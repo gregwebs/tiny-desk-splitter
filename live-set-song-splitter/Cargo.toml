@@ -1,0 +1,48 @@
+[package]
+name = "live-set-splitter"
+version = "0.1.0"
+edition = "2021"
+authors = ["Audio Analysis Tool <example@example.com>"]
+description = "A tool for splitting live music recordings into individual songs"
+
+[dependencies]
+# Command line argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Audio processing
+hound = "3.5"           # WAV file manipulation
+rustfft = "6.1"         # Fast Fourier Transform
+ndarray = "0.15"        # N-dimensional arrays
+
+# Visualization
+plotters = "0.3"        # Plotting library
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Logging
+log = "0.4"
+env_logger = "0.10"
+
+# Error handling
+thiserror = "1.0"
+
+ffmpeg-next = "7.1.0"
+
+# File system operations
+tempfile = "3.8"        # For better temporary file handling
+stringmetrics = "2.2.2"
+image = "0.24"         # Image processing library
+anyhow = "1.0.97"
+
+# Optional: for more advanced audio processing
+# Note: these are optional and can be added if needed
+# symphonia = { version = "0.5", features = ["mp3", "aac", "isomp4"] }
+
+[profile.release]
+opt-level = 3           # Maximum optimization
+lto = true              # Link-time optimization
+codegen-units = 1       # Optimize for size rather than parallel compilation
+panic = "abort"         # Abort on panic in release mode
+strip = true            # Strip symbols from binary
