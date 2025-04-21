@@ -275,7 +275,7 @@ pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
         return Err(anyhow::anyhow!("Artist name is empty"));
     }
 
-    let output_file_name = format!("{}_info.json", sanitized_artist_name);
+    let output_file_name = format!("{}.json", sanitized_artist_name);
 
     // Write to file as JSON
     let json =

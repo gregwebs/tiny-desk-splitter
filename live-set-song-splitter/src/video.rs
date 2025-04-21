@@ -132,7 +132,8 @@ impl VideoInfo {
             .output()?;
 
         if !basic_info_output.status.success() {
-            return Err(anyhow::anyhow!("Failed to get video information"));
+            let err_text = String::from_utf8(basic_info_output.stderr).unwrap_or_default();
+            return Err(anyhow::anyhow!("Failed to get video information: {}", err_text));
         }
 
         let info_json = String::from_utf8(basic_info_output.stdout)?;

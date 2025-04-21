@@ -12,10 +12,13 @@ URL="$1"
 
 # Scrape the set list
 echo "Scraping set list..."
-cargo run --bin scraper "$URL"
+json_file=$(cargo run --bin scraper "$URL" | tee | grep -po '\S\+.json')
+album=$(sed -nE 's/"album": "(.*)",/\1/p' "$json_file" | sed 's/^ *//')
+
+# TODO: Use the album name from the JSON file that is emitted.
 
 # Download the video using yt-dlp
 echo "Downloading video..."
-yt-dlp --use-extractors "generic,-Npr" "$URL" -o "%(title)s.%(ext)s"
+yt-dlp --use-extractors "generic,-Npr" "$URL" -o "${album}.mp4"
 
 echo "Done!"

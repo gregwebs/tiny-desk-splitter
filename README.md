@@ -8,3 +8,17 @@ Split a tiny desk concert into individual songs.
 * yt-dlp (downloading)
 * ffmpeg (splitting)
 * Rust (compiling this project)
+
+### Running
+
+Download a concert:
+
+```sh
+./download.sh <CONCERT_UR>
+```
+
+Split the concert:
+
+```sh
+cargo run --bin live-set-splitter -- <json_file>
+```
