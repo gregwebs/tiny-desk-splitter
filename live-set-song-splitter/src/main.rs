@@ -67,6 +67,10 @@ struct Cli {
     /// Save successfully matched images to ./analysis/images directory
     #[arg(long)]
     analyze_images: bool,
+
+    /// Reuse previously extracted frames if they exist
+    #[arg(long)]
+    reuse_frames: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -253,6 +257,7 @@ fn main() -> Result<()> {
             &concert.set_list,
             &video_info,
             cli.analyze_images,
+            cli.reuse_frames,
         )?;
         segments = song_segments;
         for segment in &segments {
@@ -273,8 +278,9 @@ fn main() -> Result<()> {
         println!("Found {} segments", segments.len());
 
         // Refine the end time of the last song using black frame detection
-        segments = refine_last_song_end_time(&input_file, segments, video_info.duration)
-            .with_context(|| "Failed to refine last song end time")?;
+        segments =
+            refine_last_song_end_time(&input_file, segments, video_info.duration, cli.reuse_frames)
+                .with_context(|| "Failed to refine last song end time")?;
 
         // Create song timestamps and output JSON file
         concert.timestamps = Some(create_song_timestamps(&segments, &concert.set_list));
@@ -294,7 +300,29 @@ fn main() -> Result<()> {
 
     // Check if text detection found enough songs
     if segments.iter().filter(|s| s.segment.is_song).count() < num_songs {
-        let msg = "Text overlay detection didn't find all songs.";
+        // Find which songs are missing
+        let found_titles: Vec<String> = segments
+            .iter()
+            .filter(|s| s.segment.is_song)
+            .map(|s| s.song.title.clone())
+            .collect();
+
+        let missing_songs: Vec<String> = concert
+            .set_list
+            .iter()
+            .filter(|song| {
+                !found_titles
+                    .iter()
+                    .any(|title| title.to_lowercase() == song.title.to_lowercase())
+            })
+            .map(|song| song.title.clone())
+            .collect();
+
+        let missing_songs_msg = missing_songs.join(", ");
+        let msg = format!(
+            "Text overlay detection didn't find all songs. Missing: {}",
+            missing_songs_msg
+        );
         return Err(anyhow!("{}", msg));
     }
 
@@ -339,6 +367,7 @@ fn refine_last_song_end_time(
     input_file: &str,
     segments: Vec<SongSegment>,
     total_duration: f64,
+    reuse_frames: bool,
 ) -> Result<Vec<SongSegment>> {
     // Find the last song segment
     let mut refined_segments = segments;
@@ -349,7 +378,9 @@ fn refine_last_song_end_time(
         let current_end = refined_segments[last_idx].segment.end_time;
 
         // Try to find a black frame to use as the end time
-        if let Some(black_frame_time) = find_black_frame_end_time(input_file, total_duration)? {
+        if let Some(black_frame_time) =
+            find_black_frame_end_time(input_file, total_duration, reuse_frames)?
+        {
             println!(
                 "Adjusted last song end time from {:.2}s to {:.2}s (found black frame)",
                 current_end, black_frame_time
@@ -361,7 +392,11 @@ fn refine_last_song_end_time(
     Ok(refined_segments)
 }
 
-fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Option<f64>> {
+fn find_black_frame_end_time(
+    input_file: &str,
+    total_duration: f64,
+    reuse_frames: bool,
+) -> Result<Option<f64>> {
     println!("Looking for black frames to determine end of last song...");
 
     // Define the search window (last 40 seconds)
@@ -370,30 +405,50 @@ fn find_black_frame_end_time(input_file: &str, total_duration: f64) -> Result<Op
 
     // Create a temporary directory for frames
     let temp_dir = "temp_frames/end_frames";
-    overwrite_dir(temp_dir)?;
 
-    // Extract frames at full framerate for the last 40 seconds
-    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg
-        .from_to(search_start, total_duration)
-        .args(&["-i", input_file])
-        .png()
-        .args(&[
-            "-frame_pts",
-            "1",
-            "-fps_mode",
-            "passthrough", // Use original timestamps
-        ])
-        .video_filter(&format!("{}/%d.png", temp_dir), vec!["scale=200:100"]);
-    let status = ffmpeg
-        .cmd()
-        // TODO: can we get rid of this particular error without just silencing stderr?
-        // [image2 @ 0x132e08570] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 928 >= 928
-        .stderr(std::process::Stdio::null())
-        .status()?;
+    // Check if we should reuse existing end frames
+    let frames_exist = std::path::Path::new(temp_dir).exists()
+        && std::fs::read_dir(temp_dir)
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false);
 
-    if !status.success() {
-        return Err(anyhow!("Failed to extract end frames"));
+    if !reuse_frames || !frames_exist {
+        // Only overwrite directory if not reusing frames or if no frames exist
+        overwrite_dir(temp_dir)?;
+
+        // Extract frames at full framerate for the last 40 seconds
+        let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+        ffmpeg
+            .from_to(search_start, total_duration)
+            .args(&["-i", input_file])
+            .png()
+            .args(&[
+                "-frame_pts",
+                "1",
+                "-fps_mode",
+                "passthrough", // Use original timestamps
+            ])
+            .video_filter(&format!("{}/%d.png", temp_dir), vec!["scale=200:100"]);
+        let status = ffmpeg
+            .cmd()
+            // TODO: can we get rid of this particular error without just silencing stderr?
+            // [image2 @ 0x132e08570] Application provided invalid, non monotonically increasing dts to muxer in stream 0: 928 >= 928
+            .stderr(std::process::Stdio::null())
+            .status()?;
+
+        if !status.success() {
+            return Err(anyhow!("Failed to extract end frames"));
+        }
+
+        println!(
+            "Extracted {} end frames for black frame detection",
+            search_duration
+        );
+    } else {
+        println!(
+            "Reusing existing end frames from {} for black frame detection",
+            temp_dir
+        );
     }
 
     // Get list of extracted frames
@@ -699,12 +754,55 @@ fn detect_song_boundaries_from_text(
     songs: &[Song],
     video_info: &VideoInfo,
     analyze_images: bool,
+    reuse_frames: bool,
 ) -> Result<Vec<SongSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
     // Create a temporary directory for frames
     let temp_dir = "temp_frames";
-    overwrite_dir(temp_dir)?;
+
+    // Check if we should reuse existing frames
+    let frames_exist = std::path::Path::new(temp_dir).exists()
+        && std::fs::read_dir(temp_dir)
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false);
+
+    if !reuse_frames || !frames_exist {
+        // Only overwrite directory if not reusing frames or if no frames exist
+        overwrite_dir(temp_dir)?;
+
+        println!("Extracting frames every 1 seconds for song title detection...");
+
+        let every_few_seconds = "fps=1,select='not(mod(t,1))'";
+
+        // Extract frames every 1 seconds with potential text overlays
+        let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+        ffmpeg.args(&[
+            "-i",
+            input_file,
+            "-c:v",
+            "png",
+            "-frame_pts",
+            "1",
+            "-fps_mode",
+            "passthrough", // Use original timestamps (replaces -vsync 0)
+            "-vf",
+            &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
+            &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
+        ]);
+        let status = ffmpeg.cmd().status()?;
+
+        println!("Frames extracted successfully for image detection.");
+
+        if !status.success() {
+            return Err(anyhow!("Failed to extract frames"));
+        }
+    } else {
+        println!(
+            "Reusing existing frames from {} for song title detection...",
+            temp_dir
+        );
+    }
 
     let mut sorted_songs: Vec<Song> = songs
         .to_vec()
@@ -715,33 +813,6 @@ fn detect_song_boundaries_from_text(
         .collect();
     // sorted_songs.clone_from_slice(songs);
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
-
-    println!("Extracting frames every 1 seconds for song title detection...");
-
-    let every_few_seconds = "fps=1,select='not(mod(t,1))'";
-
-    // Extract frames every 1 seconds with potential text overlays
-    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg.args(&[
-        "-i",
-        input_file,
-        "-c:v",
-        "png",
-        "-frame_pts",
-        "1",
-        "-fps_mode",
-        "passthrough", // Use original timestamps (replaces -vsync 0)
-        "-vf",
-        &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
-        &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
-    ]);
-    let status = ffmpeg.cmd().status()?;
-
-    println!("Frames extracted successfully for image detection.");
-
-    if !status.success() {
-        return Err(anyhow!("Failed to extract frames"));
-    }
 
     // Get list of extracted frames
     let mut frames = fs::read_dir(temp_dir)?
@@ -827,6 +898,7 @@ fn detect_song_boundaries_from_text(
                         frame_num,
                         video_info,
                         analyze_images,
+                        reuse_frames,
                     )?;
 
                     if let Some((song, time)) = title_time {
@@ -912,6 +984,7 @@ fn match_song_titles(
     frame_num: usize,
     video_info: &VideoInfo,
     analyze_images: bool,
+    reuse_frames: bool,
 ) -> Result<Option<(String, f64)>> {
     let (lines, overlay) = ocr_parse;
 
@@ -923,10 +996,12 @@ fn match_song_titles(
     };
 
     if *overlay {
+        let extra = if lines.len() > 2 { "..." } else { "" };
         println!(
-            "Frame {}: Detected overlay: '{}...'",
+            "Frame {}: Detected overlay: '{}{}'",
             frame_num,
-            filtered_text.split("\n").next().unwrap()
+            filtered_text.split("\n").next().unwrap(),
+            extra,
         );
     } else {
         /*
@@ -934,54 +1009,68 @@ fn match_song_titles(
         */
     }
 
-    let mut best_match: Option<(String, (ocr::MatchReason, String, u32))> = None;
+    // Store all matches, not just the best one
+    let mut all_matches: Vec<(String, (ocr::MatchReason, String, u32))> = Vec::new();
+
     for song_title in song_titles_to_match {
-        match matches_song_title(&lines, song_title, *overlay) {
-            None => {
-                continue;
-            }
-            Some(matched @ (_, _, lev_dist)) => match best_match {
-                None => {
-                    best_match = Some((song_title.to_string(), matched));
-                }
-                Some((_, (_, _, best_dist))) => {
-                    if lev_dist < best_dist {
-                        best_match = Some((song_title.to_string(), matched));
-                    }
-                }
-            },
+        if let Some(matched) = matches_song_title(&lines, song_title, *overlay) {
+            all_matches.push((song_title.to_string(), matched));
         }
     }
-    match best_match {
-        None => Ok(None),
-        Some((song_title, (reason, line, lev_dist))) => {
+
+    // Sort matches by Levenshtein distance (lower is better)
+    all_matches.sort_by_key(|&(_, (_, _, dist))| dist);
+
+    if all_matches.is_empty() {
+        if *overlay {
             println!(
-                "Match found! '{}' matches song '{}' frame={} dist={} reason={}",
-                line, &song_title, frame_num, lev_dist, reason,
-            );
-
-            // If analyze_images flag is enabled, save the matched image
-            if analyze_images {
-                let frame_path =
-                    std::path::PathBuf::from(format!("{}/{}.png", temp_dir, frame_num));
-                save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
-            }
-
-            match timestamp_for_song(
-                input_file,
-                temp_dir,
-                &artist_cmp,
-                &song_title,
+                "Did not find a match for frame {}. {}",
                 frame_num,
-                video_info,
-                analyze_images,
-            ) {
-                Ok(timestamp) => {
-                    return Ok(Some((song_title.to_string(), timestamp)));
-                }
-                Err(e) => Err(e),
-            }
+                lines.to_vec().join("\n")
+            )
         }
+        return Ok(None);
+    }
+
+    // The best match is the first one after sorting
+    let (song_title, _) = &all_matches[0];
+
+    // Print all matches, with the best match indicated
+    for (i, (match_title, (match_reason, match_line, match_dist))) in all_matches.iter().enumerate()
+    {
+        if i == 0 {
+            println!(
+                "Match found! '{}' matches song '{}' frame={} dist={} reason={} (best match)",
+                match_line, match_title, frame_num, match_dist, match_reason,
+            );
+        } else {
+            println!(
+                "Other match: '{}' matches song '{}' frame={} dist={} reason={}",
+                match_line, match_title, frame_num, match_dist, match_reason,
+            );
+        }
+    }
+
+    // If analyze_images flag is enabled, save the matched image
+    if analyze_images {
+        let frame_path = std::path::PathBuf::from(format!("{}/{}.png", temp_dir, frame_num));
+        save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
+    }
+
+    match timestamp_for_song(
+        input_file,
+        temp_dir,
+        &artist_cmp,
+        &song_title,
+        frame_num,
+        video_info,
+        analyze_images,
+        reuse_frames,
+    ) {
+        Ok(timestamp) => {
+            return Ok(Some((song_title.to_string(), timestamp)));
+        }
+        Err(e) => Err(e),
     }
 }
 
@@ -993,6 +1082,7 @@ fn timestamp_for_song(
     frame_num: usize,
     video_info: &VideoInfo,
     analyze_images: bool,
+    reuse_frames: bool,
 ) -> Result<f64> {
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
@@ -1003,6 +1093,7 @@ fn timestamp_for_song(
         frame_num,
         video_info,
         analyze_images,
+        reuse_frames,
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
@@ -1022,11 +1113,12 @@ fn refine_song_start_time(
     initial_frame_num: usize,
     video_info: &VideoInfo,
     analyze_images: bool,
+    reuse_frames: bool,
 ) -> Result<f64> {
     let initial_timestamp = initial_frame_num as f64;
     println!(
-        "Refining start time for '{}' (initially at {}s)...",
-        song_title, initial_timestamp
+        "Refining start time for '{}' (initially at frame {} {}s)...",
+        song_title, initial_frame_num, initial_timestamp
     );
 
     // Define the time window to look before the detected timestamp
@@ -1044,48 +1136,65 @@ fn refine_song_start_time(
 
     // find an exact frame
     let (_, after_opt, _) = video_info.nearest_frames_by_time(initial_frame_num as f64);
-    let (end_fram_num, end_timestamp) = if let Some(after_key_frame) = after_opt {
+    let (end_frame_num, end_timestamp) = if let Some(after_key_frame) = after_opt {
         (
             after_key_frame,
             video_info.frames[after_key_frame].timestamp,
         )
     } else {
-        return Err(anyhow!(
-            "Could not find frame after initial timestamp"
-        ));
+        return Err(anyhow!("Could not find frame after initial timestamp"));
     };
     println!(
-        "looking back from frame {} after {}",
-        end_timestamp, initial_timestamp
+        "looking back from frame {} {} after {}",
+        end_frame_num, end_timestamp, initial_timestamp
     );
 
     // Create a subdirectory for the refined frames
     let refined_dir = format!("{}/refined_{}", temp_dir, sanitize_filename(song_title));
-    overwrite_dir(&refined_dir)?;
 
-    // Extract frames at original video framerate for accuracy
+    // Check if we should reuse existing refined frames
+    let frames_exist = std::path::Path::new(&refined_dir).exists()
+        && std::fs::read_dir(&refined_dir)
+            .map(|entries| entries.count() > 0)
+            .unwrap_or(false);
+
+    // Get the original video framerate
     let fps = video_info.framerate;
-    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg
-        .from_to(start_time, end_timestamp)
-        .args(&["-i", input_file])
-        .png()
-        .video_filter(
-            &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
-            vec![&format!("fps={}", fps), CROP_TO_TEXT], // Use original video framerate
-        )
-        .video_filter(
-            &format!("{}/%dbw.png", refined_dir), // Sequential numbering starting from 1
-            vec![
-                &format!("fps={}", fps), // Use original video framerate
-                CROP_TO_TEXT,
-                ffmpeg::BLACK_AND_WHITE,
-            ],
-        );
-    let status = ffmpeg.cmd().status()?;
 
-    if !status.success() {
-        return Err(anyhow!("Failed to extract refined frames"));
+    if !reuse_frames || !frames_exist {
+        // Only overwrite directory if not reusing frames or if no frames exist
+        overwrite_dir(&refined_dir)?;
+
+        // Extract frames at original video framerate for accuracy
+        let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+        ffmpeg
+            .from_to(start_time, end_timestamp)
+            .args(&["-i", input_file])
+            .png()
+            .video_filter(
+                &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
+                vec![&format!("fps={}", fps), CROP_TO_TEXT], // Use original video framerate
+            )
+            .video_filter(
+                &format!("{}/%dbw.png", refined_dir), // Sequential numbering starting from 1
+                vec![
+                    &format!("fps={}", fps), // Use original video framerate
+                    CROP_TO_TEXT,
+                    ffmpeg::BLACK_AND_WHITE,
+                ],
+            );
+        let status = ffmpeg.cmd().status()?;
+
+        if !status.success() {
+            return Err(anyhow!("Failed to extract refined frames"));
+        }
+
+        println!("Extracted refined frames for '{}'", song_title);
+    } else {
+        println!(
+            "Reusing existing refined frames from {} for '{}'",
+            refined_dir, song_title
+        );
     }
 
     // Read the refined frames and analyze them
@@ -1170,40 +1279,43 @@ fn refine_song_start_time(
             break;
         }
     }
-    // println!("earliest match frame {:?}/{}", earliest_match, frame_count);
 
     // Return the earliest match if found, otherwise 0.0
-    if let Some(earliest_match) = earliest_match {
-        let subtracted_frame_num = frame_count as usize - earliest_match;
-        let earliest_frame_num = end_fram_num - subtracted_frame_num as usize;
-        // We never detect the fade soon enough
-        // So go back to the previous keyframe
-        // This then allows for video splitting without re-encoding
-        let frame = video_info.frames[earliest_frame_num];
-        let ((_, before_frame), _, _) = video_info.nearest_frames_by_time(frame.timestamp);
-        let new_time = video_info.frames[before_frame].timestamp;
-        /*
-        if earliest_frame_num > 1 {
-            earliest_frame_num -= 1;
+    match earliest_match {
+        Some(earliest_match) if earliest_match > 0 => {
+            println!("earliest match frame {:?}/{}", earliest_match, frame_count);
+            let subtracted_frame_num = frame_count as usize - earliest_match;
+            let earliest_frame_num = end_frame_num - subtracted_frame_num as usize;
+            // We never detect the fade soon enough
+            // So go back to the previous keyframe
+            // This then allows for video splitting without re-encoding
+            let frame = video_info.frames[earliest_frame_num];
+            let ((_, before_frame), _, _) = video_info.nearest_frames_by_time(frame.timestamp);
+            let new_time = video_info.frames[before_frame].timestamp;
+            /*
+            if earliest_frame_num > 1 {
+                earliest_frame_num -= 1;
+            }
+            let frame = video_info.frames[earliest_frame_num];
+            let new_time = frame.timestamp;
+            */
+            println!(
+                "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s) frame {}",
+                song_title,
+                end_timestamp,
+                new_time,
+                end_timestamp - new_time,
+                earliest_match,
+            );
+            Ok(new_time)
         }
-        let frame = video_info.frames[earliest_frame_num];
-        let new_time = frame.timestamp;
-        */
-        println!(
-            "Successfully refined start time for '{}' from {}s to {}s (-{:.2}s) frame {}",
-            song_title,
-            end_timestamp,
-            new_time,
-            end_timestamp - new_time,
-            earliest_match,
-        );
-        Ok(new_time)
-    } else {
-        println!(
-            "Could not find earlier boundary for '{}', keeping original timestamp: {}s",
-            song_title, initial_timestamp
-        );
-        return Ok(0.0);
+        _ => {
+            println!(
+                "Could not find earlier boundary for '{}', keeping original timestamp: {}s. zero={}",
+                song_title, initial_timestamp, earliest_match.is_some(),
+            );
+            return Ok(0.0);
+        }
     }
 }
 
@@ -1272,10 +1384,7 @@ fn extract_segment(
     let status = cmd.status()?;
 
     if !status.success() {
-        return Err(anyhow!(
-            "Failed to extract segment to {}",
-            output_file
-        ));
+        return Err(anyhow!("Failed to extract segment to {}", output_file));
     }
 
     Ok(())

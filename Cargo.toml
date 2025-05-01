@@ -1,3 +1,10 @@
 [workspace]
 resolver = "2"
 members = ["concert-downloader", "live-set-song-splitter"]
+
+[profile.release]
+opt-level = 3           # Maximum optimization
+lto = true              # Link-time optimization
+codegen-units = 1       # Optimize for size rather than parallel compilation
+panic = "abort"         # Abort on panic in release mode
+strip = true            # Strip symbols from binary

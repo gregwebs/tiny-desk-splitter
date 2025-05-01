@@ -351,6 +351,12 @@ mod tests_matches_song_title {
     }
 
     #[test]
+    fn test_accents() {
+        let lines = vec!["No Timé to’ Lose".to_string()];
+        assert!(matches_song_title(&lines, "No Time to Lose", true).is_some());
+    }
+
+    #[test]
     fn test_too_loose() {
         let lines = vec!["seenaneiias Thibaudcn™".to_string()];
         let song_title = "heitor villa-lobos: \"o polichinelo\" (from a prole do bebê no. 1)";
