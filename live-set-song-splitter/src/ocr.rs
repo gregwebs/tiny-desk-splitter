@@ -238,7 +238,7 @@ pub fn matches_song_title_weighted(
         // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
         // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
         if lev <= levenshtein_limit {
-            return Some((MatchReason::Levenshtein(lev), line.clone(), lev));
+            return Some((MatchReason::Levenshtein(lev), line.clone(), lev / levenshtein_limit));
         }
         if title_normalized.starts_with(&line_normalized) {
             // println!("normalized title contains normalized line");
