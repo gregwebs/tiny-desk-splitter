@@ -102,19 +102,22 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
 pub fn extract_content(document: &Html) -> Result<(Option<String>, Vec<Song>, Vec<Musician>)> {
     let storytext_selector = Selector::parse("#storytext").unwrap();
     let p_selector = Selector::parse("p").unwrap();
+    let h3_selector = Selector::parse("h3").unwrap();
 
     let mut description = None;
     let mut set_list = Vec::new();
     let mut musicians = Vec::new();
 
     if let Some(storytext) = document.select(&storytext_selector).next() {
-        let paragraphs: Vec<_> = storytext.select(&p_selector).collect();
+        let mut headings: Vec<_> = storytext.select(&p_selector).collect();
+        let mut h3s: Vec<_> = storytext.select(&h3_selector).collect();
+        headings.append(&mut h3s);
 
         // Get description from first paragraphs until SET LIST or MUSICIANS
         let mut desc_text = String::new();
         let mut description_done = false;
 
-        for p in &paragraphs {
+        for p in &headings {
             let text: String = p.text().collect::<String>();
             let upper_text = text.trim().to_uppercase();
 
@@ -136,10 +139,10 @@ pub fn extract_content(document: &Html) -> Result<(Option<String>, Vec<Song>, Ve
         }
 
         // Extract set list
-        set_list = extract_set_list(paragraphs.as_slice())?;
+        set_list = extract_set_list(headings.as_slice())?;
 
         // Extract musicians
-        musicians = extract_musicians(paragraphs.as_slice())?;
+        musicians = extract_musicians(headings.as_slice())?;
     }
 
     Ok((description, set_list, musicians))
@@ -235,7 +238,12 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
                     .unwrap()
                     .text()
                     .collect::<String>();
-                for musician_instrument in musician_text.split(';') {
+                for musician_instrument_orig in musician_text.trim().split(';') {
+                    let musician_instrument = musician_instrument_orig.trim();
+                    if musician_instrument.trim() == "" {
+                        continue
+                    }
+                    println!("musician_instrument {}", musician_instrument);
                     let parts: Vec<&str> =
                         strip_suffix(musician_instrument, ")").split("(").collect();
                     if parts.len() == 2 {
@@ -246,10 +254,20 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
                             instruments,
                         });
                     } else {
-                        return Err(anyhow::anyhow!(
-                            "Did not understand musician instrument list: {}",
-                            parts.join(", ")
-                        ));
+                        let parts: Vec<&str> = musician_instrument.split(": ").collect();
+                        if parts.len() == 2 {
+                            let instruments =
+                                parts[1].split(',').map(|s| s.trim().to_string()).collect();
+                            musicians.push(Musician {
+                                name: parts[0].to_string(),
+                                instruments,
+                            });
+                        } else {
+                            return Err(anyhow::anyhow!(
+                                "Did not understand musician instrument list: {} from {}",
+                                parts.join(", "), musician_instrument,
+                            ));
+                        }
                     }
                 }
                 return Ok(musicians);

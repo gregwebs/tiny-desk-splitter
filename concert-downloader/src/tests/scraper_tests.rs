@@ -1,6 +1,6 @@
 use super::fixtures;
 use super::save_failed_html;
-use crate::scraper::parse_concert_info;
+use crate::scraper::{parse_concert_info, Musician};
 use anyhow::Result;
 
 // Test successful parsing of a sample concert
@@ -208,4 +208,39 @@ fn test_missing_musicians() {
         "expected contains musicians: {}",
         error_msg
     );
+}
+
+
+#[test]
+fn test_musicians_colon() {
+    let html = r#"
+    <html>
+    <head><title>Some Artist: Tiny Desk Concert</title></head>
+    <body>
+        <div class="storytitle"><h1>Some Concert</h1></div>
+        <div class="dateblock"><time datetime="2023-01-01">Jan 1, 2023</time></div>
+        <div id="storytext">
+            <p>Description</p>
+            <h3>SET LIST</h3>
+            <ul>
+                <li>Test Song</li>
+            </ul>
+            <h3>MUSICIANS</h3>
+            <p>
+                <em>
+                    Leslie Carrara-Rudolph: Abby Cadabby, Penguin; Ryan Dillon: Elmo; Eric Jacobson: Bert, Grover, Oscar the Grouch;
+                </em>
+            </p>
+        </div>
+    </body>
+    </html>
+    "#;
+
+    let result = parse_concert_info(html, "https://example.com/test");
+    assert!(!result.is_err());
+    assert_eq!(result.unwrap().musicians, vec![
+        Musician{name:"Leslie Carrara-Rudolph".to_owned(),instruments:vec!["Abby Cadabby".to_owned(), "Penguin".to_owned()]},
+        Musician{name:"Ryan Dillon".to_owned(),instruments:vec!["Elmo".to_owned()]},
+        Musician{name:"Eric Jacobson".to_owned(),instruments:vec!["Bert".to_owned(), "Grover".to_owned(), "Oscar the Grouch".to_owned()]},
+    ]);
 }
