@@ -164,7 +164,7 @@ fn main() -> Result<()> {
     let num_songs = concert.set_list.len();
 
     let input_file = match cli_input_file {
-        Some(file) => file.as_str(),
+        Some(file) => file.clone(),
         None => {
             let album = metadata.album.clone().ok_or(
                 anyhow!("No album found in concert metadata file. Please specify a --input-path to the mp4 file for the concert.")
@@ -173,7 +173,11 @@ fn main() -> Result<()> {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",
             };
-            &format!("{}/{}.mp4", input_dir, album)
+            if input_dir == "" {
+                format!("{}.mp4", album)
+            } else {
+                format!("{}/{}.mp4", input_dir, album).to_string()
+            }
         }
     };
 
@@ -186,7 +190,7 @@ fn main() -> Result<()> {
     }
 
     // Get all video information at once
-    let video_info = VideoInfo::from_ffprobe_file(input_file)
+    let video_info = VideoInfo::from_ffprobe_file(&input_file)
         .with_context(|| format!("Failed to get video information from {}", input_file))?;
     println!("Total duration: {:.2} seconds", video_info.duration);
 
@@ -252,7 +256,7 @@ fn main() -> Result<()> {
         println!("Attempting to detect song boundaries using text overlays...");
         // Get song segments from text detection
         let song_segments = detect_song_boundaries_from_text(
-            input_file,
+            &input_file,
             &metadata.artist,
             &concert.set_list,
             &video_info,
@@ -268,7 +272,7 @@ fn main() -> Result<()> {
     if cli.timestamps_file.is_none() || cli.refine_timestamps {
         // Always extract audio waveform for further refinement
         println!("Extracting audio waveform for refinement...");
-        let audio_data = audio::extract_audio_waveform(input_file)
+        let audio_data = audio::extract_audio_waveform(&input_file)
             .with_context(|| format!("Failed to extract audio waveform from {}", input_file))?;
 
         // Refine segments using audio analysis
@@ -345,7 +349,7 @@ fn main() -> Result<()> {
     if !cli.no_save_songs {
         fs::create_dir_all(&output_dir)?;
         process_segments(
-            input_file,
+            &input_file,
             &segments,
             concert,
             &output_dir,
