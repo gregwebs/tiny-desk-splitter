@@ -901,10 +901,14 @@ fn detect_song_boundaries_from_text(
                         reuse_frames,
                     )?;
 
-                    if let Some((song, time)) = title_time {
-                        song_title_matched.insert(song, time);
-                        last_song_start_time = Some(time);
-                        break 'convert; // Found a match, no need to try other PSM options
+                    if let Some((song, time, overlay)) = title_time {
+                        if overlay {
+                            song_title_matched.insert(song, time);
+                            last_song_start_time = Some(time);
+                            break 'convert; // Found a match, no need to try other PSM options
+                        } else {
+                            println!("skipping match because no overlay {} {}", time, song)
+                        }
                     }
                 }
             }
@@ -985,7 +989,7 @@ fn match_song_titles(
     video_info: &VideoInfo,
     analyze_images: bool,
     reuse_frames: bool,
-) -> Result<Option<(String, f64)>> {
+) -> Result<Option<(String, f64, bool)>> {
     let (lines, overlay) = ocr_parse;
 
     // Format text for display
@@ -1057,6 +1061,12 @@ fn match_song_titles(
         save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
     }
 
+    // Don't bother refining
+    // TODO: look at refined images to see if there is an overlay
+    if !*overlay {
+        return Ok(Some((song_title.to_string(), frame_num as f64, *overlay)));
+    }
+
     match timestamp_for_song(
         input_file,
         temp_dir,
@@ -1068,7 +1078,7 @@ fn match_song_titles(
         reuse_frames,
     ) {
         Ok(timestamp) => {
-            return Ok(Some((song_title.to_string(), timestamp)));
+            return Ok(Some((song_title.to_string(), timestamp, *overlay)));
         }
         Err(e) => Err(e),
     }
