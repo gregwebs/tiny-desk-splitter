@@ -9,6 +9,7 @@ mod io;
 use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
 use crate::video::VideoInfo;
+mod concert;
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
@@ -91,36 +92,20 @@ struct SongSegment {
     pub segment: AudioSegment,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct SetMetaData {
-    artist: String,
-    album: Option<String>,
-    date: Option<String>,
-    show: Option<String>,
-}
-
-impl SetMetaData {
-    fn year(&self) -> Option<String> {
-        self.date
-            .as_ref()
-            .and_then(|date| date.split('-').next().map(|s| s.to_string()))
-    }
-
-    fn folder_name(&self) -> String {
-        self.album
-            .as_ref()
-            .unwrap_or(&self.artist)
-            .to_string()
-            .replace(" : ", " - ")
-            .replace(": ", " - ")
-            .replace(":", "-")
-    }
+fn folder_name(concertdata: &concert::SetMetaData) -> String {
+    concertdata.album
+        .as_ref()
+        .unwrap_or(&concertdata.artist)
+        .to_string()
+        .replace(" : ", " - ")
+        .replace(": ", " - ")
+        .replace(":", "-")
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct Concert {
     #[serde(flatten)]
-    metadata: SetMetaData,
+    metadata: concert::SetMetaData,
     set_list: Vec<Song>,
     timestamps: Option<Vec<SongTimestamp>>,
 }
@@ -141,7 +126,7 @@ struct Timestamps {
 #[derive(Serialize, Deserialize, Debug)]
 struct OutputMetadata {
     #[serde(flatten)]
-    metadata: SetMetaData,
+    metadata: concert::SetMetaData,
     #[serde(flatten)]
     timestamps: Timestamps,
 }
@@ -195,7 +180,7 @@ fn main() -> Result<()> {
     println!("Total duration: {:.2} seconds", video_info.duration);
 
     // Determine output directory path (will be used later too)
-    let folder_name = metadata.folder_name();
+    let folder_name = folder_name(&metadata);
     let output_dir = if let Some(custom_dir) = &cli.output_dir {
         let dir = format!("{}/{}", custom_dir, folder_name);
         println!("Using custom output directory: {}", dir);
@@ -721,7 +706,7 @@ fn process_segments(
             OutputFormat::Audio | OutputFormat::Both => {
                 let output_file = format!("{}/{}.m4a", output_dir, safe_title);
 
-                extract_audio_segment(
+                ffmpeg::extract_audio_segment(
                     input_file,
                     &output_file,
                     segment.segment.start_time,
@@ -1334,39 +1319,6 @@ fn refine_song_start_time(
     }
 }
 
-// Add common metadata fields to an FFmpeg command
-fn add_metadata_to_cmd(
-    cmd: &mut std::process::Command,
-    song_title: Option<&str>,
-    concertdata: &SetMetaData,
-    track_number: Option<usize>,
-) {
-    // Add artist metadata
-    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
-
-    // Add title metadata if available
-    if let Some(title) = song_title {
-        cmd.args(&["-metadata", &format!("title={}", title)]);
-    }
-
-    // Add album metadata if available
-    if let Some(ref album) = concertdata.album {
-        cmd.args(&["-metadata", &format!("album={}", album)]);
-    }
-
-    // Add year metadata if available
-    if let Some(year_value) = concertdata.year() {
-        if !year_value.is_empty() {
-            cmd.args(&["-metadata", &format!("date={}", year_value)]);
-        }
-    }
-
-    // Add track number metadata if available
-    if let Some(track) = track_number {
-        cmd.args(&["-metadata", &format!("track={}", track)]);
-    }
-}
-
 // This is really slow because it re-encodes
 // If we just want audio we should be able to avoid re-encoding
 // For video we can't do precision splitting without re-encoding.
@@ -1379,7 +1331,7 @@ fn extract_segment(
     start_time: f64,
     end_time: f64,
     song_title: Option<&str>,
-    concertdata: &SetMetaData,
+    concertdata: &concert::SetMetaData,
     track_number: Option<usize>,
 ) -> Result<()> {
     let mut ffmpeg = ffmpeg::create_ffmpeg_command();
@@ -1389,7 +1341,7 @@ fn extract_segment(
     let mut cmd = ffmpeg.cmd();
 
     // Add metadata
-    add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
+    ffmpeg::add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
 
     cmd.args(&[
         "-y", // Overwrite output file
@@ -1400,46 +1352,6 @@ fn extract_segment(
 
     if !status.success() {
         return Err(anyhow!("Failed to extract segment to {}", output_file));
-    }
-
-    Ok(())
-}
-
-// Extract audio-only segment using stream copy (no re-encoding)
-fn extract_audio_segment(
-    input_file: &str,
-    output_file: &str,
-    start_time: f64,
-    end_time: f64,
-    song_title: Option<&str>,
-    concertdata: &SetMetaData,
-    track_number: Option<usize>,
-) -> Result<()> {
-    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg
-        .args(&[
-            "-i", input_file, "-vn", // No video
-            "-acodec", "copy", // Copy audio stream without re-encoding
-            "-map", "0:a",
-        ])
-        .from_to(start_time, end_time);
-    let mut cmd = ffmpeg.cmd();
-
-    // Add metadata
-    add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
-
-    cmd.args(&[
-        "-y", // Overwrite output file
-        output_file,
-    ]);
-
-    let status = cmd.status()?;
-
-    if !status.success() {
-        return Err(anyhow!(
-            "Failed to extract audio segment to {}",
-            output_file
-        ));
     }
 
     Ok(())

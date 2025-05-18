@@ -1,7 +1,9 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use anyhow::Result;
+use crate::concert;
+
+use anyhow::{anyhow, Result};
 
 // these ones worked okay
 // pub const BLACK_AND_WHITE: &str = "hue=s=0";
@@ -86,11 +88,84 @@ fn _extract_segment_mp4box(
         .status()?;
 
     if !status.success() {
-        return Err(anyhow::anyhow!(
+        return Err(anyhow!(
             "Failed to extract segment to {}",
             output_file
         ));
     }
 
     Ok(())
+}
+
+// Extract audio-only segment using stream copy (no re-encoding)
+pub fn extract_audio_segment(
+    input_file: &str,
+    output_file: &str,
+    start_time: f64,
+    end_time: f64,
+    song_title: Option<&str>,
+    concertdata: &concert::SetMetaData,
+    track_number: Option<usize>,
+) -> Result<()> {
+    let mut ffmpeg = create_ffmpeg_command();
+    ffmpeg
+        .args(&[
+            "-i", input_file, "-vn", // No video
+            "-acodec", "copy", // Copy audio stream without re-encoding
+            "-map", "0:a",
+        ])
+        .from_to(start_time, end_time);
+    let mut cmd = ffmpeg.cmd();
+
+    // Add metadata
+    add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
+
+    cmd.args(&[
+        "-y", // Overwrite output file
+        output_file,
+    ]);
+
+    let status = cmd.status()?;
+
+    if !status.success() {
+        return Err(anyhow!(
+            "Failed to extract audio segment to {}",
+            output_file
+        ));
+    }
+
+    Ok(())
+}
+
+// Add common metadata fields to an FFmpeg command
+pub fn add_metadata_to_cmd(
+    cmd: &mut std::process::Command,
+    song_title: Option<&str>,
+    concertdata: &concert::SetMetaData,
+    track_number: Option<usize>,
+) {
+    // Add artist metadata
+    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
+
+    // Add title metadata if available
+    if let Some(title) = song_title {
+        cmd.args(&["-metadata", &format!("title={}", title)]);
+    }
+
+    // Add album metadata if available
+    if let Some(ref album) = concertdata.album {
+        cmd.args(&["-metadata", &format!("album={}", album)]);
+    }
+
+    // Add year metadata if available
+    if let Some(year_value) = concertdata.year() {
+        if !year_value.is_empty() {
+            cmd.args(&["-metadata", &format!("date={}", year_value)]);
+        }
+    }
+
+    // Add track number metadata if available
+    if let Some(track) = track_number {
+        cmd.args(&["-metadata", &format!("track={}", track)]);
+    }
 }
