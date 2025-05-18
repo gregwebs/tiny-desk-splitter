@@ -866,7 +866,7 @@ fn detect_song_boundaries_from_text(
                 let orig_path = frame_path.clone();
                 // let mut bw_path = frame_path.clone();
                 frame_path.set_file_name(format!("{}bw.png", frame_num));
-                let mut cmd = std::process::Command::new("convert");
+                let mut cmd = std::process::Command::new("magick");
                 cmd.arg(orig_path.to_str().unwrap());
                 cmd.args(vec![
                     "-colorspace",
@@ -874,7 +874,8 @@ fn detect_song_boundaries_from_text(
                     "-channel",
                     "rgb",
                     "-threshold",
-                    "65%",
+                    "55%",
+                    "-negate", // Tesseract wants the text to be black and the background white
                     "+channel",
                 ]);
                 cmd.arg(&frame_path);
@@ -1066,7 +1067,7 @@ fn match_song_titles(
     }
 
     // Don't bother refining
-    // TODO: look at refined images to see if there is an overlay
+    // TODO: if we don't match a song then look at refined images to see if there is an overlay
     if !*overlay {
         return Ok(Some((song_title.to_string(), frame_num as f64, *overlay)));
     }
