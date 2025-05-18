@@ -114,7 +114,7 @@ impl VideoInfo {
     }
 
     pub fn from_ffprobe_file(input_file: &str) -> Result<VideoInfo> {
-        println!("Analyzing video file metadata...");
+        println!("Analyzing video file metadata for {}", &input_file);
 
         // Get basic video information in one call
         let basic_info_output = create_ffprobe_command()
@@ -127,14 +127,14 @@ impl VideoInfo {
                 "stream=r_frame_rate:format=duration,start_time",
                 "-of",
                 "json",
-                input_file,
+                &input_file,
             ])
             .output()?;
 
         if !basic_info_output.status.success() {
             let err_text = String::from_utf8(basic_info_output.stderr).unwrap_or_default();
             return Err(anyhow::anyhow!(
-                "Failed to get video information: {}",
+                "ffprobe failed to get video information: {}",
                 err_text
             ));
         }

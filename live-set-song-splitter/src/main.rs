@@ -168,7 +168,7 @@ fn main() -> Result<()> {
         None => {
             let album = metadata.album.clone().ok_or(
                 anyhow!("No album found in concert metadata file. Please specify a --input-path to the mp4 file for the concert.")
-            )?;
+            )?.replace(":", "");
             let input_dir = match std::path::Path::new(&concert_path).parent() {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",

@@ -15,7 +15,7 @@ shift
 for file in *.json ; do
     if [[ "$(jq -r .source "$file")" == $url ]] ; then
         echo "found existing metadata file $file"
-        mp4="$(jq -r .album "$file").mp4"
+        mp4="$(jq -r .album "$file" | sed 's|:||').mp4"
         if ! test -f "$mp4" ; then
             ./download.sh "$url"
         else
