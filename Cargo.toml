@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["concert-downloader", "live-set-song-splitter"]
+members = ["scraper", "live-set-song-splitter"]
 
 [profile.release]
 opt-level = 3           # Maximum optimization

@@ -1,1 +1,1 @@
-./concert-downloader/download.sh
+./scraper/download.sh

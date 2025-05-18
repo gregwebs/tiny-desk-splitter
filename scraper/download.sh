@@ -13,7 +13,8 @@ URL="$1"
 # Scrape the set list
 echo "Scraping set list..."
 json_file=$(cargo run --bin scraper "$URL" | tee | grep -po '\S\+.json')
-album=$(sed -nE 's/"album": "(.*)",/\1/p' "$json_file" | sed 's/^ *//')
+# remove the colon- ffprobe doesn't like that
+album=$(sed -nE 's/"album": "(.*)",/\1/p' "$json_file" | sed 's/^ *//' | sed 's|:||')
 
 # TODO: Use the album name from the JSON file that is emitted.
 
