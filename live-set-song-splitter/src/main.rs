@@ -6,7 +6,6 @@ use crate::ocr::{
 mod audio;
 mod ffmpeg;
 mod io;
-use crate::io::{overwrite_dir, sanitize_filename};
 mod video;
 use crate::video::VideoInfo;
 mod concert;
@@ -93,13 +92,15 @@ struct SongSegment {
 }
 
 fn folder_name(concertdata: &concert::SetMetaData) -> String {
-    concertdata.album
+    io::sanitize_filename(
+        &concertdata.album
         .as_ref()
         .unwrap_or(&concertdata.artist)
         .to_string()
         .replace(" : ", " - ")
         .replace(": ", " - ")
         .replace(":", "-")
+    )
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -180,13 +181,13 @@ fn main() -> Result<()> {
     println!("Total duration: {:.2} seconds", video_info.duration);
 
     // Determine output directory path (will be used later too)
-    let folder_name = folder_name(&metadata);
+    let concert_folder_name = folder_name(&metadata);
     let output_dir = if let Some(custom_dir) = &cli.output_dir {
-        let dir = format!("{}/{}", custom_dir, folder_name);
+        let dir = format!("{}/{}", custom_dir, concert_folder_name);
         println!("Using custom output directory: {}", dir);
         dir
     } else {
-        folder_name
+        concert_folder_name
     };
 
     // If timestamps file is provided, read from it instead of detecting segments
@@ -236,17 +237,27 @@ fn main() -> Result<()> {
         println!("Loaded {} song segments from JSON file", segments.len());
     }
 
+    io::ensure_dir("temp_frames")?;
+    let temp_dir = format!("temp_frames/{}", folder_name(&metadata));
+    io::ensure_dir(&temp_dir)?;
+
     if segments.len() == 0 {
+        let settings = Settings{
+            analyze_images: cli.analyze_images,
+            reuse_frames: cli.reuse_frames,
+        };
+
         // First try to detect song boundaries using text overlays
         println!("Attempting to detect song boundaries using text overlays...");
+
         // Get song segments from text detection
         let song_segments = detect_song_boundaries_from_text(
             &input_file,
             &metadata.artist,
             &concert.set_list,
             &video_info,
-            cli.analyze_images,
-            cli.reuse_frames,
+            &settings,
+            &temp_dir,
         )?;
         segments = song_segments;
         for segment in &segments {
@@ -268,7 +279,7 @@ fn main() -> Result<()> {
 
         // Refine the end time of the last song using black frame detection
         segments =
-            refine_last_song_end_time(&input_file, segments, video_info.duration, cli.reuse_frames)
+            refine_last_song_end_time(&input_file, segments, video_info.duration, cli.reuse_frames, &temp_dir)
                 .with_context(|| "Failed to refine last song end time")?;
 
         // Create song timestamps and output JSON file
@@ -349,6 +360,14 @@ fn main() -> Result<()> {
         OutputFormat::Both => println!("Video and audio extraction complete!"),
     }
 
+    if std::path::Path::new(&temp_dir).exists() {
+        println!("Cleaning up temporary folder: {}", temp_dir);
+        match fs::remove_dir_all(&temp_dir) {
+            Ok(_) => println!("Successfully removed temporary album folder"),
+            Err(e) => println!("Warning: Failed to clean up temporary album folder: {}", e),
+        }
+    }
+
     Ok(())
 }
 
@@ -357,6 +376,7 @@ fn refine_last_song_end_time(
     segments: Vec<SongSegment>,
     total_duration: f64,
     reuse_frames: bool,
+    temp_dir: &str,
 ) -> Result<Vec<SongSegment>> {
     // Find the last song segment
     let mut refined_segments = segments;
@@ -368,7 +388,7 @@ fn refine_last_song_end_time(
 
         // Try to find a black frame to use as the end time
         if let Some(black_frame_time) =
-            find_black_frame_end_time(input_file, total_duration, reuse_frames)?
+            find_black_frame_end_time(input_file, total_duration, reuse_frames, temp_dir)?
         {
             println!(
                 "Adjusted last song end time from {:.2}s to {:.2}s (found black frame)",
@@ -385,25 +405,18 @@ fn find_black_frame_end_time(
     input_file: &str,
     total_duration: f64,
     reuse_frames: bool,
+    temp_dir: &str,
 ) -> Result<Option<f64>> {
     println!("Looking for black frames to determine end of last song...");
 
     // Define the search window (last 40 seconds)
     let search_duration = 40.0;
     let search_start = (total_duration - search_duration).max(0.0);
+    let temp_dir = format!("{}/end_frames", temp_dir);
 
-    // Create a temporary directory for frames
-    let temp_dir = "temp_frames/end_frames";
-
-    // Check if we should reuse existing end frames
-    let frames_exist = std::path::Path::new(temp_dir).exists()
-        && std::fs::read_dir(temp_dir)
-            .map(|entries| entries.count() > 0)
-            .unwrap_or(false);
-
-    if !reuse_frames || !frames_exist {
+    if !reuse_frames {
         // Only overwrite directory if not reusing frames or if no frames exist
-        overwrite_dir(temp_dir)?;
+        io::overwrite_dir(&temp_dir)?;
 
         // Extract frames at full framerate for the last 40 seconds
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
@@ -438,10 +451,11 @@ fn find_black_frame_end_time(
             "Reusing existing end frames from {} for black frame detection",
             temp_dir
         );
+        io::ensure_dir(&temp_dir)?;
     }
 
     // Get list of extracted frames
-    let mut frames = fs::read_dir(temp_dir)?
+    let mut frames = fs::read_dir(&temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
         .map(|entry| entry.path())
@@ -673,7 +687,7 @@ fn process_segments(
         };
 
         // Create a safe filename from the song title
-        let safe_title = sanitize_filename(song_title);
+        let safe_title = io::sanitize_filename(song_title);
 
         println!(
             "Extracting {:#?} for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
@@ -737,35 +751,38 @@ fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
 
 const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/4:0:160";
 
+pub struct Settings {
+    analyze_images: bool,
+    reuse_frames: bool,
+}
+
 fn detect_song_boundaries_from_text(
     input_file: &str,
     artist: &str,
     songs: &[Song],
     video_info: &VideoInfo,
-    analyze_images: bool,
-    reuse_frames: bool,
+    settings: &Settings,
+    temp_dir: &str,
 ) -> Result<Vec<SongSegment>> {
     let total_duration = video_info.duration;
     let artist_cmp = artist.to_lowercase();
-    // Create a temporary directory for frames
-    let temp_dir = "temp_frames";
-
-    // Check if we should reuse existing frames
-    let frames_exist = std::path::Path::new(temp_dir).exists()
-        && std::fs::read_dir(temp_dir)
-            .map(|entries| entries.count() > 0)
-            .unwrap_or(false);
-
-    if !reuse_frames || !frames_exist {
+    
+    if !settings.reuse_frames {
         // Only overwrite directory if not reusing frames or if no frames exist
-        overwrite_dir(temp_dir)?;
+        io::overwrite_dir(&temp_dir)?;
 
         println!("Extracting frames every 1 seconds for song title detection...");
 
         let every_few_seconds = "fps=1,select='not(mod(t,1))'";
 
+        // Extract 1 frame every few seconds
+        // focus on the text area
+        // Invert colors so the overlay text will be black, which tesseract prefers
+        let filters = format!("{},{},{}", every_few_seconds, CROP_TO_TEXT, "negate");
+
         // Extract frames every 1 seconds with potential text overlays
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
+        // Add command line options to invert the colors
         ffmpeg.args(&[
             "-i",
             input_file,
@@ -776,7 +793,7 @@ fn detect_song_boundaries_from_text(
             "-fps_mode",
             "passthrough", // Use original timestamps (replaces -vsync 0)
             "-vf",
-            &format!("{},{}", every_few_seconds, CROP_TO_TEXT), // Extract 1 frame every few seconds, focus on the text area
+            &filters,
             &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
         ]);
         let status = ffmpeg.cmd().status()?;
@@ -791,6 +808,7 @@ fn detect_song_boundaries_from_text(
             "Reusing existing frames from {} for song title detection...",
             temp_dir
         );
+        io::ensure_dir(temp_dir)?;
     }
 
     let mut sorted_songs: Vec<Song> = songs
@@ -804,7 +822,7 @@ fn detect_song_boundaries_from_text(
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
 
     // Get list of extracted frames
-    let mut frames = fs::read_dir(temp_dir)?
+    let mut frames = fs::read_dir(&temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
         .map(|entry| entry.path())
@@ -860,7 +878,6 @@ fn detect_song_boundaries_from_text(
                     "rgb",
                     "-threshold",
                     "55%",
-                    "-negate", // Tesseract wants the text to be black and the background white
                     "+channel",
                 ]);
                 cmd.arg(&frame_path);
@@ -881,14 +898,13 @@ fn detect_song_boundaries_from_text(
                 if let Some(lo) = parsed {
                     let title_time = match_song_titles(
                         input_file,
-                        temp_dir,
+                        &temp_dir,
                         &lo,
                         song_titles_to_match,
                         &artist_cmp,
                         frame_num,
                         video_info,
-                        analyze_images,
-                        reuse_frames,
+                        settings,
                     )?;
 
                     if let Some((song, time, overlay)) = title_time {
@@ -897,7 +913,8 @@ fn detect_song_boundaries_from_text(
                             last_song_start_time = Some(time);
                             break 'convert; // Found a match, no need to try other PSM options
                         } else {
-                            println!("skipping match because no overlay {} {}", time, song)
+                            let overlay_text = if lo.0.len() > 0 { &lo.0[0] } else { "" };
+                            println!("skipping match because no overlay {} {}\n{}", time, song, overlay_text)
                         }
                     }
                 }
@@ -977,8 +994,7 @@ fn match_song_titles(
     artist_cmp: &str,
     frame_num: usize,
     video_info: &VideoInfo,
-    analyze_images: bool,
-    reuse_frames: bool,
+    settings: &Settings,
 ) -> Result<Option<(String, f64, bool)>> {
     let (lines, overlay) = ocr_parse;
 
@@ -1046,7 +1062,7 @@ fn match_song_titles(
     }
 
     // If analyze_images flag is enabled, save the matched image
-    if analyze_images {
+    if settings.analyze_images {
         let frame_path = std::path::PathBuf::from(format!("{}/{}.png", temp_dir, frame_num));
         save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
     }
@@ -1064,8 +1080,7 @@ fn match_song_titles(
         &song_title,
         frame_num,
         video_info,
-        analyze_images,
-        reuse_frames,
+        settings,
     ) {
         Ok(timestamp) => {
             return Ok(Some((song_title.to_string(), timestamp, *overlay)));
@@ -1081,8 +1096,7 @@ fn timestamp_for_song(
     song_title: &str,
     frame_num: usize,
     video_info: &VideoInfo,
-    analyze_images: bool,
-    reuse_frames: bool,
+    settings: &Settings,
 ) -> Result<f64> {
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
@@ -1092,8 +1106,7 @@ fn timestamp_for_song(
         song_title,
         frame_num,
         video_info,
-        analyze_images,
-        reuse_frames,
+        settings,
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
@@ -1112,8 +1125,7 @@ fn refine_song_start_time(
     song_title: &str,
     initial_frame_num: usize,
     video_info: &VideoInfo,
-    analyze_images: bool,
-    reuse_frames: bool,
+    settings: &Settings,
 ) -> Result<f64> {
     let initial_timestamp = initial_frame_num as f64;
     println!(
@@ -1148,9 +1160,9 @@ fn refine_song_start_time(
         "looking back from frame {} {} after {}",
         end_frame_num, end_timestamp, initial_timestamp
     );
-
+    
     // Create a subdirectory for the refined frames
-    let refined_dir = format!("{}/refined_{}", temp_dir, sanitize_filename(song_title));
+    let refined_dir = format!("{}/refined_{}", temp_dir, io::sanitize_filename(song_title));
 
     // Check if we should reuse existing refined frames
     let frames_exist = std::path::Path::new(&refined_dir).exists()
@@ -1161,9 +1173,9 @@ fn refine_song_start_time(
     // Get the original video framerate
     let fps = video_info.framerate;
 
-    if !reuse_frames || !frames_exist {
+    if !settings.reuse_frames || !frames_exist {
         // Only overwrite directory if not reusing frames or if no frames exist
-        overwrite_dir(&refined_dir)?;
+        io::overwrite_dir(&refined_dir)?;
 
         // Extract frames at original video framerate for accuracy
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
@@ -1264,7 +1276,7 @@ fn refine_song_start_time(
                             earliest_match_found = true;
 
                             // If analyze_images flag is enabled, save the matched image
-                            if analyze_images {
+                            if settings.analyze_images {
                                 save_matched_image(&frame_path, song_title, frame_num, "refined")?;
                             }
                         }
@@ -1370,7 +1382,7 @@ fn save_matched_image(
         .with_context(|| format!("Failed to create analysis directory: {}", analysis_dir))?;
 
     // Create a sanitized filename from the song title
-    let safe_title = sanitize_filename(song_title);
+    let safe_title = io::sanitize_filename(song_title);
     let target_path = format!(
         "{}/{}_{}_{}.png",
         analysis_dir, prefix, safe_title, frame_num

@@ -3,6 +3,18 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+pub fn ensure_dir<P: AsRef<Path>>(path: P) -> Result<()> {
+    let path_ref = path.as_ref();
+    let path_str = path_ref.to_string_lossy();
+
+    if !fs::exists(&path)
+        .with_context(|| format!("Failed to check if directory exists: {}", path_str))?
+    {
+        fs::create_dir(&path).with_context(|| format!("Failed to create directory: {}", path_str))?;
+    }
+    return Ok(())
+}
+
 pub fn overwrite_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     let path_ref = path.as_ref();
     let path_str = path_ref.to_string_lossy();
