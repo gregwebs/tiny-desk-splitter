@@ -4,6 +4,7 @@ use std::process::Command;
 
 use anyhow::{Context, Result};
 use stringmetrics::{levenshtein_weight, LevWeights};
+use unidecode::unidecode;
 
 pub type OcrParse = (Vec<String>, bool);
 
@@ -75,8 +76,8 @@ pub fn parse_tesseract_output(text: &str, artist: &str) -> Option<OcrParse> {
 
 fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
     // Check if this is an overlay with artist at the top
-    let line = line_input.to_lowercase().replace(" ", "");
-    let artist = artist_input.to_lowercase().replace(" ", "");
+    let line = unidecode(&line_input.replace(" ", "")).to_lowercase();
+    let artist = unidecode(&artist_input.replace(" ", "")).to_lowercase();
     return !artist.is_empty() && !line.is_empty() && {
         // starts_with here allows tesseract to imagine extra characters at the end
         line.starts_with(&artist) ||
@@ -150,6 +151,11 @@ mod tests {
     #[test]
     fn test_fuzzy_cutoff() {
         assert!(fuzzy_match_artist("gillian welch & davi", "Gillian Welch & David Rawlings"));
+    }
+
+    #[test]
+    fn test_fuzzy_diacritics() {
+        assert!(fuzzy_match_artist("Takacs Quartet", "Takács Quartet"));
     }
 }
 
