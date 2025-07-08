@@ -82,7 +82,7 @@ fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
         line.starts_with(&artist) ||
         // Check if the first line is a subset of the artist name
         // That should mean that tesseract missed the last few letters
-        (artist.starts_with(&line) && ((line.len() as f64) / (artist.len() as f64) >= 0.7) ||
+        (artist.starts_with(&line) && (line.len() > 16 || ((line.len() as f64) / (artist.len() as f64) >= 0.7)) ||
             { // Also allow tesseract to get the last few letters wrong
                 let split_at = artist.chars().count() * 7 / 10;
                 line.len() > split_at && {
@@ -145,6 +145,11 @@ mod tests {
     #[test]
     fn test_fuzzy_name() {
         assert!(fuzzy_match_artist("Megan Moror", "Megan Moroney"));
+    }
+
+    #[test]
+    fn test_fuzzy_cutoff() {
+        assert!(fuzzy_match_artist("gillian welch & davi", "Gillian Welch & David Rawlings"));
     }
 }
 
