@@ -6,5 +6,6 @@
       "Bash(cargo build:*)"
     ],
     "deny": []
-  }
+  },
+  "enableAllProjectMcpServers": false
 }
