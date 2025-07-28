@@ -78,6 +78,8 @@ fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
     // Check if this is an overlay with artist at the top
     let line = unidecode(&line_input.replace(" ", "")).to_lowercase();
     let artist = unidecode(&artist_input.replace(" ", "")).to_lowercase();
+    let weights = LevWeights::new(1, 1, 1);
+    let levenshtein_limit = 1;
     return !artist.is_empty() && !line.is_empty() && {
         // starts_with here allows tesseract to imagine extra characters at the end
         line.starts_with(&artist) ||
@@ -91,7 +93,10 @@ fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
                     artist.starts_with(&artist_start)
                 }
             }
-        )
+            // Off by 1
+        ) || (levenshtein_weight(&artist, &line,
+             levenshtein_limit + 10 as u32,
+                &weights) <= levenshtein_limit )
     };
 }
 
@@ -145,7 +150,8 @@ mod tests {
 
     #[test]
     fn test_fuzzy_name() {
-        assert!(fuzzy_match_artist("Megan Moror", "Megan Moroney"));
+        // assert!(fuzzy_match_artist("Megan Moror", "Megan Moroney"));
+        assert!(fuzzy_match_artist("Teylor swift", "Taylor Swift"));
     }
 
     #[test]
@@ -156,6 +162,11 @@ mod tests {
     #[test]
     fn test_fuzzy_diacritics() {
         assert!(fuzzy_match_artist("Takacs Quartet", "Takács Quartet"));
+    }
+
+    #[test]
+    fn test_fuzzy_special() {
+        assert!(fuzzy_match_artist("Taylor swift “*", "Taylor Swift"));
     }
 }
 

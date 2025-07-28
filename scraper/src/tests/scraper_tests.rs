@@ -30,7 +30,7 @@ fn test_sample_concert_parsing() {
     assert_eq!(concert_info.artist, "Test Artist");
     assert_eq!(
         concert_info.album,
-        Some("Test Artist: Tiny Desk Concert".to_string())
+        "Test Artist: Tiny Desk Concert".to_string(),
     );
     assert_eq!(concert_info.date, Some("2023-01-01".to_string()));
     assert_eq!(concert_info.show, "Tiny Desk Concerts");
@@ -141,7 +141,7 @@ fn test_missing_date() {
     <html>
     <head><title>Some Artist: Tiny Desk Concert</title></head>
     <body>
-        <div class="storytitle"><h1>Some Concert</h1></div>
+        <div class="storytitle"><h1>Some Artist</h1></div>
     </body>
     </html>
     "#;
@@ -157,7 +157,7 @@ fn test_missing_set_list() {
     <html>
     <head><title>Some Artist: Tiny Desk Concert</title></head>
     <body>
-        <div class="storytitle"><h1>Some Concert</h1></div>
+        <div class="storytitle"><h1>Some Artist</h1></div>
         <div class="dateblock"><time datetime="2023-01-01">Jan 1, 2023</time></div>
         <div id="storytext">
             <p>Description</p>
@@ -185,7 +185,7 @@ fn test_missing_musicians() {
     <html>
     <head><title>Some Artist: Tiny Desk Concert</title></head>
     <body>
-        <div class="storytitle"><h1>Some Concert</h1></div>
+        <div class="storytitle"><h1>Some Artist</h1></div>
         <div class="dateblock"><time datetime="2023-01-01">Jan 1, 2023</time></div>
         <div id="storytext">
             <p>Description</p>
@@ -217,7 +217,7 @@ fn test_musicians_colon() {
     <html>
     <head><title>Some Artist: Tiny Desk Concert</title></head>
     <body>
-        <div class="storytitle"><h1>Some Concert</h1></div>
+        <div class="storytitle"><h1>Some Artist</h1></div>
         <div class="dateblock"><time datetime="2023-01-01">Jan 1, 2023</time></div>
         <div id="storytext">
             <p>Description</p>

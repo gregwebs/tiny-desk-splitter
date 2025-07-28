@@ -21,7 +21,7 @@ pub struct ConcertInfo {
     pub source: String,
     pub show: String,
     pub date: Option<String>,
-    pub album: Option<String>,
+    pub album: String,
     pub description: Option<String>,
     pub set_list: Vec<Song>,
     pub musicians: Vec<Musician>,
@@ -31,6 +31,10 @@ pub fn fetch_html(url: &str) -> Result<String> {
     let client = Client::new();
     let response = client.get(url).send().context("Failed to send request")?;
     response.text().context("Failed to get response text")
+}
+
+fn first_split(s: &str, char: char) -> String {
+    return s.split(char).next().unwrap_or("").trim().to_string()
 }
 
 pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
@@ -44,7 +48,7 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         .map(|element| element.text().collect())
         .unwrap_or_default();
 
-    let artist_name = title.split(':').next().unwrap_or("").trim().to_string();
+    let mut artist_name = first_split(&title, ':');
 
     if artist_name.is_empty() {
         return Err(anyhow::anyhow!("Title is empty"));
@@ -52,13 +56,22 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
 
     // Extract story title
     let story_title_selector = Selector::parse(".storytitle h1").unwrap();
-    let story_title = document
+    let story_title_may = document
         .select(&story_title_selector)
         .next()
         .map(|element| element.text().collect::<String>().trim().to_string());
 
-    if story_title.is_none() {
-        return Err(anyhow::anyhow!("No story title found"));
+    let story_title = match story_title_may {
+        None => { return Err(anyhow::anyhow!("No story title found")) },
+        Some(st) => { st },
+    };
+
+    if !story_title.to_lowercase().contains(&artist_name.to_lowercase()) {
+        if artist_name.to_lowercase() == "video" || artist_name.ends_with("The Tiny Desk") {
+            artist_name = story_title.split(":").next().unwrap_or("").trim().to_string()
+        } else {
+            return Err(anyhow::anyhow!("mismatch between artist '{}' and story title '{}'", artist_name, story_title));
+        }
     }
 
     // Extract date
@@ -121,7 +134,7 @@ pub fn extract_content(document: &Html) -> Result<(Option<String>, Vec<Song>, Ve
             let text: String = p.text().collect::<String>();
             let upper_text = text.trim().to_uppercase();
 
-            if upper_text == "SET LIST" || upper_text == "MUSICIANS" {
+            if upper_text == "SET LIST" || upper_text == "MUSICIANS" || upper_text == "MUSICIAN" {
                 description_done = true;
                 continue;
             }
@@ -192,7 +205,10 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
 
     let musicians_para_find = paragraphs
         .iter()
-        .find(|p| return p.text().collect::<String>().trim().to_uppercase() == "MUSICIANS");
+        .find(|p| -> bool { 
+            let mtext = p.text().collect::<String>().trim().to_uppercase();
+            return mtext == "MUSICIANS" || mtext == "MUSICIAN"
+        });
     let p = match musicians_para_find {
         None => return Err(anyhow::anyhow!("musicians text not found on page")),
         Some(p) => p,
@@ -311,10 +327,7 @@ pub fn scrape_data(url: &str) -> Result<()> {
     let concert_info = parse_concert_info(&html, url)?;
 
     println!("Artist: {}", concert_info.artist);
-
-    if let Some(title) = &concert_info.album {
-        println!("Story Title: {}", title);
-    }
+    println!("Story Title: {}", &concert_info.album);
 
     if let Some(date_str) = &concert_info.date {
         println!("Date: {}", date_str);

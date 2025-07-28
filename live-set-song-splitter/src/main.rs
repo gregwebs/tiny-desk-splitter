@@ -864,6 +864,8 @@ fn detect_song_boundaries_from_text(
             .cloned()
             .collect::<Vec<_>>();
 
+        let mut all_ocr_results: Vec<ocr::OcrParse> = Vec::new();
+
         'convert: for convert in [false, true] {
             if convert {
                 let orig_path = frame_path.clone();
@@ -890,32 +892,47 @@ fn detect_song_boundaries_from_text(
             // Define an iterator for different PSM options
             let psm_options = [Some("11"), None, Some("6")].iter();
 
-            // Iterate through PSM options until we find a match
+            // Collect all OCR results from different PSM options
             for &psm in psm_options {
                 // Run tesseract OCR on the frame with current PSM option
                 let parsed = ocr::run_tesseract_ocr_parse(frame_path_str, &artist_cmp, psm)?;
-
                 if let Some(lo) = parsed {
-                    let title_time = match_song_titles(
-                        input_file,
-                        &temp_dir,
-                        &lo,
-                        song_titles_to_match,
-                        &artist_cmp,
-                        frame_num,
-                        video_info,
-                        settings,
-                    )?;
+                    all_ocr_results.push(lo);
+                }
+            }
 
-                    if let Some((song, time, overlay)) = title_time {
-                        if overlay {
-                            song_title_matched.insert(song, time);
-                            last_song_start_time = Some(time);
-                            break 'convert; // Found a match, no need to try other PSM options
-                        } else {
-                            let overlay_text = if lo.0.len() > 0 { &lo.0[0] } else { "" };
-                            println!("skipping match because no overlay {} {}\n{}", time, song, overlay_text)
-                        }
+            // Check if any OCR result contains the artist name (indicates overlay)
+            let has_artist_overlay = all_ocr_results.iter().any(|(_, overlay)| *overlay);
+
+            // If we haven't found the overlay, first
+            // do the bw conversion and look for it
+            if !has_artist_overlay && !convert {
+                continue
+            }
+            let ocr_results = all_ocr_results;
+            all_ocr_results = Vec::new();
+
+            for ocr_result in &ocr_results {
+                // Create a modified OCR result that indicates overlay presence
+                let modified_ocr = (ocr_result.0.clone(), has_artist_overlay);
+
+                let title_time = match_song_titles(
+                    input_file,
+                    &temp_dir,
+                    &modified_ocr,
+                    song_titles_to_match,
+                    &artist_cmp,
+                    frame_num,
+                    video_info,
+                    settings,
+                )?;
+
+                if let Some((song, time, overlay)) = title_time {
+                    // println!("overlay {}. ocr result {:?}", has_artist_overlay, ocr_result);
+                    if overlay {
+                        song_title_matched.insert(song, time);
+                        last_song_start_time = Some(time);
+                        break 'convert; // Found a match, no need to try other OCR results
                     }
                 }
             }
@@ -1049,10 +1066,18 @@ fn match_song_titles(
     for (i, (match_title, (match_reason, match_line, match_dist))) in all_matches.iter().enumerate()
     {
         if i == 0 {
-            println!(
-                "Match found! '{}' matches song '{}' frame={} dist={} reason={} (best match)",
-                match_line, match_title, frame_num, match_dist, match_reason,
-            );
+            if *overlay {
+                println!(
+                    "Match found! '{}' matches song '{}' frame={} dist={} reason={} (best match)",
+                    match_line, match_title, frame_num, match_dist, match_reason,
+                );
+            } else {
+                let overlay_text = if lines.len() > 0 { &lines[0] } else { "" };
+                println!(
+                    "Skipping best match because no artist. '{}' matches song '{}' frame={} dist={} reason={} (best match)\n{}",
+                    match_line, match_title, frame_num, match_dist, match_reason, overlay_text
+                );
+            }
         } else {
             println!(
                 "Other match: '{}' matches song '{}' frame={} dist={} reason={}",
