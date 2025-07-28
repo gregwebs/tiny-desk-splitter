@@ -414,7 +414,13 @@ fn find_black_frame_end_time(
     let search_start = (total_duration - search_duration).max(0.0);
     let temp_dir = format!("{}/end_frames", temp_dir);
 
-    if !reuse_frames {
+    if reuse_frames {
+        println!(
+            "Reusing existing end frames from {} for black frame detection",
+            temp_dir
+        );
+    } else {
+        io::ensure_dir(&temp_dir)?;
         // Only overwrite directory if not reusing frames or if no frames exist
         io::overwrite_dir(&temp_dir)?;
 
@@ -446,12 +452,6 @@ fn find_black_frame_end_time(
             "Extracted {} end frames for black frame detection",
             search_duration
         );
-    } else {
-        println!(
-            "Reusing existing end frames from {} for black frame detection",
-            temp_dir
-        );
-        io::ensure_dir(&temp_dir)?;
     }
 
     // Get list of extracted frames
@@ -756,18 +756,18 @@ pub struct Settings {
     reuse_frames: bool,
 }
 
-fn detect_song_boundaries_from_text(
+fn extract_frames(
     input_file: &str,
-    artist: &str,
-    songs: &[Song],
-    video_info: &VideoInfo,
-    settings: &Settings,
     temp_dir: &str,
-) -> Result<Vec<SongSegment>> {
-    let total_duration = video_info.duration;
-    let artist_cmp = artist.to_lowercase();
-    
-    if !settings.reuse_frames {
+    reuse_frames: bool,
+) -> Result<Vec<std::path::PathBuf>> {
+    if reuse_frames {
+        println!(
+            "Reusing existing frames from {} for song title detection...",
+            temp_dir
+        );
+        io::ensure_dir(temp_dir)?;
+    } else {
         // Only overwrite directory if not reusing frames or if no frames exist
         io::overwrite_dir(&temp_dir)?;
 
@@ -803,13 +803,31 @@ fn detect_song_boundaries_from_text(
         if !status.success() {
             return Err(anyhow!("Failed to extract frames"));
         }
-    } else {
-        println!(
-            "Reusing existing frames from {} for song title detection...",
-            temp_dir
-        );
-        io::ensure_dir(temp_dir)?;
     }
+
+    // Get list of extracted frames
+    let frames = fs::read_dir(&temp_dir)?
+        .filter_map(Result::ok)
+        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .map(|entry| entry.path())
+        .collect::<Vec<_>>();
+
+    println!("Extracted {} frames, analyzing for text...", frames.len());
+    return Ok(frames);
+}
+
+fn detect_song_boundaries_from_text(
+    input_file: &str,
+    artist: &str,
+    songs: &[Song],
+    video_info: &VideoInfo,
+    settings: &Settings,
+    temp_dir: &str,
+) -> Result<Vec<SongSegment>> {
+    let mut frames = extract_frames(input_file, temp_dir, settings.reuse_frames)?;
+
+    let total_duration = video_info.duration;
+    let artist_cmp = artist.to_lowercase();
 
     let mut sorted_songs: Vec<Song> = songs
         .to_vec()
@@ -820,15 +838,6 @@ fn detect_song_boundaries_from_text(
         .collect();
     // sorted_songs.clone_from_slice(songs);
     sorted_songs.sort_by(|a, b| a.title.len().partial_cmp(&b.title.len()).unwrap().reverse());
-
-    // Get list of extracted frames
-    let mut frames = fs::read_dir(&temp_dir)?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-
-    println!("Extracted {} frames, analyzing for text...", frames.len());
 
     // Map to store detected song start times
     let mut song_title_matched: HashMap<String, f64> = HashMap::new();
