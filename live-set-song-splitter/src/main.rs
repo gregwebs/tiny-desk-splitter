@@ -833,6 +833,9 @@ fn detect_song_boundaries_from_text(
     // Map to store detected song start times
     let mut song_title_matched: HashMap<String, f64> = HashMap::new();
 
+    // Store potential title-only matches for fallback
+    let mut title_only_matches: Vec<(String, f64, usize)> = Vec::new();
+
     // Process each frame to detect text
     frames.sort_by(|a, b| {
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
@@ -933,8 +936,44 @@ fn detect_song_boundaries_from_text(
                         song_title_matched.insert(song, time);
                         last_song_start_time = Some(time);
                         break 'convert; // Found a match, no need to try other OCR results
+                    } else {
+                        // Store title-only match for potential fallback
+                        title_only_matches.push((song, time, frame_num));
                     }
                 }
+            }
+        }
+    }
+
+    // Check if we need to use fallback matches (title-only) for missing songs
+    let total_songs = songs.len();
+    let matched_songs = song_title_matched.len();
+
+    if matched_songs == total_songs - 1 && !title_only_matches.is_empty() {
+        // Find which song is missing
+        let matched_titles: std::collections::HashSet<String> = song_title_matched.keys().cloned().collect();
+        let missing_songs: Vec<String> = songs
+            .iter()
+            .map(|s| s.title.to_lowercase())
+            .filter(|title| !matched_titles.contains(title))
+            .collect();
+
+        if missing_songs.len() == 1 {
+            let missing_song = &missing_songs[0];
+
+            // Find the best title-only match for the missing song
+            let mut best_match: Option<(String, f64, usize)> = None;
+            for (song_title, time, frame_num) in &title_only_matches {
+                if song_title == missing_song {
+                    if best_match.is_none() || time < &best_match.as_ref().unwrap().1 {
+                        best_match = Some((song_title.clone(), *time, *frame_num));
+                    }
+                }
+            }
+
+            if let Some((song, time, frame_num)) = best_match {
+                println!("Using fallback title-only match for '{}' at frame {} since all other songs have been matched", song, frame_num);
+                song_title_matched.insert(song, time);
             }
         }
     }
