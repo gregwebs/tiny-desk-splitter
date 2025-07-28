@@ -10,9 +10,10 @@ pub fn ensure_dir<P: AsRef<Path>>(path: P) -> Result<()> {
     if !fs::exists(&path)
         .with_context(|| format!("Failed to check if directory exists: {}", path_str))?
     {
-        fs::create_dir(&path).with_context(|| format!("Failed to create directory: {}", path_str))?;
+        fs::create_dir(&path)
+            .with_context(|| format!("Failed to create directory: {}", path_str))?;
     }
-    return Ok(())
+    return Ok(());
 }
 
 pub fn overwrite_dir<P: AsRef<Path>>(path: P) -> Result<()> {

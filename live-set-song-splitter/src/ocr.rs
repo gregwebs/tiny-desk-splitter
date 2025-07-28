@@ -80,9 +80,11 @@ fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
     let artist = unidecode(&artist_input.replace(" ", "")).to_lowercase();
     let weights = LevWeights::new(1, 1, 1);
     let levenshtein_limit = 1;
-    return !artist.is_empty() && !line.is_empty() && {
-        // starts_with here allows tesseract to imagine extra characters at the end
-        line.starts_with(&artist) ||
+    return !artist.is_empty()
+        && !line.is_empty()
+        && {
+            // starts_with here allows tesseract to imagine extra characters at the end
+            line.starts_with(&artist) ||
         // Check if the first line is a subset of the artist name
         // That should mean that tesseract missed the last few letters
         (artist.starts_with(&line) && (line.len() > 16 || ((line.len() as f64) / (artist.len() as f64) >= 0.7)) ||
@@ -97,7 +99,7 @@ fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
         ) || (levenshtein_weight(&artist, &line,
              levenshtein_limit + 10 as u32,
                 &weights) <= levenshtein_limit )
-    };
+        };
 }
 
 #[cfg(test)]
@@ -156,7 +158,10 @@ mod tests {
 
     #[test]
     fn test_fuzzy_cutoff() {
-        assert!(fuzzy_match_artist("gillian welch & davi", "Gillian Welch & David Rawlings"));
+        assert!(fuzzy_match_artist(
+            "gillian welch & davi",
+            "Gillian Welch & David Rawlings"
+        ));
     }
 
     #[test]
@@ -260,7 +265,11 @@ pub fn matches_song_title_weighted(
         // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
         // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
         if lev <= levenshtein_limit {
-            return Some((MatchReason::Levenshtein(lev), line.clone(), lev / levenshtein_limit));
+            return Some((
+                MatchReason::Levenshtein(lev),
+                line.clone(),
+                lev / levenshtein_limit,
+            ));
         }
         if title_normalized.starts_with(&line_normalized) {
             // println!("normalized title contains normalized line");

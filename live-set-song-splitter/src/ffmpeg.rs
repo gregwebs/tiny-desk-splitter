@@ -88,10 +88,7 @@ fn _extract_segment_mp4box(
         .status()?;
 
     if !status.success() {
-        return Err(anyhow!(
-            "Failed to extract segment to {}",
-            output_file
-        ));
+        return Err(anyhow!("Failed to extract segment to {}", output_file));
     }
 
     Ok(())

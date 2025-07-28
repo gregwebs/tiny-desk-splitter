@@ -34,7 +34,7 @@ pub fn fetch_html(url: &str) -> Result<String> {
 }
 
 fn first_split(s: &str, char: char) -> String {
-    return s.split(char).next().unwrap_or("").trim().to_string()
+    return s.split(char).next().unwrap_or("").trim().to_string();
 }
 
 pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
@@ -62,15 +62,27 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         .map(|element| element.text().collect::<String>().trim().to_string());
 
     let story_title = match story_title_may {
-        None => { return Err(anyhow::anyhow!("No story title found")) },
-        Some(st) => { st },
+        None => return Err(anyhow::anyhow!("No story title found")),
+        Some(st) => st,
     };
 
-    if !story_title.to_lowercase().contains(&artist_name.to_lowercase()) {
+    if !story_title
+        .to_lowercase()
+        .contains(&artist_name.to_lowercase())
+    {
         if artist_name.to_lowercase() == "video" || artist_name.ends_with("The Tiny Desk") {
-            artist_name = story_title.split(":").next().unwrap_or("").trim().to_string()
+            artist_name = story_title
+                .split(":")
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
         } else {
-            return Err(anyhow::anyhow!("mismatch between artist '{}' and story title '{}'", artist_name, story_title));
+            return Err(anyhow::anyhow!(
+                "mismatch between artist '{}' and story title '{}'",
+                artist_name,
+                story_title
+            ));
         }
     }
 
@@ -203,12 +215,10 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
     let li_selector = Selector::parse("li").unwrap();
     let mut musicians = Vec::new();
 
-    let musicians_para_find = paragraphs
-        .iter()
-        .find(|p| -> bool { 
-            let mtext = p.text().collect::<String>().trim().to_uppercase();
-            return mtext == "MUSICIANS" || mtext == "MUSICIAN"
-        });
+    let musicians_para_find = paragraphs.iter().find(|p| -> bool {
+        let mtext = p.text().collect::<String>().trim().to_uppercase();
+        return mtext == "MUSICIANS" || mtext == "MUSICIAN";
+    });
     let p = match musicians_para_find {
         None => return Err(anyhow::anyhow!("musicians text not found on page")),
         Some(p) => p,
@@ -257,7 +267,7 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
                 for musician_instrument_orig in musician_text.trim().split(';') {
                     let musician_instrument = musician_instrument_orig.trim();
                     if musician_instrument.trim() == "" {
-                        continue
+                        continue;
                     }
                     println!("musician_instrument {}", musician_instrument);
                     let parts: Vec<&str> =
@@ -281,7 +291,8 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
                         } else {
                             return Err(anyhow::anyhow!(
                                 "Did not understand musician instrument list: {} from {}",
-                                parts.join(", "), musician_instrument,
+                                parts.join(", "),
+                                musician_instrument,
                             ));
                         }
                     }

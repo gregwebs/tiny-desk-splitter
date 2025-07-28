@@ -93,13 +93,14 @@ struct SongSegment {
 
 fn folder_name(concertdata: &concert::SetMetaData) -> String {
     io::sanitize_filename(
-        &concertdata.album
-        .as_ref()
-        .unwrap_or(&concertdata.artist)
-        .to_string()
-        .replace(" : ", " - ")
-        .replace(": ", " - ")
-        .replace(":", "-")
+        &concertdata
+            .album
+            .as_ref()
+            .unwrap_or(&concertdata.artist)
+            .to_string()
+            .replace(" : ", " - ")
+            .replace(": ", " - ")
+            .replace(":", "-"),
     )
 }
 
@@ -242,7 +243,7 @@ fn main() -> Result<()> {
     io::ensure_dir(&temp_dir)?;
 
     if segments.len() == 0 {
-        let settings = Settings{
+        let settings = Settings {
             analyze_images: cli.analyze_images,
             reuse_frames: cli.reuse_frames,
         };
@@ -278,9 +279,14 @@ fn main() -> Result<()> {
         println!("Found {} segments", segments.len());
 
         // Refine the end time of the last song using black frame detection
-        segments =
-            refine_last_song_end_time(&input_file, segments, video_info.duration, cli.reuse_frames, &temp_dir)
-                .with_context(|| "Failed to refine last song end time")?;
+        segments = refine_last_song_end_time(
+            &input_file,
+            segments,
+            video_info.duration,
+            cli.reuse_frames,
+            &temp_dir,
+        )
+        .with_context(|| "Failed to refine last song end time")?;
 
         // Create song timestamps and output JSON file
         concert.timestamps = Some(create_song_timestamps(&segments, &concert.set_list));
@@ -794,7 +800,7 @@ fn extract_frames(
             "passthrough", // Use original timestamps (replaces -vsync 0)
             "-vf",
             &filters,
-            &format!("{}/%d.png", temp_dir),                    // Use sequential numbering
+            &format!("{}/%d.png", temp_dir), // Use sequential numbering
         ]);
         let status = ffmpeg.cmd().status()?;
 
@@ -919,7 +925,7 @@ fn detect_song_boundaries_from_text(
             // If we haven't found the overlay, first
             // do the bw conversion and look for it
             if !has_artist_overlay && !convert {
-                continue
+                continue;
             }
             let ocr_results = all_ocr_results;
             all_ocr_results = Vec::new();
@@ -960,7 +966,8 @@ fn detect_song_boundaries_from_text(
 
     if matched_songs == total_songs - 1 && !title_only_matches.is_empty() {
         // Find which song is missing
-        let matched_titles: std::collections::HashSet<String> = song_title_matched.keys().cloned().collect();
+        let matched_titles: std::collections::HashSet<String> =
+            song_title_matched.keys().cloned().collect();
         let missing_songs: Vec<String> = songs
             .iter()
             .map(|s| s.title.to_lowercase())
@@ -1233,7 +1240,7 @@ fn refine_song_start_time(
         "looking back from frame {} {} after {}",
         end_frame_num, end_timestamp, initial_timestamp
     );
-    
+
     // Create a subdirectory for the refined frames
     let refined_dir = format!("{}/refined_{}", temp_dir, io::sanitize_filename(song_title));
 

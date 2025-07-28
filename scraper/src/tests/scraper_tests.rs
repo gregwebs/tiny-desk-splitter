@@ -210,7 +210,6 @@ fn test_missing_musicians() {
     );
 }
 
-
 #[test]
 fn test_musicians_colon() {
     let html = r#"
@@ -238,9 +237,25 @@ fn test_musicians_colon() {
 
     let result = parse_concert_info(html, "https://example.com/test");
     assert!(!result.is_err());
-    assert_eq!(result.unwrap().musicians, vec![
-        Musician{name:"Leslie Carrara-Rudolph".to_owned(),instruments:vec!["Abby Cadabby".to_owned(), "Penguin".to_owned()]},
-        Musician{name:"Ryan Dillon".to_owned(),instruments:vec!["Elmo".to_owned()]},
-        Musician{name:"Eric Jacobson".to_owned(),instruments:vec!["Bert".to_owned(), "Grover".to_owned(), "Oscar the Grouch".to_owned()]},
-    ]);
+    assert_eq!(
+        result.unwrap().musicians,
+        vec![
+            Musician {
+                name: "Leslie Carrara-Rudolph".to_owned(),
+                instruments: vec!["Abby Cadabby".to_owned(), "Penguin".to_owned()]
+            },
+            Musician {
+                name: "Ryan Dillon".to_owned(),
+                instruments: vec!["Elmo".to_owned()]
+            },
+            Musician {
+                name: "Eric Jacobson".to_owned(),
+                instruments: vec![
+                    "Bert".to_owned(),
+                    "Grover".to_owned(),
+                    "Oscar the Grouch".to_owned()
+                ]
+            },
+        ]
+    );
 }
