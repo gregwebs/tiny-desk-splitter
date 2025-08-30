@@ -74,32 +74,85 @@ pub fn parse_tesseract_output(text: &str, artist: &str) -> Option<OcrParse> {
     Some((lines, is_overlay))
 }
 
+pub enum ArtistMatchReason {
+    No(NoArtistMatchReason),
+    Yes(YesArtistMatchReason),
+}
+
+pub enum NoArtistMatchReason {
+    EmptyArtist,
+    EmptyLine,
+    Fallthrough,
+}
+
+pub enum YesArtistMatchReason {
+    StartsWith,
+    OffByOne,
+}
+
 fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
+    match fuzzy_match_artist_reason(line_input, artist_input) {
+        ArtistMatchReason::Yes(..) => true,
+        ArtistMatchReason::No(..) => false,
+    }
+}
+
+fn fuzzy_match_artist_reason(line_input: &str, artist_input: &str) -> ArtistMatchReason {
     // Check if this is an overlay with artist at the top
     let line = unidecode(&line_input.replace(" ", "")).to_lowercase();
     let artist = unidecode(&artist_input.replace(" ", "")).to_lowercase();
     let weights = LevWeights::new(1, 1, 1);
+    if artist.is_empty() {
+        return ArtistMatchReason::No(NoArtistMatchReason::EmptyArtist);
+    }
+    if line.is_empty() {
+        return ArtistMatchReason::No(NoArtistMatchReason::EmptyLine);
+    }
+    // starts_with here allows tesseract to imagine extra characters at the end
+    if line.starts_with(&artist) {
+        return ArtistMatchReason::Yes(YesArtistMatchReason::StartsWith);
+    }
+    // Check if the first line is a subset of the artist name
+    // That should mean that tesseract missed the last few letters
+    let subset_line_length = (line.len() as f64) / (artist.len() as f64) >= 0.7;
+    if artist.starts_with(&line) && (line.len() > 16 || subset_line_length) {
+        return ArtistMatchReason::Yes(YesArtistMatchReason::StartsWith);
+    }
+    // Also allow tesseract to get the last few letters wrong
+    let artist_chars_count = artist.chars().count();
+    let split_at = artist_chars_count * 7 / 10;
+    if line.len() > split_at && {
+        let artist_start = line.chars().take(split_at).collect::<String>();
+        artist.starts_with(&artist_start)
+    } {
+        return ArtistMatchReason::Yes(YesArtistMatchReason::StartsWith);
+    }
+
+    // Off by 1
     let levenshtein_limit = 1;
-    return !artist.is_empty()
-        && !line.is_empty()
-        && {
-            // starts_with here allows tesseract to imagine extra characters at the end
-            line.starts_with(&artist) ||
-        // Check if the first line is a subset of the artist name
-        // That should mean that tesseract missed the last few letters
-        (artist.starts_with(&line) && (line.len() > 16 || ((line.len() as f64) / (artist.len() as f64) >= 0.7)) ||
-            { // Also allow tesseract to get the last few letters wrong
-                let split_at = artist.chars().count() * 7 / 10;
-                line.len() > split_at && {
-                    let artist_start = line.chars().take(split_at).collect::<String>();
-                    artist.starts_with(&artist_start)
-                }
-            }
-            // Off by 1
-        ) || (levenshtein_weight(&artist, &line,
-             levenshtein_limit + 10 as u32,
-                &weights) <= levenshtein_limit )
-        };
+
+    if levenshtein_weight(&artist, &line, levenshtein_limit + 10 as u32, &weights)
+        <= levenshtein_limit
+    {
+        return ArtistMatchReason::Yes(YesArtistMatchReason::OffByOne);
+    }
+    let more_line = (line.len() as i32) - (artist.len() as i32);
+    if more_line > 0 {
+        let line = line.chars().take(artist_chars_count).collect::<String>();
+        if levenshtein_weight(&artist, &line, levenshtein_limit + 10 as u32, &weights)
+            <= levenshtein_limit
+        {
+            return ArtistMatchReason::Yes(YesArtistMatchReason::OffByOne);
+        }
+    }
+    return ArtistMatchReason::No(NoArtistMatchReason::Fallthrough);
+    /*
+    last_artist_alpha = match artist.chars().last() {
+        None => panic!("expected a last char"),
+        Some(last_char) => last_char.is_alphanumeric(),
+    }
+    let line_no_special = if
+    */
 }
 
 #[cfg(test)]
@@ -154,6 +207,11 @@ mod tests {
     fn test_fuzzy_name() {
         // assert!(fuzzy_match_artist("Megan Moror", "Megan Moroney"));
         assert!(fuzzy_match_artist("Teylor swift", "Taylor Swift"));
+    }
+
+    #[test]
+    fn test_one_special_char_one_letter() {
+        assert!(fuzzy_match_artist("sieFra Hull &", "Sierra Hull"));
     }
 
     #[test]
