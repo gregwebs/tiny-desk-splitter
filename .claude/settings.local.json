@@ -1,11 +1,9 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cargo check:*)"
-      "Bash(cargo test:*)"
-      "Bash(cargo build:*)"
+      "Bash(cargo check:*)",
+      "Bash(cd:*)"
     ],
     "deny": []
-  },
-  "enableAllProjectMcpServers": false
+  }
 }
