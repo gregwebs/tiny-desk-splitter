@@ -266,6 +266,34 @@ fn main() -> Result<()> {
         }
     }
 
+    // Check if text detection found enough songs
+    if segments.iter().filter(|s| s.segment.is_song).count() < num_songs {
+        // Find which songs are missing
+        let found_titles: Vec<String> = segments
+            .iter()
+            .filter(|s| s.segment.is_song)
+            .map(|s| s.song.title.clone())
+            .collect();
+
+        let missing_songs: Vec<String> = concert
+            .set_list
+            .iter()
+            .filter(|song| {
+                !found_titles
+                    .iter()
+                    .any(|title| title.to_lowercase() == song.title.to_lowercase())
+            })
+            .map(|song| song.title.clone())
+            .collect();
+
+        let missing_songs_msg = missing_songs.join(", ");
+        let msg = format!(
+            "Text overlay detection didn't find all songs. Missing: {}",
+            missing_songs_msg
+        );
+        return Err(anyhow!("{}", msg));
+    }
+
     if cli.timestamps_file.is_none() || cli.refine_timestamps {
         // Always extract audio waveform for further refinement
         println!("Extracting audio waveform for refinement...");
@@ -302,34 +330,6 @@ fn main() -> Result<()> {
             format!("{}/{}", &output_dir, &output_filename),
             serde_json::to_string_pretty(&concert)?,
         )?;
-    }
-
-    // Check if text detection found enough songs
-    if segments.iter().filter(|s| s.segment.is_song).count() < num_songs {
-        // Find which songs are missing
-        let found_titles: Vec<String> = segments
-            .iter()
-            .filter(|s| s.segment.is_song)
-            .map(|s| s.song.title.clone())
-            .collect();
-
-        let missing_songs: Vec<String> = concert
-            .set_list
-            .iter()
-            .filter(|song| {
-                !found_titles
-                    .iter()
-                    .any(|title| title.to_lowercase() == song.title.to_lowercase())
-            })
-            .map(|song| song.title.clone())
-            .collect();
-
-        let missing_songs_msg = missing_songs.join(", ");
-        let msg = format!(
-            "Text overlay detection didn't find all songs. Missing: {}",
-            missing_songs_msg
-        );
-        return Err(anyhow!("{}", msg));
     }
 
     for (i, segment) in segments.iter().enumerate() {
@@ -961,10 +961,12 @@ fn detect_song_boundaries_from_text(
     }
 
     // Check if we need to use fallback matches (title-only) for missing songs
-    let total_songs = songs.len();
-    let matched_songs = song_title_matched.len();
+    let total_songs = songs.len() as i32;
+    let matched_songs = song_title_matched.len() as i32;
 
-    if matched_songs == total_songs - 1 && !title_only_matches.is_empty() {
+    if matched_songs < total_songs && !title_only_matches.is_empty() {
+        println!("Some songs were not matched yet. Checking title only matches now");
+
         // Find which song is missing
         let matched_titles: std::collections::HashSet<String> =
             song_title_matched.keys().cloned().collect();
@@ -974,13 +976,11 @@ fn detect_song_boundaries_from_text(
             .filter(|title| !matched_titles.contains(title))
             .collect();
 
-        if missing_songs.len() == 1 {
-            let missing_song = &missing_songs[0];
-
+        for missing_song in missing_songs {
             // Find the best title-only match for the missing song
             let mut best_match: Option<(String, f64, usize)> = None;
             for (song_title, time, frame_num) in &title_only_matches {
-                if song_title == missing_song {
+                if *song_title == missing_song {
                     if best_match.is_none() || time < &best_match.as_ref().unwrap().1 {
                         best_match = Some((song_title.clone(), *time, *frame_num));
                     }
