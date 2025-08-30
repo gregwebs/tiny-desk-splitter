@@ -344,64 +344,135 @@ impl fmt::Display for MatchReason {
     }
 }
 
+fn check_line_match(
+    line: &str,
+    song_title: &str,
+    is_overlay: bool,
+    weights: &LevWeights,
+) -> Option<(MatchReason, String, u32)> {
+    let line_normalized = normalize_text(line);
+    let title_normalized = normalize_text(song_title);
+    let mut title_normalized_for_matching = title_normalized.clone();
+
+    // Check for exact or partial match
+    if line_normalized.contains(&title_normalized) {
+        return Some((MatchReason::Contains, line.to_string(), 0));
+    }
+    // Longer text is too fragile
+    // If we can confidently match 15 characters, that should be enough
+    let line_count = line_normalized.chars().count();
+    let title_count = title_normalized.chars().count();
+    if line_count > 10 && title_count > 12 {
+        let take = std::cmp::min(line_count + 2, title_count);
+        title_normalized_for_matching = title_normalized.chars().take(take).collect::<String>();
+    }
+    let mut levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
+    if is_overlay {
+        levenshtein_limit += 2
+    }
+    // If we have an overlay and no exact match was found, try fuzzy matching
+    let lev = levenshtein_weight(
+        &line_normalized,
+        &title_normalized_for_matching,
+        // It seems to stop if hitting this limit with any iteration
+        // We need a high limit so that it will backtrack and try a different approach
+        levenshtein_limit + 10 + title_count as u32,
+        &weights,
+    );
+    // println!("normalized title/line:\n{}\n{}", title_normalized_for_matching, line_normalized);
+    // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
+    if lev <= levenshtein_limit {
+        return Some((
+            MatchReason::Levenshtein(lev),
+            line.to_string(),
+            lev / levenshtein_limit,
+        ));
+    }
+    if title_normalized.starts_with(&line_normalized) {
+        // println!("normalized title contains normalized line");
+        if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
+            return Some((
+                MatchReason::StartsWith,
+                line.to_string(),
+                (title_normalized.len() - line_normalized.len()) as u32,
+            ));
+        }
+    }
+    None
+}
+
+
+fn spell_number(i: u8) -> &'static str {
+    match i {
+        1 => "one",
+        2 => "two",
+        3 => "three",
+        4 => "four",
+        5 => "five",
+        6 => "six",
+        7 => "seven",
+        8 => "eight",
+        9 => "nine",
+        _ => panic!("{} given but only 1-9 supported", i)
+    }
+}
+
+fn strip_movement_prefix(song_title: &str) -> Option<String> {
+    let movement = "Movement ";
+    if song_title.starts_with(movement) {
+        let numbered = &song_title[movement.len()..];
+        // println!("starts with Movement, now: {}", &numbered);
+        for i in 1..9 {
+            let spelled = spell_number(i);
+            if numbered.to_lowercase().starts_with(&spelled) {
+                let un_numbered = &numbered[spelled.len()..];
+                // println!("number {} now: {}", i, &un_numbered);
+                if un_numbered.starts_with(": ") {
+                    let mut un_coloned = &un_numbered[2..];
+                    // println!("no colon {} now: {}", i, &un_coloned);
+                    if un_coloned.chars().nth(0) == Some('"') {
+                        un_coloned = &un_coloned[1..];
+                        // println!("no quote now: {}", &un_coloned);
+                    }
+                    if un_coloned.len() > 0 && un_coloned.chars().nth(un_coloned.chars().count() -1) == Some('"') {
+                        un_coloned = &un_coloned[..un_coloned.len()-1];
+                        // println!("no quote now: {}", &un_coloned);
+                    }
+                    return Some(un_coloned.to_string());
+                }
+            }
+        }
+    }
+    return None
+}
+
 pub fn matches_song_title_weighted(
     lines: &[String],
     song_title: &str,
     is_overlay: bool,
     weights: &LevWeights,
 ) -> Option<(MatchReason, String, u32)> {
-    let title_normalized = normalize_text(song_title);
-
+    // Check individual lines first
     for line in lines {
-        let line_normalized = normalize_text(line);
-        let mut title_normalized = title_normalized.clone();
-
-        // Check for exact or partial match
-        if line_normalized.contains(&title_normalized) {
-            return Some((MatchReason::Contains, line.clone(), 0));
+        if let Some(result) = check_line_match(line, song_title, is_overlay, weights) {
+            return Some(result);
         }
-        // Longer text is too fragile
-        // If we can confidently match 15 characters, that should be enough
-        // TODO: Longer titles (> 30~) get split across 2 lines, could match that better
-        let line_count = line_normalized.chars().count();
-        let title_count = title_normalized.chars().count();
-        if line_count > 10 && title_count > 12 {
-            let take = std::cmp::min(line_count + 2, title_count);
-            title_normalized = title_normalized.chars().take(take).collect::<String>();
-        }
-        let mut levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
-        if is_overlay {
-            levenshtein_limit += 2
-        }
-        // If we have an overlay and no exact match was found, try fuzzy matching
-        let lev = levenshtein_weight(
-            &line_normalized,
-            &title_normalized,
-            // It seems to stop if hitting this limit with any iteration
-            // We need a high limit so that it will backtrack and try a different approach
-            levenshtein_limit + 10 + title_count as u32,
-            &weights,
-        );
-        // println!("normalized title/line:\n{}\n{}", title_normalized, line_normalized);
-        // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
-        if lev <= levenshtein_limit {
-            return Some((
-                MatchReason::Levenshtein(lev),
-                line.clone(),
-                lev / levenshtein_limit,
-            ));
-        }
-        if title_normalized.starts_with(&line_normalized) {
-            // println!("normalized title contains normalized line");
-            if (line_normalized.len() as f64 / title_normalized.len() as f64) >= 0.4 {
-                return Some((
-                    MatchReason::StartsWith,
-                    line.clone(),
-                    (title_normalized.len() - line_normalized.len()) as u32,
-                ));
+        if let Some(stripped) = strip_movement_prefix(song_title) {
+            // println!("movement stripped: {}", &stripped);
+            if let Some(result) = check_line_match(line, &stripped, is_overlay, weights) {
+                return Some(result);
             }
         }
     }
+
+    // Check multi-line combinations (for song titles split across lines)
+    for i in 0..lines.len().saturating_sub(1) {
+        let combined_line = format!("{} {}", lines[i], lines[i + 1]);
+        if let Some(result) = check_line_match(&combined_line, song_title, is_overlay, weights) {
+            return Some(result);
+        }
+    }
+
     None
 }
 
@@ -516,6 +587,20 @@ mod tests_matches_song_title {
             print_match_result(r);
         }
         assert!(!result.is_some());
+    }
+
+    #[test]
+    fn test_multi_line() {
+        let lines = vec!["Lay Me Down".to_string(), "(feat, LaDonna Harley-Péters)".to_string()];
+        assert!(matches_song_title(&lines, "Lay Me Down (feat. LaDonna Harley-Peters)", true).is_some());
+    }
+
+    #[test]
+    fn test_movement_strip() {
+        let stripped = strip_movement_prefix("Movement Two: \"Omnyama\"");
+        assert!(stripped == Some("Omnyama".to_string()), "{:?}", stripped);
+        let lines = vec!["Omnyama".to_string()];
+        assert!(matches_song_title(&lines, "Movement Two: \"Omnyama\"", true).is_some());
     }
 
     fn print_match_result(result: &(MatchReason, String, u32)) {
