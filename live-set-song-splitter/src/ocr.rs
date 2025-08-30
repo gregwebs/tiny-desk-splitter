@@ -74,20 +74,75 @@ pub fn parse_tesseract_output(text: &str, artist: &str) -> Option<OcrParse> {
     Some((lines, is_overlay))
 }
 
+#[derive(Debug)]
 pub enum ArtistMatchReason {
     No(NoArtistMatchReason),
     Yes(YesArtistMatchReason),
 }
 
+impl fmt::Display for ArtistMatchReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self {
+            &ArtistMatchReason::No(no) => {
+                write!(f, "{}", no)
+            }
+            &ArtistMatchReason::Yes(yes) => {
+                write!(f, "{}", yes)
+            }
+        }
+    }
+}
+
+impl ArtistMatchReason {
+    #[cfg(test)]
+    fn bool(&self) -> bool {
+        match self {
+            ArtistMatchReason::Yes(..) => true,
+            ArtistMatchReason::No(..) => false,
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum NoArtistMatchReason {
     EmptyArtist,
     EmptyLine,
     Fallthrough,
 }
 
+impl fmt::Display for NoArtistMatchReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self {
+            &NoArtistMatchReason::EmptyArtist => {
+                write!(f, "empty artist")
+            }
+            &NoArtistMatchReason::EmptyLine => {
+                write!(f, "empty line")
+            }
+            &NoArtistMatchReason::Fallthrough => {
+                write!(f, "no match")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
 pub enum YesArtistMatchReason {
     StartsWith,
     OffByOne,
+}
+
+impl fmt::Display for YesArtistMatchReason {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match &self {
+            &YesArtistMatchReason::StartsWith => {
+                write!(f, "starts with")
+            }
+            &YesArtistMatchReason::OffByOne => {
+                write!(f, "off by 1")
+            }
+        }
+    }
 }
 
 fn fuzzy_match_artist(line_input: &str, artist_input: &str) -> bool {
@@ -159,22 +214,29 @@ fn fuzzy_match_artist_reason(line_input: &str, artist_input: &str) -> ArtistMatc
 mod tests {
     use super::*;
 
+    fn assert_fuzzy_match_artist(line_input: &str, artist_input: &str) {
+        let result = fuzzy_match_artist_reason(line_input, artist_input);
+        if !result.bool() {
+            assert!(false, "{:?}", result)
+        }
+    }
+
     #[test]
     fn test_exact_match() {
-        assert!(fuzzy_match_artist("John Doe", "John Doe"));
-        assert!(fuzzy_match_artist("John Doe:", "John Doe"));
+        assert_fuzzy_match_artist("John Doe", "John Doe");
+        assert_fuzzy_match_artist("John Doe:", "John Doe");
     }
 
     #[test]
     fn test_case_insensitive() {
-        assert!(fuzzy_match_artist("JOHN DOE", "john doe"));
-        assert!(fuzzy_match_artist("john doe", "JOHN DOE"));
+        assert_fuzzy_match_artist("JOHN DOE", "john doe");
+        assert_fuzzy_match_artist("john doe", "JOHN DOE");
     }
 
     #[test]
     fn test_space_handling() {
-        assert!(fuzzy_match_artist("JohnDoe", "John Doe"));
-        assert!(fuzzy_match_artist("John Doe", "JohnDoe"));
+        assert_fuzzy_match_artist("JohnDoe", "John Doe");
+        assert_fuzzy_match_artist("John Doe", "JohnDoe");
     }
 
     #[test]
@@ -189,7 +251,7 @@ mod tests {
 
     #[test]
     fn test_partial_match_start() {
-        assert!(fuzzy_match_artist("John Doe Extra", "John Doe"));
+        assert_fuzzy_match_artist("John Doe Extra", "John Doe");
     }
 
     #[test]
@@ -200,18 +262,18 @@ mod tests {
     #[test]
     fn test_ratio_threshold() {
         assert!(!fuzzy_match_artist("johndo", "johndoe890"));
-        assert!(fuzzy_match_artist("johndoe", "johndoe890"));
+        assert_fuzzy_match_artist("johndoe", "johndoe890");
     }
 
     #[test]
     fn test_fuzzy_name() {
         // assert!(fuzzy_match_artist("Megan Moror", "Megan Moroney"));
-        assert!(fuzzy_match_artist("Teylor swift", "Taylor Swift"));
+        assert_fuzzy_match_artist("Teylor swift", "Taylor Swift");
     }
 
     #[test]
     fn test_one_special_char_one_letter() {
-        assert!(fuzzy_match_artist("sieFra Hull &", "Sierra Hull"));
+        assert_fuzzy_match_artist("sieFra Hull &", "Sierra Hull");
     }
 
     #[test]
@@ -224,12 +286,12 @@ mod tests {
 
     #[test]
     fn test_fuzzy_diacritics() {
-        assert!(fuzzy_match_artist("Takacs Quartet", "Takács Quartet"));
+        assert_fuzzy_match_artist("Takacs Quartet", "Takács Quartet");
     }
 
     #[test]
     fn test_fuzzy_special() {
-        assert!(fuzzy_match_artist("Taylor swift “*", "Taylor Swift"));
+        assert_fuzzy_match_artist("Taylor swift “*", "Taylor Swift");
     }
 }
 
