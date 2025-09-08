@@ -181,7 +181,7 @@ pub fn extract_set_list(paragraphs: &[ElementRef]) -> Result<Vec<Song>> {
         let text: String = p.text().collect::<String>().to_uppercase();
 
         if text.contains("SET LIST") {
-            println!("found set list paragraph");
+            // println!("found set list paragraph");
             // Find the next sibling that is a UL element
             let mut next_element = p.next_sibling();
             while let Some(element) = next_element {
@@ -189,15 +189,17 @@ pub fn extract_set_list(paragraphs: &[ElementRef]) -> Result<Vec<Song>> {
                     if el.name() == "ul" {
                         let ul_element = ElementRef::wrap(element).unwrap();
                         for li in ul_element.select(&li_selector) {
-                            let song_text = li
+                            let mut song_text = li
                                 .text()
                                 .collect::<String>()
-                                .trim()
-                                .trim_start_matches(|c| c == '"' || c == '\'')
-                                .trim_end_matches(|c| c == '"' || c == '\'')
-                                .to_string();
+                                .trim().to_string();
 
-                            set_list.push(Song { title: song_text });
+                            if let Some(start) = song_text.chars().nth(0) {
+                                if start == '"' || start == '\'' {
+                                    song_text = song_text[1..].trim_end_matches(|c| c == '"' || c == '\'').to_string();
+                                }
+                                set_list.push(Song { title: song_text });
+                            }
                         }
                         break;
                     }
