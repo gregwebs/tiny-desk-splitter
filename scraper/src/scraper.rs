@@ -70,7 +70,7 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         .to_lowercase()
         .contains(&artist_name.to_lowercase())
     {
-        if artist_name.to_lowercase() == "video" || artist_name.ends_with("The Tiny Desk") {
+        if artist_name.to_lowercase() == "video" || artist_name.ends_with("The Tiny Desk") || story_title.ends_with(": Tiny Desk Concert") {
             artist_name = story_title
                 .split(":")
                 .next()

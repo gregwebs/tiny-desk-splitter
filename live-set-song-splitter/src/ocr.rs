@@ -457,9 +457,9 @@ pub fn matches_song_title_weighted(
         if let Some(result) = check_line_match(line, song_title, is_overlay, weights) {
             return Some(result);
         }
-        if let Some(stripped) = strip_movement_prefix(song_title) {
-            // println!("movement stripped: {}", &stripped);
-            if let Some(result) = check_line_match(line, &stripped, is_overlay, weights) {
+        if let Some(stripped_song) = strip_movement_prefix(song_title) {
+            println!("movement stripped: {}", &stripped_song);
+            if let Some(result) = check_line_match(line, &stripped_song, is_overlay, weights) {
                 return Some(result);
             }
         }
