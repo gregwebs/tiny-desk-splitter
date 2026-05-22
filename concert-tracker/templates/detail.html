@@ -5,7 +5,7 @@
 <p>
   <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
   <span class="badge badge-{{ processing_status }}">{{ processing_status }}</span>
-  {% if let Some(date) = concert.concert_date.as_ref() %}<strong>Date:</strong> {{ date }}{% endif %}
+  {% if let Some(date) = concert.display_date() %}<strong>Date:</strong> {{ date }}{% endif %}
 </p>
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 {% if let Some(desc) = concert.description.as_ref() %}<p>{{ desc }}</p>{% endif %}

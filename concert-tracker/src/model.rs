@@ -121,6 +121,16 @@ impl Concert {
     pub fn processing_status(&self) -> ProcessingStatus {
         ProcessingStatus::from_concert(self)
     }
+
+    /// Date portion of `concert_date` for display. Archive sync stores
+    /// date-only strings like "2026-05-20"; full per-concert scrape stores
+    /// ISO 8601 timestamps like "2026-05-22T05:00:00-04:00". Either way,
+    /// we only want the YYYY-MM-DD prefix in the UI.
+    pub fn display_date(&self) -> Option<String> {
+        self.concert_date
+            .as_ref()
+            .map(|d| d.get(..10).unwrap_or(d).to_string())
+    }
 }
 
 #[cfg(test)]
@@ -236,6 +246,33 @@ mod tests {
             at: "2024-01-01T02:00:00Z".to_string(),
         }];
         assert_eq!(c.processing_status(), ProcessingStatus::Split);
+    }
+
+    #[test]
+    fn display_date_strips_time_from_iso_timestamp() {
+        let mut c = bare_concert();
+        c.concert_date = Some("2026-05-22T05:00:00-04:00".to_string());
+        assert_eq!(c.display_date(), Some("2026-05-22".to_string()));
+    }
+
+    #[test]
+    fn display_date_passes_through_date_only_string() {
+        let mut c = bare_concert();
+        c.concert_date = Some("2026-05-20".to_string());
+        assert_eq!(c.display_date(), Some("2026-05-20".to_string()));
+    }
+
+    #[test]
+    fn display_date_returns_none_when_missing() {
+        let c = bare_concert();
+        assert_eq!(c.display_date(), None);
+    }
+
+    #[test]
+    fn display_date_returns_whole_string_when_shorter_than_ten() {
+        let mut c = bare_concert();
+        c.concert_date = Some("2026".to_string());
+        assert_eq!(c.display_date(), Some("2026".to_string()));
     }
 
     #[test]
