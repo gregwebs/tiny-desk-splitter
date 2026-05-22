@@ -37,10 +37,13 @@ struct RowTemplate {
     teaser: String,
     concert_status: String,
     processing_status: String,
+    processing_status_label: String,
     ignored: bool,
     wanted: bool,
     can_download: bool,
+    can_delete_download: bool,
     can_split: bool,
+    can_delete_split: bool,
     can_listen: bool,
     is_in_progress: bool,
 }
@@ -51,10 +54,14 @@ struct DetailTemplate {
     concert: Concert,
     concert_status: String,
     processing_status: String,
+    processing_status_label: String,
     can_download: bool,
+    can_delete_download: bool,
     can_split: bool,
+    can_delete_split: bool,
     can_listen: bool,
     notes_value: String,
+    preview_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -62,6 +69,12 @@ struct DetailTemplate {
 struct ListenButtonTemplate {
     id: i64,
     state: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "delete_confirm.html")]
+struct DeleteConfirmTemplate {
+    id: i64,
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -96,7 +109,7 @@ const FILTERS: &[(&str, &str)] = &[
     ("available", "Available"),
     ("ignored", "Ignored"),
     ("downloaded", "Downloaded"),
-    ("split", "Split"),
+    ("split", "Tracks"),
 ];
 
 fn matches_filter(c: &Concert, slug: &str) -> bool {
@@ -144,7 +157,11 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         &ps,
         ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
     ) && c.album.is_some();
+    let can_delete_download = c.downloaded_at.is_some()
+        && c.download_started_at.is_none()
+        && c.split_started_at.is_none();
     let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
+    let can_delete_split = c.split_at.is_some() && c.split_started_at.is_none();
     let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
     let is_in_progress = matches!(
         &ps,
@@ -159,10 +176,13 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         teaser: c.teaser.clone().unwrap_or_default(),
         concert_status: c.concert_status().slug().to_string(),
         processing_status: ps.slug().to_string(),
+        processing_status_label: ps.label().to_string(),
         ignored: c.ignored,
         wanted: c.wanted,
         can_download,
+        can_delete_download,
         can_split,
+        can_delete_split,
         can_listen,
         is_in_progress,
     }
@@ -219,9 +239,12 @@ pub async fn detail(
     let concert = if initial.metadata_scraped_at.is_none() {
         let db = state.db.clone();
         let initial_for_task = initial.clone();
+        let working_dir = state.jobs.working_dir.clone();
         match tokio::task::spawn_blocking(move || {
             let conn = db.lock().unwrap();
-            ensure_scraped(&conn, initial_for_task, crate::scrape::scrape_url)
+            ensure_scraped(&conn, initial_for_task, |c, u| {
+                crate::scrape::scrape_url(c, u, &working_dir)
+            })
         })
         .await
         {
@@ -240,17 +263,26 @@ pub async fn detail(
         &ps,
         ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
     ) && concert.album.is_some();
+    let can_delete_download = concert.downloaded_at.is_some()
+        && concert.download_started_at.is_none()
+        && concert.split_started_at.is_none();
     let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
+    let can_delete_split = concert.split_at.is_some() && concert.split_started_at.is_none();
     let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
     let notes_value = concert.notes.clone().unwrap_or_default();
+    let preview_url = concert.preview_image_url(&state.jobs.working_dir);
 
     Ok(DetailTemplate {
         concert_status: concert.concert_status().slug().to_string(),
         processing_status: ps.slug().to_string(),
+        processing_status_label: ps.label().to_string(),
         can_download,
+        can_delete_download,
         can_split,
+        can_delete_split,
         can_listen,
         notes_value,
+        preview_url,
         concert,
     })
 }
@@ -307,9 +339,10 @@ pub async fn scrape_concert(
 
     // reqwest::blocking cannot run inside a tokio runtime; offload to a blocking thread.
     let db = state.db.clone();
+    let working_dir = state.jobs.working_dir.clone();
     let scrape_result = tokio::task::spawn_blocking(move || {
         let conn = db.lock().unwrap();
-        crate::scrape::scrape_url(&conn, &url)
+        crate::scrape::scrape_url(&conn, &url, &working_dir)
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))?;
@@ -349,6 +382,88 @@ pub async fn split(
         db::get_concert(&conn, id)?
     };
     render_row(&concert).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn delete_download(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Response, AppError> {
+    let force = params.get("force").map(|v| v == "true").unwrap_or(false);
+
+    let (downloaded_at, album, title) = {
+        let conn = state.db.lock().unwrap();
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (c.downloaded_at, c.album, c.title)
+    };
+
+    if downloaded_at.is_none() {
+        return Ok((StatusCode::BAD_REQUEST, "Concert has no downloaded file to delete").into_response());
+    }
+
+    tracing::info!("delete-download started for concert {} ({}) force={}", id, title, force);
+
+    if !force {
+        let path = album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
+        match path {
+            Some(p) => {
+                if let Err(e) = std::fs::remove_file(&p) {
+                    tracing::warn!("delete-download failed to remove {} for concert {}: {}", p.display(), id, e);
+                    return Err(AppError::Internal(anyhow::anyhow!(
+                        "Failed to remove {}: {}", p.display(), e
+                    )));
+                }
+                tracing::info!("delete-download removed {} for concert {}", p.display(), id);
+            }
+            None => {
+                tracing::info!("delete-download file not found for concert {}, returning confirm prompt", id);
+                let body = DeleteConfirmTemplate { id }
+                    .render()
+                    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+                return Ok(([("content-type", "text/html; charset=utf-8")], body).into_response());
+            }
+        }
+    } else {
+        tracing::info!("delete-download force=true for concert {}, skipping file check", id);
+    }
+
+    {
+        let conn = state.db.lock().unwrap();
+        db::clear_download_state(&conn, id)?;
+    }
+    tracing::info!("delete-download completed for concert {}", id);
+
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    Ok((headers, "").into_response())
+}
+
+pub async fn delete_split(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let (split_at, title) = {
+        let conn = state.db.lock().unwrap();
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (c.split_at, c.title)
+    };
+
+    if split_at.is_none() {
+        return Ok((StatusCode::BAD_REQUEST, "Concert has no split state to delete").into_response());
+    }
+
+    tracing::info!("delete-split started for concert {} ({})", id, title);
+    {
+        let conn = state.db.lock().unwrap();
+        db::clear_split_state(&conn, id)?;
+    }
+    tracing::info!("delete-split completed for concert {}", id);
+
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    Ok((headers, "").into_response())
 }
 
 pub async fn listen(

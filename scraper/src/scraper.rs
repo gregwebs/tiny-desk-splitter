@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
+use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::sync::OnceLock;
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Musician {
@@ -25,12 +27,23 @@ pub struct ConcertInfo {
     pub description: Option<String>,
     pub set_list: Vec<Song>,
     pub musicians: Vec<Musician>,
+    #[serde(default)]
+    pub preview_image_url: Option<String>,
 }
 
 pub fn fetch_html(url: &str) -> Result<String> {
     let client = Client::new();
     let response = client.get(url).send().context("Failed to send request")?;
     response.text().context("Failed to get response text")
+}
+
+/// Fetch a URL as raw bytes (e.g. for images).
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
+    let client = Client::new();
+    let response = client.get(url).send().context("Failed to send request")?;
+    let response = response.error_for_status().context("HTTP error status")?;
+    let bytes = response.bytes().context("Failed to read response bytes")?;
+    Ok(bytes.to_vec())
 }
 
 fn first_split(s: &str, char: char) -> String {
@@ -119,6 +132,8 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         return Err(anyhow::anyhow!("No musicians list found"));
     }
 
+    let preview_image_url = extract_preview_image_url(&document);
+
     // Create JSON structure
     let concert_info = ConcertInfo {
         artist: artist_name,
@@ -129,9 +144,45 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         description,
         set_list,
         musicians,
+        preview_image_url,
     };
 
     Ok(concert_info)
+}
+
+/// Extract the video preview thumbnail URL from a NPR Tiny Desk page.
+///
+/// Prefers the JWPlayer `div.jw-preview` `background-image` style when it's in
+/// the served HTML, then falls back to the `og:image` meta tag (which NPR
+/// always ships in the static markup and points at the same thumbnail). The
+/// `jw-preview` div is normally JS-rendered, so the fallback is the common
+/// path in practice — but we keep both since either one is acceptable.
+pub fn extract_preview_image_url(document: &Html) -> Option<String> {
+    extract_jw_preview_url(document).or_else(|| extract_og_image_url(document))
+}
+
+fn extract_jw_preview_url(document: &Html) -> Option<String> {
+    static URL_RE: OnceLock<Regex> = OnceLock::new();
+    let re = URL_RE.get_or_init(|| {
+        Regex::new(r#"background-image\s*:\s*url\(\s*['"]?([^'")]+)['"]?\s*\)"#).unwrap()
+    });
+
+    let selector = Selector::parse("div.jw-preview").ok()?;
+    let element = document.select(&selector).next()?;
+    let style = element.value().attr("style")?;
+    let caps = re.captures(style)?;
+    Some(caps.get(1)?.as_str().to_string())
+}
+
+fn extract_og_image_url(document: &Html) -> Option<String> {
+    let selector = Selector::parse(r#"meta[property="og:image"]"#).ok()?;
+    let element = document.select(&selector).next()?;
+    let content = element.value().attr("content")?;
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.to_string())
+    }
 }
 
 pub fn extract_content(document: &Html) -> Result<(Option<String>, Vec<Song>, Vec<Musician>)> {

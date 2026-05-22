@@ -1,7 +1,8 @@
 use super::fixtures;
 use super::save_failed_html;
-use crate::scraper::{parse_concert_info, Musician};
+use crate::scraper::{extract_preview_image_url, parse_concert_info, Musician};
 use anyhow::Result;
+use scraper::Html;
 
 // Test successful parsing of a sample concert
 #[test]
@@ -52,6 +53,72 @@ fn test_sample_concert_parsing() {
     assert_eq!(concert_info.musicians[1].instruments, vec!["bass"]);
     assert_eq!(concert_info.musicians[2].name, "Test Drummer");
     assert_eq!(concert_info.musicians[2].instruments, vec!["drums"]);
+
+    assert_eq!(
+        concert_info.preview_image_url.as_deref(),
+        Some("https://example.org/thumb.jpg")
+    );
+}
+
+#[test]
+fn extract_preview_image_url_finds_url_in_jw_preview_style() {
+    let html = r#"<html><body>
+        <div class="jw-preview jw-reset" style="background-image: url(&quot;https://example.org/a.jpg&quot;); background-size: cover;"></div>
+    </body></html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_preview_image_url(&document).as_deref(),
+        Some("https://example.org/a.jpg")
+    );
+}
+
+#[test]
+fn extract_preview_image_url_returns_none_when_missing() {
+    let document = Html::parse_document("<html><body></body></html>");
+    assert!(extract_preview_image_url(&document).is_none());
+}
+
+#[test]
+fn extract_preview_image_url_handles_single_quotes() {
+    let html = r#"<html><body><div class="jw-preview" style="background-image: url('https://example.org/b.jpg')"></div></body></html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_preview_image_url(&document).as_deref(),
+        Some("https://example.org/b.jpg")
+    );
+}
+
+#[test]
+fn extract_preview_image_url_handles_unquoted_url() {
+    let html = r#"<html><body><div class="jw-preview" style="background-image: url(https://example.org/c.jpg)"></div></body></html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_preview_image_url(&document).as_deref(),
+        Some("https://example.org/c.jpg")
+    );
+}
+
+#[test]
+fn extract_preview_image_url_falls_back_to_og_image() {
+    let html = r#"<html><head><meta property="og:image" content="https://example.org/og.jpg" /></head><body></body></html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_preview_image_url(&document).as_deref(),
+        Some("https://example.org/og.jpg")
+    );
+}
+
+#[test]
+fn extract_preview_image_url_prefers_jw_preview_over_og_image() {
+    let html = r#"<html>
+        <head><meta property="og:image" content="https://example.org/og.jpg" /></head>
+        <body><div class="jw-preview" style="background-image: url('https://example.org/jw.jpg')"></div></body>
+    </html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_preview_image_url(&document).as_deref(),
+        Some("https://example.org/jw.jpg")
+    );
 }
 
 // Regression tests - load failing pages from the failures directory

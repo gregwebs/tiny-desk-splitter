@@ -80,6 +80,16 @@ impl ProcessingStatus {
             ProcessingStatus::NotStarted => "not-started",
         }
     }
+
+    /// Human-readable label for the status badge. Diverges from `slug()` only
+    /// where the slug reads awkwardly; `slug()` stays stable for CSS classes
+    /// and URL filter values.
+    pub fn label(&self) -> &str {
+        match self {
+            ProcessingStatus::Split => "tracks",
+            _ => self.slug(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -144,6 +154,19 @@ impl Concert {
                 .collect(),
             None => Vec::new(),
         }
+    }
+
+    /// Browser-visible URL for this concert's preview image, or `None` if the
+    /// image hasn't been downloaded yet. Mirrors the on-disk layout used by
+    /// `crate::scrape::preview_image_path` and the `/previews` ServeDir mount.
+    pub fn preview_image_url(&self, working_dir: &std::path::Path) -> Option<String> {
+        let album = self.album.as_deref()?;
+        let sanitized = sanitize_album(album);
+        let on_disk = working_dir.join("previews").join(format!("{}.jpg", sanitized));
+        if !on_disk.exists() {
+            return None;
+        }
+        Some(format!("/previews/{}.jpg", sanitized))
     }
 }
 
@@ -301,6 +324,21 @@ mod tests {
     }
 
     #[test]
+    fn processing_status_label_diverges_only_for_split() {
+        assert_eq!(ProcessingStatus::Split.label(), "tracks");
+        for ps in [
+            ProcessingStatus::NotStarted,
+            ProcessingStatus::Downloading,
+            ProcessingStatus::DownloadError,
+            ProcessingStatus::Downloaded,
+            ProcessingStatus::Splitting,
+            ProcessingStatus::SplitError,
+        ] {
+            assert_eq!(ps.label(), ps.slug(), "label should match slug for {:?}", ps);
+        }
+    }
+
+    #[test]
     fn description_paragraphs_none_yields_empty() {
         let c = bare_concert();
         assert!(c.description_paragraphs().is_empty());
@@ -328,5 +366,46 @@ mod tests {
         let mut c = bare_concert();
         c.description = Some("  First.  \n\n\n\n  Second.  \n\n".to_string());
         assert_eq!(c.description_paragraphs(), vec!["First.", "Second."]);
+    }
+
+    #[test]
+    fn preview_image_url_returns_none_when_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = bare_concert();
+        c.album = Some("Foo Album".to_string());
+        assert!(c.preview_image_url(dir.path()).is_none());
+    }
+
+    #[test]
+    fn preview_image_url_returns_path_when_file_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("previews")).unwrap();
+        std::fs::File::create(dir.path().join("previews").join("Foo Album.jpg")).unwrap();
+        let mut c = bare_concert();
+        c.album = Some("Foo Album".to_string());
+        assert_eq!(
+            c.preview_image_url(dir.path()).as_deref(),
+            Some("/previews/Foo Album.jpg")
+        );
+    }
+
+    #[test]
+    fn preview_image_url_strips_colons_from_album() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("previews")).unwrap();
+        std::fs::File::create(dir.path().join("previews").join("Some Concert.jpg")).unwrap();
+        let mut c = bare_concert();
+        c.album = Some("Some: Concert".to_string());
+        assert_eq!(
+            c.preview_image_url(dir.path()).as_deref(),
+            Some("/previews/Some Concert.jpg")
+        );
+    }
+
+    #[test]
+    fn preview_image_url_returns_none_when_album_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let c = bare_concert();
+        assert!(c.preview_image_url(dir.path()).is_none());
     }
 }

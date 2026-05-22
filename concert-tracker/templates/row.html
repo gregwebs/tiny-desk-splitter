@@ -5,15 +5,21 @@
     <div class="card-meta">
       {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
       <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
-      <span class="badge badge-{{ processing_status }}">{{ processing_status }}</span>
+      <span class="badge badge-{{ processing_status }}">{{ processing_status_label }}</span>
     </div>
     {% if !teaser.is_empty() %}<p class="card-teaser">{{ teaser }}</p>{% endif %}
     <div class="card-actions">
       {% if can_download %}
       <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML">Download</button>
       {% endif %}
+      {% if can_delete_download %}
+      <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
+      {% endif %}
       {% if can_split %}
       <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML">Split</button>
+      {% endif %}
+      {% if can_delete_split %}
+      <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="this" hx-swap="outerHTML">✕</button>
       {% endif %}
       {% if can_listen %}
       <button class="btn-listen" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>

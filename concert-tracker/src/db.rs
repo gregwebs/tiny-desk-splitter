@@ -225,6 +225,34 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
     Ok(())
 }
 
+/// Clear all download-related state. Wipes downloaded_at, download_started_at,
+/// split_at, split_started_at, and split_errors. download_errors is preserved
+/// (its history still applies to the failed-to-download state). split_errors
+/// is wiped because those errors describe splitting a file that no longer
+/// exists — keeping them would leave ProcessingStatus stuck at SplitError,
+/// hiding the Download button.
+pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL,
+                             split_at = NULL, split_started_at = NULL,
+                             split_errors_json = '[]'
+         WHERE id = ?1",
+        params![id],
+    )
+    .context("Failed to clear download state")?;
+    Ok(())
+}
+
+/// Clear split-related timestamps. Error history is preserved.
+pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE concerts SET split_at = NULL, split_started_at = NULL WHERE id = ?1",
+        params![id],
+    )
+    .context("Failed to clear split state")?;
+    Ok(())
+}
+
 /// Set downloaded_at from filesystem mtime if not already set (for scan/recovery).
 pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<()> {
     conn.execute(
@@ -504,6 +532,55 @@ pub mod tests {
         set_downloaded_at_if_missing(&conn, id, "2025-12-31T00:00:00Z").unwrap(); // must not overwrite
         let c = get_concert(&conn, id).unwrap();
         assert_eq!(c.downloaded_at, Some("2024-01-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn clear_download_state_nulls_timestamps_and_resets_split_errors() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_failed(&conn, id, "earlier 403").unwrap();
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_failed(&conn, id, "ffmpeg blew up").unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+
+        clear_download_state(&conn, id).unwrap();
+
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.downloaded_at.is_none());
+        assert!(c.download_started_at.is_none());
+        assert!(c.split_at.is_none());
+        assert!(c.split_started_at.is_none());
+        // download_errors stays as audit trail of past download attempts.
+        assert_eq!(c.download_errors.len(), 1);
+        assert_eq!(c.download_errors[0].error, "earlier 403");
+        // split_errors must be wiped — they described a file that no longer
+        // exists, and preserving them would pin ProcessingStatus at SplitError
+        // and hide the Download button.
+        assert!(c.split_errors.is_empty());
+    }
+
+    #[test]
+    fn clear_split_state_nulls_only_split_columns() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_failed(&conn, id, "first try").unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+
+        clear_split_state(&conn, id).unwrap();
+
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.downloaded_at.is_some(), "download state must be untouched");
+        assert!(c.split_at.is_none());
+        assert!(c.split_started_at.is_none());
+        assert_eq!(c.split_errors.len(), 1, "split errors preserved");
     }
 
     #[test]

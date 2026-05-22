@@ -15,6 +15,10 @@ struct Cli {
     #[arg(long, default_value = "concerts.db")]
     db: PathBuf,
 
+    /// Working directory where downloaded media and preview images live.
+    #[arg(long, default_value = ".")]
+    workdir: PathBuf,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -79,7 +83,7 @@ fn main() -> Result<()> {
         }
 
         Command::Scrape { url } => {
-            scrape_url(&conn, &url)?;
+            scrape_url(&conn, &url, &cli.workdir)?;
             println!("Scraped {}", url);
         }
 
