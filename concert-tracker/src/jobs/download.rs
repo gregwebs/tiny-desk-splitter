@@ -28,16 +28,20 @@ pub async fn start_download(
     {
         let conn = db.lock().unwrap();
         if !db::try_mark_download_started(&conn, concert_id)? {
+            tracing::info!("download already running for concert {}", concert_id);
             return Ok(StartOutcome::AlreadyRunning);
         }
     }
 
-    let job = {
+    let (job, title) = {
         let conn = db.lock().unwrap();
         let concert = db::get_concert(&conn, concert_id)?;
-        download_job_from_concert(&concert, &config.working_dir)?
+        let title = concert.title.clone();
+        let job = download_job_from_concert(&concert, &config.working_dir)?;
+        (job, title)
     };
 
+    tracing::info!("download started for concert {} ({})", concert_id, title);
     let handle = tokio::task::spawn(run_download(db.clone(), config, job));
     registry.insert(key, handle);
 
@@ -50,17 +54,20 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
 
     match cmd.output().await {
         Ok(output) if output.status.success() => {
+            tracing::info!("download completed for concert {}", concert_id);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_succeeded(&conn, concert_id);
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let error = format!("exit {:?}: {}", output.status.code(), stderr.trim());
+            tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
         }
         Err(e) => {
             let error = format!("spawn error: {}", e);
+            tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
         }
