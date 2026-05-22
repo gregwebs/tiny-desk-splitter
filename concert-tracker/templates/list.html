@@ -1,0 +1,24 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="filter-chips">
+  {% for (slug, label, active_class) in filters %}
+  <a href="/?filter={{ slug }}" class="{{ active_class }}">{{ label }}</a>
+  {% endfor %}
+</div>
+<table>
+  <thead>
+    <tr>
+      <th>Title</th>
+      <th>Date</th>
+      <th>Status</th>
+      <th>Processing</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody id="concert-list">
+    {% for row in rows %}
+    {{ row|safe }}
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

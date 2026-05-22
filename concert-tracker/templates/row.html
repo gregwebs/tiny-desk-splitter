@@ -1,0 +1,16 @@
+<tr id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
+  <td><a href="/concerts/{{ id }}">{{ title }}</a></td>
+  <td>{{ concert_date }}</td>
+  <td><span class="badge badge-{{ concert_status }}">{{ concert_status }}</span></td>
+  <td><span class="badge badge-{{ processing_status }}">{{ processing_status }}</span></td>
+  <td>
+    {% if can_download %}
+    <button hx-post="/concerts/{{ id }}/download" hx-target="closest tr" hx-swap="outerHTML">Download</button>
+    {% endif %}
+    {% if can_split %}
+    <button hx-post="/concerts/{{ id }}/split" hx-target="closest tr" hx-swap="outerHTML">Split</button>
+    {% endif %}
+    <button hx-post="/concerts/{{ id }}/ignore" hx-target="closest tr" hx-swap="outerHTML">{% if ignored %}Unignore{% else %}Ignore{% endif %}</button>
+    <button hx-post="/concerts/{{ id }}/want" hx-target="closest tr" hx-swap="outerHTML">{% if wanted %}Unwant{% else %}Want{% endif %}</button>
+  </td>
+</tr>

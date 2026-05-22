@@ -1,0 +1,176 @@
+use anyhow::Result;
+use std::sync::{Arc, Mutex};
+use rusqlite::Connection;
+
+use crate::db;
+use crate::jobs::{download_job_from_concert, DownloadJob, JobConfig, JobKey, JobKind, JobRegistry};
+
+pub enum StartOutcome {
+    Spawned,
+    AlreadyRunning,
+}
+
+/// Start a download job for the given concert. Returns Spawned or AlreadyRunning.
+pub async fn start_download(
+    db: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    config: JobConfig,
+    concert_id: i64,
+) -> Result<StartOutcome> {
+    let key = JobKey {
+        concert_id,
+        kind: JobKind::Download,
+    };
+    if registry.is_running(&key) {
+        return Ok(StartOutcome::AlreadyRunning);
+    }
+
+    {
+        let conn = db.lock().unwrap();
+        if !db::try_mark_download_started(&conn, concert_id)? {
+            return Ok(StartOutcome::AlreadyRunning);
+        }
+    }
+
+    let job = {
+        let conn = db.lock().unwrap();
+        let concert = db::get_concert(&conn, concert_id)?;
+        download_job_from_concert(&concert, &config.working_dir)?
+    };
+
+    let handle = tokio::task::spawn(run_download(db.clone(), config, job));
+    registry.insert(key, handle);
+
+    Ok(StartOutcome::Spawned)
+}
+
+async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: DownloadJob) {
+    let concert_id = job.concert_id;
+    let mut cmd = (config.download_cmd)(&job);
+
+    match cmd.output().await {
+        Ok(output) if output.status.success() => {
+            let conn = db.lock().unwrap();
+            let _ = db::mark_download_succeeded(&conn, concert_id);
+        }
+        Ok(output) => {
+            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let error = format!("exit {:?}: {}", output.status.code(), stderr.trim());
+            let conn = db.lock().unwrap();
+            let _ = db::mark_download_failed(&conn, concert_id, &error);
+        }
+        Err(e) => {
+            let error = format!("spawn error: {}", e);
+            let conn = db.lock().unwrap();
+            let _ = db::mark_download_failed(&conn, concert_id, &error);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+    use crate::jobs::{JobConfig, JobRegistry};
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::process::Command;
+
+    fn config_success() -> JobConfig {
+        JobConfig {
+            working_dir: PathBuf::from("/tmp"),
+            download_cmd: Arc::new(|_job: &DownloadJob| Command::new("true")),
+            split_cmd: Arc::new(|_| unreachable!()),
+        }
+    }
+
+    fn config_failure() -> JobConfig {
+        JobConfig {
+            working_dir: PathBuf::from("/tmp"),
+            download_cmd: Arc::new(|_| {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", "echo boom >&2; exit 7"]);
+                cmd
+            }),
+            split_cmd: Arc::new(|_| unreachable!()),
+        }
+    }
+
+    fn seeded_db() -> Arc<Mutex<Connection>> {
+        let conn = db::open_in_memory().unwrap();
+        db::upsert_listing(
+            &conn,
+            &db::NewListing {
+                source_url: "https://npr.org/test/dl".to_string(),
+                title: "Test Concert".to_string(),
+                concert_date: None,
+                teaser: None,
+            },
+        )
+        .unwrap();
+        db::update_metadata(
+            &conn,
+            1,
+            &db::MetadataUpdate {
+                artist: "Test Artist".to_string(),
+                album: "Test Album".to_string(),
+                description: None,
+                set_list: vec![],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        Arc::new(Mutex::new(conn))
+    }
+
+    #[tokio::test]
+    async fn successful_download_marks_downloaded_at() {
+        let db = seeded_db();
+        let registry = Arc::new(JobRegistry::new());
+        start_download(db.clone(), registry, config_success(), 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let conn = db.lock().unwrap();
+        let concert = db::get_concert(&conn, 1).unwrap();
+        assert!(concert.downloaded_at.is_some());
+        assert!(concert.download_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn failed_download_records_error() {
+        let db = seeded_db();
+        let registry = Arc::new(JobRegistry::new());
+        start_download(db.clone(), registry, config_failure(), 1)
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let conn = db.lock().unwrap();
+        let concert = db::get_concert(&conn, 1).unwrap();
+        assert!(concert.downloaded_at.is_none());
+        assert!(!concert.download_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn duplicate_start_returns_already_running() {
+        let db = seeded_db();
+        let registry = Arc::new(JobRegistry::new());
+        let config = JobConfig {
+            working_dir: PathBuf::from("/tmp"),
+            download_cmd: Arc::new(|_| {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", "sleep 10"]);
+                cmd
+            }),
+            split_cmd: Arc::new(|_| unreachable!()),
+        };
+        let r1 = start_download(db.clone(), registry.clone(), config.clone(), 1)
+            .await
+            .unwrap();
+        assert!(matches!(r1, StartOutcome::Spawned));
+        let r2 = start_download(db.clone(), registry.clone(), config, 1)
+            .await
+            .unwrap();
+        assert!(matches!(r2, StartOutcome::AlreadyRunning));
+    }
+}

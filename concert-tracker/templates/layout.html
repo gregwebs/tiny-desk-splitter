@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tiny Desk Concerts</title>
+  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 1400px; margin: 0 auto; padding: 1rem; }
+    header { display: flex; align-items: center; gap: 1rem; margin-bottom: 1rem; }
+    h1 { margin: 0; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+    th, td { padding: 0.4rem 0.6rem; border: 1px solid #ddd; text-align: left; vertical-align: top; }
+    th { background: #f5f5f5; }
+    .filter-chips { margin-bottom: 0.75rem; }
+    .filter-chips a { display: inline-block; margin-right: 0.4rem; padding: 0.25rem 0.6rem;
+                      border: 1px solid #ccc; border-radius: 12px; text-decoration: none; color: #333; font-size: 0.85em; }
+    .filter-chips a.active { background: #333; color: #fff; border-color: #333; }
+    .badge { display: inline-block; padding: 0.15rem 0.4rem; border-radius: 3px; font-size: 0.8em; }
+    .badge-split     { background: #d4edda; color: #155724; }
+    .badge-downloaded { background: #d1ecf1; color: #0c5460; }
+    .badge-downloading,.badge-splitting { background: #fff3cd; color: #856404; }
+    .badge-split-error,.badge-download-error { background: #f8d7da; color: #721c24; }
+    .badge-not-started { background: #e2e3e5; color: #383d41; }
+    .badge-wanted   { background: #cce5ff; color: #004085; }
+    .badge-ignored  { background: #e2e3e5; color: #383d41; }
+    .badge-available { background: #fff; color: #333; border: 1px solid #ccc; }
+    button { padding: 0.2rem 0.5rem; font-size: 0.8em; cursor: pointer; }
+    #banner { color: green; margin-left: 0.5rem; }
+    .error-list { color: #721c24; font-size: 0.85em; }
+    textarea { width: 100%; box-sizing: border-box; }
+    .set-list { margin: 0; padding-left: 1.5rem; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Tiny Desk Concerts</h1>
+    <button hx-post="/sync" hx-target="#banner" hx-swap="innerHTML">Sync</button>
+    <span id="banner"></span>
+  </header>
+  {% block content %}{% endblock %}
+</body>
+</html>

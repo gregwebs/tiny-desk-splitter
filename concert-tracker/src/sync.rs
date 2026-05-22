@@ -1,0 +1,195 @@
+use anyhow::{Context, Result};
+use chrono::{Datelike, Utc};
+use rusqlite::Connection;
+use tiny_desk_scraper::{fetch_archive_month, ConcertListing};
+
+use crate::db::{self, NewListing};
+
+pub struct YearMonth {
+    pub year: i32,
+    pub month: u32,
+}
+
+impl YearMonth {
+    pub fn current() -> Self {
+        let now = Utc::now();
+        YearMonth {
+            year: now.year(),
+            month: now.month(),
+        }
+    }
+
+    pub fn parse(s: &str) -> Result<Self> {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() != 2 {
+            return Err(anyhow::anyhow!("Expected YYYY-MM format, got: {}", s));
+        }
+        Ok(YearMonth {
+            year: parts[0].parse().context("Invalid year")?,
+            month: parts[1].parse().context("Invalid month")?,
+        })
+    }
+
+    pub fn previous(&self) -> Self {
+        if self.month == 1 {
+            YearMonth {
+                year: self.year - 1,
+                month: 12,
+            }
+        } else {
+            YearMonth {
+                year: self.year,
+                month: self.month - 1,
+            }
+        }
+    }
+
+    pub fn next(&self) -> Self {
+        if self.month == 12 {
+            YearMonth {
+                year: self.year + 1,
+                month: 1,
+            }
+        } else {
+            YearMonth {
+                year: self.year,
+                month: self.month + 1,
+            }
+        }
+    }
+}
+
+/// Fetch and upsert all concert listings for a given month.
+pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<usize> {
+    let listings = fetch_archive_month(ym.year, ym.month, None)
+        .with_context(|| format!("Failed to fetch archive for {}/{:02}", ym.year, ym.month))?;
+    upsert_listings(conn, &listings)
+}
+
+/// Sync a range of months (inclusive on both ends).
+pub fn sync_months(conn: &Connection, from: YearMonth, to: YearMonth) -> Result<usize> {
+    let mut total = 0;
+    let mut current = from;
+    loop {
+        let count = sync_month(conn, &current)?;
+        total += count;
+        if current.year == to.year && current.month == to.month {
+            break;
+        }
+        current = current.next();
+    }
+    Ok(total)
+}
+
+pub fn upsert_listings(conn: &Connection, listings: &[ConcertListing]) -> Result<usize> {
+    for listing in listings {
+        db::upsert_listing(
+            conn,
+            &NewListing {
+                source_url: listing.url.clone(),
+                title: listing.title.clone(),
+                concert_date: if listing.date.is_empty() {
+                    None
+                } else {
+                    Some(listing.date.clone())
+                },
+                teaser: if listing.teaser.is_empty() {
+                    None
+                } else {
+                    Some(listing.teaser.clone())
+                },
+            },
+        )?;
+    }
+    Ok(listings.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db;
+
+    fn listing(url: &str, title: &str, date: &str) -> ConcertListing {
+        ConcertListing {
+            title: title.to_string(),
+            url: url.to_string(),
+            date: date.to_string(),
+            teaser: "Some teaser".to_string(),
+        }
+    }
+
+    #[test]
+    fn year_month_parse_valid() {
+        let ym = YearMonth::parse("2024-03").unwrap();
+        assert_eq!(ym.year, 2024);
+        assert_eq!(ym.month, 3);
+    }
+
+    #[test]
+    fn year_month_parse_rejects_invalid_format() {
+        assert!(YearMonth::parse("202403").is_err());
+        assert!(YearMonth::parse("2024-3-1").is_err());
+    }
+
+    #[test]
+    fn year_month_previous_wraps_january_to_december() {
+        let ym = YearMonth { year: 2024, month: 1 };
+        let prev = ym.previous();
+        assert_eq!(prev.year, 2023);
+        assert_eq!(prev.month, 12);
+    }
+
+    #[test]
+    fn year_month_next_wraps_december_to_january() {
+        let ym = YearMonth { year: 2024, month: 12 };
+        let next = ym.next();
+        assert_eq!(next.year, 2025);
+        assert_eq!(next.month, 1);
+    }
+
+    #[test]
+    fn year_month_previous_mid_year() {
+        let ym = YearMonth { year: 2024, month: 6 };
+        let prev = ym.previous();
+        assert_eq!(prev.year, 2024);
+        assert_eq!(prev.month, 5);
+    }
+
+    #[test]
+    fn upsert_listings_inserts_all() {
+        let conn = db::open_in_memory().unwrap();
+        let listings = vec![
+            listing("https://npr.org/c/1", "Concert A", "2024-01-01"),
+            listing("https://npr.org/c/2", "Concert B", "2024-02-01"),
+        ];
+        let count = upsert_listings(&conn, &listings).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(db::list_concerts(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn upsert_listings_treats_empty_date_as_none() {
+        let conn = db::open_in_memory().unwrap();
+        let listings = vec![ConcertListing {
+            title: "No Date Concert".to_string(),
+            url: "https://npr.org/c/nodate".to_string(),
+            date: "".to_string(),
+            teaser: "".to_string(),
+        }];
+        upsert_listings(&conn, &listings).unwrap();
+        let c = db::get_concert_by_url(&conn, "https://npr.org/c/nodate")
+            .unwrap()
+            .unwrap();
+        assert!(c.concert_date.is_none());
+        assert!(c.teaser.is_none());
+    }
+
+    #[test]
+    fn upsert_listings_is_idempotent() {
+        let conn = db::open_in_memory().unwrap();
+        let listings = vec![listing("https://npr.org/c/1", "Concert A", "2024-01-01")];
+        upsert_listings(&conn, &listings).unwrap();
+        upsert_listings(&conn, &listings).unwrap();
+        assert_eq!(db::list_concerts(&conn).unwrap().len(), 1);
+    }
+}

@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::fs;
 use std::path::Path;
 
+pub mod archive_scraper_tests;
 pub mod fixtures;
 pub mod scraper_tests;
 
