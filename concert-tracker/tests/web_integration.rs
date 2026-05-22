@@ -161,6 +161,55 @@ async fn download_endpoint_spawns_job_and_returns_row() {
     assert_eq!(response.status(), StatusCode::OK);
 }
 
+/// When a concert is opened for the first time and the scrape fails (e.g.
+/// network down or NPR unreachable), the detail page must still render with
+/// the listing-only data and `metadata_scraped_at` must stay NULL so the
+/// next view can retry. The success path is covered by the unit tests for
+/// `ensure_scraped` in src/web/handlers.rs — those use a stub closure and
+/// avoid hitting the network, while this test exercises the real call path.
+#[tokio::test]
+async fn detail_page_auto_scrape_failure_still_renders() {
+    let conn = db::open_in_memory().unwrap();
+    // Port 1 with no listener — connection refuses immediately.
+    seeded_concert(&conn, "http://127.0.0.1:1/never-resolves", "Unreachable Concert");
+    let db_arc = Arc::new(Mutex::new(conn));
+    let state = AppState {
+        db: db_arc.clone(),
+        registry: Arc::new(JobRegistry::new()),
+        jobs: JobConfig {
+            working_dir: PathBuf::from("/tmp"),
+            download_cmd: Arc::new(|_| Command::new("true")),
+            split_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("Unreachable Concert"), "listing title must render even when scrape fails");
+
+    // metadata_scraped_at must remain NULL so the next view retries.
+    let reread = {
+        let conn = db_arc.lock().unwrap();
+        db::get_concert(&conn, 1).unwrap()
+    };
+    assert!(reread.metadata_scraped_at.is_none());
+    assert!(reread.artist.is_none());
+}
+
 #[tokio::test]
 async fn detail_page_renders_set_list_and_state() {
     let conn = db::open_in_memory().unwrap();

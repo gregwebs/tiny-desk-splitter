@@ -7,6 +7,7 @@ use axum::{
     http::{HeaderMap, StatusCode},
     response::Response,
 };
+use rusqlite::Connection;
 
 use crate::db;
 use crate::jobs::download::start_download;
@@ -99,6 +100,26 @@ fn matches_filter(c: &Concert, slug: &str) -> bool {
     }
 }
 
+/// If `concert` has not yet been fully scraped, run `fetch_and_apply` to fetch
+/// the per-concert page and write metadata, then reload the row. Failures are
+/// logged and tolerated — the original `concert` is returned and the page
+/// renders with listing-only data.
+fn ensure_scraped<F>(conn: &Connection, concert: Concert, fetch_and_apply: F) -> Concert
+where
+    F: FnOnce(&Connection, &str) -> anyhow::Result<()>,
+{
+    if concert.metadata_scraped_at.is_some() {
+        return concert;
+    }
+    match fetch_and_apply(conn, &concert.source_url) {
+        Ok(()) => db::get_concert(conn, concert.id).unwrap_or(concert),
+        Err(e) => {
+            tracing::warn!("auto-scrape failed for concert {}: {}", concert.id, e);
+            concert
+        }
+    }
+}
+
 fn render_row(c: &Concert) -> Result<String, askama::Error> {
     let ps = c.processing_status();
     let can_download = matches!(
@@ -168,9 +189,30 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
+    let initial = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    // Auto-scrape on first view. The scrape itself is blocking (reqwest::blocking
+    // can't run inside the tokio runtime), so wrap the whole step in spawn_blocking.
+    let concert = if initial.metadata_scraped_at.is_none() {
+        let db = state.db.clone();
+        let initial_for_task = initial.clone();
+        match tokio::task::spawn_blocking(move || {
+            let conn = db.lock().unwrap();
+            ensure_scraped(&conn, initial_for_task, crate::scrape::scrape_url)
+        })
+        .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!("auto-scrape task join failed for concert {}: {}", id, e);
+                initial
+            }
+        }
+    } else {
+        initial
     };
 
     let ps = concert.processing_status();
@@ -314,4 +356,121 @@ pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse
         headers,
         format!("Synced {} concerts for {}/{:02}", count, year, month),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::model::Musician;
+    use std::cell::Cell;
+
+    fn seed_listing(conn: &Connection, url: &str) -> i64 {
+        db::upsert_listing(
+            conn,
+            &NewListing {
+                source_url: url.to_string(),
+                title: "Test Concert".to_string(),
+                concert_date: Some("2026-05-20".to_string()),
+                teaser: Some("a teaser".to_string()),
+            },
+        )
+        .unwrap();
+        conn.query_row(
+            "SELECT id FROM concerts WHERE source_url = ?1",
+            [url],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn ensure_scraped_skips_when_already_scraped() {
+        let conn = db::open_in_memory().unwrap();
+        let url = "https://example.org/already";
+        let id = seed_listing(&conn, url);
+        db::update_metadata(
+            &conn,
+            id,
+            &MetadataUpdate {
+                artist: "Existing".to_string(),
+                album: "Existing Album".to_string(),
+                description: Some("desc".to_string()),
+                set_list: vec!["Song A".to_string()],
+                musicians: vec![Musician {
+                    name: "Player".to_string(),
+                    instruments: vec!["guitar".to_string()],
+                }],
+            },
+        )
+        .unwrap();
+        let concert = db::get_concert(&conn, id).unwrap();
+        assert!(concert.metadata_scraped_at.is_some());
+
+        let called = Cell::new(false);
+        let result = ensure_scraped(&conn, concert, |_conn, _url| {
+            called.set(true);
+            Ok(())
+        });
+
+        assert!(!called.get(), "scrape closure must not be called when already scraped");
+        assert_eq!(result.artist.as_deref(), Some("Existing"));
+        assert_eq!(result.set_list, vec!["Song A".to_string()]);
+    }
+
+    #[test]
+    fn ensure_scraped_runs_closure_when_missing_and_merges_result() {
+        let conn = db::open_in_memory().unwrap();
+        let url = "https://example.org/fresh";
+        let id = seed_listing(&conn, url);
+        let concert = db::get_concert(&conn, id).unwrap();
+        assert!(concert.metadata_scraped_at.is_none());
+        assert!(concert.set_list.is_empty());
+
+        let called = Cell::new(false);
+        let result = ensure_scraped(&conn, concert, |conn, source_url| {
+            called.set(true);
+            assert_eq!(source_url, url);
+            db::update_metadata(
+                conn,
+                id,
+                &MetadataUpdate {
+                    artist: "Fetched".to_string(),
+                    album: "Fetched Album".to_string(),
+                    description: None,
+                    set_list: vec!["Song 1".to_string(), "Song 2".to_string()],
+                    musicians: vec![],
+                },
+            )
+        });
+
+        assert!(called.get(), "scrape closure must run when metadata is missing");
+        assert_eq!(result.artist.as_deref(), Some("Fetched"));
+        assert_eq!(result.set_list, vec!["Song 1".to_string(), "Song 2".to_string()]);
+        assert!(result.metadata_scraped_at.is_some());
+    }
+
+    #[test]
+    fn ensure_scraped_tolerates_failure_and_returns_listing_only() {
+        let conn = db::open_in_memory().unwrap();
+        let url = "https://example.org/broken";
+        let id = seed_listing(&conn, url);
+        let concert = db::get_concert(&conn, id).unwrap();
+
+        let result = ensure_scraped(&conn, concert, |_conn, _url| {
+            Err(anyhow::anyhow!("simulated network failure"))
+        });
+
+        assert_eq!(result.title, "Test Concert");
+        assert_eq!(result.teaser.as_deref(), Some("a teaser"));
+        assert!(result.artist.is_none());
+        assert!(result.set_list.is_empty());
+        assert!(
+            result.metadata_scraped_at.is_none(),
+            "metadata_scraped_at must remain NULL after a failed scrape so the next view retries"
+        );
+
+        let reread = db::get_concert(&conn, id).unwrap();
+        assert!(reread.metadata_scraped_at.is_none());
+    }
 }
