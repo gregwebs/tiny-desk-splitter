@@ -131,6 +131,20 @@ impl Concert {
             .as_ref()
             .map(|d| d.get(..10).unwrap_or(d).to_string())
     }
+
+    /// Split the stored description into its source paragraphs. The scraper
+    /// joins NPR's `<p>` blocks with `"\n\n"`; this reverses that so the
+    /// renderer can emit one `<p>` per paragraph. Empty pieces are dropped.
+    pub fn description_paragraphs(&self) -> Vec<&str> {
+        match self.description.as_deref() {
+            Some(s) => s
+                .split("\n\n")
+                .map(str::trim)
+                .filter(|p| !p.is_empty())
+                .collect(),
+            None => Vec::new(),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -284,5 +298,35 @@ mod tests {
         assert_eq!(ProcessingStatus::Splitting.slug(), "splitting");
         assert_eq!(ProcessingStatus::SplitError.slug(), "split-error");
         assert_eq!(ProcessingStatus::Split.slug(), "split");
+    }
+
+    #[test]
+    fn description_paragraphs_none_yields_empty() {
+        let c = bare_concert();
+        assert!(c.description_paragraphs().is_empty());
+    }
+
+    #[test]
+    fn description_paragraphs_single_paragraph() {
+        let mut c = bare_concert();
+        c.description = Some("Just one paragraph.".to_string());
+        assert_eq!(c.description_paragraphs(), vec!["Just one paragraph."]);
+    }
+
+    #[test]
+    fn description_paragraphs_splits_on_double_newline() {
+        let mut c = bare_concert();
+        c.description = Some("First paragraph.\n\nSecond paragraph.\n\nThird.".to_string());
+        assert_eq!(
+            c.description_paragraphs(),
+            vec!["First paragraph.", "Second paragraph.", "Third."]
+        );
+    }
+
+    #[test]
+    fn description_paragraphs_trims_and_drops_empties() {
+        let mut c = bare_concert();
+        c.description = Some("  First.  \n\n\n\n  Second.  \n\n".to_string());
+        assert_eq!(c.description_paragraphs(), vec!["First.", "Second."]);
     }
 }

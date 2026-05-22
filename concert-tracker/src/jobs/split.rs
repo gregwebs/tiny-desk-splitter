@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
 use crate::db;
-use crate::jobs::{JobConfig, JobKey, JobKind, JobRegistry, SplitJob};
+use crate::jobs::{find_downloaded_file, JobConfig, JobKey, JobKind, JobRegistry, SplitJob};
 use crate::model::{Concert, Musician};
 
 pub enum StartOutcome {
@@ -84,6 +84,7 @@ pub async fn start_split(
         kind: JobKind::Split,
     };
     if registry.is_running(&key) {
+        tracing::info!("split already running for concert {}", concert_id);
         return Ok(StartOutcome::AlreadyRunning);
     }
 
@@ -96,20 +97,36 @@ pub async fn start_split(
 
     if !ok {
         if concert.downloaded_at.is_none() {
+            tracing::info!("split rejected: concert {} not yet downloaded", concert_id);
             return Ok(StartOutcome::NotDownloaded);
         }
+        tracing::info!("split already running for concert {}", concert_id);
         return Ok(StartOutcome::AlreadyRunning);
     }
 
+    let title = concert.title.clone();
+    let album = concert.album.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("Concert {} has no album, cannot locate input file", concert_id)
+    })?;
+    let input_file = find_downloaded_file(&config.working_dir, album).ok_or_else(|| {
+        anyhow::anyhow!(
+            "Downloaded file for concert {} (album {:?}) not found in {}",
+            concert_id,
+            album,
+            config.working_dir.display()
+        )
+    })?;
     let temp_file = write_splitter_input(&concert)?;
     let json_path = temp_file.path().to_path_buf();
     let job = SplitJob {
         concert_id: concert.id,
         json_path,
+        input_file,
         working_dir: config.working_dir.clone(),
         _temp_file: temp_file,
     };
 
+    tracing::info!("split started for concert {} ({})", concert_id, title);
     let handle = tokio::task::spawn(run_split(db.clone(), config, job));
     registry.insert(key, handle);
 
@@ -122,17 +139,20 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
 
     match cmd.output().await {
         Ok(output) if output.status.success() => {
+            tracing::info!("split completed for concert {}", concert_id);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_succeeded(&conn, concert_id);
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
             let error = format!("exit {:?}: {}", output.status.code(), stderr.trim());
+            tracing::warn!("split failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
         }
         Err(e) => {
             let error = format!("spawn error: {}", e);
+            tracing::warn!("split failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
         }

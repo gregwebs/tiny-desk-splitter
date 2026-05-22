@@ -15,6 +15,9 @@
       {% if can_split %}
       <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML">Split</button>
       {% endif %}
+      {% if can_listen %}
+      <button class="btn-listen" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+      {% endif %}
       <button hx-post="/concerts/{{ id }}/ignore" hx-target="closest .card" hx-swap="outerHTML">{% if ignored %}Unignore{% else %}Ignore{% endif %}</button>
       <button hx-post="/concerts/{{ id }}/want" hx-target="closest .card" hx-swap="outerHTML">{% if wanted %}Unwant{% else %}Want{% endif %}</button>
     </div>

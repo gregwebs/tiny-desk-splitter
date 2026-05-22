@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
-use concert_tracker::jobs::{JobConfig, JobRegistry};
+use concert_tracker::jobs::{default_splitter_bin, JobConfig, JobRegistry};
 use concert_tracker::web::{router, AppState};
 
 #[derive(Parser)]
@@ -19,6 +19,11 @@ struct Cli {
 
     #[arg(long, default_value = "3000")]
     port: u16,
+
+    /// Path to the `live-set-splitter` binary. Defaults to a sibling of the
+    /// running executable, falling back to a PATH lookup of `live-set-splitter`.
+    #[arg(long)]
+    splitter_bin: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -33,10 +38,11 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let conn = db::open(&cli.db)?;
 
+    let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::production(cli.workdir),
+        jobs: JobConfig::production(cli.workdir, splitter_bin),
     };
 
     let app = router(state);

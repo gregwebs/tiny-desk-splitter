@@ -28,6 +28,7 @@ pub fn router(state: AppState) -> Router {
         .route("/concerts/:id/scrape", post(handlers::scrape_concert))
         .route("/concerts/:id/download", post(handlers::download))
         .route("/concerts/:id/split", post(handlers::split))
+        .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/status", get(handlers::status_row))
         .route("/sync", post(handlers::sync_now))
         .layer(TraceLayer::new_for_http())

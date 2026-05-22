@@ -11,6 +11,7 @@ use rusqlite::Connection;
 
 use crate::db;
 use crate::jobs::download::start_download;
+use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
 use crate::model::{Concert, ProcessingStatus};
 use crate::sync::{sync_month, YearMonth};
@@ -40,6 +41,7 @@ struct RowTemplate {
     wanted: bool,
     can_download: bool,
     can_split: bool,
+    can_listen: bool,
     is_in_progress: bool,
 }
 
@@ -51,7 +53,15 @@ struct DetailTemplate {
     processing_status: String,
     can_download: bool,
     can_split: bool,
+    can_listen: bool,
     notes_value: String,
+}
+
+#[derive(Template)]
+#[template(path = "listen_button.html")]
+struct ListenButtonTemplate {
+    id: i64,
+    state: &'static str,
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -111,8 +121,16 @@ where
     if concert.metadata_scraped_at.is_some() {
         return concert;
     }
+    tracing::info!(
+        "auto-scrape started for concert {} ({})",
+        concert.id,
+        concert.title
+    );
     match fetch_and_apply(conn, &concert.source_url) {
-        Ok(()) => db::get_concert(conn, concert.id).unwrap_or(concert),
+        Ok(()) => {
+            tracing::info!("auto-scrape completed for concert {}", concert.id);
+            db::get_concert(conn, concert.id).unwrap_or(concert)
+        }
         Err(e) => {
             tracing::warn!("auto-scrape failed for concert {}: {}", concert.id, e);
             concert
@@ -127,6 +145,7 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
     ) && c.album.is_some();
     let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
+    let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
     let is_in_progress = matches!(
         &ps,
         ProcessingStatus::Downloading | ProcessingStatus::Splitting
@@ -144,6 +163,7 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         wanted: c.wanted,
         can_download,
         can_split,
+        can_listen,
         is_in_progress,
     }
     .render()
@@ -221,6 +241,7 @@ pub async fn detail(
         ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
     ) && concert.album.is_some();
     let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
+    let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
     let notes_value = concert.notes.clone().unwrap_or_default();
 
     Ok(DetailTemplate {
@@ -228,6 +249,7 @@ pub async fn detail(
         processing_status: ps.slug().to_string(),
         can_download,
         can_split,
+        can_listen,
         notes_value,
         concert,
     })
@@ -275,21 +297,28 @@ pub async fn scrape_concert(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let url = {
+    let (url, title) = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)
-            .map_err(|_| AppError::NotFound)?
-            .source_url
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (c.source_url, c.title)
     };
+
+    tracing::info!("re-scrape started for concert {} ({})", id, title);
 
     // reqwest::blocking cannot run inside a tokio runtime; offload to a blocking thread.
     let db = state.db.clone();
-    tokio::task::spawn_blocking(move || {
+    let scrape_result = tokio::task::spawn_blocking(move || {
         let conn = db.lock().unwrap();
         crate::scrape::scrape_url(&conn, &url)
     })
     .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))??;
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))?;
+
+    match &scrape_result {
+        Ok(()) => tracing::info!("re-scrape completed for concert {}", id),
+        Err(e) => tracing::warn!("re-scrape failed for concert {}: {}", id, e),
+    }
+    scrape_result?;
 
     let concert = {
         let conn = state.db.lock().unwrap();
@@ -320,6 +349,42 @@ pub async fn split(
         db::get_concert(&conn, id)?
     };
     render_row(&concert).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn listen(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let (album, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert.album, state.jobs.working_dir.clone())
+    };
+
+    let render_state = match album.as_deref().and_then(|a| find_downloaded_file(&working_dir, a)) {
+        None => {
+            tracing::warn!("listen: file not found for concert {}", id);
+            "error"
+        }
+        Some(path) => {
+            tracing::info!("listen: opening {} for concert {}", path.display(), id);
+            match tokio::process::Command::new("open").arg(&path).status().await {
+                Ok(status) if status.success() => "success",
+                Ok(status) => {
+                    tracing::warn!("listen: `open` exited {:?} for concert {}", status.code(), id);
+                    "error"
+                }
+                Err(e) => {
+                    tracing::warn!("listen: spawn `open` failed for concert {}: {}", id, e);
+                    "error"
+                }
+            }
+        }
+    };
+
+    ListenButtonTemplate { id, state: render_state }
+        .render()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn status_row(

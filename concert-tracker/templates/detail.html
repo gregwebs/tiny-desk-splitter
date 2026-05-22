@@ -8,7 +8,20 @@
   {% if let Some(date) = concert.display_date() %}<strong>Date:</strong> {{ date }}{% endif %}
 </p>
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
-{% if let Some(desc) = concert.description.as_ref() %}<p>{{ desc }}</p>{% endif %}
+
+<h3>Actions</h3>
+{% if can_download %}
+<button hx-post="/concerts/{{ concert.id }}/download">Download</button>
+{% endif %}
+{% if can_split %}
+<button hx-post="/concerts/{{ concert.id }}/split">Split</button>
+{% endif %}
+{% if can_listen %}
+<button class="btn-listen" hx-post="/concerts/{{ concert.id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+{% endif %}
+<button hx-post="/concerts/{{ concert.id }}/scrape">Re-scrape</button>
+
+{% for para in concert.description_paragraphs() %}<p>{{ para }}</p>{% endfor %}
 
 {% if !concert.set_list.is_empty() %}
 <h3>Set List</h3>
@@ -33,15 +46,6 @@
   <textarea name="notes" rows="3">{{ notes_value }}</textarea>
   <button type="submit">Save notes</button>
 </form>
-
-<h3>Actions</h3>
-{% if can_download %}
-<button hx-post="/concerts/{{ concert.id }}/download">Download</button>
-{% endif %}
-{% if can_split %}
-<button hx-post="/concerts/{{ concert.id }}/split">Split</button>
-{% endif %}
-<button hx-post="/concerts/{{ concert.id }}/scrape">Re-scrape</button>
 
 {% if !concert.download_errors.is_empty() %}
 <h3>Download Errors</h3>
