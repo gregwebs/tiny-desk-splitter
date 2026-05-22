@@ -211,6 +211,43 @@ fn test_missing_musicians() {
 }
 
 #[test]
+fn test_artist_name_spacing_mismatch() {
+    // NPR's <title> tag sometimes uses search-friendly spacing while the on-page
+    // <h1> uses the artist's stylized form (e.g. "Kes the Band" vs "KestheBand").
+    // Both refer to the same artist; the parser must accept this.
+    let html = r#"
+    <html>
+    <head><title>Kes the Band: Tiny Desk Concert : NPR</title></head>
+    <body>
+        <div class="storytitle"><h1>KestheBand: Tiny Desk Concert</h1></div>
+        <div class="dateblock"><time datetime="2026-05-08">May 8, 2026</time></div>
+        <div id="storytext">
+            <p>Description.</p>
+            <p>SET LIST</p>
+            <ul><li>Song A</li></ul>
+            <p>MUSICIANS</p>
+            <ul><li>Kees Dieffenthaller: vocals</li></ul>
+        </div>
+    </body>
+    </html>
+    "#;
+
+    let result = parse_concert_info(html, "https://example.com/test");
+    assert!(
+        result.is_ok(),
+        "expected ok, got: {:?}",
+        result.as_ref().err()
+    );
+    let info = result.unwrap();
+    // Either form is acceptable downstream; the splitter does fuzzy matching.
+    assert!(
+        info.artist == "Kes the Band" || info.artist == "KestheBand",
+        "unexpected artist: {:?}",
+        info.artist
+    );
+}
+
+#[test]
 fn test_musicians_colon() {
     let html = r#"
     <html>

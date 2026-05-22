@@ -37,6 +37,16 @@ fn first_split(s: &str, char: char) -> String {
     return s.split(char).next().unwrap_or("").trim().to_string();
 }
 
+/// Lowercase a string and strip all whitespace. Used to compare artist names
+/// that differ only in spacing — e.g. NPR's `<title>` says "Kes the Band"
+/// while the on-page `<h1>` says "KestheBand".
+fn normalize_for_match(s: &str) -> String {
+    s.chars()
+        .filter(|c| !c.is_whitespace())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
 pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
     let document = Html::parse_document(html);
 
@@ -66,11 +76,11 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         Some(st) => st,
     };
 
-    if !story_title
-        .to_lowercase()
-        .contains(&artist_name.to_lowercase())
-    {
-        if artist_name.to_lowercase() == "video" || artist_name.ends_with("The Tiny Desk") || story_title.ends_with(": Tiny Desk Concert") {
+    if !normalize_for_match(&story_title).contains(&normalize_for_match(&artist_name)) {
+        if artist_name.to_lowercase() == "video"
+            || artist_name.ends_with("The Tiny Desk")
+            || story_title.to_lowercase().contains("tiny desk concert")
+        {
             artist_name = story_title
                 .split(":")
                 .next()
