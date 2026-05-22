@@ -30,7 +30,9 @@ struct ListTemplate {
 struct RowTemplate {
     id: i64,
     title: String,
+    artist: String,
     concert_date: String,
+    teaser: String,
     concert_status: String,
     processing_status: String,
     ignored: bool,
@@ -112,7 +114,9 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
     RowTemplate {
         id: c.id,
         title: c.title.clone(),
+        artist: c.artist.clone().unwrap_or_default(),
         concert_date: c.concert_date.clone().unwrap_or_default(),
+        teaser: c.teaser.clone().unwrap_or_default(),
         concert_status: c.concert_status().slug().to_string(),
         processing_status: ps.slug().to_string(),
         ignored: c.ignored,
