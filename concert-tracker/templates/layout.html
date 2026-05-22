@@ -134,8 +134,28 @@
       color: #333;
     }
     button:hover { background: #f0f0f0; }
+    button[disabled] { opacity: 0.5; cursor: not-allowed; }
     button.btn-primary { background: #1a1a1a; color: #fff; border-color: #1a1a1a; }
     button.btn-primary:hover { background: #333; }
+
+    /* ── htmx loading indicator ── */
+    .htmx-indicator { opacity: 0; transition: opacity 150ms ease-in; }
+    .htmx-request .htmx-indicator,
+    .htmx-request.htmx-indicator { opacity: 1; }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spinner {
+      display: inline-block;
+      width: 11px;
+      height: 11px;
+      border: 2px solid rgba(0,0,0,0.15);
+      border-top-color: #444;
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+      vertical-align: middle;
+      margin-right: 0.3rem;
+    }
+    .sync-indicator { font-size: 0.85em; color: #555; display: inline-flex; align-items: center; }
 
     /* ── Detail page ── */
     .detail-header { margin-bottom: 1.5rem; }
@@ -151,7 +171,11 @@
 <body>
   <header>
     <h1>Tiny Desk Concerts</h1>
-    <button class="btn-primary" hx-post="/sync" hx-target="#banner" hx-swap="innerHTML">Sync</button>
+    <button class="btn-primary" hx-post="/sync" hx-target="#banner" hx-swap="innerHTML"
+            hx-disabled-elt="this" hx-indicator="#sync-indicator">Sync</button>
+    <span id="sync-indicator" class="htmx-indicator sync-indicator">
+      <span class="spinner"></span>Syncing…
+    </span>
     <span id="banner"></span>
   </header>
   {% block content %}{% endblock %}
