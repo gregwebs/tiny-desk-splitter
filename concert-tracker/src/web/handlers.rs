@@ -317,15 +317,11 @@ pub async fn detail(
     let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url(&state.jobs.working_dir);
-    let tracks = if matches!(&ss, SplitStatus::Split) {
-        concert
-            .album
-            .as_deref()
-            .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
-            .unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let tracks = concert
+        .album
+        .as_deref()
+        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
+        .unwrap_or_default();
 
     Ok(DetailTemplate {
         concert_status: concert.concert_status().slug().to_string(),
@@ -624,7 +620,7 @@ pub async fn tracks(
     let tracks = concert
         .album
         .as_deref()
-        .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
+        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
         .unwrap_or_default();
 
     TracksTemplate { id, tracks }
@@ -736,7 +732,7 @@ pub async fn delete_track(
     let tracks = concert
         .album
         .as_deref()
-        .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
+        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
         .unwrap_or_default();
 
     Ok(TracksTemplate { id, tracks }

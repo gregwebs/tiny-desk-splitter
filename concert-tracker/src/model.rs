@@ -33,6 +33,12 @@ pub fn concert_dir(working_dir: &Path, album: &str) -> PathBuf {
 pub struct TrackInfo {
     pub index: usize,
     pub title: String,
+    pub available: bool,
+}
+
+fn track_file_exists(dir: &Path, title: &str) -> bool {
+    let stem = sanitize_filename(title);
+    dir.join(format!("{stem}.mp4")).exists() || dir.join(format!("{stem}.m4a")).exists()
 }
 
 pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<TrackInfo> {
@@ -40,13 +46,24 @@ pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<
     set_list
         .iter()
         .enumerate()
-        .filter(|(_, title)| {
-            let stem = sanitize_filename(title);
-            dir.join(format!("{stem}.mp4")).exists() || dir.join(format!("{stem}.m4a")).exists()
-        })
+        .filter(|(_, title)| track_file_exists(&dir, title))
         .map(|(index, title)| TrackInfo {
             index,
             title: title.clone(),
+            available: true,
+        })
+        .collect()
+}
+
+pub fn list_all_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<TrackInfo> {
+    let dir = concert_dir(working_dir, album);
+    set_list
+        .iter()
+        .enumerate()
+        .map(|(index, title)| TrackInfo {
+            index,
+            title: title.clone(),
+            available: track_file_exists(&dir, title),
         })
         .collect()
 }
@@ -310,8 +327,10 @@ mod tests {
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].index, 0);
         assert_eq!(tracks[0].title, "Song One");
+        assert!(tracks[0].available);
         assert_eq!(tracks[1].index, 2);
         assert_eq!(tracks[1].title, "Song Three");
+        assert!(tracks[1].available);
     }
 
     #[test]
@@ -320,6 +339,26 @@ mod tests {
         let set_list = vec!["Song A".to_string()];
         let tracks = list_tracks(dir.path(), "No Album", &set_list);
         assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn list_all_tracks_includes_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::File::create(cd.join("Song One.m4a")).unwrap();
+
+        let set_list = vec![
+            "Song One".to_string(),
+            "Song Two".to_string(),
+        ];
+        let tracks = list_all_tracks(dir.path(), album, &set_list);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].title, "Song One");
+        assert!(tracks[0].available);
+        assert_eq!(tracks[1].title, "Song Two");
+        assert!(!tracks[1].available);
     }
 
     #[test]

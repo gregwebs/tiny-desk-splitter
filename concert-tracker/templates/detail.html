@@ -37,9 +37,13 @@
 <h3>Tracks</h3>
 <ol class="track-list">
   {% for t in tracks.iter() %}
-  <li>
+  <li{% if !t.available %} class="track-unavailable"{% endif %}>
+    {% if t.available %}
     <button class="btn-track-listen" hx-post="/concerts/{{ concert.id }}/tracks/{{ t.index }}/listen" hx-target="this" hx-swap="outerHTML">{{ t.title }}</button>
     <button class="btn-delete" title="Delete track files" hx-post="/concerts/{{ concert.id }}/tracks/{{ t.index }}/delete" hx-target="closest .track-list" hx-swap="outerHTML">✕</button>
+    {% else %}
+    <span class="track-title-unavailable">{{ t.title }}</span>
+    {% endif %}
   </li>
   {% endfor %}
 </ol>
