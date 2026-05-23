@@ -13,7 +13,7 @@ use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
-use crate::model::{Concert, DownloadStatus, SplitStatus};
+use crate::model::{Concert, DownloadStatus, SplitStatus, TrackInfo};
 use crate::sync::{sync_month, YearMonth};
 use crate::web::AppState;
 
@@ -73,12 +73,29 @@ struct DetailTemplate {
     can_listen: bool,
     notes_value: String,
     preview_url: Option<String>,
+    tracks: Vec<TrackInfo>,
 }
 
 #[derive(Template)]
 #[template(path = "listen_button.html")]
 struct ListenButtonTemplate {
     id: i64,
+    state: &'static str,
+}
+
+#[derive(Template)]
+#[template(path = "tracks.html")]
+struct TracksTemplate {
+    id: i64,
+    tracks: Vec<TrackInfo>,
+}
+
+#[derive(Template)]
+#[template(path = "track_listen_button.html")]
+struct TrackListenButtonTemplate {
+    id: i64,
+    index: usize,
+    title: String,
     state: &'static str,
 }
 
@@ -300,6 +317,15 @@ pub async fn detail(
     let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url(&state.jobs.working_dir);
+    let tracks = if matches!(&ss, SplitStatus::Split) {
+        concert
+            .album
+            .as_deref()
+            .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
 
     Ok(DetailTemplate {
         concert_status: concert.concert_status().slug().to_string(),
@@ -314,6 +340,7 @@ pub async fn detail(
         can_listen,
         notes_value,
         preview_url,
+        tracks,
         concert,
     })
 }
@@ -583,6 +610,139 @@ pub async fn listen(
     }
     .render()
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn tracks(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let tracks = concert
+        .album
+        .as_deref()
+        .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
+        .unwrap_or_default();
+
+    TracksTemplate { id, tracks }
+        .render()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn listen_track(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<impl IntoResponse, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let title = concert
+        .set_list
+        .get(idx)
+        .ok_or(AppError::NotFound)?
+        .clone();
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let stem = crate::model::sanitize_filename(&title);
+    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
+    let mp4 = dir.join(format!("{stem}.mp4"));
+    let path = if mp4.exists() {
+        mp4
+    } else {
+        dir.join(format!("{stem}.m4a"))
+    };
+
+    let render_state = if !path.exists() {
+        tracing::warn!("listen_track: file not found for concert {} track {}", id, idx);
+        "error"
+    } else {
+        tracing::info!("listen_track: opening {} for concert {}", path.display(), id);
+        match tokio::process::Command::new("open")
+            .arg(&path)
+            .status()
+            .await
+        {
+            Ok(status) if status.success() => "success",
+            Ok(status) => {
+                tracing::warn!("listen_track: `open` exited {:?} for concert {}", status.code(), id);
+                "error"
+            }
+            Err(e) => {
+                tracing::warn!("listen_track: spawn `open` failed for concert {}: {}", id, e);
+                "error"
+            }
+        }
+    };
+
+    TrackListenButtonTemplate {
+        id,
+        index: idx,
+        title,
+        state: render_state,
+    }
+    .render()
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn delete_track(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<Response, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let title = concert
+        .set_list
+        .get(idx)
+        .ok_or(AppError::NotFound)?
+        .clone();
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let stem = crate::model::sanitize_filename(&title);
+    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
+
+    for ext in &["mp4", "m4a"] {
+        let path = dir.join(format!("{stem}.{ext}"));
+        if path.exists() {
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("delete_track: failed to remove {}: {}", path.display(), e);
+            } else {
+                tracing::info!("delete_track: removed {} for concert {}", path.display(), id);
+            }
+        }
+    }
+
+    let remaining_tracks = crate::model::list_tracks(
+        &state.jobs.working_dir,
+        album,
+        &concert.set_list,
+    );
+    if remaining_tracks.is_empty() {
+        let conn = state.db.lock().unwrap();
+        db::clear_split_state(&conn, id)?;
+        tracing::info!("delete_track: no tracks remain, cleared split state for concert {}", id);
+    }
+
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id)?
+    };
+
+    let tracks = concert
+        .album
+        .as_deref()
+        .map(|a| crate::model::list_tracks(&state.jobs.working_dir, a, &concert.set_list))
+        .unwrap_or_default();
+
+    Ok(TracksTemplate { id, tracks }
+        .render()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?
+        .into_response())
 }
 
 pub async fn status_row(

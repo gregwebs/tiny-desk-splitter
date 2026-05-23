@@ -7,10 +7,48 @@ pub fn sanitize_album(album: &str) -> String {
     album.replace(':', "")
 }
 
+/// Sanitize a string for use as a filename. Mirrors the logic in
+/// `live-set-song-splitter/src/io.rs` so derived paths match splitter output.
+pub fn sanitize_filename(input: &str) -> String {
+    let mut sanitized = input
+        .replace(
+            &['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'][..],
+            "_",
+        )
+        .replace("__", "_");
+    sanitized = sanitized.trim().trim_matches('.').to_string();
+    if sanitized.is_empty() {
+        sanitized = "untitled".to_string();
+    }
+    sanitized
+}
+
 /// Per-concert directory under `working_dir/concerts/`. All artifacts for a
 /// concert (full mp4, split tracks, preview image, metadata json) live here.
 pub fn concert_dir(working_dir: &Path, album: &str) -> PathBuf {
     working_dir.join("concerts").join(sanitize_album(album))
+}
+
+#[derive(Debug, Clone)]
+pub struct TrackInfo {
+    pub index: usize,
+    pub title: String,
+}
+
+pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<TrackInfo> {
+    let dir = concert_dir(working_dir, album);
+    set_list
+        .iter()
+        .enumerate()
+        .filter(|(_, title)| {
+            let stem = sanitize_filename(title);
+            dir.join(format!("{stem}.mp4")).exists() || dir.join(format!("{stem}.m4a")).exists()
+        })
+        .map(|(index, title)| TrackInfo {
+            index,
+            title: title.clone(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -241,6 +279,47 @@ mod tests {
         assert_eq!(sanitize_album("No Colons"), "No Colons");
         assert_eq!(sanitize_album("A: B: C"), "A B C");
         assert_eq!(sanitize_album(""), "");
+    }
+
+    #[test]
+    fn sanitize_filename_replaces_special_chars() {
+        assert_eq!(sanitize_filename("Hello/World"), "Hello_World");
+        assert_eq!(sanitize_filename("A:B:C"), "A_B_C");
+        assert_eq!(sanitize_filename("normal"), "normal");
+        assert_eq!(sanitize_filename(""), "untitled");
+        assert_eq!(sanitize_filename("..."), "untitled");
+        assert_eq!(sanitize_filename("a*b?c"), "a_b_c");
+    }
+
+    #[test]
+    fn list_tracks_returns_songs_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::File::create(cd.join("Song One.mp4")).unwrap();
+        std::fs::File::create(cd.join("Song One.m4a")).unwrap();
+        std::fs::File::create(cd.join("Song Three.m4a")).unwrap();
+
+        let set_list = vec![
+            "Song One".to_string(),
+            "Song Two".to_string(),
+            "Song Three".to_string(),
+        ];
+        let tracks = list_tracks(dir.path(), album, &set_list);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].title, "Song One");
+        assert_eq!(tracks[1].index, 2);
+        assert_eq!(tracks[1].title, "Song Three");
+    }
+
+    #[test]
+    fn list_tracks_returns_empty_when_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let set_list = vec!["Song A".to_string()];
+        let tracks = list_tracks(dir.path(), "No Album", &set_list);
+        assert!(tracks.is_empty());
     }
 
     #[test]

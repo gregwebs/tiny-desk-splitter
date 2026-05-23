@@ -36,6 +36,15 @@ pub fn router(state: AppState) -> Router {
         .route("/concerts/:id/split", post(handlers::split))
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
         .route("/concerts/:id/listen", post(handlers::listen))
+        .route("/concerts/:id/tracks", get(handlers::tracks))
+        .route(
+            "/concerts/:id/tracks/:idx/listen",
+            post(handlers::listen_track),
+        )
+        .route(
+            "/concerts/:id/tracks/:idx/delete",
+            post(handlers::delete_track),
+        )
         .route("/concerts/:id/status", get(handlers::status_row))
         .route("/sync", post(handlers::sync_now))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))

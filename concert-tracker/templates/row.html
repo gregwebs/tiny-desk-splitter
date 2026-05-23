@@ -40,7 +40,9 @@
 
       {# Split slot: NotSplit + Downloaded shows Split button; Splitting shows badge; SplitError shows badge + retry; Split shows badge + ✕ #}
       <span class="card-slot card-slot-split">
-        {% if show_split_badge %}
+        {% if can_delete_split %}
+          <button class="badge badge-{{ split_status }}" hx-get="/concerts/{{ id }}/tracks" hx-target="#tracks-{{ id }}" hx-swap="innerHTML">{{ split_status_label }}</button>
+        {% else if show_split_badge %}
           <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
         {% endif %}
         {% if can_split %}
@@ -52,5 +54,6 @@
       </span>
 
     </div>
+    <div id="tracks-{{ id }}"></div>
   </div>
 </div>
