@@ -225,17 +225,11 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
     Ok(())
 }
 
-/// Clear all download-related state. Wipes downloaded_at, download_started_at,
-/// split_at, split_started_at, and split_errors. download_errors is preserved
-/// (its history still applies to the failed-to-download state). split_errors
-/// is wiped because those errors describe splitting a file that no longer
-/// exists — keeping them would leave ProcessingStatus stuck at SplitError,
-/// hiding the Download button.
+/// Clear download-related state (downloaded_at, download_started_at).
+/// Split state is intentionally preserved — tracks may still exist on disk.
 pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL,
-                             split_at = NULL, split_started_at = NULL,
-                             split_errors_json = '[]'
+        "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL
          WHERE id = ?1",
         params![id],
     )
@@ -613,7 +607,7 @@ pub mod tests {
     }
 
     #[test]
-    fn clear_download_state_nulls_timestamps_and_resets_split_errors() {
+    fn clear_download_state_only_clears_download_columns() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
@@ -630,15 +624,12 @@ pub mod tests {
         let c = get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_none());
         assert!(c.download_started_at.is_none());
-        assert!(c.split_at.is_none());
-        assert!(c.split_started_at.is_none());
         // download_errors stays as audit trail of past download attempts.
         assert_eq!(c.download_errors.len(), 1);
         assert_eq!(c.download_errors[0].error, "earlier 403");
-        // split_errors must be wiped — they described a file that no longer
-        // exists, and preserving them would pin ProcessingStatus at SplitError
-        // and hide the Download button.
-        assert!(c.split_errors.is_empty());
+        // split state must be preserved — tracks still exist on disk.
+        assert!(c.split_at.is_some(), "split_at must be untouched");
+        assert_eq!(c.split_errors.len(), 1);
     }
 
     #[test]

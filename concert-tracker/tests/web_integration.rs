@@ -398,12 +398,9 @@ async fn delete_download_removes_file_and_clears_state() {
 
 #[tokio::test]
 async fn delete_download_with_prior_split_error_restores_download_button() {
-    // Reproduces the user-reported bug: a concert that was downloaded and then
-    // had a failed split would keep `split_errors` populated even after the
-    // mp4 was deleted. With the old combined ProcessingStatus that pinned the
-    // status at SplitError; now we have two independent statuses, but the
-    // db-layer fix (`clear_download_state` also wipes split_errors) still
-    // matters so the Download button reappears.
+    // A concert that was downloaded and then had a failed split: deleting the
+    // download clears only download columns, preserving split state. The
+    // Download button reappears because DownloadStatus becomes NotDownloaded.
     let workdir = tempfile::tempdir().unwrap();
     let album = "Prior Split Err Album";
     let cd = concert_dir(workdir.path(), album);
