@@ -13,7 +13,7 @@ use crate::model::concert_dir;
 use crate::model::sanitize_album;
 use crate::model::Concert;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum JobKind {
     Download,
     Split,
@@ -43,6 +43,32 @@ impl JobRegistry {
 
     pub fn insert(&self, key: JobKey, handle: JoinHandle<()>) {
         self.running.lock().unwrap().insert(key, handle);
+    }
+
+    /// Abort the task for `key` if it exists and is still running.
+    /// Returns `true` if a running task was aborted.
+    pub fn cancel(&self, key: &JobKey) -> bool {
+        let mut map = self.running.lock().unwrap();
+        if let Some(handle) = map.remove(key) {
+            if !handle.is_finished() {
+                handle.abort();
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Abort all running tasks. Returns the number of tasks aborted.
+    pub fn cancel_all(&self) -> usize {
+        let mut map = self.running.lock().unwrap();
+        let mut count = 0;
+        for (_, handle) in map.drain() {
+            if !handle.is_finished() {
+                handle.abort();
+                count += 1;
+            }
+        }
+        count
     }
 }
 
@@ -198,7 +224,7 @@ pub async fn run_with_logging(
     kind: &'static str,
     concert_id: i64,
 ) -> std::io::Result<(ExitStatus, String)> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn()?;
 
     let stdout = child.stdout.take().expect("stdout was piped");
@@ -348,5 +374,49 @@ mod tests {
             format!("err{}", total - STDERR_TAIL_LINES + 1)
         );
         assert_eq!(*lines.last().unwrap(), format!("err{}", total));
+    }
+
+    #[tokio::test]
+    async fn cancel_aborts_running_task() {
+        let registry = JobRegistry::new();
+        let key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Download,
+        };
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        registry.insert(key.clone(), handle);
+        assert!(registry.is_running(&key));
+
+        assert!(registry.cancel(&key));
+        assert!(!registry.is_running(&key));
+    }
+
+    #[test]
+    fn cancel_returns_false_for_unknown_key() {
+        let registry = JobRegistry::new();
+        let key = JobKey {
+            concert_id: 99,
+            kind: JobKind::Split,
+        };
+        assert!(!registry.cancel(&key));
+    }
+
+    #[tokio::test]
+    async fn cancel_all_aborts_all_running_tasks() {
+        let registry = JobRegistry::new();
+        for id in 1..=3 {
+            let key = JobKey {
+                concert_id: id,
+                kind: JobKind::Download,
+            };
+            let handle = tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            });
+            registry.insert(key, handle);
+        }
+        assert_eq!(registry.cancel_all(), 3);
+        assert_eq!(registry.cancel_all(), 0);
     }
 }

@@ -1,0 +1,36 @@
+{% extends "layout.html" %}
+{% block content %}
+<p><a href="/" class="back-link">&larr; Back to list</a></p>
+<h2>Jobs</h2>
+<div id="jobs-content" hx-get="/jobs" hx-trigger="every 5s" hx-select="#jobs-content" hx-target="this" hx-swap="outerHTML">
+{% if jobs.is_empty() %}
+<p>No jobs currently running.</p>
+{% else %}
+<table class="jobs-table">
+  <thead>
+    <tr>
+      <th>Concert</th>
+      <th>Artist</th>
+      <th>Job</th>
+      <th>Started</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for job in jobs %}
+    <tr>
+      <td><a href="/concerts/{{ job.concert_id }}">{{ job.title }}</a></td>
+      <td>{{ job.artist }}</td>
+      <td><span class="badge badge-{{ job.kind_slug }}">{{ job.kind_label }}</span></td>
+      <td>{{ job.started_at }}</td>
+      <td>
+        <button hx-post="/jobs/{{ job.concert_id }}/cancel/{{ job.kind_slug }}"
+                hx-disabled-elt="this">Cancel</button>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+</div>
+{% endblock %}

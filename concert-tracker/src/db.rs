@@ -310,6 +310,19 @@ pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
     Ok(rows)
 }
 
+pub fn list_in_progress(conn: &Connection) -> Result<Vec<Concert>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM concerts
+         WHERE download_started_at IS NOT NULL OR split_started_at IS NOT NULL
+         ORDER BY download_started_at, split_started_at",
+    )?;
+    let concerts = stmt
+        .query_map([], concert_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list in-progress concerts")?;
+    Ok(concerts)
+}
+
 pub fn list_concerts(conn: &Connection) -> Result<Vec<Concert>> {
     let mut stmt =
         conn.prepare("SELECT * FROM concerts ORDER BY concert_date DESC, first_seen_at DESC")?;
@@ -668,6 +681,30 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let result = get_concert_by_url(&conn, "https://npr.org/missing").unwrap();
         assert!(result.is_none());
+    }
+
+    fn seed_url(conn: &Connection, url: &str, title: &str) -> i64 {
+        upsert_listing(conn, &listing(url, title)).unwrap();
+        get_concert_by_url(conn, url).unwrap().unwrap().id
+    }
+
+    #[test]
+    fn list_in_progress_returns_only_active_jobs() {
+        let conn = open_in_memory().unwrap();
+        let id1 = seed_url(&conn, "https://npr.org/c/1", "Concert A");
+        let id2 = seed_url(&conn, "https://npr.org/c/2", "Concert B");
+        let _id3 = seed_url(&conn, "https://npr.org/c/3", "Concert C");
+
+        try_mark_download_started(&conn, id1).unwrap();
+        try_mark_download_started(&conn, id2).unwrap();
+        mark_download_succeeded(&conn, id2).unwrap();
+        try_mark_split_started(&conn, id2).unwrap();
+
+        let in_progress = list_in_progress(&conn).unwrap();
+        assert_eq!(in_progress.len(), 2);
+        let ids: Vec<i64> = in_progress.iter().map(|c| c.id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
     }
 }
 

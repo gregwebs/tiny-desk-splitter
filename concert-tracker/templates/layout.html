@@ -192,6 +192,12 @@
     .error-list { color: #721c24; font-size: 0.85em; }
     textarea { width: 100%; font-family: inherit; }
     .meta-line { font-size: 0.8em; color: #888; margin-top: 1.5rem; }
+
+    /* ── Jobs table ── */
+    .jobs-table { width: 100%; border-collapse: collapse; font-size: 0.88em; }
+    .jobs-table th, .jobs-table td { padding: 0.5rem 0.75rem; text-align: left; border-bottom: 1px solid #e0e0e0; }
+    .jobs-table th { font-weight: 600; font-size: 0.8em; text-transform: uppercase; letter-spacing: 0.04em; color: #666; }
+    .jobs-table tr:hover td { background: #fafafa; }
   </style>
 </head>
 <body>
@@ -202,6 +208,7 @@
     <span id="sync-indicator" class="htmx-indicator sync-indicator">
       <span class="spinner"></span>Syncing…
     </span>
+    <a href="/jobs" style="font-size: 0.85em; text-decoration: none; font-weight: 500;">Jobs</a>
     <span id="banner"></span>
   </header>
   {% block content %}{% endblock %}

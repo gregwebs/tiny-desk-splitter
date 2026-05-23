@@ -58,12 +58,33 @@ async fn main() -> Result<()> {
         jobs: JobConfig::production(cli.workdir, splitter_bin),
     };
 
-    let app = router(state);
+    let app = router(state.clone());
     let addr = SocketAddr::from(([127, 0, 0, 1], cli.port));
     println!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    let cancelled = state.registry.cancel_all();
+    if cancelled > 0 {
+        tracing::info!("cancelled {} running job(s) during shutdown", cancelled);
+        let conn = state.db.lock().unwrap();
+        let (dl, sp) = db::fail_in_progress_jobs(&conn, "server shutdown")?;
+        tracing::info!(
+            "marked {} download(s) and {} split(s) as failed on shutdown",
+            dl,
+            sp
+        );
+    }
 
     Ok(())
+}
+
+async fn shutdown_signal() {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("failed to listen for Ctrl+C");
+    tracing::info!("received Ctrl+C, shutting down");
 }

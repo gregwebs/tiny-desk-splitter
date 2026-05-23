@@ -13,6 +13,7 @@ use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
+use crate::jobs::{JobKey, JobKind};
 use crate::model::{Concert, DownloadStatus, SplitStatus, TrackInfo};
 use crate::sync::{sync_month, YearMonth};
 use crate::web::AppState;
@@ -103,6 +104,21 @@ struct TrackListenButtonTemplate {
 #[template(path = "delete_confirm.html")]
 struct DeleteConfirmTemplate {
     id: i64,
+}
+
+struct JobRow {
+    concert_id: i64,
+    title: String,
+    artist: String,
+    kind_slug: &'static str,
+    kind_label: &'static str,
+    started_at: String,
+}
+
+#[derive(Template)]
+#[template(path = "jobs.html")]
+struct JobsTemplate {
+    jobs: Vec<JobRow>,
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -750,6 +766,85 @@ pub async fn status_row(
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
     render_row(&concert).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+pub async fn jobs_list(
+    State(state): State<AppState>,
+) -> Result<impl IntoResponse, AppError> {
+    let concerts = {
+        let conn = state.db.lock().unwrap();
+        db::list_in_progress(&conn)?
+    };
+
+    let jobs: Vec<JobRow> = concerts
+        .iter()
+        .flat_map(|c| {
+            let mut rows = Vec::new();
+            if c.download_started_at.is_some() && c.downloaded_at.is_none() {
+                rows.push(JobRow {
+                    concert_id: c.id,
+                    title: c.title.clone(),
+                    artist: c.artist.clone().unwrap_or_default(),
+                    kind_slug: "downloading",
+                    kind_label: "Download",
+                    started_at: c.download_started_at.clone().unwrap_or_default(),
+                });
+            }
+            if c.split_started_at.is_some() && c.split_at.is_none() {
+                rows.push(JobRow {
+                    concert_id: c.id,
+                    title: c.title.clone(),
+                    artist: c.artist.clone().unwrap_or_default(),
+                    kind_slug: "splitting",
+                    kind_label: "Split",
+                    started_at: c.split_started_at.clone().unwrap_or_default(),
+                });
+            }
+            rows
+        })
+        .collect();
+
+    Ok(JobsTemplate { jobs })
+}
+
+pub async fn cancel_job(
+    State(state): State<AppState>,
+    Path((id, kind)): Path<(i64, String)>,
+) -> Result<Response, AppError> {
+    let job_kind = match kind.as_str() {
+        "downloading" | "download" => JobKind::Download,
+        "splitting" | "split" => JobKind::Split,
+        _ => return Err(AppError::Internal(anyhow::anyhow!("unknown job kind: {}", kind))),
+    };
+
+    let key = JobKey {
+        concert_id: id,
+        kind: job_kind,
+    };
+
+    let was_running = state.registry.cancel(&key);
+    tracing::info!(
+        "cancel_job: concert={} kind={} was_running={}",
+        id,
+        kind,
+        was_running
+    );
+
+    {
+        let conn = state.db.lock().unwrap();
+        match job_kind {
+            JobKind::Download => {
+                db::mark_download_failed(&conn, id, "cancelled by user")?;
+            }
+            JobKind::Split => {
+                db::mark_split_failed(&conn, id, "cancelled by user")?;
+            }
+        }
+    }
+
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Redirect", "/jobs".parse().unwrap());
+    Ok((headers, "").into_response())
 }
 
 pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
