@@ -1,8 +1,8 @@
 {% extends "layout.html" %}
 {% block content %}
 <div class="filter-chips">
-  {% for (slug, label, active_class) in filters %}
-  <a href="/?filter={{ slug }}" class="{{ active_class }}">{{ label }}</a>
+  {% for (href, label, active_class) in filters %}
+  <a href="{{ href }}" class="{{ active_class }}">{{ label }}</a>
   {% endfor %}
 </div>
 <div class="card-grid" id="concert-list">

@@ -23,7 +23,7 @@ use crate::web::AppState;
 #[template(path = "list.html")]
 struct ListTemplate {
     rows: Vec<String>,
-    /// (slug, label, active_class) — active_class is "active" or ""
+    /// (href, label, active_class)
     filters: Vec<(String, String, String)>,
 }
 
@@ -115,7 +115,6 @@ impl IntoResponse for AppError {
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 const FILTERS: &[(&str, &str)] = &[
-    ("all", "All"),
     ("wanted", "Wanted"),
     ("available", "Available"),
     ("ignored", "Ignored"),
@@ -130,7 +129,7 @@ fn matches_filter(c: &Concert, slug: &str) -> bool {
         "available" => !c.ignored && !c.wanted,
         "downloaded" => matches!(c.download_status(), DownloadStatus::Downloaded),
         "split" => matches!(c.split_status(), SplitStatus::Split),
-        _ => true,
+        _ => !c.ignored,
     }
 }
 
@@ -222,7 +221,7 @@ pub async fn list(
     let filter = params
         .get("filter")
         .map(|s| s.as_str())
-        .unwrap_or("all")
+        .unwrap_or("")
         .to_string();
 
     let concerts = {
@@ -242,8 +241,14 @@ pub async fn list(
         filters: FILTERS
             .iter()
             .map(|(s, l)| {
-                let active = if *s == filter { "active" } else { "" };
-                (s.to_string(), l.to_string(), active.to_string())
+                let active = *s == filter;
+                let href = if active {
+                    "/".to_string()
+                } else {
+                    format!("/?filter={s}")
+                };
+                let active_class = if active { "active" } else { "" };
+                (href, l.to_string(), active_class.to_string())
             })
             .collect(),
     })
