@@ -165,8 +165,10 @@ where
 fn render_row(c: &Concert) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
-    let can_download = matches!(&ds, DownloadStatus::NotDownloaded | DownloadStatus::DownloadError)
-        && c.album.is_some();
+    let can_download = matches!(
+        &ds,
+        DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
+    ) && c.album.is_some();
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
     let can_split = matches!(&ds, DownloadStatus::Downloaded)
         && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
@@ -282,9 +284,10 @@ pub async fn detail(
 
     let ds = concert.download_status();
     let ss = concert.split_status();
-    let can_download =
-        matches!(&ds, DownloadStatus::NotDownloaded | DownloadStatus::DownloadError)
-            && concert.album.is_some();
+    let can_download = matches!(
+        &ds,
+        DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
+    ) && concert.album.is_some();
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
     let can_split = matches!(&ds, DownloadStatus::Downloaded)
         && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
@@ -387,7 +390,13 @@ pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    start_download(state.db.clone(), state.registry.clone(), state.jobs.clone(), id).await?;
+    start_download(
+        state.db.clone(),
+        state.registry.clone(),
+        state.jobs.clone(),
+        id,
+    )
+    .await?;
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
@@ -399,7 +408,13 @@ pub async fn split(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    start_split(state.db.clone(), state.registry.clone(), state.jobs.clone(), id).await?;
+    start_split(
+        state.db.clone(),
+        state.registry.clone(),
+        state.jobs.clone(),
+        id,
+    )
+    .await?;
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
@@ -421,10 +436,19 @@ pub async fn delete_download(
     };
 
     if downloaded_at.is_none() {
-        return Ok((StatusCode::BAD_REQUEST, "Concert has no downloaded file to delete").into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            "Concert has no downloaded file to delete",
+        )
+            .into_response());
     }
 
-    tracing::info!("delete-download started for concert {} ({}) force={}", id, title, force);
+    tracing::info!(
+        "delete-download started for concert {} ({}) force={}",
+        id,
+        title,
+        force
+    );
 
     if !force {
         let path = album
@@ -433,15 +457,25 @@ pub async fn delete_download(
         match path {
             Some(p) => {
                 if let Err(e) = std::fs::remove_file(&p) {
-                    tracing::warn!("delete-download failed to remove {} for concert {}: {}", p.display(), id, e);
+                    tracing::warn!(
+                        "delete-download failed to remove {} for concert {}: {}",
+                        p.display(),
+                        id,
+                        e
+                    );
                     return Err(AppError::Internal(anyhow::anyhow!(
-                        "Failed to remove {}: {}", p.display(), e
+                        "Failed to remove {}: {}",
+                        p.display(),
+                        e
                     )));
                 }
                 tracing::info!("delete-download removed {} for concert {}", p.display(), id);
             }
             None => {
-                tracing::info!("delete-download file not found for concert {}, returning confirm prompt", id);
+                tracing::info!(
+                    "delete-download file not found for concert {}, returning confirm prompt",
+                    id
+                );
                 let body = DeleteConfirmTemplate { id }
                     .render()
                     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
@@ -449,7 +483,10 @@ pub async fn delete_download(
             }
         }
     } else {
-        tracing::info!("delete-download force=true for concert {}, skipping file check", id);
+        tracing::info!(
+            "delete-download force=true for concert {}, skipping file check",
+            id
+        );
     }
 
     {
@@ -474,7 +511,11 @@ pub async fn delete_split(
     };
 
     if split_at.is_none() {
-        return Ok((StatusCode::BAD_REQUEST, "Concert has no split state to delete").into_response());
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            "Concert has no split state to delete",
+        )
+            .into_response());
     }
 
     tracing::info!("delete-split started for concert {} ({})", id, title);
@@ -499,17 +540,28 @@ pub async fn listen(
         (concert.album, state.jobs.working_dir.clone())
     };
 
-    let render_state = match album.as_deref().and_then(|a| find_downloaded_file(&working_dir, a)) {
+    let render_state = match album
+        .as_deref()
+        .and_then(|a| find_downloaded_file(&working_dir, a))
+    {
         None => {
             tracing::warn!("listen: file not found for concert {}", id);
             "error"
         }
         Some(path) => {
             tracing::info!("listen: opening {} for concert {}", path.display(), id);
-            match tokio::process::Command::new("open").arg(&path).status().await {
+            match tokio::process::Command::new("open")
+                .arg(&path)
+                .status()
+                .await
+            {
                 Ok(status) if status.success() => "success",
                 Ok(status) => {
-                    tracing::warn!("listen: `open` exited {:?} for concert {}", status.code(), id);
+                    tracing::warn!(
+                        "listen: `open` exited {:?} for concert {}",
+                        status.code(),
+                        id
+                    );
                     "error"
                 }
                 Err(e) => {
@@ -520,9 +572,12 @@ pub async fn listen(
         }
     };
 
-    ListenButtonTemplate { id, state: render_state }
-        .render()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    ListenButtonTemplate {
+        id,
+        state: render_state,
+    }
+    .render()
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn status_row(
@@ -550,7 +605,12 @@ pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))??;
 
-    tracing::info!("sync completed: {} concerts for {}/{:02}", count, year, month);
+    tracing::info!(
+        "sync completed: {} concerts for {}/{:02}",
+        count,
+        year,
+        month
+    );
 
     // Tell htmx to reload the page so the new concerts appear in the list.
     let mut headers = HeaderMap::new();
@@ -616,7 +676,10 @@ mod tests {
             Ok(())
         });
 
-        assert!(!called.get(), "scrape closure must not be called when already scraped");
+        assert!(
+            !called.get(),
+            "scrape closure must not be called when already scraped"
+        );
         assert_eq!(result.artist.as_deref(), Some("Existing"));
         assert_eq!(result.set_list, vec!["Song A".to_string()]);
     }
@@ -647,9 +710,15 @@ mod tests {
             )
         });
 
-        assert!(called.get(), "scrape closure must run when metadata is missing");
+        assert!(
+            called.get(),
+            "scrape closure must run when metadata is missing"
+        );
         assert_eq!(result.artist.as_deref(), Some("Fetched"));
-        assert_eq!(result.set_list, vec!["Song 1".to_string(), "Song 2".to_string()]);
+        assert_eq!(
+            result.set_list,
+            vec!["Song 1".to_string(), "Song 2".to_string()]
+        );
         assert!(result.metadata_scraped_at.is_some());
     }
 

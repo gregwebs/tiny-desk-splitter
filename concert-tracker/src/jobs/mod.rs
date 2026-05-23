@@ -283,7 +283,10 @@ mod tests {
     #[tokio::test]
     async fn run_with_logging_captures_stderr_tail_and_exit_code() {
         let mut cmd = Command::new("sh");
-        cmd.args(["-c", "echo out1; echo out2; echo err1 >&2; echo err2 >&2; exit 5"]);
+        cmd.args([
+            "-c",
+            "echo out1; echo out2; echo err1 >&2; echo err2 >&2; exit 5",
+        ]);
         let (status, stderr_tail) = run_with_logging(cmd, "test", 42).await.unwrap();
         assert_eq!(status.code(), Some(5));
         assert_eq!(stderr_tail, "err1\nerr2");
@@ -292,14 +295,20 @@ mod tests {
     #[tokio::test]
     async fn run_with_logging_caps_stderr_tail_to_last_lines() {
         let total = STDERR_TAIL_LINES + 10;
-        let script = format!("for i in $(seq 1 {}); do echo err$i >&2; done; exit 1", total);
+        let script = format!(
+            "for i in $(seq 1 {}); do echo err$i >&2; done; exit 1",
+            total
+        );
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &script]);
         let (status, stderr_tail) = run_with_logging(cmd, "test", 0).await.unwrap();
         assert_eq!(status.code(), Some(1));
         let lines: Vec<&str> = stderr_tail.lines().collect();
         assert_eq!(lines.len(), STDERR_TAIL_LINES);
-        assert_eq!(*lines.first().unwrap(), format!("err{}", total - STDERR_TAIL_LINES + 1));
+        assert_eq!(
+            *lines.first().unwrap(),
+            format!("err{}", total - STDERR_TAIL_LINES + 1)
+        );
         assert_eq!(*lines.last().unwrap(), format!("err{}", total));
     }
 }

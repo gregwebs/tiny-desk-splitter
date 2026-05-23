@@ -1,9 +1,16 @@
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 
 /// Strip colons from album names to produce safe filesystem paths.
 /// Mirrors the logic in download.sh and extract.sh.
 pub fn sanitize_album(album: &str) -> String {
     album.replace(':', "")
+}
+
+/// Per-concert directory under `working_dir/concerts/`. All artifacts for a
+/// concert (full mp4, split tracks, preview image, metadata json) live here.
+pub fn concert_dir(working_dir: &Path, album: &str) -> PathBuf {
+    working_dir.join("concerts").join(sanitize_album(album))
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -183,16 +190,18 @@ impl Concert {
     }
 
     /// Browser-visible URL for this concert's preview image, or `None` if the
-    /// image hasn't been downloaded yet. Mirrors the on-disk layout used by
-    /// `crate::scrape::preview_image_path` and the `/previews` ServeDir mount.
+    /// image hasn't been downloaded yet. Mirrors the on-disk layout under
+    /// `<working_dir>/concerts/<album>/<album>.jpg`. Served via the
+    /// `/concert-files` ServeDir mount (the `/concerts/:id` API route prevents
+    /// reusing the `/concerts` URL prefix for static files).
     pub fn preview_image_url(&self, working_dir: &std::path::Path) -> Option<String> {
         let album = self.album.as_deref()?;
         let sanitized = sanitize_album(album);
-        let on_disk = working_dir.join("previews").join(format!("{}.jpg", sanitized));
+        let on_disk = concert_dir(working_dir, album).join(format!("{}.jpg", sanitized));
         if !on_disk.exists() {
             return None;
         }
-        Some(format!("/previews/{}.jpg", sanitized))
+        Some(format!("/concert-files/{}/{}.jpg", sanitized, sanitized))
     }
 }
 
@@ -236,11 +245,23 @@ mod tests {
 
     #[test]
     fn concert_status_from_flags_all_combinations() {
-        assert_eq!(ConcertStatus::from_flags(false, false), ConcertStatus::Available);
-        assert_eq!(ConcertStatus::from_flags(true, false), ConcertStatus::Ignored);
-        assert_eq!(ConcertStatus::from_flags(false, true), ConcertStatus::Wanted);
+        assert_eq!(
+            ConcertStatus::from_flags(false, false),
+            ConcertStatus::Available
+        );
+        assert_eq!(
+            ConcertStatus::from_flags(true, false),
+            ConcertStatus::Ignored
+        );
+        assert_eq!(
+            ConcertStatus::from_flags(false, true),
+            ConcertStatus::Wanted
+        );
         // ignored takes priority if somehow both are set
-        assert_eq!(ConcertStatus::from_flags(true, true), ConcertStatus::Ignored);
+        assert_eq!(
+            ConcertStatus::from_flags(true, true),
+            ConcertStatus::Ignored
+        );
     }
 
     #[test]
@@ -381,7 +402,12 @@ mod tests {
             SplitStatus::Splitting,
             SplitStatus::SplitError,
         ] {
-            assert_eq!(ss.label(), ss.slug(), "label should match slug for {:?}", ss);
+            assert_eq!(
+                ss.label(),
+                ss.slug(),
+                "label should match slug for {:?}",
+                ss
+            );
         }
     }
 
@@ -393,7 +419,12 @@ mod tests {
             DownloadStatus::Downloaded,
             DownloadStatus::DownloadError,
         ] {
-            assert_eq!(ds.label(), ds.slug(), "label should match slug for {:?}", ds);
+            assert_eq!(
+                ds.label(),
+                ds.slug(),
+                "label should match slug for {:?}",
+                ds
+            );
         }
     }
 
@@ -438,26 +469,40 @@ mod tests {
     #[test]
     fn preview_image_url_returns_path_when_file_exists() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("previews")).unwrap();
-        std::fs::File::create(dir.path().join("previews").join("Foo Album.jpg")).unwrap();
+        let cd = concert_dir(dir.path(), "Foo Album");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::File::create(cd.join("Foo Album.jpg")).unwrap();
         let mut c = bare_concert();
         c.album = Some("Foo Album".to_string());
         assert_eq!(
             c.preview_image_url(dir.path()).as_deref(),
-            Some("/previews/Foo Album.jpg")
+            Some("/concert-files/Foo Album/Foo Album.jpg")
         );
     }
 
     #[test]
     fn preview_image_url_strips_colons_from_album() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::create_dir_all(dir.path().join("previews")).unwrap();
-        std::fs::File::create(dir.path().join("previews").join("Some Concert.jpg")).unwrap();
+        let cd = concert_dir(dir.path(), "Some: Concert");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::File::create(cd.join("Some Concert.jpg")).unwrap();
         let mut c = bare_concert();
         c.album = Some("Some: Concert".to_string());
         assert_eq!(
             c.preview_image_url(dir.path()).as_deref(),
-            Some("/previews/Some Concert.jpg")
+            Some("/concert-files/Some Concert/Some Concert.jpg")
+        );
+    }
+
+    #[test]
+    fn concert_dir_strips_colons() {
+        assert_eq!(
+            concert_dir(Path::new("/wd"), "Air: Tiny Desk Concert"),
+            PathBuf::from("/wd/concerts/Air Tiny Desk Concert")
+        );
+        assert_eq!(
+            concert_dir(Path::new("/wd"), "Plain"),
+            PathBuf::from("/wd/concerts/Plain")
         );
     }
 

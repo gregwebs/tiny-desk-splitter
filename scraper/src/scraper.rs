@@ -250,14 +250,13 @@ pub fn extract_set_list(paragraphs: &[ElementRef]) -> Result<Vec<Song>> {
                     if el.name() == "ul" {
                         let ul_element = ElementRef::wrap(element).unwrap();
                         for li in ul_element.select(&li_selector) {
-                            let mut song_text = li
-                                .text()
-                                .collect::<String>()
-                                .trim().to_string();
+                            let mut song_text = li.text().collect::<String>().trim().to_string();
 
                             if let Some(start) = song_text.chars().nth(0) {
                                 if start == '"' || start == '\'' {
-                                    song_text = song_text[1..].trim_end_matches(|c| c == '"' || c == '\'').to_string();
+                                    song_text = song_text[1..]
+                                        .trim_end_matches(|c| c == '"' || c == '\'')
+                                        .to_string();
                                 }
                                 set_list.push(Song { title: song_text });
                             }
@@ -369,6 +368,12 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
     Ok(musicians)
 }
 
+/// Sanitize an album name the same way concert-tracker does (strip colons
+/// only). Kept inline to avoid pulling concert-tracker as a build dep.
+fn sanitize_album_for_dir(album: &str) -> String {
+    album.replace(':', "")
+}
+
 pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
     // Create output filename based on artist name
     let sanitized_artist_name = concert_info
@@ -383,15 +388,25 @@ pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
         return Err(anyhow::anyhow!("Artist name is empty"));
     }
 
-    let output_file_name = format!("{}.json", sanitized_artist_name);
+    // Place metadata inside `concerts/<sanitized-album>/<artist-slug>.json`
+    // so the JSON lives alongside the mp4, preview, and split tracks.
+    let concert_dir =
+        std::path::Path::new("concerts").join(sanitize_album_for_dir(&concert_info.album));
+    fs::create_dir_all(&concert_dir).with_context(|| {
+        format!(
+            "Failed to create concert directory {}",
+            concert_dir.display()
+        )
+    })?;
+    let output_file = concert_dir.join(format!("{}.json", sanitized_artist_name));
 
-    // Write to file as JSON
     let json =
         serde_json::to_string_pretty(&concert_info).context("Failed to serialize concert info")?;
 
-    fs::write(&output_file_name, json).context("Failed to write JSON file")?;
+    fs::write(&output_file, json)
+        .with_context(|| format!("Failed to write JSON file {}", output_file.display()))?;
 
-    Ok(output_file_name)
+    Ok(output_file.to_string_lossy().into_owned())
 }
 
 pub fn scrape_data(url: &str) -> Result<()> {

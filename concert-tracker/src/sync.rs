@@ -133,7 +133,10 @@ mod tests {
 
     #[test]
     fn year_month_previous_wraps_january_to_december() {
-        let ym = YearMonth { year: 2024, month: 1 };
+        let ym = YearMonth {
+            year: 2024,
+            month: 1,
+        };
         let prev = ym.previous();
         assert_eq!(prev.year, 2023);
         assert_eq!(prev.month, 12);
@@ -141,7 +144,10 @@ mod tests {
 
     #[test]
     fn year_month_next_wraps_december_to_january() {
-        let ym = YearMonth { year: 2024, month: 12 };
+        let ym = YearMonth {
+            year: 2024,
+            month: 12,
+        };
         let next = ym.next();
         assert_eq!(next.year, 2025);
         assert_eq!(next.month, 1);
@@ -149,7 +155,10 @@ mod tests {
 
     #[test]
     fn year_month_previous_mid_year() {
-        let ym = YearMonth { year: 2024, month: 6 };
+        let ym = YearMonth {
+            year: 2024,
+            month: 6,
+        };
         let prev = ym.previous();
         assert_eq!(prev.year, 2024);
         assert_eq!(prev.month, 5);

@@ -20,7 +20,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    let previews_dir = state.jobs.working_dir.join("previews");
+    let concerts_dir = state.jobs.working_dir.join("concerts");
     Router::new()
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
@@ -29,13 +29,16 @@ pub fn router(state: AppState) -> Router {
         .route("/concerts/:id/notes", post(handlers::notes))
         .route("/concerts/:id/scrape", post(handlers::scrape_concert))
         .route("/concerts/:id/download", post(handlers::download))
-        .route("/concerts/:id/delete-download", post(handlers::delete_download))
+        .route(
+            "/concerts/:id/delete-download",
+            post(handlers::delete_download),
+        )
         .route("/concerts/:id/split", post(handlers::split))
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/status", get(handlers::status_row))
         .route("/sync", post(handlers::sync_now))
-        .nest_service("/previews", ServeDir::new(previews_dir))
+        .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

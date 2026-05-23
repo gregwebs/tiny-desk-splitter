@@ -317,9 +317,8 @@ pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
 }
 
 pub fn list_concerts(conn: &Connection) -> Result<Vec<Concert>> {
-    let mut stmt = conn.prepare(
-        "SELECT * FROM concerts ORDER BY concert_date DESC, first_seen_at DESC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT * FROM concerts ORDER BY concert_date DESC, first_seen_at DESC")?;
     let concerts = stmt
         .query_map([], concert_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
@@ -328,8 +327,12 @@ pub fn list_concerts(conn: &Connection) -> Result<Vec<Concert>> {
 }
 
 pub fn get_concert(conn: &Connection, id: i64) -> Result<Concert> {
-    conn.query_row("SELECT * FROM concerts WHERE id = ?1", params![id], concert_from_row)
-        .context("Concert not found")
+    conn.query_row(
+        "SELECT * FROM concerts WHERE id = ?1",
+        params![id],
+        concert_from_row,
+    )
+    .context("Concert not found")
 }
 
 pub fn get_concert_by_url(conn: &Connection, url: &str) -> Result<Option<Concert>> {
@@ -356,7 +359,9 @@ pub mod tests {
 
     fn seed(conn: &Connection) -> i64 {
         upsert_listing(conn, &listing("https://npr.org/c/1", "Test Concert")).unwrap();
-        let c = get_concert_by_url(conn, "https://npr.org/c/1").unwrap().unwrap();
+        let c = get_concert_by_url(conn, "https://npr.org/c/1")
+            .unwrap()
+            .unwrap();
         c.id
     }
 
@@ -472,7 +477,10 @@ pub mod tests {
         let id = seed(&conn);
         assert!(try_mark_download_started(&conn, id).unwrap());
         assert!(!try_mark_download_started(&conn, id).unwrap());
-        assert!(get_concert(&conn, id).unwrap().download_started_at.is_some());
+        assert!(get_concert(&conn, id)
+            .unwrap()
+            .download_started_at
+            .is_some());
     }
 
     #[test]
@@ -542,7 +550,10 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id1 = seed(&conn);
         upsert_listing(&conn, &listing("https://npr.org/c/2", "B")).unwrap();
-        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2").unwrap().unwrap().id;
+        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2")
+            .unwrap()
+            .unwrap()
+            .id;
 
         try_mark_download_started(&conn, id1).unwrap();
         mark_download_succeeded(&conn, id1).unwrap();
@@ -552,7 +563,10 @@ pub mod tests {
         let cleared = reset_in_progress(&conn).unwrap();
         assert_eq!(cleared, 2);
         assert!(get_concert(&conn, id1).unwrap().split_started_at.is_none());
-        assert!(get_concert(&conn, id2).unwrap().download_started_at.is_none());
+        assert!(get_concert(&conn, id2)
+            .unwrap()
+            .download_started_at
+            .is_none());
     }
 
     #[test]
@@ -560,7 +574,10 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id1 = seed(&conn);
         upsert_listing(&conn, &listing("https://npr.org/c/2", "B")).unwrap();
-        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2").unwrap().unwrap().id;
+        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2")
+            .unwrap()
+            .unwrap()
+            .id;
 
         // id1: split in progress; id2: download in progress.
         try_mark_download_started(&conn, id1).unwrap();
@@ -638,7 +655,10 @@ pub mod tests {
         clear_split_state(&conn, id).unwrap();
 
         let c = get_concert(&conn, id).unwrap();
-        assert!(c.downloaded_at.is_some(), "download state must be untouched");
+        assert!(
+            c.downloaded_at.is_some(),
+            "download state must be untouched"
+        );
         assert!(c.split_at.is_none());
         assert!(c.split_started_at.is_none());
         assert_eq!(c.split_errors.len(), 1, "split errors preserved");

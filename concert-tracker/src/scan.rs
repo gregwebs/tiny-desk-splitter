@@ -4,7 +4,7 @@ use rusqlite::Connection;
 use std::path::Path;
 
 use crate::db;
-use crate::model::sanitize_album;
+use crate::model::{concert_dir, sanitize_album};
 
 pub struct ScanReport {
     pub downloads_found: usize,
@@ -40,13 +40,15 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
         }
 
         let split_dir = expected_split_dir(dir, &album);
-        if split_dir.exists() && has_split_tracks(&split_dir) {
+        if split_dir.exists() && has_split_tracks(&split_dir, &album) {
             match mtime_iso(&split_dir) {
                 Ok(at) => {
                     db::set_split_at_if_missing(conn, concert.id, &at)?;
                     report.splits_found += 1;
                 }
-                Err(e) => report.errors.push(format!("{}: {}", split_dir.display(), e)),
+                Err(e) => report
+                    .errors
+                    .push(format!("{}: {}", split_dir.display(), e)),
             }
         }
     }
@@ -55,21 +57,30 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
 }
 
 pub fn expected_mp4_path(dir: &Path, album: &str) -> std::path::PathBuf {
-    dir.join(format!("{}.mp4", sanitize_album(album)))
+    concert_dir(dir, album).join(format!("{}.mp4", sanitize_album(album)))
 }
 
 pub fn expected_split_dir(dir: &Path, album: &str) -> std::path::PathBuf {
-    dir.join(sanitize_album(album))
+    concert_dir(dir, album)
 }
 
-/// Returns true if the directory contains any audio track files.
-pub fn has_split_tracks(dir: &Path) -> bool {
+/// Returns true if `dir` contains audio track files belonging to per-song
+/// splits. The full-concert `{sanitize_album(album)}.mp4` lives in the same
+/// directory; per-song video files (`.mp4`) are detected via audio sidecars
+/// (`.m4a`, `.mp3`, ...) so a downloaded-but-not-split concert does not
+/// falsely register as split.
+pub fn has_split_tracks(dir: &Path, album: &str) -> bool {
     let audio_exts = ["mp3", "m4a", "wav", "flac", "ogg", "opus", "aac"];
+    let full_stem = sanitize_album(album);
     std::fs::read_dir(dir)
         .map(|entries| {
             entries.filter_map(|e| e.ok()).any(|e| {
-                e.path()
-                    .extension()
+                let path = e.path();
+                let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                if stem == full_stem {
+                    return false;
+                }
+                path.extension()
                     .and_then(|x| x.to_str())
                     .map(|x| audio_exts.contains(&x))
                     .unwrap_or(false)
@@ -122,23 +133,29 @@ mod tests {
         c.id
     }
 
+    fn make_concert_dir(working_dir: &Path, album: &str) -> std::path::PathBuf {
+        let cd = concert_dir(working_dir, album);
+        fs::create_dir_all(&cd).unwrap();
+        cd
+    }
+
     #[test]
-    fn expected_paths_sanitize_colons() {
+    fn expected_paths_use_concerts_subdir_and_sanitize_colons() {
         let dir = std::path::Path::new("/tmp");
         assert_eq!(
             expected_mp4_path(dir, "Bob Dylan: Live"),
-            std::path::PathBuf::from("/tmp/Bob Dylan Live.mp4")
+            std::path::PathBuf::from("/tmp/concerts/Bob Dylan Live/Bob Dylan Live.mp4")
         );
         assert_eq!(
             expected_split_dir(dir, "Bob Dylan: Live"),
-            std::path::PathBuf::from("/tmp/Bob Dylan Live")
+            std::path::PathBuf::from("/tmp/concerts/Bob Dylan Live")
         );
     }
 
     #[test]
     fn has_split_tracks_false_for_empty_dir() {
         let dir = temp_dir();
-        assert!(!has_split_tracks(dir.path()));
+        assert!(!has_split_tracks(dir.path(), "Anything"));
     }
 
     #[test]
@@ -146,14 +163,14 @@ mod tests {
         let dir = temp_dir();
         fs::write(dir.path().join("cover.jpg"), b"").unwrap();
         fs::write(dir.path().join("notes.txt"), b"").unwrap();
-        assert!(!has_split_tracks(dir.path()));
+        assert!(!has_split_tracks(dir.path(), "Anything"));
     }
 
     #[test]
     fn has_split_tracks_true_for_audio_files() {
         let dir = temp_dir();
         fs::write(dir.path().join("01 - Song.mp3"), b"").unwrap();
-        assert!(has_split_tracks(dir.path()));
+        assert!(has_split_tracks(dir.path(), "Anything"));
     }
 
     #[test]
@@ -161,8 +178,27 @@ mod tests {
         for ext in &["m4a", "wav", "flac", "ogg", "opus", "aac"] {
             let dir = temp_dir();
             fs::write(dir.path().join(format!("track.{}", ext)), b"").unwrap();
-            assert!(has_split_tracks(dir.path()), "should detect .{}", ext);
+            assert!(
+                has_split_tracks(dir.path(), "Anything"),
+                "should detect .{}",
+                ext
+            );
         }
+    }
+
+    #[test]
+    fn has_split_tracks_ignores_full_concert_mp4() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("Foo Album.mp4"), b"").unwrap();
+        assert!(!has_split_tracks(dir.path(), "Foo Album"));
+    }
+
+    #[test]
+    fn has_split_tracks_excludes_full_mp4_but_counts_per_song_audio() {
+        let dir = temp_dir();
+        fs::write(dir.path().join("Foo Album.mp4"), b"").unwrap();
+        fs::write(dir.path().join("Track 1.m4a"), b"").unwrap();
+        assert!(has_split_tracks(dir.path(), "Foo Album"));
     }
 
     #[test]
@@ -170,7 +206,8 @@ mod tests {
         let dir = temp_dir();
         let conn = db::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/1", "Test Album");
-        fs::write(dir.path().join("Test Album.mp4"), b"fake mp4").unwrap();
+        let cd = make_concert_dir(dir.path(), "Test Album");
+        fs::write(cd.join("Test Album.mp4"), b"fake mp4").unwrap();
 
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.downloads_found, 1);
@@ -183,9 +220,8 @@ mod tests {
         let dir = temp_dir();
         let conn = db::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/2", "Split Album");
-        let split_dir = dir.path().join("Split Album");
-        fs::create_dir(&split_dir).unwrap();
-        fs::write(split_dir.join("01 - Track.mp3"), b"").unwrap();
+        let cd = make_concert_dir(dir.path(), "Split Album");
+        fs::write(cd.join("01 - Track.mp3"), b"").unwrap();
 
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.splits_found, 1);
@@ -218,10 +254,25 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/3", "Existing Download");
         db::set_downloaded_at_if_missing(&conn, id, "2020-01-01T00:00:00Z").unwrap();
-        fs::write(dir.path().join("Existing Download.mp4"), b"").unwrap();
+        let cd = make_concert_dir(dir.path(), "Existing Download");
+        fs::write(cd.join("Existing Download.mp4"), b"").unwrap();
 
         scan(&conn, dir.path()).unwrap();
         let c = db::get_concert(&conn, id).unwrap();
         assert_eq!(c.downloaded_at, Some("2020-01-01T00:00:00Z".to_string()));
+    }
+
+    #[test]
+    fn scan_does_not_count_split_when_only_full_mp4_present() {
+        let dir = temp_dir();
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_concert_with_album(&conn, "https://npr.org/c/4", "Just Downloaded");
+        let cd = make_concert_dir(dir.path(), "Just Downloaded");
+        fs::write(cd.join("Just Downloaded.mp4"), b"").unwrap();
+
+        let report = scan(&conn, dir.path()).unwrap();
+        assert_eq!(report.downloads_found, 1);
+        assert_eq!(report.splits_found, 0);
+        assert!(db::get_concert(&conn, id).unwrap().split_at.is_none());
     }
 }

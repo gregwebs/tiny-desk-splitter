@@ -13,7 +13,9 @@ fn main() -> Result<()> {
 
     let year: i32 = args[1].parse().expect("Year must be a number");
     let month: u32 = args[2].parse().expect("Month must be 1-12");
-    let day: Option<u32> = args.get(3).map(|d| d.parse().expect("Day must be a number"));
+    let day: Option<u32> = args
+        .get(3)
+        .map(|d| d.parse().expect("Day must be a number"));
 
     let day_value = day.unwrap_or_else(|| get_last_day_of_month(year, month));
     println!(

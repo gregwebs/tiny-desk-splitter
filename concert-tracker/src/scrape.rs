@@ -5,10 +5,10 @@ use std::path::{Path, PathBuf};
 use tiny_desk_scraper::{fetch_bytes, fetch_html, parse_concert_info, ConcertInfo};
 
 use crate::db::{self, MetadataUpdate, NewListing};
-use crate::model::{sanitize_album, Musician};
+use crate::model::{concert_dir, sanitize_album, Musician};
 
 /// Fetch a concert URL, parse metadata, upsert into the database, and save
-/// the preview thumbnail to `{working_dir}/previews/`. Thumbnail download is
+/// the preview thumbnail into the concert's directory. Thumbnail download is
 /// best-effort: failures are logged but do not fail the overall scrape.
 pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()> {
     let html = fetch_html(url)?;
@@ -36,14 +36,12 @@ pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()
 
 /// Path where a concert's preview image lives on disk.
 pub fn preview_image_path(working_dir: &Path, album: &str) -> PathBuf {
-    working_dir
-        .join("previews")
-        .join(format!("{}.jpg", sanitize_album(album)))
+    concert_dir(working_dir, album).join(format!("{}.jpg", sanitize_album(album)))
 }
 
 fn save_preview_image(url: &str, dest: &Path) -> Result<()> {
     if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).context("create previews directory")?;
+        fs::create_dir_all(parent).context("create concert directory")?;
     }
     let bytes = fetch_bytes(url)?;
     fs::write(dest, bytes).with_context(|| format!("write preview to {}", dest.display()))?;
@@ -99,13 +97,15 @@ mod tests {
         let p = preview_image_path(Path::new("/wd"), "Some Album: Tiny Desk Concert");
         assert_eq!(
             p,
-            PathBuf::from("/wd/previews/Some Album Tiny Desk Concert.jpg")
+            PathBuf::from(
+                "/wd/concerts/Some Album Tiny Desk Concert/Some Album Tiny Desk Concert.jpg"
+            )
         );
     }
 
     #[test]
     fn preview_image_path_handles_plain_album() {
         let p = preview_image_path(Path::new("/wd"), "Plain");
-        assert_eq!(p, PathBuf::from("/wd/previews/Plain.jpg"));
+        assert_eq!(p, PathBuf::from("/wd/concerts/Plain/Plain.jpg"));
     }
 }

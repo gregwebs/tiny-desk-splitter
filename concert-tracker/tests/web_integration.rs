@@ -10,6 +10,7 @@ use tower::ServiceExt;
 use concert_tracker::{
     db::{self, MetadataUpdate, NewListing},
     jobs::{JobConfig, JobRegistry},
+    model::concert_dir,
     web::{router, AppState},
 };
 
@@ -80,7 +81,10 @@ async fn ignore_endpoint_toggles_flag_and_returns_row() {
     let html = String::from_utf8_lossy(&body);
     // After the row redesign, the concert-status slot shows the "ignored"
     // badge alongside an ✕ button (which posts back to /ignore to clear).
-    assert!(html.contains("badge-ignored"), "ignored badge must render in the slot");
+    assert!(
+        html.contains("badge-ignored"),
+        "ignored badge must render in the slot"
+    );
     assert!(
         html.contains("title=\"Clear ignored\""),
         "✕ to clear ignored must render alongside the badge"
@@ -97,13 +101,26 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
     let app = router(test_state(conn));
 
     let resp = app
-        .oneshot(Request::builder().uri("/concerts/1/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("/concerts/1/want\""), "Want action must appear in slot when Available");
-    assert!(html.contains("/concerts/1/ignore\""), "Ignore action must appear in slot when Available");
+    assert!(
+        html.contains("/concerts/1/want\""),
+        "Want action must appear in slot when Available"
+    );
+    assert!(
+        html.contains("/concerts/1/ignore\""),
+        "Ignore action must appear in slot when Available"
+    );
     // No "available" badge — that was the visual the buttons replace.
     assert!(!html.contains("badge-available"));
 }
@@ -129,13 +146,26 @@ async fn not_downloaded_row_hides_download_badge_and_shows_button() {
     let app = router(test_state(conn));
 
     let resp = app
-        .oneshot(Request::builder().uri("/concerts/1/status").body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("/concerts/1/download\""), "Download button must appear when NotDownloaded");
-    assert!(!html.contains("badge-not-downloaded"), "no 'not-downloaded' badge in fresh state — the button replaces it");
+    assert!(
+        html.contains("/concerts/1/download\""),
+        "Download button must appear when NotDownloaded"
+    );
+    assert!(
+        !html.contains("badge-not-downloaded"),
+        "no 'not-downloaded' badge in fresh state — the button replaces it"
+    );
 }
 
 #[tokio::test]
@@ -228,7 +258,11 @@ async fn download_endpoint_spawns_job_and_returns_row() {
 async fn detail_page_auto_scrape_failure_still_renders() {
     let conn = db::open_in_memory().unwrap();
     // Port 1 with no listener — connection refuses immediately.
-    seeded_concert(&conn, "http://127.0.0.1:1/never-resolves", "Unreachable Concert");
+    seeded_concert(
+        &conn,
+        "http://127.0.0.1:1/never-resolves",
+        "Unreachable Concert",
+    );
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
         db: db_arc.clone(),
@@ -256,7 +290,10 @@ async fn detail_page_auto_scrape_failure_still_renders() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Unreachable Concert"), "listing title must render even when scrape fails");
+    assert!(
+        html.contains("Unreachable Concert"),
+        "listing title must render even when scrape fails"
+    );
 
     // metadata_scraped_at must remain NULL so the next view retries.
     let reread = {
@@ -310,7 +347,9 @@ fn seed_downloaded(conn: &rusqlite::Connection, url: &str, album: &str) {
 async fn delete_download_removes_file_and_clears_state() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Some Album";
-    let mp4 = workdir.path().join(format!("{}.mp4", album));
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let mp4 = cd.join(format!("{}.mp4", album));
     std::fs::write(&mp4, b"fake mp4 bytes").unwrap();
 
     let conn = db::open_in_memory().unwrap();
@@ -340,7 +379,10 @@ async fn delete_download_removes_file_and_clears_state() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get("HX-Refresh").and_then(|v| v.to_str().ok()),
+        response
+            .headers()
+            .get("HX-Refresh")
+            .and_then(|v| v.to_str().ok()),
         Some("true"),
         "successful delete must trigger a full htmx refresh"
     );
@@ -364,7 +406,9 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     // matters so the Download button reappears.
     let workdir = tempfile::tempdir().unwrap();
     let album = "Prior Split Err Album";
-    let mp4 = workdir.path().join(format!("{}.mp4", album));
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let mp4 = cd.join(format!("{}.mp4", album));
     std::fs::write(&mp4, b"fake mp4 bytes").unwrap();
 
     let conn = db::open_in_memory().unwrap();
@@ -614,7 +658,10 @@ async fn delete_download_force_clears_state_when_file_missing() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get("HX-Refresh").and_then(|v| v.to_str().ok()),
+        response
+            .headers()
+            .get("HX-Refresh")
+            .and_then(|v| v.to_str().ok()),
         Some("true")
     );
     let c = {
@@ -655,7 +702,10 @@ async fn delete_split_clears_state() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers().get("HX-Refresh").and_then(|v| v.to_str().ok()),
+        response
+            .headers()
+            .get("HX-Refresh")
+            .and_then(|v| v.to_str().ok()),
         Some("true")
     );
     let c = {
