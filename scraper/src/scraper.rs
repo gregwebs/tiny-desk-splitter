@@ -29,6 +29,8 @@ pub struct ConcertInfo {
     pub musicians: Vec<Musician>,
     #[serde(default)]
     pub preview_image_url: Option<String>,
+    #[serde(default)]
+    pub teaser: Option<String>,
 }
 
 pub fn fetch_html(url: &str) -> Result<String> {
@@ -133,6 +135,7 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
     }
 
     let preview_image_url = extract_preview_image_url(&document);
+    let teaser = extract_og_description(&document);
 
     // Create JSON structure
     let concert_info = ConcertInfo {
@@ -145,6 +148,7 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         set_list,
         musicians,
         preview_image_url,
+        teaser,
     };
 
     Ok(concert_info)
@@ -183,6 +187,22 @@ fn extract_og_image_url(document: &Html) -> Option<String> {
     } else {
         Some(content.to_string())
     }
+}
+
+pub fn extract_og_description(document: &Html) -> Option<String> {
+    let selector = Selector::parse(r#"meta[property="og:description"]"#).ok()?;
+    let element = document.select(&selector).next()?;
+    let content = element.value().attr("content")?;
+    if content.is_empty() {
+        None
+    } else {
+        Some(content.to_string())
+    }
+}
+
+pub fn extract_teaser_from_html(html: &str) -> Option<String> {
+    let document = Html::parse_document(html);
+    extract_og_description(&document)
 }
 
 pub fn extract_content(document: &Html) -> Result<(Option<String>, Vec<Song>, Vec<Musician>)> {

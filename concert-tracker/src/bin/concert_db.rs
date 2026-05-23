@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use concert_tracker::db;
 use concert_tracker::import::import_dir;
-use concert_tracker::model::Concert;
+use concert_tracker::model::{sanitize_album, Concert};
 use concert_tracker::scan::scan;
 use concert_tracker::scrape::scrape_url;
 use concert_tracker::sync::{sync_months, YearMonth};
@@ -53,6 +53,10 @@ enum Command {
     ResetInProgress,
     /// Import JSON files + scan directory (one-time backfill)
     InitFromFiles { dir: PathBuf },
+    /// Backfill missing teasers by re-scraping concert pages for og:description
+    BackfillTeasers,
+    /// Update concert JSON files on disk to include teasers from the database
+    UpdateJsonTeasers,
 }
 
 fn main() -> Result<()> {
@@ -149,7 +153,117 @@ fn main() -> Result<()> {
                 imported, report.downloads_found, report.splits_found
             );
         }
+
+        Command::BackfillTeasers => {
+            let concerts = db::list_concerts_missing_teaser(&conn)?;
+            println!("Found {} concerts missing teasers", concerts.len());
+            let mut success = 0;
+            let mut failed = 0;
+            for c in &concerts {
+                match backfill_teaser(&conn, c) {
+                    Ok(true) => {
+                        println!("  [{}] {} — teaser set", c.id, c.title);
+                        success += 1;
+                    }
+                    Ok(false) => {
+                        println!("  [{}] {} — no og:description found", c.id, c.title);
+                        failed += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  [{}] {} — error: {}", c.id, c.title, e);
+                        failed += 1;
+                    }
+                }
+            }
+            println!("Backfilled {} teasers ({} failed/missing)", success, failed);
+        }
+
+        Command::UpdateJsonTeasers => {
+            let concerts = db::list_concerts(&conn)?;
+            let mut updated = 0;
+            let mut skipped = 0;
+            for c in &concerts {
+                let teaser = match c.teaser.as_deref() {
+                    Some(t) if !t.is_empty() => t,
+                    _ => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let album = match c.album.as_deref() {
+                    Some(a) => a,
+                    None => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                let artist = match c.artist.as_deref() {
+                    Some(a) => a,
+                    None => {
+                        skipped += 1;
+                        continue;
+                    }
+                };
+                match update_json_teaser(&cli.workdir, album, artist, teaser) {
+                    Ok(true) => {
+                        println!("  updated {}", c.title);
+                        updated += 1;
+                    }
+                    Ok(false) => skipped += 1,
+                    Err(e) => {
+                        eprintln!("  [{}] {} — error: {}", c.id, c.title, e);
+                        skipped += 1;
+                    }
+                }
+            }
+            println!(
+                "Updated {} JSON files ({} skipped/missing)",
+                updated, skipped
+            );
+        }
     }
 
     Ok(())
+}
+
+fn backfill_teaser(conn: &rusqlite::Connection, concert: &Concert) -> Result<bool> {
+    let html = tiny_desk_scraper::fetch_html(&concert.source_url)?;
+    match tiny_desk_scraper::extract_teaser_from_html(&html) {
+        Some(teaser) => {
+            db::set_teaser(conn, concert.id, &teaser)?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
+}
+
+fn sanitize_artist_for_filename(artist: &str) -> String {
+    artist
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect::<String>()
+        .replace(' ', "_")
+        .to_lowercase()
+}
+
+fn update_json_teaser(
+    workdir: &std::path::Path,
+    album: &str,
+    artist: &str,
+    teaser: &str,
+) -> Result<bool> {
+    let dir = workdir.join("concerts").join(sanitize_album(album));
+    let filename = format!("{}.json", sanitize_artist_for_filename(artist));
+    let path = dir.join(&filename);
+    if !path.exists() {
+        return Ok(false);
+    }
+    let content = std::fs::read_to_string(&path)?;
+    let mut value: serde_json::Value = serde_json::from_str(&content)?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("teaser".to_string(), serde_json::Value::String(teaser.to_string()));
+    }
+    let json = serde_json::to_string_pretty(&value)?;
+    std::fs::write(&path, json)?;
+    Ok(true)
 }

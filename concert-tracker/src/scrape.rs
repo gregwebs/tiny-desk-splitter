@@ -56,7 +56,7 @@ pub fn apply_concert_info(conn: &Connection, info: &ConcertInfo) -> Result<()> {
             source_url: info.source.clone(),
             title: info.album.clone(),
             concert_date: info.date.clone(),
-            teaser: None,
+            teaser: info.teaser.clone(),
         },
     )?;
 

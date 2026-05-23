@@ -342,6 +342,24 @@ pub fn get_concert(conn: &Connection, id: i64) -> Result<Concert> {
     .context("Concert not found")
 }
 
+pub fn list_concerts_missing_teaser(conn: &Connection) -> Result<Vec<Concert>> {
+    let mut stmt = conn.prepare("SELECT * FROM concerts WHERE teaser IS NULL ORDER BY id")?;
+    let concerts = stmt
+        .query_map([], concert_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list concerts missing teaser")?;
+    Ok(concerts)
+}
+
+pub fn set_teaser(conn: &Connection, id: i64, teaser: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE concerts SET teaser = ?1 WHERE id = ?2",
+        params![teaser, id],
+    )
+    .context("Failed to set teaser")?;
+    Ok(())
+}
+
 pub fn get_concert_by_url(conn: &Connection, url: &str) -> Result<Option<Concert>> {
     let mut stmt = conn.prepare("SELECT * FROM concerts WHERE source_url = ?1")?;
     let mut iter = stmt.query_map(params![url], concert_from_row)?;
@@ -686,6 +704,34 @@ pub mod tests {
     fn seed_url(conn: &Connection, url: &str, title: &str) -> i64 {
         upsert_listing(conn, &listing(url, title)).unwrap();
         get_concert_by_url(conn, url).unwrap().unwrap().id
+    }
+
+    #[test]
+    fn list_concerts_missing_teaser_returns_rows_without_teaser() {
+        let conn = open_in_memory().unwrap();
+        upsert_listing(&conn, &listing("https://npr.org/c/1", "A")).unwrap();
+        upsert_listing(
+            &conn,
+            &NewListing {
+                source_url: "https://npr.org/c/2".to_string(),
+                title: "B".to_string(),
+                concert_date: None,
+                teaser: None,
+            },
+        )
+        .unwrap();
+        let missing = list_concerts_missing_teaser(&conn).unwrap();
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].title, "B");
+    }
+
+    #[test]
+    fn set_teaser_updates_concert() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        set_teaser(&conn, id, "A great show").unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.teaser, Some("A great show".to_string()));
     }
 
     #[test]

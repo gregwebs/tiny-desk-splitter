@@ -1,6 +1,9 @@
 use super::fixtures;
 use super::save_failed_html;
-use crate::scraper::{extract_preview_image_url, parse_concert_info, Musician};
+use crate::scraper::{
+    extract_og_description, extract_preview_image_url, extract_teaser_from_html, parse_concert_info,
+    Musician,
+};
 use anyhow::Result;
 use scraper::Html;
 
@@ -57,6 +60,10 @@ fn test_sample_concert_parsing() {
     assert_eq!(
         concert_info.preview_image_url.as_deref(),
         Some("https://example.org/thumb.jpg")
+    );
+    assert_eq!(
+        concert_info.teaser.as_deref(),
+        Some("A sample teaser for testing purposes.")
     );
 }
 
@@ -118,6 +125,38 @@ fn extract_preview_image_url_prefers_jw_preview_over_og_image() {
     assert_eq!(
         extract_preview_image_url(&document).as_deref(),
         Some("https://example.org/jw.jpg")
+    );
+}
+
+#[test]
+fn extract_og_description_finds_content() {
+    let html = r#"<html><head><meta property="og:description" content="A great concert." /></head><body></body></html>"#;
+    let document = Html::parse_document(html);
+    assert_eq!(
+        extract_og_description(&document).as_deref(),
+        Some("A great concert.")
+    );
+}
+
+#[test]
+fn extract_og_description_returns_none_when_missing() {
+    let document = Html::parse_document("<html><head></head><body></body></html>");
+    assert!(extract_og_description(&document).is_none());
+}
+
+#[test]
+fn extract_og_description_returns_none_when_empty() {
+    let html = r#"<html><head><meta property="og:description" content="" /></head><body></body></html>"#;
+    let document = Html::parse_document(html);
+    assert!(extract_og_description(&document).is_none());
+}
+
+#[test]
+fn extract_teaser_from_html_works() {
+    let html = r#"<html><head><meta property="og:description" content="Teaser text here." /></head><body></body></html>"#;
+    assert_eq!(
+        extract_teaser_from_html(html).as_deref(),
+        Some("Teaser text here.")
     );
 }
 
