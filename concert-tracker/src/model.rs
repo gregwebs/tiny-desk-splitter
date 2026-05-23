@@ -40,53 +40,75 @@ impl ConcertStatus {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ProcessingStatus {
-    Split,
-    Splitting,
-    SplitError,
-    Downloaded,
+pub enum DownloadStatus {
+    NotDownloaded,
     Downloading,
+    Downloaded,
     DownloadError,
-    NotStarted,
 }
 
-impl ProcessingStatus {
+impl DownloadStatus {
     pub fn from_concert(c: &Concert) -> Self {
-        if c.split_at.is_some() {
-            ProcessingStatus::Split
-        } else if c.split_started_at.is_some() {
-            ProcessingStatus::Splitting
-        } else if !c.split_errors.is_empty() {
-            ProcessingStatus::SplitError
-        } else if c.downloaded_at.is_some() {
-            ProcessingStatus::Downloaded
+        if c.downloaded_at.is_some() {
+            DownloadStatus::Downloaded
         } else if c.download_started_at.is_some() {
-            ProcessingStatus::Downloading
+            DownloadStatus::Downloading
         } else if !c.download_errors.is_empty() {
-            ProcessingStatus::DownloadError
+            DownloadStatus::DownloadError
         } else {
-            ProcessingStatus::NotStarted
+            DownloadStatus::NotDownloaded
         }
     }
 
     pub fn slug(&self) -> &str {
         match self {
-            ProcessingStatus::Split => "split",
-            ProcessingStatus::Splitting => "splitting",
-            ProcessingStatus::SplitError => "split-error",
-            ProcessingStatus::Downloaded => "downloaded",
-            ProcessingStatus::Downloading => "downloading",
-            ProcessingStatus::DownloadError => "download-error",
-            ProcessingStatus::NotStarted => "not-started",
+            DownloadStatus::NotDownloaded => "not-downloaded",
+            DownloadStatus::Downloading => "downloading",
+            DownloadStatus::Downloaded => "downloaded",
+            DownloadStatus::DownloadError => "download-error",
         }
     }
 
-    /// Human-readable label for the status badge. Diverges from `slug()` only
-    /// where the slug reads awkwardly; `slug()` stays stable for CSS classes
-    /// and URL filter values.
+    pub fn label(&self) -> &str {
+        self.slug()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SplitStatus {
+    NotSplit,
+    Splitting,
+    Split,
+    SplitError,
+}
+
+impl SplitStatus {
+    pub fn from_concert(c: &Concert) -> Self {
+        if c.split_at.is_some() {
+            SplitStatus::Split
+        } else if c.split_started_at.is_some() {
+            SplitStatus::Splitting
+        } else if !c.split_errors.is_empty() {
+            SplitStatus::SplitError
+        } else {
+            SplitStatus::NotSplit
+        }
+    }
+
+    pub fn slug(&self) -> &str {
+        match self {
+            SplitStatus::NotSplit => "not-split",
+            SplitStatus::Splitting => "splitting",
+            SplitStatus::Split => "split",
+            SplitStatus::SplitError => "split-error",
+        }
+    }
+
+    /// Diverges from `slug()` only where the slug reads awkwardly. `slug()`
+    /// stays stable for CSS classes and URL filter values.
     pub fn label(&self) -> &str {
         match self {
-            ProcessingStatus::Split => "tracks",
+            SplitStatus::Split => "tracks",
             _ => self.slug(),
         }
     }
@@ -128,8 +150,12 @@ impl Concert {
         ConcertStatus::from_flags(self.ignored, self.wanted)
     }
 
-    pub fn processing_status(&self) -> ProcessingStatus {
-        ProcessingStatus::from_concert(self)
+    pub fn download_status(&self) -> DownloadStatus {
+        DownloadStatus::from_concert(self)
+    }
+
+    pub fn split_status(&self) -> SplitStatus {
+        SplitStatus::from_concert(self)
     }
 
     /// Date portion of `concert_date` for display. Archive sync stores
@@ -224,65 +250,84 @@ mod tests {
         assert_eq!(ConcertStatus::Wanted.slug(), "wanted");
     }
 
-    #[test]
-    fn processing_status_not_started_when_no_timestamps() {
-        let c = bare_concert();
-        assert_eq!(c.processing_status(), ProcessingStatus::NotStarted);
+    fn err(msg: &str) -> ErrorEntry {
+        ErrorEntry {
+            error: msg.to_string(),
+            at: "2024-01-01T00:00:00Z".to_string(),
+        }
     }
 
     #[test]
-    fn processing_status_downloading_when_started_but_not_done() {
+    fn download_status_not_downloaded_when_no_timestamps() {
+        let c = bare_concert();
+        assert_eq!(c.download_status(), DownloadStatus::NotDownloaded);
+        assert_eq!(c.split_status(), SplitStatus::NotSplit);
+    }
+
+    #[test]
+    fn download_status_downloading_when_started_but_not_done() {
         let mut c = bare_concert();
         c.download_started_at = Some("2024-01-01T00:00:00Z".to_string());
-        assert_eq!(c.processing_status(), ProcessingStatus::Downloading);
+        assert_eq!(c.download_status(), DownloadStatus::Downloading);
     }
 
     #[test]
-    fn processing_status_download_error_when_errors_and_no_started_at() {
+    fn download_status_download_error_when_errors_only() {
         let mut c = bare_concert();
-        c.download_errors = vec![ErrorEntry {
-            error: "failed".to_string(),
-            at: "2024-01-01T00:00:00Z".to_string(),
-        }];
-        assert_eq!(c.processing_status(), ProcessingStatus::DownloadError);
+        c.download_errors = vec![err("failed")];
+        assert_eq!(c.download_status(), DownloadStatus::DownloadError);
     }
 
     #[test]
-    fn processing_status_downloaded_after_success() {
+    fn download_status_downloaded_after_success() {
         let mut c = bare_concert();
         c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
-        assert_eq!(c.processing_status(), ProcessingStatus::Downloaded);
+        assert_eq!(c.download_status(), DownloadStatus::Downloaded);
     }
 
     #[test]
-    fn processing_status_splitting_when_split_started() {
+    fn download_status_downloaded_beats_in_progress_and_errors() {
+        let mut c = bare_concert();
+        c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
+        c.download_started_at = Some("2024-01-01T00:00:00Z".to_string());
+        c.download_errors = vec![err("earlier")];
+        assert_eq!(c.download_status(), DownloadStatus::Downloaded);
+    }
+
+    #[test]
+    fn split_status_splitting_when_in_progress() {
         let mut c = bare_concert();
         c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
         c.split_started_at = Some("2024-01-01T02:00:00Z".to_string());
-        assert_eq!(c.processing_status(), ProcessingStatus::Splitting);
+        assert_eq!(c.split_status(), SplitStatus::Splitting);
     }
 
     #[test]
-    fn processing_status_split_error() {
+    fn split_status_split_error_when_errors_only() {
         let mut c = bare_concert();
         c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
-        c.split_errors = vec![ErrorEntry {
-            error: "split failed".to_string(),
-            at: "2024-01-01T02:00:00Z".to_string(),
-        }];
-        assert_eq!(c.processing_status(), ProcessingStatus::SplitError);
+        c.split_errors = vec![err("split failed")];
+        assert_eq!(c.split_status(), SplitStatus::SplitError);
     }
 
     #[test]
-    fn processing_status_split_takes_priority_over_all() {
+    fn split_status_split_beats_in_progress_and_errors() {
         let mut c = bare_concert();
         c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
         c.split_at = Some("2024-01-01T03:00:00Z".to_string());
-        c.split_errors = vec![ErrorEntry {
-            error: "old error".to_string(),
-            at: "2024-01-01T02:00:00Z".to_string(),
-        }];
-        assert_eq!(c.processing_status(), ProcessingStatus::Split);
+        c.split_errors = vec![err("old error")];
+        assert_eq!(c.split_status(), SplitStatus::Split);
+    }
+
+    #[test]
+    fn split_status_independent_of_download_status() {
+        // A purely synthetic state (no downloaded_at) — split_status still derives
+        // from its own columns. The DB layer enforces the cross-machine rule
+        // that splits require a download; the model does not.
+        let mut c = bare_concert();
+        c.split_at = Some("2024-01-01T03:00:00Z".to_string());
+        assert_eq!(c.split_status(), SplitStatus::Split);
+        assert_eq!(c.download_status(), DownloadStatus::NotDownloaded);
     }
 
     #[test]
@@ -313,28 +358,42 @@ mod tests {
     }
 
     #[test]
-    fn processing_status_slugs() {
-        assert_eq!(ProcessingStatus::NotStarted.slug(), "not-started");
-        assert_eq!(ProcessingStatus::Downloading.slug(), "downloading");
-        assert_eq!(ProcessingStatus::DownloadError.slug(), "download-error");
-        assert_eq!(ProcessingStatus::Downloaded.slug(), "downloaded");
-        assert_eq!(ProcessingStatus::Splitting.slug(), "splitting");
-        assert_eq!(ProcessingStatus::SplitError.slug(), "split-error");
-        assert_eq!(ProcessingStatus::Split.slug(), "split");
+    fn download_status_slugs() {
+        assert_eq!(DownloadStatus::NotDownloaded.slug(), "not-downloaded");
+        assert_eq!(DownloadStatus::Downloading.slug(), "downloading");
+        assert_eq!(DownloadStatus::Downloaded.slug(), "downloaded");
+        assert_eq!(DownloadStatus::DownloadError.slug(), "download-error");
     }
 
     #[test]
-    fn processing_status_label_diverges_only_for_split() {
-        assert_eq!(ProcessingStatus::Split.label(), "tracks");
-        for ps in [
-            ProcessingStatus::NotStarted,
-            ProcessingStatus::Downloading,
-            ProcessingStatus::DownloadError,
-            ProcessingStatus::Downloaded,
-            ProcessingStatus::Splitting,
-            ProcessingStatus::SplitError,
+    fn split_status_slugs() {
+        assert_eq!(SplitStatus::NotSplit.slug(), "not-split");
+        assert_eq!(SplitStatus::Splitting.slug(), "splitting");
+        assert_eq!(SplitStatus::Split.slug(), "split");
+        assert_eq!(SplitStatus::SplitError.slug(), "split-error");
+    }
+
+    #[test]
+    fn split_status_label_says_tracks_only_for_split() {
+        assert_eq!(SplitStatus::Split.label(), "tracks");
+        for ss in [
+            SplitStatus::NotSplit,
+            SplitStatus::Splitting,
+            SplitStatus::SplitError,
         ] {
-            assert_eq!(ps.label(), ps.slug(), "label should match slug for {:?}", ps);
+            assert_eq!(ss.label(), ss.slug(), "label should match slug for {:?}", ss);
+        }
+    }
+
+    #[test]
+    fn download_status_label_always_matches_slug() {
+        for ds in [
+            DownloadStatus::NotDownloaded,
+            DownloadStatus::Downloading,
+            DownloadStatus::Downloaded,
+            DownloadStatus::DownloadError,
+        ] {
+            assert_eq!(ds.label(), ds.slug(), "label should match slug for {:?}", ds);
         }
     }
 

@@ -116,11 +116,12 @@ fn main() -> Result<()> {
                 .collect();
             for c in filtered {
                 println!(
-                    "[{}] {} | {} | {}",
+                    "[{}] {} | {} | {}+{}",
                     c.id,
                     c.title,
                     c.concert_status().slug(),
-                    c.processing_status().slug()
+                    c.download_status().slug(),
+                    c.split_status().slug()
                 );
             }
         }

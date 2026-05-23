@@ -7,7 +7,8 @@
 {% endif %}
 <p>
   <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
-  <span class="badge badge-{{ processing_status }}">{{ processing_status_label }}</span>
+  <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
+  <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
   {% if let Some(date) = concert.display_date() %}<strong>Date:</strong> {{ date }}{% endif %}
 </p>
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}

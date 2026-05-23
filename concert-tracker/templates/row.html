@@ -1,31 +1,56 @@
-<div class="card status-{{ processing_status }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
+<div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   <div class="card-body">
     {% if !artist.is_empty() %}<div class="card-artist">{{ artist }}</div>{% endif %}
     <h3 class="card-title"><a href="/concerts/{{ id }}">{{ title }}</a></h3>
     <div class="card-meta">
       {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
-      <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
-      <span class="badge badge-{{ processing_status }}">{{ processing_status_label }}</span>
     </div>
     {% if !teaser.is_empty() %}<p class="card-teaser">{{ teaser }}</p>{% endif %}
     <div class="card-actions">
-      {% if can_download %}
-      <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML">Download</button>
-      {% endif %}
-      {% if can_delete_download %}
-      <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
-      {% endif %}
-      {% if can_split %}
-      <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML">Split</button>
-      {% endif %}
-      {% if can_delete_split %}
-      <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="this" hx-swap="outerHTML">✕</button>
-      {% endif %}
-      {% if can_listen %}
-      <button class="btn-listen" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
-      {% endif %}
-      <button hx-post="/concerts/{{ id }}/ignore" hx-target="closest .card" hx-swap="outerHTML">{% if ignored %}Unignore{% else %}Ignore{% endif %}</button>
-      <button hx-post="/concerts/{{ id }}/want" hx-target="closest .card" hx-swap="outerHTML">{% if wanted %}Unwant{% else %}Want{% endif %}</button>
+
+      {# Concert-status slot: Available shows action buttons; Wanted/Ignored show badge + ✕ #}
+      <span class="card-slot card-slot-concert">
+        {% if is_available %}
+          <button hx-post="/concerts/{{ id }}/want" hx-target="closest .card" hx-swap="outerHTML">Want</button>
+          <button hx-post="/concerts/{{ id }}/ignore" hx-target="closest .card" hx-swap="outerHTML">Ignore</button>
+        {% else if wanted %}
+          <span class="badge badge-wanted">wanted</span>
+          <button class="btn-delete" title="Clear wanted" hx-post="/concerts/{{ id }}/want" hx-target="closest .card" hx-swap="outerHTML">✕</button>
+        {% else if ignored %}
+          <span class="badge badge-ignored">ignored</span>
+          <button class="btn-delete" title="Clear ignored" hx-post="/concerts/{{ id }}/ignore" hx-target="closest .card" hx-swap="outerHTML">✕</button>
+        {% endif %}
+      </span>
+
+      {# Download slot: NotDownloaded shows Download button; Downloading shows badge; DownloadError shows badge + retry; Downloaded shows badge + ✕ + Listen #}
+      <span class="card-slot card-slot-download">
+        {% if show_download_badge %}
+          <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
+        {% endif %}
+        {% if can_download %}
+          <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML">Download</button>
+        {% endif %}
+        {% if can_delete_download %}
+          <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
+        {% endif %}
+        {% if can_listen %}
+          <button class="btn-listen" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+        {% endif %}
+      </span>
+
+      {# Split slot: NotSplit + Downloaded shows Split button; Splitting shows badge; SplitError shows badge + retry; Split shows badge + ✕ #}
+      <span class="card-slot card-slot-split">
+        {% if show_split_badge %}
+          <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
+        {% endif %}
+        {% if can_split %}
+          <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML">Split</button>
+        {% endif %}
+        {% if can_delete_split %}
+          <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="this" hx-swap="outerHTML">✕</button>
+        {% endif %}
+      </span>
+
     </div>
   </div>
 </div>

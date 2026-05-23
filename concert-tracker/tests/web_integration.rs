@@ -78,7 +78,64 @@ async fn ignore_endpoint_toggles_flag_and_returns_row() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("badge-ignored") || html.contains("Unignore"));
+    // After the row redesign, the concert-status slot shows the "ignored"
+    // badge alongside an ✕ button (which posts back to /ignore to clear).
+    assert!(html.contains("badge-ignored"), "ignored badge must render in the slot");
+    assert!(
+        html.contains("title=\"Clear ignored\""),
+        "✕ to clear ignored must render alongside the badge"
+    );
+}
+
+#[tokio::test]
+async fn available_concert_row_shows_want_and_ignore_buttons() {
+    // In the Available state the concert-status slot exposes the two action
+    // buttons. The redesign moved them from a trailing actions row into the
+    // status slot itself, replacing the prior "available" badge.
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/avail", "Avail Concert");
+    let app = router(test_state(conn));
+
+    let resp = app
+        .oneshot(Request::builder().uri("/concerts/1/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("/concerts/1/want\""), "Want action must appear in slot when Available");
+    assert!(html.contains("/concerts/1/ignore\""), "Ignore action must appear in slot when Available");
+    // No "available" badge — that was the visual the buttons replace.
+    assert!(!html.contains("badge-available"));
+}
+
+#[tokio::test]
+async fn not_downloaded_row_hides_download_badge_and_shows_button() {
+    // Replaces the prior "not-downloaded" grey badge with the Download
+    // action button in the same slot.
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/fresh", "Fresh Concert");
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "X".to_string(),
+            album: "Some Album".to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .oneshot(Request::builder().uri("/concerts/1/status").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("/concerts/1/download\""), "Download button must appear when NotDownloaded");
+    assert!(!html.contains("badge-not-downloaded"), "no 'not-downloaded' badge in fresh state — the button replaces it");
 }
 
 #[tokio::test]
@@ -301,8 +358,10 @@ async fn delete_download_removes_file_and_clears_state() {
 async fn delete_download_with_prior_split_error_restores_download_button() {
     // Reproduces the user-reported bug: a concert that was downloaded and then
     // had a failed split would keep `split_errors` populated even after the
-    // mp4 was deleted, pinning ProcessingStatus at SplitError. That hid the
-    // Download button and kept Split / Listen visible despite no source file.
+    // mp4 was deleted. With the old combined ProcessingStatus that pinned the
+    // status at SplitError; now we have two independent statuses, but the
+    // db-layer fix (`clear_download_state` also wipes split_errors) still
+    // matters so the Download button reappears.
     let workdir = tempfile::tempdir().unwrap();
     let album = "Prior Split Err Album";
     let mp4 = workdir.path().join(format!("{}.mp4", album));
@@ -366,6 +425,124 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     assert!(
         !html.contains("/concerts/1/listen\""),
         "Listen button must NOT appear after delete; got: {}",
+        html
+    );
+}
+
+#[tokio::test]
+async fn downloaded_filter_includes_split_concerts() {
+    // With the new two-axis statuses, the "Downloaded" filter pill should
+    // include every concert whose download badge reads "downloaded" — even
+    // if it has also been split. (Previously the filter carried a hidden
+    // `&& !Split` guard, which surprised users when their split concerts
+    // disappeared from the Downloaded filter despite showing the badge.)
+    let conn = db::open_in_memory().unwrap();
+    // First concert: downloaded only. `seed_downloaded` hardcodes id=1.
+    seed_downloaded(&conn, "https://npr.org/d/dl-only", "Album One");
+    // Second concert: downloaded + split. Set up inline because seed_downloaded
+    // only handles a single id=1 concert.
+    db::upsert_listing(
+        &conn,
+        &NewListing {
+            source_url: "https://npr.org/d/dl-split".to_string(),
+            title: "Split Concert".to_string(),
+            concert_date: Some("2024-01-16".to_string()),
+            teaser: None,
+        },
+    )
+    .unwrap();
+    let id2 = db::get_concert_by_url(&conn, "https://npr.org/d/dl-split")
+        .unwrap()
+        .unwrap()
+        .id;
+    db::update_metadata(
+        &conn,
+        id2,
+        &MetadataUpdate {
+            artist: "Y".to_string(),
+            album: "Album Two".to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    db::try_mark_download_started(&conn, id2).unwrap();
+    db::mark_download_succeeded(&conn, id2).unwrap();
+    db::try_mark_split_started(&conn, id2).unwrap();
+    db::mark_split_succeeded(&conn, id2).unwrap();
+
+    let app = router(test_state(conn));
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/?filter=downloaded")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+
+    // Cards are rendered with id="concert-{id}". Both must appear.
+    assert!(
+        html.contains("id=\"concert-1\""),
+        "downloaded-only concert (id 1) must appear under Downloaded filter"
+    );
+    assert!(
+        html.contains(&format!("id=\"concert-{}\"", id2)),
+        "split concert (id {}) must also appear under Downloaded filter — its badge reads 'downloaded'",
+        id2
+    );
+}
+
+#[tokio::test]
+async fn listen_button_visible_after_successful_split() {
+    // Once tracks have been split, the source mp4 is still on disk and still
+    // playable. With the old combined ProcessingStatus, `Split` shadowed
+    // `Downloaded` and the Listen button disappeared. With the new
+    // DownloadStatus / SplitStatus split, Listen is gated only on
+    // DownloadStatus == Downloaded.
+    let conn = db::open_in_memory().unwrap();
+    seed_downloaded(&conn, "https://npr.org/d/split-listen", "Some Album");
+    db::try_mark_split_started(&conn, 1).unwrap();
+    db::mark_split_succeeded(&conn, 1).unwrap();
+    let app = router(test_state(conn));
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/status")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(
+        html.contains("/concerts/1/listen\""),
+        "Listen button must remain visible after split; got: {}",
+        html
+    );
+    // Split action button should be gone (already split), but delete-split X
+    // should be present.
+    assert!(
+        !html.contains("/concerts/1/split\""),
+        "Split action button must NOT appear once already split; got: {}",
+        html
+    );
+    assert!(
+        html.contains("/concerts/1/delete-split"),
+        "Delete-tracks button must appear after split; got: {}",
         html
     );
 }

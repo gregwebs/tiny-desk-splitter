@@ -273,6 +273,37 @@ pub fn set_split_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<(
     Ok(())
 }
 
+/// Mark any concert whose download or split was in progress as failed with
+/// the given error. Used at server startup to recover from an unclean
+/// shutdown — the previous process's in-flight job is no longer running, so
+/// the row must not stay pinned at Downloading / Splitting (which hides every
+/// retry button in the UI). Each orphaned row gets an `ErrorEntry` appended
+/// to its `*_errors_json`, leaving the concert in DownloadError / SplitError
+/// state where the slot UI already exposes a retry button.
+///
+/// Returns `(download_count, split_count)` of rows touched.
+pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<(usize, usize)> {
+    let dl_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM concerts WHERE download_started_at IS NOT NULL")?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<_>>()
+        .context("Failed to read in-progress downloads")?;
+    for id in &dl_ids {
+        mark_download_failed(conn, *id, error)?;
+    }
+
+    let sp_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM concerts WHERE split_started_at IS NOT NULL")?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<_>>()
+        .context("Failed to read in-progress splits")?;
+    for id in &sp_ids {
+        mark_split_failed(conn, *id, error)?;
+    }
+
+    Ok((dl_ids.len(), sp_ids.len()))
+}
+
 /// Clear all stale in-progress flags (e.g. after an unclean shutdown).
 pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
     let rows = conn
@@ -522,6 +553,36 @@ pub mod tests {
         assert_eq!(cleared, 2);
         assert!(get_concert(&conn, id1).unwrap().split_started_at.is_none());
         assert!(get_concert(&conn, id2).unwrap().download_started_at.is_none());
+    }
+
+    #[test]
+    fn fail_in_progress_jobs_appends_error_and_clears_flags() {
+        let conn = open_in_memory().unwrap();
+        let id1 = seed(&conn);
+        upsert_listing(&conn, &listing("https://npr.org/c/2", "B")).unwrap();
+        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2").unwrap().unwrap().id;
+
+        // id1: split in progress; id2: download in progress.
+        try_mark_download_started(&conn, id1).unwrap();
+        mark_download_succeeded(&conn, id1).unwrap();
+        try_mark_split_started(&conn, id1).unwrap();
+        try_mark_download_started(&conn, id2).unwrap();
+
+        let (dl, sp) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
+        assert_eq!(dl, 1);
+        assert_eq!(sp, 1);
+
+        let c1 = get_concert(&conn, id1).unwrap();
+        assert!(c1.split_started_at.is_none());
+        assert_eq!(c1.split_errors.last().unwrap().error, "server restarted");
+
+        let c2 = get_concert(&conn, id2).unwrap();
+        assert!(c2.download_started_at.is_none());
+        assert_eq!(c2.download_errors.last().unwrap().error, "server restarted");
+
+        // Idempotent: a second call on the now-clean state touches nothing.
+        let (dl2, sp2) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
+        assert_eq!((dl2, sp2), (0, 0));
     }
 
     #[test]

@@ -38,6 +38,19 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let conn = db::open(&cli.db)?;
 
+    // Recover from unclean shutdowns: any row still flagged Downloading or
+    // Splitting belongs to a process that's no longer running. Move them to
+    // *Error so the slot UI exposes a retry button instead of pinning the
+    // concert at an unactionable "splitting" / "downloading" badge.
+    let (stale_dl, stale_sp) = db::fail_in_progress_jobs(&conn, "server restarted")?;
+    if stale_dl + stale_sp > 0 {
+        tracing::info!(
+            "marked {} stale download(s) and {} stale split(s) as failed on startup",
+            stale_dl,
+            stale_sp
+        );
+    }
+
     let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),

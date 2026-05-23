@@ -13,7 +13,7 @@ use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
-use crate::model::{Concert, ProcessingStatus};
+use crate::model::{Concert, DownloadStatus, SplitStatus};
 use crate::sync::{sync_month, YearMonth};
 use crate::web::AppState;
 
@@ -35,9 +35,14 @@ struct RowTemplate {
     artist: String,
     concert_date: String,
     teaser: String,
-    concert_status: String,
-    processing_status: String,
-    processing_status_label: String,
+    download_status: String,
+    download_status_label: String,
+    split_status: String,
+    split_status_label: String,
+    card_accent: &'static str,
+    /// Concert-status slot: in Available the slot shows the Ignore/Want
+    /// buttons; otherwise it shows the wanted/ignored badge + ✕.
+    is_available: bool,
     ignored: bool,
     wanted: bool,
     can_download: bool,
@@ -45,6 +50,10 @@ struct RowTemplate {
     can_split: bool,
     can_delete_split: bool,
     can_listen: bool,
+    /// Whether to show the download badge alongside slot contents.
+    /// False only for the NotDownloaded "fresh" state.
+    show_download_badge: bool,
+    show_split_badge: bool,
     is_in_progress: bool,
 }
 
@@ -53,8 +62,10 @@ struct RowTemplate {
 struct DetailTemplate {
     concert: Concert,
     concert_status: String,
-    processing_status: String,
-    processing_status_label: String,
+    download_status: String,
+    download_status_label: String,
+    split_status: String,
+    split_status_label: String,
     can_download: bool,
     can_delete_download: bool,
     can_split: bool,
@@ -117,8 +128,8 @@ fn matches_filter(c: &Concert, slug: &str) -> bool {
         "wanted" => !c.ignored && c.wanted,
         "ignored" => c.ignored,
         "available" => !c.ignored && !c.wanted,
-        "downloaded" => matches!(c.processing_status(), ProcessingStatus::Downloaded),
-        "split" => matches!(c.processing_status(), ProcessingStatus::Split),
+        "downloaded" => matches!(c.download_status(), DownloadStatus::Downloaded),
+        "split" => matches!(c.split_status(), SplitStatus::Split),
         _ => true,
     }
 }
@@ -152,21 +163,27 @@ where
 }
 
 fn render_row(c: &Concert) -> Result<String, askama::Error> {
-    let ps = c.processing_status();
-    let can_download = matches!(
-        &ps,
-        ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
-    ) && c.album.is_some();
-    let can_delete_download = c.downloaded_at.is_some()
-        && c.download_started_at.is_none()
-        && c.split_started_at.is_none();
-    let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
-    let can_delete_split = c.split_at.is_some() && c.split_started_at.is_none();
-    let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
-    let is_in_progress = matches!(
-        &ps,
-        ProcessingStatus::Downloading | ProcessingStatus::Splitting
-    );
+    let ds = c.download_status();
+    let ss = c.split_status();
+    let can_download = matches!(&ds, DownloadStatus::NotDownloaded | DownloadStatus::DownloadError)
+        && c.album.is_some();
+    let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
+    let can_split = matches!(&ds, DownloadStatus::Downloaded)
+        && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
+    let can_delete_split = matches!(&ss, SplitStatus::Split);
+    let can_listen = matches!(&ds, DownloadStatus::Downloaded);
+    let show_download_badge = !matches!(&ds, DownloadStatus::NotDownloaded);
+    let show_split_badge = !matches!(&ss, SplitStatus::NotSplit);
+    let is_in_progress =
+        matches!(&ds, DownloadStatus::Downloading) || matches!(&ss, SplitStatus::Splitting);
+    let card_accent = if matches!(&ss, SplitStatus::Split) {
+        "split"
+    } else if matches!(&ds, DownloadStatus::Downloaded) {
+        "downloaded"
+    } else {
+        ""
+    };
+    let is_available = !c.ignored && !c.wanted;
 
     RowTemplate {
         id: c.id,
@@ -174,9 +191,12 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         artist: c.artist.clone().unwrap_or_default(),
         concert_date: c.display_date().unwrap_or_default(),
         teaser: c.teaser.clone().unwrap_or_default(),
-        concert_status: c.concert_status().slug().to_string(),
-        processing_status: ps.slug().to_string(),
-        processing_status_label: ps.label().to_string(),
+        download_status: ds.slug().to_string(),
+        download_status_label: ds.label().to_string(),
+        split_status: ss.slug().to_string(),
+        split_status_label: ss.label().to_string(),
+        card_accent,
+        is_available,
         ignored: c.ignored,
         wanted: c.wanted,
         can_download,
@@ -184,6 +204,8 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
         can_split,
         can_delete_split,
         can_listen,
+        show_download_badge,
+        show_split_badge,
         is_in_progress,
     }
     .render()
@@ -258,24 +280,25 @@ pub async fn detail(
         initial
     };
 
-    let ps = concert.processing_status();
-    let can_download = matches!(
-        &ps,
-        ProcessingStatus::NotStarted | ProcessingStatus::DownloadError
-    ) && concert.album.is_some();
-    let can_delete_download = concert.downloaded_at.is_some()
-        && concert.download_started_at.is_none()
-        && concert.split_started_at.is_none();
-    let can_split = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
-    let can_delete_split = concert.split_at.is_some() && concert.split_started_at.is_none();
-    let can_listen = matches!(&ps, ProcessingStatus::Downloaded | ProcessingStatus::SplitError);
+    let ds = concert.download_status();
+    let ss = concert.split_status();
+    let can_download =
+        matches!(&ds, DownloadStatus::NotDownloaded | DownloadStatus::DownloadError)
+            && concert.album.is_some();
+    let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
+    let can_split = matches!(&ds, DownloadStatus::Downloaded)
+        && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
+    let can_delete_split = matches!(&ss, SplitStatus::Split);
+    let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url(&state.jobs.working_dir);
 
     Ok(DetailTemplate {
         concert_status: concert.concert_status().slug().to_string(),
-        processing_status: ps.slug().to_string(),
-        processing_status_label: ps.label().to_string(),
+        download_status: ds.slug().to_string(),
+        download_status_label: ds.label().to_string(),
+        split_status: ss.slug().to_string(),
+        split_status_label: ss.label().to_string(),
         can_download,
         can_delete_download,
         can_split,
