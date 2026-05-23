@@ -1,9 +1,12 @@
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
 use rusqlite::Connection;
+use std::sync::{Arc, Mutex};
 
 use crate::db;
-use crate::jobs::{download_job_from_concert, DownloadJob, JobConfig, JobKey, JobKind, JobRegistry};
+use crate::jobs::{
+    download_job_from_concert, run_with_logging, DownloadJob, JobConfig, JobKey, JobKind,
+    JobRegistry,
+};
 
 pub enum StartOutcome {
     Spawned,
@@ -50,17 +53,16 @@ pub async fn start_download(
 
 async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: DownloadJob) {
     let concert_id = job.concert_id;
-    let mut cmd = (config.download_cmd)(&job);
+    let cmd = (config.download_cmd)(&job);
 
-    match cmd.output().await {
-        Ok(output) if output.status.success() => {
+    match run_with_logging(cmd, "download", concert_id).await {
+        Ok((status, _)) if status.success() => {
             tracing::info!("download completed for concert {}", concert_id);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_succeeded(&conn, concert_id);
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-            let error = format!("exit {:?}: {}", output.status.code(), stderr.trim());
+        Ok((status, stderr_tail)) => {
+            let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
