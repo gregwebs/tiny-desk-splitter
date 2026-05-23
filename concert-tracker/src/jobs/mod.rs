@@ -154,6 +154,37 @@ pub fn find_downloaded_file(working_dir: &Path, album: &str) -> Option<PathBuf> 
 /// blow up memory or the `*_errors` column.
 const STDERR_TAIL_LINES: usize = 64;
 
+macro_rules! log_child_line {
+    ($kind:expr, $concert_id:expr, $stream:expr, $line:expr) => {
+        match $kind {
+            "split" => tracing::info!(
+                target: "concert_tracker::jobs::split",
+                kind = $kind,
+                concert_id = $concert_id,
+                stream = $stream,
+                "{}",
+                $line
+            ),
+            "download" => tracing::info!(
+                target: "concert_tracker::jobs::download",
+                kind = $kind,
+                concert_id = $concert_id,
+                stream = $stream,
+                "{}",
+                $line
+            ),
+            _ => tracing::info!(
+                target: "concert_tracker::jobs",
+                kind = $kind,
+                concert_id = $concert_id,
+                stream = $stream,
+                "{}",
+                $line
+            ),
+        }
+    };
+}
+
 /// Spawn `cmd` with both stdout and stderr piped, stream every line through
 /// `tracing::info!` so it appears in concert-web's log, and return the exit
 /// status plus the last [`STDERR_TAIL_LINES`] lines of stderr joined by `\n`.
@@ -173,14 +204,7 @@ pub async fn run_with_logging(
     let stdout_task: JoinHandle<()> = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::info!(
-                target: "concert_tracker::jobs::child",
-                kind = kind,
-                concert_id = concert_id,
-                stream = "stdout",
-                "{}",
-                line
-            );
+            log_child_line!(kind, concert_id, "stdout", line);
         }
     });
 
@@ -189,14 +213,7 @@ pub async fn run_with_logging(
         let mut tail: std::collections::VecDeque<String> =
             std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::info!(
-                target: "concert_tracker::jobs::child",
-                kind = kind,
-                concert_id = concert_id,
-                stream = "stderr",
-                "{}",
-                line
-            );
+            log_child_line!(kind, concert_id, "stderr", line);
             if tail.len() == STDERR_TAIL_LINES {
                 tail.pop_front();
             }
