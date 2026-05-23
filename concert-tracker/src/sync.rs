@@ -1,10 +1,13 @@
+use std::collections::HashSet;
+
 use anyhow::{Context, Result};
-use chrono::{Datelike, Utc};
+use chrono::{Datelike, Month, Utc};
 use rusqlite::Connection;
 use tiny_desk_scraper::{fetch_archive_month, ConcertListing};
 
 use crate::db::{self, NewListing};
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct YearMonth {
     pub year: i32,
     pub month: u32,
@@ -28,6 +31,24 @@ impl YearMonth {
             year: parts[0].parse().context("Invalid year")?,
             month: parts[1].parse().context("Invalid month")?,
         })
+    }
+
+    pub fn from_date_str(s: &str) -> Option<Self> {
+        let parts: Vec<&str> = s.get(..7)?.split('-').collect();
+        if parts.len() != 2 {
+            return None;
+        }
+        Some(YearMonth {
+            year: parts[0].parse().ok()?,
+            month: parts[1].parse().ok()?,
+        })
+    }
+
+    pub fn display_label(&self) -> String {
+        let month_name = Month::try_from(self.month as u8)
+            .map(|m| m.name())
+            .unwrap_or("Unknown");
+        format!("{} {}", month_name, self.year)
     }
 
     pub fn previous(&self) -> Self {
@@ -59,11 +80,22 @@ impl YearMonth {
     }
 }
 
+/// Build the set of synced months from the database.
+pub fn synced_months_set(conn: &Connection) -> Result<HashSet<YearMonth>> {
+    let pairs = db::list_synced_months(conn)?;
+    Ok(pairs
+        .into_iter()
+        .map(|(y, m)| YearMonth { year: y, month: m })
+        .collect())
+}
+
 /// Fetch and upsert all concert listings for a given month.
 pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<usize> {
     let listings = fetch_archive_month(ym.year, ym.month, None)
         .with_context(|| format!("Failed to fetch archive for {}/{:02}", ym.year, ym.month))?;
-    upsert_listings(conn, &listings)
+    let count = upsert_listings(conn, &listings)?;
+    db::mark_month_synced(conn, ym.year, ym.month)?;
+    Ok(count)
 }
 
 /// Sync a range of months (inclusive on both ends).
@@ -162,6 +194,66 @@ mod tests {
         let prev = ym.previous();
         assert_eq!(prev.year, 2024);
         assert_eq!(prev.month, 5);
+    }
+
+    #[test]
+    fn year_month_from_date_str_iso_timestamp() {
+        let ym = YearMonth::from_date_str("2026-05-22T05:00:00-04:00").unwrap();
+        assert_eq!(ym.year, 2026);
+        assert_eq!(ym.month, 5);
+    }
+
+    #[test]
+    fn year_month_from_date_str_date_only() {
+        let ym = YearMonth::from_date_str("2025-11-13").unwrap();
+        assert_eq!(ym.year, 2025);
+        assert_eq!(ym.month, 11);
+    }
+
+    #[test]
+    fn year_month_from_date_str_too_short() {
+        assert!(YearMonth::from_date_str("2026").is_none());
+    }
+
+    #[test]
+    fn year_month_display_label() {
+        let ym = YearMonth {
+            year: 2026,
+            month: 5,
+        };
+        assert_eq!(ym.display_label(), "May 2026");
+    }
+
+    #[test]
+    fn year_month_display_label_january() {
+        let ym = YearMonth {
+            year: 2025,
+            month: 1,
+        };
+        assert_eq!(ym.display_label(), "January 2025");
+    }
+
+    #[test]
+    fn year_month_equality_and_hash() {
+        let a = YearMonth {
+            year: 2026,
+            month: 5,
+        };
+        let b = YearMonth {
+            year: 2026,
+            month: 5,
+        };
+        let c = YearMonth {
+            year: 2026,
+            month: 4,
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+
+        let mut set = std::collections::HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+        assert!(!set.contains(&c));
     }
 
     #[test]

@@ -24,3 +24,10 @@ CREATE TABLE IF NOT EXISTS concerts (
 
 CREATE INDEX IF NOT EXISTS idx_concerts_date ON concerts(concert_date DESC);
 CREATE INDEX IF NOT EXISTS idx_concerts_ignored ON concerts(ignored);
+
+CREATE TABLE IF NOT EXISTS synced_months (
+    year INTEGER NOT NULL,
+    month INTEGER NOT NULL,
+    synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (year, month)
+);

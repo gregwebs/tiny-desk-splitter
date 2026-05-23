@@ -263,12 +263,12 @@ pub fn download_job_from_concert(
 ) -> anyhow::Result<DownloadJob> {
     let album = concert
         .album
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("Concert {} has no album", concert.id))?;
+        .as_deref()
+        .unwrap_or(&concert.title);
     Ok(DownloadJob {
         concert_id: concert.id,
         source_url: concert.source_url.clone(),
-        album: album.clone(),
+        album: album.to_string(),
         working_dir: working_dir.to_path_buf(),
     })
 }

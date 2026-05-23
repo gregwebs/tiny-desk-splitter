@@ -15,7 +15,7 @@ use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
 use crate::jobs::{JobKey, JobKind};
 use crate::model::{Concert, DownloadStatus, SplitStatus, TrackInfo};
-use crate::sync::{sync_month, YearMonth};
+use crate::sync::{sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
 
 // ── Templates ────────────────────────────────────────────────────────────────
@@ -200,7 +200,7 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
     let can_download = matches!(
         &ds,
         DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
-    ) && c.album.is_some();
+    );
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
     let can_split = matches!(&ds, DownloadStatus::Downloaded)
         && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
@@ -247,6 +247,22 @@ fn render_row(c: &Concert) -> Result<String, askama::Error> {
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
+fn render_month_divider(ym: &YearMonth, show_sync: bool) -> String {
+    let label = ym.display_label();
+    let sync_button = if show_sync {
+        format!(
+            " <button hx-post='/sync/{}/{}' hx-target='#banner' hx-swap='innerHTML' hx-disabled-elt='this'>Sync</button>",
+            ym.year, ym.month
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "<div class='month-divider'><span class='month-label'>{}</span>{}</div>",
+        label, sync_button
+    )
+}
+
 pub async fn list(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -257,20 +273,61 @@ pub async fn list(
         .unwrap_or("")
         .to_string();
 
-    let concerts = {
+    let (concerts, synced, earliest_date) = {
         let conn = state.db.lock().unwrap();
-        db::list_concerts(&conn)?
+        let concerts = db::list_concerts(&conn)?;
+        let synced = synced_months_set(&conn)?;
+        let earliest = db::earliest_concert_date(&conn)?;
+        (concerts, synced, earliest)
     };
 
-    let rows: Vec<String> = concerts
+    let filtered: Vec<&Concert> = concerts
         .iter()
         .filter(|c| matches_filter(c, &filter))
-        .map(render_row)
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        .collect();
+
+    let current = YearMonth::current();
+
+    let earliest_ym = earliest_date
+        .as_deref()
+        .and_then(YearMonth::from_date_str)
+        .unwrap_or_else(|| current.clone());
+    let stop_at = earliest_ym.previous();
+
+    // Group filtered concerts by YYYY-MM
+    let mut by_month: HashMap<YearMonth, Vec<String>> = HashMap::new();
+    let mut no_date_rows: Vec<String> = Vec::new();
+    for c in &filtered {
+        let row = render_row(c)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        match c.concert_date.as_deref().and_then(YearMonth::from_date_str) {
+            Some(ym) => by_month.entry(ym).or_default().push(row),
+            None => no_date_rows.push(row),
+        }
+    }
+
+    // Walk from current month backward to (earliest - 1), building output
+    let mut items: Vec<String> = Vec::new();
+    let mut ym = current.clone();
+    loop {
+        let show_sync = ym == current || !synced.contains(&ym);
+        items.push(render_month_divider(&ym, show_sync));
+        if let Some(rows) = by_month.remove(&ym) {
+            items.extend(rows);
+        }
+        if ym == stop_at {
+            break;
+        }
+        ym = ym.previous();
+    }
+
+    if !no_date_rows.is_empty() {
+        items.push(r#"<div class="month-divider"><span class="month-label">Unknown date</span></div>"#.to_string());
+        items.extend(no_date_rows);
+    }
 
     Ok(ListTemplate {
-        rows,
+        rows: items,
         filters: FILTERS
             .iter()
             .map(|(s, l)| {
@@ -434,6 +491,29 @@ pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
+    // Ensure metadata is scraped before downloading so we have artist, album,
+    // set_list, preview image, etc.
+    {
+        let needs_scrape = {
+            let conn = state.db.lock().unwrap();
+            let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+            c.metadata_scraped_at.is_none()
+        };
+        if needs_scrape {
+            let db = state.db.clone();
+            let working_dir = state.jobs.working_dir.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let conn = db.lock().unwrap();
+                let c = db::get_concert(&conn, id)?;
+                ensure_scraped(&conn, c, |conn, url| {
+                    crate::scrape::scrape_url(conn, url, &working_dir)
+                });
+                Ok::<_, anyhow::Error>(())
+            })
+            .await;
+        }
+    }
+
     start_download(
         state.db.clone(),
         state.registry.clone(),
@@ -869,6 +949,39 @@ pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse
     );
 
     // Tell htmx to reload the page so the new concerts appear in the list.
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    Ok((
+        headers,
+        format!("Synced {} concerts for {}/{:02}", count, year, month),
+    ))
+}
+
+pub async fn sync_month_handler(
+    State(state): State<AppState>,
+    Path((year, month)): Path<(i32, u32)>,
+) -> Result<impl IntoResponse, AppError> {
+    tracing::info!("sync started for {}/{:02}", year, month);
+
+    let db = state.db.clone();
+    let ym = YearMonth {
+        year,
+        month,
+    };
+    let count = tokio::task::spawn_blocking(move || {
+        let conn = db.lock().unwrap();
+        sync_month(&conn, &ym)
+    })
+    .await
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))??;
+
+    tracing::info!(
+        "sync completed: {} concerts for {}/{:02}",
+        count,
+        year,
+        month
+    );
+
     let mut headers = HeaderMap::new();
     headers.insert("HX-Refresh", "true".parse().unwrap());
     Ok((

@@ -360,6 +360,35 @@ pub fn set_teaser(conn: &Connection, id: i64, teaser: &str) -> Result<()> {
     Ok(())
 }
 
+pub fn mark_month_synced(conn: &Connection, year: i32, month: u32) -> Result<()> {
+    conn.execute(
+        "INSERT OR REPLACE INTO synced_months (year, month) VALUES (?1, ?2)",
+        params![year, month],
+    )
+    .context("Failed to mark month synced")?;
+    Ok(())
+}
+
+pub fn list_synced_months(conn: &Connection) -> Result<Vec<(i32, u32)>> {
+    let mut stmt = conn.prepare("SELECT year, month FROM synced_months ORDER BY year, month")?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, i32>(0)?, row.get::<_, u32>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list synced months")?;
+    Ok(rows)
+}
+
+pub fn earliest_concert_date(conn: &Connection) -> Result<Option<String>> {
+    let result = conn
+        .query_row(
+            "SELECT MIN(concert_date) FROM concerts WHERE concert_date IS NOT NULL",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .context("Failed to get earliest concert date")?;
+    Ok(result)
+}
+
 pub fn get_concert_by_url(conn: &Connection, url: &str) -> Result<Option<Concert>> {
     let mut stmt = conn.prepare("SELECT * FROM concerts WHERE source_url = ?1")?;
     let mut iter = stmt.query_map(params![url], concert_from_row)?;
@@ -704,6 +733,48 @@ pub mod tests {
     fn seed_url(conn: &Connection, url: &str, title: &str) -> i64 {
         upsert_listing(conn, &listing(url, title)).unwrap();
         get_concert_by_url(conn, url).unwrap().unwrap().id
+    }
+
+    #[test]
+    fn mark_month_synced_and_list() {
+        let conn = open_in_memory().unwrap();
+        mark_month_synced(&conn, 2026, 5).unwrap();
+        mark_month_synced(&conn, 2026, 4).unwrap();
+        let months = list_synced_months(&conn).unwrap();
+        assert_eq!(months, vec![(2026, 4), (2026, 5)]);
+    }
+
+    #[test]
+    fn mark_month_synced_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        mark_month_synced(&conn, 2026, 5).unwrap();
+        mark_month_synced(&conn, 2026, 5).unwrap();
+        assert_eq!(list_synced_months(&conn).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn earliest_concert_date_returns_min() {
+        let conn = open_in_memory().unwrap();
+        upsert_listing(&conn, &listing("https://npr.org/c/1", "A")).unwrap();
+        upsert_listing(
+            &conn,
+            &NewListing {
+                source_url: "https://npr.org/c/2".to_string(),
+                title: "B".to_string(),
+                concert_date: Some("2020-01-15".to_string()),
+                teaser: None,
+            },
+        )
+        .unwrap();
+        let earliest = earliest_concert_date(&conn).unwrap();
+        assert_eq!(earliest, Some("2020-01-15".to_string()));
+    }
+
+    #[test]
+    fn earliest_concert_date_returns_none_when_empty() {
+        let conn = open_in_memory().unwrap();
+        let earliest = earliest_concert_date(&conn).unwrap();
+        assert!(earliest.is_none());
     }
 
     #[test]
