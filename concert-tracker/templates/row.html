@@ -28,7 +28,8 @@
           <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
         {% endif %}
         {% if can_download %}
-          <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML">Download</button>
+          <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML"
+                  hx-disabled-elt="this" hx-on::before-request="this.textContent='Starting…'">Download</button>
         {% endif %}
         {% if can_delete_download %}
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
