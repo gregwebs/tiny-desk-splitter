@@ -61,6 +61,8 @@ enum Command {
     BackfillEvents,
     /// Backfill track_delete events by comparing set_list against files on disk
     BackfillTrackDeletes,
+    /// Backfill split events with track names and count
+    BackfillSplitTracks,
 }
 
 fn main() -> Result<()> {
@@ -190,6 +192,11 @@ fn main() -> Result<()> {
         Command::BackfillTrackDeletes => {
             let count = concert_tracker::events::backfill_track_deletes(&conn, &cli.workdir)?;
             println!("Backfilled {} track_delete events", count);
+        }
+
+        Command::BackfillSplitTracks => {
+            let count = concert_tracker::events::backfill_split_tracks(&conn)?;
+            println!("Backfilled {} split events with track info", count);
         }
 
         Command::UpdateJsonTeasers => {

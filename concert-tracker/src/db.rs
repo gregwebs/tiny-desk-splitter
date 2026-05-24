@@ -270,8 +270,23 @@ pub fn mark_split_succeeded(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to mark split succeeded")?;
-    events::record_now(conn, id, Event::Split, None);
+    let json = split_tracks_json(conn, id);
+    events::record_now(conn, id, Event::Split, json.as_deref());
     Ok(())
+}
+
+fn split_tracks_json(conn: &Connection, concert_id: i64) -> Option<String> {
+    let concert = get_concert(conn, concert_id).ok()?;
+    if concert.set_list.is_empty() {
+        return None;
+    }
+    Some(
+        serde_json::json!({
+            "track_count": concert.set_list.len(),
+            "tracks": concert.set_list,
+        })
+        .to_string(),
+    )
 }
 
 pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {

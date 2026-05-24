@@ -131,7 +131,18 @@ pub fn backfill(conn: &Connection) -> anyhow::Result<usize> {
         }
 
         if let Some(ref at) = c.split_at {
-            record(conn, c.id, Event::Split, at, None);
+            let json = if c.set_list.is_empty() {
+                None
+            } else {
+                Some(
+                    serde_json::json!({
+                        "track_count": c.set_list.len(),
+                        "tracks": &c.set_list,
+                    })
+                    .to_string(),
+                )
+            };
+            record(conn, c.id, Event::Split, at, json.as_deref());
             count += 1;
         } else if let Some(ref at) = c.split_started_at {
             record(conn, c.id, Event::SplitStarted, at, None);
@@ -205,6 +216,47 @@ pub fn backfill_track_deletes(
     }
 
     tracing::info!("backfill_track_deletes: generated {} events", count);
+    Ok(count)
+}
+
+/// Backfill split events that are missing track info in their JSON payload.
+/// Updates existing rows in place rather than creating new events.
+pub fn backfill_split_tracks(conn: &Connection) -> anyhow::Result<usize> {
+    let mut event_stmt =
+        conn.prepare("SELECT id, concert_id FROM events WHERE event = 'split' AND json IS NULL")?;
+    let rows: Vec<(i64, i64)> = event_stmt
+        .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let mut count = 0;
+    for (event_id, concert_id) in &rows {
+        let concert = match crate::db::get_concert(conn, *concert_id) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        if concert.set_list.is_empty() {
+            continue;
+        }
+        let json = serde_json::json!({
+            "track_count": concert.set_list.len(),
+            "tracks": &concert.set_list,
+        })
+        .to_string();
+        conn.execute(
+            "UPDATE events SET json = ?1 WHERE id = ?2",
+            rusqlite::params![json, event_id],
+        )?;
+        tracing::debug!(
+            "backfill_split_tracks: event {} concert {} -> {} tracks",
+            event_id,
+            concert_id,
+            concert.set_list.len()
+        );
+        count += 1;
+    }
+
+    tracing::info!("backfill_split_tracks: updated {} events", count);
     Ok(count)
 }
 
@@ -638,5 +690,154 @@ mod tests {
         // Idempotent
         let count2 = backfill_track_deletes(&conn, dir.path()).unwrap();
         assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn split_event_includes_track_json() {
+        let conn = setup();
+        let id = seed(&conn);
+
+        crate::db::update_metadata(
+            &conn,
+            id,
+            &crate::db::MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+                description: None,
+                set_list: vec!["Song A".to_string(), "Song B".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        conn.execute("DELETE FROM events", []).unwrap();
+
+        crate::db::try_mark_download_started(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::try_mark_split_started(&conn, id).unwrap();
+        crate::db::mark_split_succeeded(&conn, id).unwrap();
+
+        let json = event_json_for(&conn, id, "split").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["track_count"], 2);
+        assert_eq!(v["tracks"][0], "Song A");
+        assert_eq!(v["tracks"][1], "Song B");
+    }
+
+    #[test]
+    fn split_event_no_json_when_empty_set_list() {
+        let conn = setup();
+        let id = seed(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+
+        crate::db::try_mark_download_started(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::try_mark_split_started(&conn, id).unwrap();
+        crate::db::mark_split_succeeded(&conn, id).unwrap();
+
+        let json = event_json_for(&conn, id, "split");
+        assert!(json.is_none());
+    }
+
+    #[test]
+    fn backfill_split_tracks_updates_null_json() {
+        let conn = setup();
+        let id = seed(&conn);
+
+        crate::db::update_metadata(
+            &conn,
+            id,
+            &crate::db::MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+                description: None,
+                set_list: vec!["Track 1".to_string(), "Track 2".to_string(), "Track 3".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+
+        // Simulate a split event with no json (the old behavior)
+        conn.execute("DELETE FROM events", []).unwrap();
+        record(&conn, id, Event::Split, "2024-06-01T12:00:00Z", None);
+
+        let count = backfill_split_tracks(&conn).unwrap();
+        assert_eq!(count, 1);
+
+        let json = event_json_for(&conn, id, "split").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["track_count"], 3);
+        assert_eq!(v["tracks"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn backfill_split_tracks_is_idempotent() {
+        let conn = setup();
+        let id = seed(&conn);
+
+        crate::db::update_metadata(
+            &conn,
+            id,
+            &crate::db::MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+                description: None,
+                set_list: vec!["Track 1".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+
+        conn.execute("DELETE FROM events", []).unwrap();
+        record(&conn, id, Event::Split, "2024-06-01T12:00:00Z", None);
+
+        let count1 = backfill_split_tracks(&conn).unwrap();
+        assert_eq!(count1, 1);
+
+        let count2 = backfill_split_tracks(&conn).unwrap();
+        assert_eq!(count2, 0);
+    }
+
+    #[test]
+    fn backfill_split_tracks_skips_empty_set_list() {
+        let conn = setup();
+        let id = seed(&conn);
+
+        conn.execute("DELETE FROM events", []).unwrap();
+        record(&conn, id, Event::Split, "2024-06-01T12:00:00Z", None);
+
+        let count = backfill_split_tracks(&conn).unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn backfill_generates_split_event_with_tracks() {
+        let conn = setup();
+        let id = seed(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+
+        crate::db::update_metadata(
+            &conn,
+            id,
+            &crate::db::MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Album".to_string(),
+                description: None,
+                set_list: vec!["Song X".to_string(), "Song Y".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        crate::db::try_mark_download_started(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::try_mark_split_started(&conn, id).unwrap();
+        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        conn.execute("DELETE FROM events", []).unwrap();
+
+        backfill(&conn).unwrap();
+
+        let json = event_json_for(&conn, id, "split").unwrap();
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["track_count"], 2);
+        assert_eq!(v["tracks"][0], "Song X");
     }
 }
