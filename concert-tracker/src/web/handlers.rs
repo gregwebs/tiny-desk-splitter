@@ -966,36 +966,6 @@ pub async fn cancel_job(
     Ok((headers, "").into_response())
 }
 
-pub async fn sync_now(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
-    let ym = YearMonth::current();
-    let (year, month) = (ym.year, ym.month);
-    tracing::info!("sync started for {}/{:02}", year, month);
-
-    // reqwest::blocking cannot run inside a tokio runtime; offload to a blocking thread.
-    let db = state.db.clone();
-    let count = tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        sync_month(&conn, &ym)
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))??;
-
-    tracing::info!(
-        "sync completed: {} concerts for {}/{:02}",
-        count,
-        year,
-        month
-    );
-
-    // Tell htmx to reload the page so the new concerts appear in the list.
-    let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((
-        headers,
-        format!("Synced {} concerts for {}/{:02}", count, year, month),
-    ))
-}
-
 pub async fn sync_month_handler(
     State(state): State<AppState>,
     Path((year, month)): Path<(i32, u32)>,

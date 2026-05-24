@@ -49,7 +49,6 @@ pub fn router(state: AppState) -> Router {
         .route("/jobs", get(handlers::jobs_list))
         .route("/jobs/count", get(handlers::jobs_count))
         .route("/jobs/:id/cancel/:kind", post(handlers::cancel_job))
-        .route("/sync", post(handlers::sync_now))
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .layer(TraceLayer::new_for_http())

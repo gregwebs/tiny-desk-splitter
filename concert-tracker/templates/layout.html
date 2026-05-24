@@ -19,10 +19,15 @@
 
     /* ── Header ── */
     header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: #f7f7f7;
       display: flex;
       align-items: center;
       gap: 1rem;
-      margin-bottom: 1.5rem;
+      margin-bottom: 0.5rem;
+      padding-top: 0.5rem;
       padding-bottom: 0.75rem;
       border-bottom: 2px solid #1a1a1a;
     }
@@ -30,7 +35,18 @@
     #banner { font-size: 0.85em; color: #2a7a2a; }
 
     /* ── Filter chips ── */
-    .filter-chips { margin-bottom: 1.25rem; display: flex; flex-wrap: wrap; gap: 0.4rem; }
+    .filter-chips {
+      position: sticky;
+      top: 3rem;
+      z-index: 99;
+      background: #f7f7f7;
+      padding-top: 0.4rem;
+      padding-bottom: 0.5rem;
+      margin-bottom: 0.75rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+    }
     .filter-chips a {
       display: inline-block;
       padding: 0.3rem 0.8rem;
@@ -228,11 +244,6 @@
 <body>
   <header>
     <h1>Tiny Desk Concerts</h1>
-    <button class="btn-primary" hx-post="/sync" hx-target="#banner" hx-swap="innerHTML"
-            hx-disabled-elt="this" hx-indicator="#sync-indicator">Sync</button>
-    <span id="sync-indicator" class="htmx-indicator sync-indicator">
-      <span class="spinner"></span>Syncing…
-    </span>
     <a href="/jobs" style="font-size: 0.85em; text-decoration: none; font-weight: 500;">Jobs<span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></a>
     <span id="banner"></span>
   </header>
