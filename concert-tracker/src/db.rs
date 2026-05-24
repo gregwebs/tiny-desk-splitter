@@ -3,6 +3,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection, Row};
 use std::path::Path;
 
+use crate::events::{self, Event};
 use crate::model::{Concert, ErrorEntry, Musician};
 
 const MIGRATION: &str = include_str!("../migrations/0001_init.sql");
@@ -42,7 +43,9 @@ fn configure(conn: &Connection) -> Result<()> {
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION)
-        .context("Failed to run migrations")
+        .context("Failed to run migrations")?;
+    events::backfill(conn).context("Failed to backfill events")?;
+    Ok(())
 }
 
 fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
@@ -90,6 +93,15 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
 }
 
 pub fn upsert_listing(conn: &Connection, listing: &NewListing) -> Result<()> {
+    let is_new = conn
+        .query_row(
+            "SELECT COUNT(*) FROM concerts WHERE source_url = ?1",
+            params![listing.source_url],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        == 0;
+
     conn.execute(
         "INSERT INTO concerts (source_url, title, concert_date, teaser)
          VALUES (?1, ?2, ?3, ?4)
@@ -105,6 +117,12 @@ pub fn upsert_listing(conn: &Connection, listing: &NewListing) -> Result<()> {
         ],
     )
     .context("Failed to upsert listing")?;
+
+    if is_new {
+        let id = conn.last_insert_rowid();
+        events::record_now(conn, id, Event::Import, None);
+    }
+
     Ok(())
 }
 
@@ -125,10 +143,11 @@ pub fn update_metadata(conn: &Connection, id: i64, update: &MetadataUpdate) -> R
         ],
     )
     .context("Failed to update metadata")?;
+    events::record_now(conn, id, Event::Scraped, None);
     Ok(())
 }
 
-pub fn toggle_ignored(conn: &Connection, id: i64) -> Result<()> {
+pub fn toggle_ignored(conn: &Connection, id: i64) -> Result<bool> {
     conn.execute(
         "UPDATE concerts SET
              ignored = CASE WHEN ignored = 0 THEN 1 ELSE 0 END,
@@ -137,10 +156,25 @@ pub fn toggle_ignored(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to toggle ignored")?;
-    Ok(())
+
+    let new_ignored: bool = conn
+        .query_row(
+            "SELECT ignored FROM concerts WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0).map(|v| v != 0),
+        )
+        .context("Failed to read new ignored value")?;
+
+    if new_ignored {
+        events::record_now(conn, id, Event::Ignored, None);
+    } else {
+        events::record_now(conn, id, Event::IgnoredDelete, None);
+    }
+
+    Ok(new_ignored)
 }
 
-pub fn toggle_wanted(conn: &Connection, id: i64) -> Result<()> {
+pub fn toggle_wanted(conn: &Connection, id: i64) -> Result<bool> {
     conn.execute(
         "UPDATE concerts SET
              wanted  = CASE WHEN wanted = 0 THEN 1 ELSE 0 END,
@@ -149,7 +183,22 @@ pub fn toggle_wanted(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to toggle wanted")?;
-    Ok(())
+
+    let new_wanted: bool = conn
+        .query_row(
+            "SELECT wanted FROM concerts WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, i64>(0).map(|v| v != 0),
+        )
+        .context("Failed to read new wanted value")?;
+
+    if new_wanted {
+        events::record_now(conn, id, Event::Wanted, None);
+    } else {
+        events::record_now(conn, id, Event::WantedDelete, None);
+    }
+
+    Ok(new_wanted)
 }
 
 pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
@@ -170,6 +219,9 @@ pub fn try_mark_download_started(conn: &Connection, id: i64) -> Result<bool> {
             params![id],
         )
         .context("Failed to mark download started")?;
+    if rows > 0 {
+        events::record_now(conn, id, Event::DownloadStarted, None);
+    }
     Ok(rows > 0)
 }
 
@@ -180,6 +232,7 @@ pub fn mark_download_succeeded(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to mark download succeeded")?;
+    events::record_now(conn, id, Event::Downloaded, None);
     Ok(())
 }
 
@@ -190,6 +243,8 @@ pub fn mark_download_failed(conn: &Connection, id: i64, error: &str) -> Result<(
         params![id],
     )
     .context("Failed to clear download_started_at")?;
+    let json = serde_json::json!({"error": error}).to_string();
+    events::record_now(conn, id, Event::DownloadError, Some(&json));
     Ok(())
 }
 
@@ -202,6 +257,9 @@ pub fn try_mark_split_started(conn: &Connection, id: i64) -> Result<bool> {
             params![id],
         )
         .context("Failed to mark split started")?;
+    if rows > 0 {
+        events::record_now(conn, id, Event::SplitStarted, None);
+    }
     Ok(rows > 0)
 }
 
@@ -212,6 +270,7 @@ pub fn mark_split_succeeded(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to mark split succeeded")?;
+    events::record_now(conn, id, Event::Split, None);
     Ok(())
 }
 
@@ -222,6 +281,8 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
         params![id],
     )
     .context("Failed to clear split_started_at")?;
+    let json = serde_json::json!({"error": error}).to_string();
+    events::record_now(conn, id, Event::SplitError, Some(&json));
     Ok(())
 }
 
@@ -234,6 +295,7 @@ pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to clear download state")?;
+    events::record_now(conn, id, Event::DownloadDelete, None);
     Ok(())
 }
 
@@ -244,6 +306,7 @@ pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to clear split state")?;
+    events::record_now(conn, id, Event::SplitDelete, None);
     Ok(())
 }
 
@@ -321,6 +384,17 @@ pub fn list_in_progress(conn: &Connection) -> Result<Vec<Concert>> {
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("Failed to list in-progress concerts")?;
     Ok(concerts)
+}
+
+pub fn count_active_jobs(conn: &Connection) -> Result<usize> {
+    let count: usize = conn.query_row(
+        "SELECT
+           (SELECT COUNT(*) FROM concerts WHERE download_started_at IS NOT NULL AND downloaded_at IS NULL)
+         + (SELECT COUNT(*) FROM concerts WHERE split_started_at IS NOT NULL AND split_at IS NULL)",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(count)
 }
 
 pub fn list_concerts(conn: &Connection) -> Result<Vec<Concert>> {
@@ -822,6 +896,36 @@ pub mod tests {
         let ids: Vec<i64> = in_progress.iter().map(|c| c.id).collect();
         assert!(ids.contains(&id1));
         assert!(ids.contains(&id2));
+    }
+
+    #[test]
+    fn count_active_jobs_counts_downloading_and_splitting() {
+        let conn = open_in_memory().unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 0);
+
+        let id1 = seed_url(&conn, "https://npr.org/c/1", "Concert A");
+        let id2 = seed_url(&conn, "https://npr.org/c/2", "Concert B");
+        let id3 = seed_url(&conn, "https://npr.org/c/3", "Concert C");
+
+        try_mark_download_started(&conn, id1).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 1);
+
+        try_mark_download_started(&conn, id2).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 2);
+
+        mark_download_succeeded(&conn, id2).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 1);
+
+        try_mark_split_started(&conn, id2).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 2);
+
+        // Completed jobs should not be counted
+        mark_download_succeeded(&conn, id1).unwrap();
+        mark_split_succeeded(&conn, id2).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 0);
+
+        // id3 remains idle throughout
+        let _ = id3;
     }
 }
 

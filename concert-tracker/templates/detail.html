@@ -89,6 +89,24 @@
 </ul>
 {% endif %}
 
+{% if !events.is_empty() %}
+<h3>Events</h3>
+<table class="events-table">
+  <thead>
+    <tr><th>Time</th><th>Event</th><th>Details</th></tr>
+  </thead>
+  <tbody>
+    {% for e in events.iter() %}
+    <tr>
+      <td>{{ e.at }}</td>
+      <td><span class="badge badge-event">{{ e.event }}</span></td>
+      <td>{% if let Some(j) = e.json.as_ref() %}{{ j }}{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
 <p style="font-size:0.8em;color:#888">
   <a href="{{ concert.source_url }}" target="_blank">NPR page</a>
   | First seen: {{ concert.first_seen_at }}

@@ -75,6 +75,7 @@ struct DetailTemplate {
     notes_value: String,
     preview_url: Option<String>,
     tracks: Vec<TrackInfo>,
+    events: Vec<crate::events::EventRow>,
 }
 
 #[derive(Template)]
@@ -395,6 +396,10 @@ pub async fn detail(
         .as_deref()
         .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
         .unwrap_or_default();
+    let events = {
+        let conn = state.db.lock().unwrap();
+        crate::events::list_for_concert(&conn, id)
+    };
 
     Ok(DetailTemplate {
         concert_status: concert.concert_status().slug().to_string(),
@@ -410,6 +415,7 @@ pub async fn detail(
         notes_value,
         preview_url,
         tracks,
+        events,
         concert,
     })
 }
@@ -696,6 +702,11 @@ pub async fn listen(
         }
     };
 
+    if render_state == "success" {
+        let conn = state.db.lock().unwrap();
+        crate::events::record_now(&conn, id, crate::events::Event::Listen, None);
+    }
+
     ListenButtonTemplate {
         id,
         state: render_state,
@@ -770,6 +781,12 @@ pub async fn listen_track(
         }
     };
 
+    if render_state == "success" {
+        let conn = state.db.lock().unwrap();
+        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
+        crate::events::record_now(&conn, id, crate::events::Event::Listen, Some(&json));
+    }
+
     TrackListenButtonTemplate {
         id,
         index: idx,
@@ -807,6 +824,12 @@ pub async fn delete_track(
                 tracing::info!("delete_track: removed {} for concert {}", path.display(), id);
             }
         }
+    }
+
+    {
+        let conn = state.db.lock().unwrap();
+        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
+        crate::events::record_now(&conn, id, crate::events::Event::TrackDelete, Some(&json));
     }
 
     let remaining_tracks = crate::model::list_tracks(
@@ -885,6 +908,22 @@ pub async fn jobs_list(
         .collect();
 
     Ok(JobsTemplate { jobs })
+}
+
+pub async fn jobs_count(
+    State(state): State<AppState>,
+) -> Result<String, AppError> {
+    let count = {
+        let conn = state.db.lock().unwrap();
+        db::count_active_jobs(&conn)?
+    };
+    if count > 0 {
+        Ok(format!(
+            " <span class=\"badge badge-downloading\">{count}</span>"
+        ))
+    } else {
+        Ok(String::new())
+    }
 }
 
 pub async fn cancel_job(

@@ -25,6 +25,17 @@ CREATE TABLE IF NOT EXISTS concerts (
 CREATE INDEX IF NOT EXISTS idx_concerts_date ON concerts(concert_date DESC);
 CREATE INDEX IF NOT EXISTS idx_concerts_ignored ON concerts(ignored);
 
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concert_id INTEGER NOT NULL,
+    event TEXT NOT NULL,
+    at TEXT NOT NULL,
+    json TEXT,
+    inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updates TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_concert_id ON events(concert_id);
+
 CREATE TABLE IF NOT EXISTS synced_months (
     year INTEGER NOT NULL,
     month INTEGER NOT NULL,

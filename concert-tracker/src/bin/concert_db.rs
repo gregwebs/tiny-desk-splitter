@@ -57,6 +57,10 @@ enum Command {
     BackfillTeasers,
     /// Update concert JSON files on disk to include teasers from the database
     UpdateJsonTeasers,
+    /// Backfill the events table from existing concert data
+    BackfillEvents,
+    /// Backfill track_delete events by comparing set_list against files on disk
+    BackfillTrackDeletes,
 }
 
 fn main() -> Result<()> {
@@ -176,6 +180,16 @@ fn main() -> Result<()> {
                 }
             }
             println!("Backfilled {} teasers ({} failed/missing)", success, failed);
+        }
+
+        Command::BackfillEvents => {
+            let count = concert_tracker::events::backfill(&conn)?;
+            println!("Backfilled {} events", count);
+        }
+
+        Command::BackfillTrackDeletes => {
+            let count = concert_tracker::events::backfill_track_deletes(&conn, &cli.workdir)?;
+            println!("Backfilled {} track_delete events", count);
         }
 
         Command::UpdateJsonTeasers => {
