@@ -395,21 +395,6 @@ fn sanitize_album_for_dir(album: &str) -> String {
 }
 
 pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
-    // Create output filename based on artist name
-    let sanitized_artist_name = concert_info
-        .artist
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .replace(" ", "_")
-        .to_lowercase();
-
-    if sanitized_artist_name.is_empty() {
-        return Err(anyhow::anyhow!("Artist name is empty"));
-    }
-
-    // Place metadata inside `concerts/<sanitized-album>/<artist-slug>.json`
-    // so the JSON lives alongside the mp4, preview, and split tracks.
     let concert_dir =
         std::path::Path::new("concerts").join(sanitize_album_for_dir(&concert_info.album));
     fs::create_dir_all(&concert_dir).with_context(|| {
@@ -418,7 +403,7 @@ pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
             concert_dir.display()
         )
     })?;
-    let output_file = concert_dir.join(format!("{}.json", sanitized_artist_name));
+    let output_file = concert_dir.join("concert.json");
 
     let json =
         serde_json::to_string_pretty(&concert_info).context("Failed to serialize concert info")?;

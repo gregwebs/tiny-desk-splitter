@@ -100,14 +100,14 @@ fn main() -> Result<()> {
             });
         }
 
-        // Preview at previews/{sanitized}.jpg → target/{sanitized}.jpg
+        // Preview at previews/{sanitized}.jpg → target/preview.jpg
         let preview = working_dir
             .join("previews")
             .join(format!("{}.jpg", sanitize_album(album)));
         if preview.is_file() {
             plan.push(Move {
                 src: preview,
-                dst: target.join(format!("{}.jpg", sanitize_album(album))),
+                dst: target.join("preview.jpg"),
             });
         }
 
@@ -130,9 +130,7 @@ fn main() -> Result<()> {
         }
     }
 
-    // JSON metadata at workspace root → target/{original-filename}.json
-    // The filename uses an artist slug (e.g. `air.json`), not the album, so we
-    // read each file to learn its album.
+    // JSON metadata at workspace root → target/concert.json
     let json_moves = plan_json_moves(&working_dir)?;
     plan.extend(json_moves);
 
@@ -141,12 +139,11 @@ fn main() -> Result<()> {
         if mv.src == mv.dst {
             continue;
         }
-        // JSON-specific conflict resolution: if the in-dir file is a
+        // JSON-specific conflict resolution: if the in-dir concert.json is a
         // splitter-augmented copy (has a `timestamps` field), rename it to
-        // `<stem>-timestamps.json` so the richer scraper JSON can take its
-        // canonical name.
+        // `timestamps.json` so the richer scraper JSON can take the canonical name.
         if mv.dst.exists() && is_json_path(&mv.dst) && is_splitter_timestamps_json(&mv.dst) {
-            let renamed = rename_with_suffix(&mv.dst, "-timestamps");
+            let renamed = mv.dst.with_file_name("timestamps.json");
             if renamed.exists() {
                 tracing::warn!(
                     "skip (both {} and {} already exist)",
@@ -269,17 +266,6 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-/// Slugify an artist name the way the standalone scraper does, so generated
-/// files share its naming convention (`Brandi Carlile` → `brandi_carlile`).
-fn artist_slug(artist: &str) -> String {
-    artist
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .replace(' ', "_")
-        .to_lowercase()
-}
-
 #[derive(Serialize)]
 struct ScraperJson<'a> {
     artist: &'a str,
@@ -303,9 +289,9 @@ struct JsonMusician<'a> {
     instruments: &'a [String],
 }
 
-/// For each concert with album + artist, write `concerts/<album>/<slug>.json`
-/// from DB metadata if neither that file nor any other non-`-timestamps.json`
-/// already exists. Returns count of files written.
+/// For each concert with album + artist, write `concerts/<album>/concert.json`
+/// from DB metadata if the file doesn't already exist. Returns count of files
+/// written.
 fn backfill_metadata_json(
     concerts: &[Concert],
     working_dir: &Path,
@@ -320,14 +306,7 @@ fn backfill_metadata_json(
         if !dir.is_dir() {
             continue;
         }
-        if has_canonical_metadata_json(&dir)? {
-            continue;
-        }
-        let slug = artist_slug(artist);
-        if slug.is_empty() {
-            continue;
-        }
-        let dst = dir.join(format!("{}.json", slug));
+        let dst = dir.join("concert.json");
         if dst.exists() {
             continue;
         }
@@ -359,30 +338,6 @@ fn backfill_metadata_json(
         count += 1;
     }
     Ok(count)
-}
-
-/// True if `dir` contains any `*.json` file that is NOT a `-timestamps.json`
-/// (i.e. an existing canonical scraper-style metadata file).
-fn has_canonical_metadata_json(dir: &Path) -> Result<bool> {
-    let entries = fs::read_dir(dir).with_context(|| format!("read_dir {}", dir.display()))?;
-    for e in entries {
-        let e = e?;
-        let path = e.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
-            continue;
-        };
-        if !name.ends_with(".json") {
-            continue;
-        }
-        if name.ends_with("-timestamps.json") {
-            continue;
-        }
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 /// Walk every file directly under `src` and queue a move to `dst/{filename}`.
@@ -456,7 +411,7 @@ fn plan_json_moves(working_dir: &Path) -> Result<Vec<Move>> {
             tracing::warn!("skip {}: no `album` field", path.display());
             continue;
         };
-        let dst = concert_dir(working_dir, &album).join(name);
+        let dst = concert_dir(working_dir, &album).join("concert.json");
         moves.push(Move { src: path, dst });
     }
     Ok(moves)
@@ -488,23 +443,6 @@ fn is_splitter_timestamps_json(path: &Path) -> bool {
         return false;
     };
     matches!(probe.timestamps, Some(serde_json::Value::Array(ref a)) if !a.is_empty())
-}
-
-/// Return `path` with `suffix` inserted before the extension.
-/// `/foo/bar/air.json` + `-timestamps` → `/foo/bar/air-timestamps.json`.
-fn rename_with_suffix(path: &Path, suffix: &str) -> PathBuf {
-    let parent = path.parent().unwrap_or(Path::new(""));
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or_default();
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let new_name = if ext.is_empty() {
-        format!("{}{}", stem, suffix)
-    } else {
-        format!("{}{}.{}", stem, suffix, ext)
-    };
-    parent.join(new_name)
 }
 
 /// Cache for resolving album → directory from JSON metadata. Currently unused
@@ -555,47 +493,8 @@ mod tests {
             moves[0].dst,
             wd.join("concerts")
                 .join("Air Tiny Desk Concert")
-                .join("air.json")
+                .join("concert.json")
         );
-    }
-
-    #[test]
-    fn rename_with_suffix_inserts_before_extension() {
-        assert_eq!(
-            rename_with_suffix(Path::new("/a/b/air.json"), "-timestamps"),
-            PathBuf::from("/a/b/air-timestamps.json")
-        );
-        assert_eq!(
-            rename_with_suffix(Path::new("noext"), "-x"),
-            PathBuf::from("noext-x")
-        );
-    }
-
-    #[test]
-    fn artist_slug_matches_scraper_convention() {
-        assert_eq!(artist_slug("Brandi Carlile"), "brandi_carlile");
-        // Non-alphanumeric (hyphens, apostrophes) are dropped, not replaced.
-        assert_eq!(
-            artist_slug("Don Was and the Pan-Detroit Ensemble"),
-            "don_was_and_the_pandetroit_ensemble"
-        );
-        assert_eq!(artist_slug("Ghost-Note"), "ghostnote");
-        assert_eq!(artist_slug("KestheBand"), "kestheband");
-    }
-
-    #[test]
-    fn has_canonical_metadata_json_ignores_timestamps_only() {
-        let td = TempDir::new().unwrap();
-        let only_ts = td.path().join("only_ts");
-        fs::create_dir_all(&only_ts).unwrap();
-        write(&only_ts.join("foo-timestamps.json"), b"{}");
-        assert!(!has_canonical_metadata_json(&only_ts).unwrap());
-
-        let with_canonical = td.path().join("with_canonical");
-        fs::create_dir_all(&with_canonical).unwrap();
-        write(&with_canonical.join("foo-timestamps.json"), b"{}");
-        write(&with_canonical.join("foo.json"), b"{}");
-        assert!(has_canonical_metadata_json(&with_canonical).unwrap());
     }
 
     #[test]

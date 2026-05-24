@@ -1,3 +1,16 @@
+## Concert Files
+
+Each concert lives in `concerts/<album>/` with these metadata files:
+
+| File | Description |
+|---|---|
+| `concert.json` | Scraped metadata (artist, set list, musicians, source URL) |
+| `timestamps.json` | Splitter output with detected song timestamps |
+| `preview.jpg` | Thumbnail image from NPR |
+
+The directory also contains the full concert video (`<album>.mp4`) and, after
+splitting, per-song tracks (`<Song Title>.mp4` / `.m4a`).
+
 ## Sync
 
 NPR concerts are scraped and synced to a local SQLite DB in a concerts table.

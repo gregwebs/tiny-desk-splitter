@@ -251,24 +251,14 @@ fn backfill_teaser(conn: &rusqlite::Connection, concert: &Concert) -> Result<boo
     }
 }
 
-fn sanitize_artist_for_filename(artist: &str) -> String {
-    artist
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .replace(' ', "_")
-        .to_lowercase()
-}
-
 fn update_json_teaser(
     workdir: &std::path::Path,
     album: &str,
-    artist: &str,
+    _artist: &str,
     teaser: &str,
 ) -> Result<bool> {
     let dir = workdir.join("concerts").join(sanitize_album(album));
-    let filename = format!("{}.json", sanitize_artist_for_filename(artist));
-    let path = dir.join(&filename);
+    let path = dir.join("concert.json");
     if !path.exists() {
         return Ok(false);
     }

@@ -14,7 +14,7 @@ use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
 use crate::jobs::{JobKey, JobKind};
-use crate::model::{Concert, DownloadStatus, SplitStatus, TrackInfo};
+use crate::model::{concert_dir, Concert, DownloadStatus, SplitStatus, TrackInfo};
 use crate::sync::{sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
 
@@ -429,6 +429,16 @@ pub async fn ignore(
         db::toggle_ignored(&conn, id)?;
         db::get_concert(&conn, id)?
     };
+    if concert.ignored {
+        if let Some(album) = concert.album.as_deref() {
+            let preview = concert_dir(&state.jobs.working_dir, album).join("preview.jpg");
+            if let Err(e) = std::fs::remove_file(&preview) {
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    tracing::warn!("failed to delete preview image {}: {}", preview.display(), e);
+                }
+            }
+        }
+    }
     render_row(&concert).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 

@@ -770,3 +770,53 @@ async fn detail_page_renders_set_list_and_state() {
     assert!(html.contains("Song Two"));
     assert!(html.contains("Detail Artist"));
 }
+
+#[tokio::test]
+async fn ignore_deletes_preview_image() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Test Album";
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let preview = cd.join("preview.jpg");
+    std::fs::write(&preview, b"fake jpg").unwrap();
+    assert!(preview.exists());
+
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/ign", album);
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "Test".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    let state = AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        jobs: JobConfig {
+            working_dir: workdir.path().to_path_buf(),
+            download_cmd: Arc::new(|_| Command::new("true")),
+            split_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/ignore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!preview.exists(), "preview.jpg should be deleted when concert is ignored");
+}

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use tiny_desk_scraper::{fetch_bytes, fetch_html, parse_concert_info, ConcertInfo};
 
 use crate::db::{self, MetadataUpdate, NewListing};
-use crate::model::{concert_dir, sanitize_album, Musician};
+use crate::model::{concert_dir, Musician};
 
 /// Fetch a concert URL, parse metadata, upsert into the database, and save
 /// the preview thumbnail into the concert's directory. Thumbnail download is
@@ -36,7 +36,7 @@ pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()
 
 /// Path where a concert's preview image lives on disk.
 pub fn preview_image_path(working_dir: &Path, album: &str) -> PathBuf {
-    concert_dir(working_dir, album).join(format!("{}.jpg", sanitize_album(album)))
+    concert_dir(working_dir, album).join("preview.jpg")
 }
 
 fn save_preview_image(url: &str, dest: &Path) -> Result<()> {
@@ -93,19 +93,17 @@ mod tests {
     use super::*;
 
     #[test]
-    fn preview_image_path_uses_sanitized_album() {
+    fn preview_image_path_uses_fixed_name() {
         let p = preview_image_path(Path::new("/wd"), "Some Album: Tiny Desk Concert");
         assert_eq!(
             p,
-            PathBuf::from(
-                "/wd/concerts/Some Album Tiny Desk Concert/Some Album Tiny Desk Concert.jpg"
-            )
+            PathBuf::from("/wd/concerts/Some Album Tiny Desk Concert/preview.jpg")
         );
     }
 
     #[test]
     fn preview_image_path_handles_plain_album() {
         let p = preview_image_path(Path::new("/wd"), "Plain");
-        assert_eq!(p, PathBuf::from("/wd/concerts/Plain/Plain.jpg"));
+        assert_eq!(p, PathBuf::from("/wd/concerts/Plain/preview.jpg"));
     }
 }

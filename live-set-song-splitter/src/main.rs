@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::BufReader;
+use std::path::Path;
 
 /// Output format for extracted segments
 #[derive(Parser, Debug, Clone, Copy, ValueEnum)]
@@ -91,83 +92,26 @@ struct SongSegment {
     pub segment: AudioSegment,
 }
 
-/// Slugify an artist the same way the scraper does
-/// (`Brandi Carlile` → `brandi_carlile`). Non-alphanumeric, non-whitespace
-/// characters are dropped, spaces become underscores, and the whole string is
-/// lowercased. Returns `None` if the result is empty.
-fn artist_slug(artist: &str) -> Option<String> {
-    let s: String = artist
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
-        .collect::<String>()
-        .replace(' ', "_")
-        .to_lowercase();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
-}
-
-/// Stem used as the base filename for splitter-written metadata. Prefers the
-/// artist slug (so output pairs with the scraper's `{slug}.json`). Falls back
-/// to the input file's stem if the artist is missing/empty (e.g. the input
-/// JSON had no usable artist field).
-fn output_stem(metadata: &concert::SetMetaData, input_path: &str) -> String {
-    if let Some(slug) = artist_slug(&metadata.artist) {
-        return slug;
-    }
-    std::path::Path::new(input_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("concert")
-        .to_string()
-}
-
 /// Write the two metadata JSON files into `output_dir`:
-///   - `{stem}.json` (canonical) — a verbatim copy of the input metadata, only
-///     if no canonical metadata file already lives in the directory.
-///   - `{stem}-timestamps.json` — the timestamps-augmented concert struct.
-/// `{stem}` is derived from the artist (see `output_stem`), so the splitter
-/// produces predictable filenames regardless of whether it was invoked with a
-/// well-named JSON or a temp file (as concert-tracker does).
+///   - `concert.json` — a verbatim copy of the input metadata, only if not
+///     already present.
+///   - `timestamps.json` — the timestamps-augmented concert struct.
 fn write_concert_json_outputs(
     output_dir: &str,
     input_path: &str,
     concert: &Concert,
 ) -> Result<()> {
-    let stem = output_stem(&concert.metadata, input_path);
-
-    let canonical_path = format!("{}/{}.json", output_dir, stem);
-    if !canonical_metadata_present(output_dir)? {
+    let canonical_path = format!("{}/concert.json", output_dir);
+    if !Path::new(&canonical_path).exists() {
         fs::copy(input_path, &canonical_path).with_context(|| {
             format!("Failed to copy {} -> {}", input_path, canonical_path)
         })?;
     }
 
-    let timestamps_path = format!("{}/{}-timestamps.json", output_dir, stem);
+    let timestamps_path = format!("{}/timestamps.json", output_dir);
     fs::write(&timestamps_path, serde_json::to_string_pretty(concert)?)
         .with_context(|| format!("Failed to write {}", timestamps_path))?;
     Ok(())
-}
-
-/// True if `dir` already contains any `*.json` file that is NOT a
-/// `*-timestamps.json` (i.e. a canonical metadata file is present and should
-/// not be clobbered).
-fn canonical_metadata_present(dir: &str) -> Result<bool> {
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(false),
-    };
-    for entry in entries {
-        let entry = entry?;
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name.ends_with(".json") && !name.ends_with("-timestamps.json") {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 fn folder_name(concertdata: &concert::SetMetaData) -> String {
@@ -1555,50 +1499,3 @@ fn save_matched_image(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[test]
-    fn artist_slug_matches_scraper_convention() {
-        assert_eq!(artist_slug("Brandi Carlile"), Some("brandi_carlile".to_string()));
-        // Non-alphanumeric (hyphens, apostrophes) are dropped, not replaced.
-        assert_eq!(artist_slug("Ghost-Note"), Some("ghostnote".to_string()));
-        assert_eq!(artist_slug("KestheBand"), Some("kestheband".to_string()));
-        assert_eq!(artist_slug(""), None);
-        assert_eq!(artist_slug("---"), None);
-    }
-
-    fn meta(artist: &str) -> concert::SetMetaData {
-        concert::SetMetaData {
-            artist: artist.to_string(),
-            album: None,
-            date: None,
-            show: None,
-        }
-    }
-
-    #[test]
-    fn output_stem_prefers_artist_slug() {
-        let m = meta("Brandi Carlile");
-        assert_eq!(output_stem(&m, "/tmp/whatever.json"), "brandi_carlile");
-    }
-
-    #[test]
-    fn output_stem_falls_back_to_input_filename_when_artist_unusable() {
-        let m = meta("---");
-        assert_eq!(output_stem(&m, "/tmp/foo.json"), "foo");
-    }
-
-    #[test]
-    fn canonical_metadata_present_ignores_timestamps_only() {
-        let td = TempDir::new().unwrap();
-        let dir = td.path().to_str().unwrap();
-        std::fs::write(td.path().join("foo-timestamps.json"), "{}").unwrap();
-        assert!(!canonical_metadata_present(dir).unwrap());
-
-        std::fs::write(td.path().join("foo.json"), "{}").unwrap();
-        assert!(canonical_metadata_present(dir).unwrap());
-    }
-}

@@ -245,18 +245,17 @@ impl Concert {
     }
 
     /// Browser-visible URL for this concert's preview image, or `None` if the
-    /// image hasn't been downloaded yet. Mirrors the on-disk layout under
-    /// `<working_dir>/concerts/<album>/<album>.jpg`. Served via the
-    /// `/concert-files` ServeDir mount (the `/concerts/:id` API route prevents
-    /// reusing the `/concerts` URL prefix for static files).
+    /// image hasn't been downloaded yet. Served via the `/concert-files`
+    /// ServeDir mount (the `/concerts/:id` API route prevents reusing the
+    /// `/concerts` URL prefix for static files).
     pub fn preview_image_url(&self, working_dir: &std::path::Path) -> Option<String> {
         let album = self.album.as_deref()?;
         let sanitized = sanitize_album(album);
-        let on_disk = concert_dir(working_dir, album).join(format!("{}.jpg", sanitized));
+        let on_disk = concert_dir(working_dir, album).join("preview.jpg");
         if !on_disk.exists() {
             return None;
         }
-        Some(format!("/concert-files/{}/{}.jpg", sanitized, sanitized))
+        Some(format!("/concert-files/{}/preview.jpg", sanitized))
     }
 }
 
@@ -589,12 +588,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cd = concert_dir(dir.path(), "Foo Album");
         std::fs::create_dir_all(&cd).unwrap();
-        std::fs::File::create(cd.join("Foo Album.jpg")).unwrap();
+        std::fs::File::create(cd.join("preview.jpg")).unwrap();
         let mut c = bare_concert();
         c.album = Some("Foo Album".to_string());
         assert_eq!(
             c.preview_image_url(dir.path()).as_deref(),
-            Some("/concert-files/Foo Album/Foo Album.jpg")
+            Some("/concert-files/Foo Album/preview.jpg")
         );
     }
 
@@ -603,12 +602,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let cd = concert_dir(dir.path(), "Some: Concert");
         std::fs::create_dir_all(&cd).unwrap();
-        std::fs::File::create(cd.join("Some Concert.jpg")).unwrap();
+        std::fs::File::create(cd.join("preview.jpg")).unwrap();
         let mut c = bare_concert();
         c.album = Some("Some: Concert".to_string());
         assert_eq!(
             c.preview_image_url(dir.path()).as_deref(),
-            Some("/concert-files/Some Concert/Some Concert.jpg")
+            Some("/concert-files/Some Concert/preview.jpg")
         );
     }
 
