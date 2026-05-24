@@ -1,3 +1,5 @@
+See README.md for an overview of the project
+
 ## Code Style Guidelines
 - **Imports**: Group standard library, external crates/packages, then local modules
 - **Rust**: Use standard Rust formatting (`cargo fmt`)
@@ -17,3 +19,4 @@
 - check the code using `cargo check` as frequently as possible- every time a series of code changes is complete enough to pass `cargo check`.
 - write tests for all new functions
 - run tests after every series of changes
+- update documentation

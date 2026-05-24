@@ -81,18 +81,7 @@ concert-db reset-in-progress
 
 ### Database schema
 
-Key columns in the `concerts` table:
-
-| Column | Type | Description |
-|---|---|---|
-| `source_url` | TEXT UNIQUE | NPR concert page URL (primary key) |
-| `ignored` / `wanted` | INTEGER | User intent flags (mutually exclusive) |
-| `notes` | TEXT | Free-form user notes |
-| `download_started_at` / `downloaded_at` | TEXT | Download lifecycle timestamps |
-| `split_started_at` / `split_at` | TEXT | Split lifecycle timestamps |
-| `download_errors_json` / `split_errors_json` | TEXT | Accumulating JSON error arrays |
-| `set_list_json` | TEXT | `["Song Title", ...]` |
-| `musicians_json` | TEXT | `[{"name": "...", "instruments": [...]}]` |
+See [./doc/data.md](./doc/data.md) for an overview of the data model.
 
 ---
 
@@ -123,6 +112,8 @@ The JSON file uses the same format produced by the `scraper` crate.
 ---
 
 ## Shell scripts
+
+These aren't deleted anymore.
 
 | Script | Description |
 |---|---|
