@@ -7,7 +7,8 @@ use tempfile::NamedTempFile;
 
 use crate::db;
 use crate::jobs::{
-    find_downloaded_file, run_with_logging, JobConfig, JobKey, JobKind, JobRegistry, SplitJob,
+    find_downloaded_file, persist_job_log, run_with_logging, JobConfig, JobKey, JobKind,
+    JobRegistry, SplitJob,
 };
 use crate::model::{concert_dir, Concert, Musician};
 
@@ -143,9 +144,22 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
     let concert_id = job.concert_id;
     let cmd = (config.split_cmd)(&job);
 
-    match run_with_logging(cmd, "split", concert_id).await {
+    let log_dir = config.log_dir();
+    let temp_file = match std::fs::create_dir_all(&log_dir)
+        .and_then(|_| NamedTempFile::new_in(&log_dir).map_err(Into::into))
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::warn!("failed to create temp log file: {}", e);
+            None
+        }
+    };
+    let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
+
+    match run_with_logging(cmd, "split", concert_id, temp_path.as_deref()).await {
         Ok((status, _)) if status.success() => {
             tracing::info!("split completed for concert {}", concert_id);
+            drop(temp_file);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_succeeded(&conn, concert_id);
         }
@@ -154,12 +168,14 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
+            persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
         }
         Err(e) => {
             let error = format!("spawn error: {}", e);
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
+            persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
         }
     }
 }

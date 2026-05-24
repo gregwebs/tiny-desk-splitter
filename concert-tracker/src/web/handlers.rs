@@ -116,10 +116,29 @@ struct JobRow {
     started_at: String,
 }
 
+struct FailedJobRow {
+    id: i64,
+    concert_id: i64,
+    title: String,
+    artist: String,
+    kind_label: String,
+    failed_at: String,
+    failure_message: String,
+}
+
 #[derive(Template)]
 #[template(path = "jobs.html")]
 struct JobsTemplate {
     jobs: Vec<JobRow>,
+    failed_jobs: Vec<FailedJobRow>,
+    failed_filter: String,
+}
+
+#[derive(Template)]
+#[template(path = "job_log.html")]
+struct JobLogTemplate {
+    job: db::FailedJob,
+    content: String,
 }
 
 // ── Error type ───────────────────────────────────────────────────────────────
@@ -883,10 +902,18 @@ pub async fn status_row(
 
 pub async fn jobs_list(
     State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concerts = {
+    let failed_filter = params
+        .get("failed_filter")
+        .cloned()
+        .unwrap_or_default();
+
+    let (concerts, failed) = {
         let conn = state.db.lock().unwrap();
-        db::list_in_progress(&conn)?
+        let concerts = db::list_in_progress(&conn)?;
+        let failed = db::list_failed_jobs(&conn, 100)?;
+        (concerts, failed)
     };
 
     let jobs: Vec<JobRow> = concerts
@@ -917,7 +944,54 @@ pub async fn jobs_list(
         })
         .collect();
 
-    Ok(JobsTemplate { jobs })
+    let failed_jobs: Vec<FailedJobRow> = failed
+        .into_iter()
+        .filter(|j| match failed_filter.as_str() {
+            "download" => j.name == "download",
+            "split" => j.name == "split",
+            _ => true,
+        })
+        .map(|j| {
+            let kind_label = match j.name.as_str() {
+                "download" => "Download",
+                "split" => "Split",
+                other => other,
+            }
+            .to_string();
+            FailedJobRow {
+                id: j.id,
+                concert_id: j.concert_id,
+                title: j.title,
+                artist: j.artist,
+                kind_label,
+                failed_at: j.failed_at,
+                failure_message: j.failure_message,
+            }
+        })
+        .collect();
+
+    Ok(JobsTemplate {
+        jobs,
+        failed_jobs,
+        failed_filter,
+    })
+}
+
+pub async fn job_log(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let job = {
+        let conn = state.db.lock().unwrap();
+        db::get_failed_job(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let log_path = state.jobs.log_dir().join(format!("{}.log", id));
+    let content = tokio::fs::read_to_string(&log_path)
+        .await
+        .unwrap_or_else(|_| "Log file not found.".to_string());
+
+    Ok(JobLogTemplate { job, content })
 }
 
 pub async fn jobs_count(

@@ -16,7 +16,11 @@ See README.md for an overview of the project
 
 # Workflow
 - plan the changes and get approval for the changes
-- check the code using `cargo check` as frequently as possible- every time a series of code changes is complete enough to pass `cargo check`.
-- write tests for all new functions
-- run tests after every series of changes
+- when making database changes, first create a backup of the existing database
 - update documentation
+- write tests for all changes
+- check the code using `cargo check` as frequently as possible- every time a series of code changes is complete enough to pass `cargo check`.
+- run tests frequently
+- verify manually that the changes work as expected in the application
+  * start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information
+  * data from the real concerts.db can be copied into the test db. Do not modify the real concerts.db during testing!

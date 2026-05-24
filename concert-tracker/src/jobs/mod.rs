@@ -2,6 +2,7 @@ pub mod download;
 pub mod split;
 
 use std::collections::HashMap;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
@@ -118,6 +119,10 @@ pub fn default_splitter_bin() -> PathBuf {
 }
 
 impl JobConfig {
+    pub fn log_dir(&self) -> PathBuf {
+        self.working_dir.join("log").join("job")
+    }
+
     pub fn production(working_dir: PathBuf, splitter_bin: PathBuf) -> Self {
         let wd = working_dir.clone();
         JobConfig {
@@ -219,30 +224,57 @@ macro_rules! log_child_line {
 /// status plus the last [`STDERR_TAIL_LINES`] lines of stderr joined by `\n`.
 /// The stderr tail is what gets written into the DB error column on failure,
 /// preserving the inline error shown in the UI.
+///
+/// When `log_file` is `Some`, every line is also written to that file
+/// (prefixed with `[stdout]` or `[stderr]`). I/O errors on the log file
+/// are warned but do not fail the job.
 pub async fn run_with_logging(
     mut cmd: Command,
     kind: &'static str,
     concert_id: i64,
+    log_file: Option<&Path>,
 ) -> std::io::Result<(ExitStatus, String)> {
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
     let mut child = cmd.spawn()?;
 
+    let log_handle: Option<Arc<Mutex<std::fs::File>>> = log_file.and_then(|path| {
+        match std::fs::File::create(path) {
+            Ok(f) => Some(Arc::new(Mutex::new(f))),
+            Err(e) => {
+                tracing::warn!("failed to create job log file {}: {}", path.display(), e);
+                None
+            }
+        }
+    });
+
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
 
+    let log_for_stdout = log_handle.clone();
     let stdout_task: JoinHandle<()> = tokio::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             log_child_line!(kind, concert_id, "stdout", line);
+            if let Some(ref f) = log_for_stdout {
+                if let Ok(mut f) = f.lock() {
+                    let _ = writeln!(f, "[stdout] {}", line);
+                }
+            }
         }
     });
 
+    let log_for_stderr = log_handle;
     let stderr_task: JoinHandle<Vec<String>> = tokio::spawn(async move {
         let mut lines = BufReader::new(stderr).lines();
         let mut tail: std::collections::VecDeque<String> =
             std::collections::VecDeque::with_capacity(STDERR_TAIL_LINES);
         while let Ok(Some(line)) = lines.next_line().await {
             log_child_line!(kind, concert_id, "stderr", line);
+            if let Some(ref f) = log_for_stderr {
+                if let Ok(mut f) = f.lock() {
+                    let _ = writeln!(f, "[stderr] {}", line);
+                }
+            }
             if tail.len() == STDERR_TAIL_LINES {
                 tail.pop_front();
             }
@@ -255,6 +287,31 @@ pub async fn run_with_logging(
     let _ = stdout_task.await;
     let tail_lines = stderr_task.await.unwrap_or_default();
     Ok((status, tail_lines.join("\n")))
+}
+
+pub fn persist_job_log(
+    conn: &rusqlite::Connection,
+    concert_id: i64,
+    name: &str,
+    error: &str,
+    temp_file: Option<tempfile::NamedTempFile>,
+    log_dir: &Path,
+) {
+    match crate::db::insert_failed_job(conn, concert_id, name, error) {
+        Ok(job_id) => {
+            if let Some(tf) = temp_file {
+                let final_path = log_dir.join(format!("{}.log", job_id));
+                if let Err(e) = tf.persist(&final_path) {
+                    tracing::warn!(
+                        "failed to persist job log to {}: {}",
+                        final_path.display(),
+                        e
+                    );
+                }
+            }
+        }
+        Err(e) => tracing::warn!("failed to insert failed job record: {}", e),
+    }
 }
 
 pub fn download_job_from_concert(
@@ -351,7 +408,7 @@ mod tests {
             "-c",
             "echo out1; echo out2; echo err1 >&2; echo err2 >&2; exit 5",
         ]);
-        let (status, stderr_tail) = run_with_logging(cmd, "test", 42).await.unwrap();
+        let (status, stderr_tail) = run_with_logging(cmd, "test", 42, None).await.unwrap();
         assert_eq!(status.code(), Some(5));
         assert_eq!(stderr_tail, "err1\nerr2");
     }
@@ -365,7 +422,7 @@ mod tests {
         );
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &script]);
-        let (status, stderr_tail) = run_with_logging(cmd, "test", 0).await.unwrap();
+        let (status, stderr_tail) = run_with_logging(cmd, "test", 0, None).await.unwrap();
         assert_eq!(status.code(), Some(1));
         let lines: Vec<&str> = stderr_tail.lines().collect();
         assert_eq!(lines.len(), STDERR_TAIL_LINES);
@@ -418,5 +475,32 @@ mod tests {
         }
         assert_eq!(registry.cancel_all(), 3);
         assert_eq!(registry.cancel_all(), 0);
+    }
+
+    #[tokio::test]
+    async fn run_with_logging_writes_log_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let log_path = dir.path().join("test.log");
+        let mut cmd = Command::new("sh");
+        cmd.args([
+            "-c",
+            "echo out1; echo out2; echo err1 >&2; echo err2 >&2; exit 0",
+        ]);
+        let (status, _) = run_with_logging(cmd, "test", 1, Some(&log_path))
+            .await
+            .unwrap();
+        assert!(status.success());
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("[stdout] out1"));
+        assert!(content.contains("[stdout] out2"));
+        assert!(content.contains("[stderr] err1"));
+        assert!(content.contains("[stderr] err2"));
+    }
+
+    #[tokio::test]
+    async fn run_with_logging_without_log_file_still_works() {
+        let cmd = Command::new("true");
+        let (status, _) = run_with_logging(cmd, "test", 1, None).await.unwrap();
+        assert!(status.success());
     }
 }

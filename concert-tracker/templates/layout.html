@@ -239,6 +239,14 @@
     .events-table td:first-child { white-space: nowrap; color: #666; }
     .events-table td:last-child { font-size: 0.9em; color: #888; word-break: break-all; }
     .badge-event { background: #e9ecef; color: #495057; }
+
+    /* ── Job log ── */
+    .error-truncated { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .job-log {
+      background: #1a1a1a; color: #e0e0e0; padding: 1rem; border-radius: 8px;
+      overflow-x: auto; font-size: 0.82em; line-height: 1.6;
+      max-height: 80vh; overflow-y: auto;
+    }
   </style>
 </head>
 <body>

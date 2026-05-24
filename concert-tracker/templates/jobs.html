@@ -2,7 +2,7 @@
 {% block content %}
 <p><a href="/" class="back-link">&larr; Back to list</a></p>
 <h2>Jobs</h2>
-<div id="jobs-content" hx-get="/jobs" hx-trigger="every 5s" hx-select="#jobs-content" hx-target="this" hx-swap="outerHTML">
+<div id="jobs-content" hx-get="/jobs{% if !failed_filter.is_empty() %}?failed_filter={{ failed_filter }}{% endif %}" hx-trigger="every 5s" hx-select="#jobs-content" hx-target="this" hx-swap="outerHTML">
 {% if jobs.is_empty() %}
 <p>No jobs currently running.</p>
 {% else %}
@@ -27,6 +27,41 @@
         <button hx-post="/jobs/{{ job.concert_id }}/cancel/{{ job.kind_slug }}"
                 hx-disabled-elt="this">Cancel</button>
       </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+<h3>Failed Jobs</h3>
+<div class="filter-chips">
+  <a href="/jobs"{% if failed_filter.is_empty() %} class="active"{% endif %}>All</a>
+  <a href="/jobs?failed_filter=download"{% if failed_filter == "download" %} class="active"{% endif %}>Download</a>
+  <a href="/jobs?failed_filter=split"{% if failed_filter == "split" %} class="active"{% endif %}>Split</a>
+</div>
+{% if failed_jobs.is_empty() %}
+<p>No failed jobs.</p>
+{% else %}
+<table class="jobs-table">
+  <thead>
+    <tr>
+      <th>Concert</th>
+      <th>Artist</th>
+      <th>Job</th>
+      <th>Failed</th>
+      <th>Error</th>
+      <th></th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for job in failed_jobs %}
+    <tr>
+      <td><a href="/concerts/{{ job.concert_id }}">{{ job.title }}</a></td>
+      <td>{{ job.artist }}</td>
+      <td><span class="badge badge-download-error">{{ job.kind_label }}</span></td>
+      <td>{{ job.failed_at }}</td>
+      <td class="error-truncated" title="{{ job.failure_message }}">{{ job.failure_message }}</td>
+      <td><a href="/jobs/{{ job.id }}/log">View Log</a></td>
     </tr>
     {% endfor %}
   </tbody>

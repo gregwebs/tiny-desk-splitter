@@ -42,3 +42,12 @@ CREATE TABLE IF NOT EXISTS synced_months (
     synced_at TEXT NOT NULL DEFAULT (datetime('now')),
     PRIMARY KEY (year, month)
 );
+
+CREATE TABLE IF NOT EXISTS jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    concert_id INTEGER NOT NULL,
+    name TEXT,
+    failed_at TEXT,
+    failure_message TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_jobs_failed_at ON jobs(failed_at DESC);

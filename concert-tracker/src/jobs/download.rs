@@ -1,11 +1,12 @@
 use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
+use tempfile::NamedTempFile;
 
 use crate::db;
 use crate::jobs::{
-    download_job_from_concert, run_with_logging, DownloadJob, JobConfig, JobKey, JobKind,
-    JobRegistry,
+    download_job_from_concert, persist_job_log, run_with_logging, DownloadJob, JobConfig, JobKey,
+    JobKind, JobRegistry,
 };
 
 pub enum StartOutcome {
@@ -55,9 +56,22 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
     let concert_id = job.concert_id;
     let cmd = (config.download_cmd)(&job);
 
-    match run_with_logging(cmd, "download", concert_id).await {
+    let log_dir = config.log_dir();
+    let temp_file = match std::fs::create_dir_all(&log_dir)
+        .and_then(|_| NamedTempFile::new_in(&log_dir).map_err(Into::into))
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            tracing::warn!("failed to create temp log file: {}", e);
+            None
+        }
+    };
+    let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
+
+    match run_with_logging(cmd, "download", concert_id, temp_path.as_deref()).await {
         Ok((status, _)) if status.success() => {
             tracing::info!("download completed for concert {}", concert_id);
+            drop(temp_file);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_succeeded(&conn, concert_id);
         }
@@ -66,15 +80,18 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
+            persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
         }
         Err(e) => {
             let error = format!("spawn error: {}", e);
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
+            persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
         }
     }
 }
+
 
 #[cfg(test)]
 mod tests {
