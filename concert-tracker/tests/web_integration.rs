@@ -818,5 +818,8 @@ async fn ignore_deletes_preview_image() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(!preview.exists(), "preview.jpg should be deleted when concert is ignored");
+    assert!(
+        !preview.exists(),
+        "preview.jpg should be deleted when concert is ignored"
+    );
 }

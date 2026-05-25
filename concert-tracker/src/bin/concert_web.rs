@@ -42,12 +42,13 @@ async fn main() -> Result<()> {
     // Splitting belongs to a process that's no longer running. Move them to
     // *Error so the slot UI exposes a retry button instead of pinning the
     // concert at an unactionable "splitting" / "downloading" badge.
-    let (stale_dl, stale_sp) = db::fail_in_progress_jobs(&conn, "server restarted")?;
-    if stale_dl + stale_sp > 0 {
+    let (stale_dl, stale_sp, stale_ar) = db::fail_in_progress_jobs(&conn, "server restarted")?;
+    if stale_dl + stale_sp + stale_ar > 0 {
         tracing::info!(
-            "marked {} stale download(s) and {} stale split(s) as failed on startup",
+            "marked {} stale download(s), {} stale split(s), and {} stale archive(s) as failed on startup",
             stale_dl,
-            stale_sp
+            stale_sp,
+            stale_ar
         );
     }
 
@@ -71,11 +72,12 @@ async fn main() -> Result<()> {
     if cancelled > 0 {
         tracing::info!("cancelled {} running job(s) during shutdown", cancelled);
         let conn = state.db.lock().unwrap();
-        let (dl, sp) = db::fail_in_progress_jobs(&conn, "server shutdown")?;
+        let (dl, sp, ar) = db::fail_in_progress_jobs(&conn, "server shutdown")?;
         tracing::info!(
-            "marked {} download(s) and {} split(s) as failed on shutdown",
+            "marked {} download(s), {} split(s), and {} archive(s) as failed on shutdown",
             dl,
-            sp
+            sp,
+            ar
         );
     }
 

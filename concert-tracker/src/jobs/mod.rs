@@ -1,3 +1,4 @@
+pub mod archive;
 pub mod download;
 pub mod split;
 
@@ -18,6 +19,7 @@ use crate::model::Concert;
 pub enum JobKind {
     Download,
     Split,
+    Archive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -234,18 +236,19 @@ pub async fn run_with_logging(
     concert_id: i64,
     log_file: Option<&Path>,
 ) -> std::io::Result<(ExitStatus, String)> {
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+    cmd.stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
     let mut child = cmd.spawn()?;
 
-    let log_handle: Option<Arc<Mutex<std::fs::File>>> = log_file.and_then(|path| {
-        match std::fs::File::create(path) {
+    let log_handle: Option<Arc<Mutex<std::fs::File>>> =
+        log_file.and_then(|path| match std::fs::File::create(path) {
             Ok(f) => Some(Arc::new(Mutex::new(f))),
             Err(e) => {
                 tracing::warn!("failed to create job log file {}: {}", path.display(), e);
                 None
             }
-        }
-    });
+        });
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let stderr = child.stderr.take().expect("stderr was piped");
@@ -318,10 +321,7 @@ pub fn download_job_from_concert(
     concert: &Concert,
     working_dir: &Path,
 ) -> anyhow::Result<DownloadJob> {
-    let album = concert
-        .album
-        .as_deref()
-        .unwrap_or(&concert.title);
+    let album = concert.album.as_deref().unwrap_or(&concert.title);
     Ok(DownloadJob {
         concert_id: concert.id,
         source_url: concert.source_url.clone(),

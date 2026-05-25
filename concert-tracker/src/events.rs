@@ -18,6 +18,9 @@ pub enum Event {
     WantedDelete,
     Ignored,
     IgnoredDelete,
+    ArchiveStarted,
+    Archived,
+    ArchiveError,
 }
 
 impl Event {
@@ -39,6 +42,9 @@ impl Event {
             Event::WantedDelete => "wanted_delete",
             Event::Ignored => "ignored",
             Event::IgnoredDelete => "ignored_delete",
+            Event::ArchiveStarted => "archive_started",
+            Event::Archived => "archived",
+            Event::ArchiveError => "archive_error",
         }
     }
 }
@@ -51,9 +57,9 @@ pub struct EventRow {
 }
 
 pub fn list_for_concert(conn: &Connection, concert_id: i64) -> Vec<EventRow> {
-    let mut stmt = match conn.prepare(
-        "SELECT event, at, json FROM events WHERE concert_id = ?1 ORDER BY at ASC, id ASC",
-    ) {
+    let mut stmt = match conn
+        .prepare("SELECT event, at, json FROM events WHERE concert_id = ?1 ORDER BY at ASC, id ASC")
+    {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("failed to list events for concert {}: {}", concert_id, e);
@@ -165,7 +171,11 @@ pub fn backfill(conn: &Connection) -> anyhow::Result<usize> {
         }
     }
 
-    tracing::info!("backfill: generated {} events for {} concerts", count, concerts.len() - existing.len());
+    tracing::info!(
+        "backfill: generated {} events for {} concerts",
+        count,
+        concerts.len() - existing.len()
+    );
     Ok(count)
 }
 
@@ -200,9 +210,8 @@ pub fn backfill_track_deletes(
                 .unwrap_or(false);
 
             if !already_exists {
-                let json =
-                    serde_json::json!({"track_index": t.index, "track_title": &t.title})
-                        .to_string();
+                let json = serde_json::json!({"track_index": t.index, "track_title": &t.title})
+                    .to_string();
                 record_now(conn, c.id, Event::TrackDelete, Some(&json));
                 tracing::info!(
                     "backfill_track_deletes: concert {} track {}: {}",
@@ -334,7 +343,13 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         let json = r#"{"error":"timeout"}"#;
-        record(&conn, id, Event::DownloadError, "2024-06-01T12:00:00Z", Some(json));
+        record(
+            &conn,
+            id,
+            Event::DownloadError,
+            "2024-06-01T12:00:00Z",
+            Some(json),
+        );
 
         let stored: String = conn
             .query_row(
@@ -750,7 +765,11 @@ mod tests {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
-                set_list: vec!["Track 1".to_string(), "Track 2".to_string(), "Track 3".to_string()],
+                set_list: vec![
+                    "Track 1".to_string(),
+                    "Track 2".to_string(),
+                    "Track 3".to_string(),
+                ],
                 musicians: vec![],
             },
         )

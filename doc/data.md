@@ -11,6 +11,10 @@ Each concert lives in `concerts/<album>/` with these metadata files:
 The directory also contains the full concert video (`<album>.mp4`) and, after
 splitting, per-song tracks (`<Song Title>.mp4` / `.m4a`).
 
+After archiving, the directory is moved to `<archive_location>/<album>/` and
+a symlink replaces the original path. If the archive is unreachable (e.g. NAS
+offline), track info is reconstructed from `split` and `track_delete` events.
+
 ## Sync
 
 NPR concerts are scraped and synced to a local SQLite DB in a concerts table.
@@ -19,8 +23,9 @@ Detailed scraping is also initiated by going to the concert detail page or click
 
 ## Concert State
 
-The concert has a download state and a split state.
+The concert has a download state, a split state, and an archive state.
 The download can be deleted and individual tracks or all tracks can be deleted.
+Archiving moves the concert directory to a configurable location and creates a symlink.
 
 Key columns in the `concerts` table:
 
@@ -31,7 +36,8 @@ Key columns in the `concerts` table:
 | `notes` | TEXT | Free-form user notes |
 | `download_started_at` / `downloaded_at` | TEXT | Download lifecycle timestamps |
 | `split_started_at` / `split_at` | TEXT | Split lifecycle timestamps |
-| `download_errors_json` / `split_errors_json` | TEXT | Accumulating JSON error arrays |
+| `archive_started_at` / `archived_at` | TEXT | Archive lifecycle timestamps |
+| `download_errors_json` / `split_errors_json` / `archive_errors_json` | TEXT | Accumulating JSON error arrays |
 | `set_list_json` | TEXT | `["Song Title", ...]` |
 | `musicians_json` | TEXT | `[{"name": "...", "instruments": [...]}]` |
 
@@ -62,3 +68,14 @@ Events recorded:
 * wanted_delete
 * ignored
 * ignored_delete
+* archive_started
+* archived
+* archive_error
+
+## Settings
+
+Settings are stored in a singleton `settings` table (single row with `id = 1`).
+
+| Column | Type | Description |
+|---|---|---|
+| `archive_location` | TEXT | Directory path for archived concerts (e.g. `/nas/media/music`) |

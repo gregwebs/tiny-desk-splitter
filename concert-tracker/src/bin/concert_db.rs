@@ -272,7 +272,10 @@ fn update_json_teaser(
     let content = std::fs::read_to_string(&path)?;
     let mut value: serde_json::Value = serde_json::from_str(&content)?;
     if let Some(obj) = value.as_object_mut() {
-        obj.insert("teaser".to_string(), serde_json::Value::String(teaser.to_string()));
+        obj.insert(
+            "teaser".to_string(),
+            serde_json::Value::String(teaser.to_string()),
+        );
     }
     let json = serde_json::to_string_pretty(&value)?;
     std::fs::write(&path, json)?;

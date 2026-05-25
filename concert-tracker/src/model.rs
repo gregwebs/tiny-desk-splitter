@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Strip colons from album names to produce safe filesystem paths.
@@ -51,6 +52,22 @@ pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<
             index,
             title: title.clone(),
             available: true,
+        })
+        .collect()
+}
+
+pub fn list_tracks_from_events(
+    set_list: &[String],
+    deleted_indices: &HashSet<usize>,
+) -> Vec<TrackInfo> {
+    set_list
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| !deleted_indices.contains(i))
+        .map(|(index, title)| TrackInfo {
+            index,
+            title: title.clone(),
+            available: false,
         })
         .collect()
 }
@@ -176,6 +193,41 @@ impl SplitStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ArchiveStatus {
+    NotArchived,
+    Archiving,
+    Archived,
+    ArchiveError,
+}
+
+impl ArchiveStatus {
+    pub fn from_concert(c: &Concert) -> Self {
+        if c.archived_at.is_some() {
+            ArchiveStatus::Archived
+        } else if c.archive_started_at.is_some() {
+            ArchiveStatus::Archiving
+        } else if !c.archive_errors.is_empty() {
+            ArchiveStatus::ArchiveError
+        } else {
+            ArchiveStatus::NotArchived
+        }
+    }
+
+    pub fn slug(&self) -> &str {
+        match self {
+            ArchiveStatus::NotArchived => "not-archived",
+            ArchiveStatus::Archiving => "archiving",
+            ArchiveStatus::Archived => "archived",
+            ArchiveStatus::ArchiveError => "archive-error",
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        self.slug()
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Musician {
     pub name: String,
@@ -203,6 +255,9 @@ pub struct Concert {
     pub split_started_at: Option<String>,
     pub split_at: Option<String>,
     pub split_errors: Vec<ErrorEntry>,
+    pub archive_started_at: Option<String>,
+    pub archived_at: Option<String>,
+    pub archive_errors: Vec<ErrorEntry>,
     pub first_seen_at: String,
     pub metadata_scraped_at: Option<String>,
 }
@@ -218,6 +273,10 @@ impl Concert {
 
     pub fn split_status(&self) -> SplitStatus {
         SplitStatus::from_concert(self)
+    }
+
+    pub fn archive_status(&self) -> ArchiveStatus {
+        ArchiveStatus::from_concert(self)
     }
 
     /// Date portion of `concert_date` for display. Archive sync stores
@@ -284,6 +343,9 @@ mod tests {
             split_started_at: None,
             split_at: None,
             split_errors: vec![],
+            archive_started_at: None,
+            archived_at: None,
+            archive_errors: vec![],
             first_seen_at: "2024-01-01T00:00:00Z".to_string(),
             metadata_scraped_at: None,
         }
@@ -348,10 +410,7 @@ mod tests {
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::File::create(cd.join("Song One.m4a")).unwrap();
 
-        let set_list = vec![
-            "Song One".to_string(),
-            "Song Two".to_string(),
-        ];
+        let set_list = vec!["Song One".to_string(), "Song Two".to_string()];
         let tracks = list_all_tracks(dir.path(), album, &set_list);
         assert_eq!(tracks.len(), 2);
         assert_eq!(tracks[0].title, "Song One");
@@ -628,5 +687,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = bare_concert();
         assert!(c.preview_image_url(dir.path()).is_none());
+    }
+
+    #[test]
+    fn archive_status_not_archived_by_default() {
+        let c = bare_concert();
+        assert_eq!(c.archive_status(), ArchiveStatus::NotArchived);
+    }
+
+    #[test]
+    fn archive_status_archiving_when_started() {
+        let mut c = bare_concert();
+        c.archive_started_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert_eq!(c.archive_status(), ArchiveStatus::Archiving);
+    }
+
+    #[test]
+    fn archive_status_archived_beats_started_and_errors() {
+        let mut c = bare_concert();
+        c.archived_at = Some("2024-01-01T01:00:00Z".to_string());
+        c.archive_started_at = Some("2024-01-01T00:00:00Z".to_string());
+        c.archive_errors = vec![err("old")];
+        assert_eq!(c.archive_status(), ArchiveStatus::Archived);
+    }
+
+    #[test]
+    fn archive_status_error_when_only_errors() {
+        let mut c = bare_concert();
+        c.archive_errors = vec![err("disk full")];
+        assert_eq!(c.archive_status(), ArchiveStatus::ArchiveError);
+    }
+
+    #[test]
+    fn archive_status_slugs() {
+        assert_eq!(ArchiveStatus::NotArchived.slug(), "not-archived");
+        assert_eq!(ArchiveStatus::Archiving.slug(), "archiving");
+        assert_eq!(ArchiveStatus::Archived.slug(), "archived");
+        assert_eq!(ArchiveStatus::ArchiveError.slug(), "archive-error");
+    }
+
+    #[test]
+    fn list_tracks_from_events_excludes_deleted() {
+        let set_list = vec![
+            "Song A".to_string(),
+            "Song B".to_string(),
+            "Song C".to_string(),
+        ];
+        let deleted = HashSet::from([1]);
+        let tracks = list_tracks_from_events(&set_list, &deleted);
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].title, "Song A");
+        assert!(!tracks[0].available);
+        assert_eq!(tracks[1].index, 2);
+        assert_eq!(tracks[1].title, "Song C");
+    }
+
+    #[test]
+    fn list_tracks_from_events_with_no_deletions() {
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let deleted = HashSet::new();
+        let tracks = list_tracks_from_events(&set_list, &deleted);
+        assert_eq!(tracks.len(), 2);
     }
 }

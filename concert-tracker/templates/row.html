@@ -54,6 +54,17 @@
         {% endif %}
       </span>
 
+      {# Archive slot #}
+      <span class="card-slot card-slot-archive">
+        {% if show_archive_badge %}
+          <span class="badge badge-{{ archive_status }}">{{ archive_status_label }}</span>
+        {% endif %}
+        {% if can_archive %}
+          <button hx-post="/concerts/{{ id }}/archive" hx-target="closest .card" hx-swap="outerHTML"
+                  hx-disabled-elt="this" hx-on::before-request="this.textContent='Archiving…'">Archive</button>
+        {% endif %}
+      </span>
+
     </div>
     <div id="tracks-{{ id }}"></div>
   </div>

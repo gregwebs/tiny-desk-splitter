@@ -9,6 +9,7 @@
   <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
   <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
   <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
+  {% if show_archive_badge %}<span class="badge badge-{{ archive_status }}">{{ archive_status_label }}</span>{% endif %}
   {% if let Some(date) = concert.display_date() %}<strong>Date:</strong> {{ date }}{% endif %}
 </p>
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
@@ -28,6 +29,10 @@
 {% endif %}
 {% if can_listen %}
 <button class="btn-listen" hx-post="/concerts/{{ concert.id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+{% endif %}
+{% if can_archive %}
+<button hx-post="/concerts/{{ concert.id }}/archive" hx-disabled-elt="this"
+        hx-on::before-request="this.textContent='Archiving…'">Archive</button>
 {% endif %}
 <button hx-post="/concerts/{{ concert.id }}/scrape">Re-scrape</button>
 
@@ -84,6 +89,15 @@
 <h3>Split Errors</h3>
 <ul class="error-list">
   {% for e in concert.split_errors.iter() %}
+  <li>{{ e.at }}: {{ e.error }}</li>
+  {% endfor %}
+</ul>
+{% endif %}
+
+{% if !concert.archive_errors.is_empty() %}
+<h3>Archive Errors</h3>
+<ul class="error-list">
+  {% for e in concert.archive_errors.iter() %}
   <li>{{ e.at }}: {{ e.error }}</li>
   {% endfor %}
 </ul>

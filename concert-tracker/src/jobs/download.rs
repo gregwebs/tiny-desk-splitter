@@ -92,7 +92,6 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

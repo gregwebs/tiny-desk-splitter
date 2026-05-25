@@ -1,8 +1,8 @@
 use super::fixtures;
 use super::save_failed_html;
 use crate::scraper::{
-    extract_og_description, extract_preview_image_url, extract_teaser_from_html, parse_concert_info,
-    Musician,
+    extract_og_description, extract_preview_image_url, extract_teaser_from_html,
+    parse_concert_info, Musician,
 };
 use anyhow::Result;
 use scraper::Html;
@@ -146,7 +146,8 @@ fn extract_og_description_returns_none_when_missing() {
 
 #[test]
 fn extract_og_description_returns_none_when_empty() {
-    let html = r#"<html><head><meta property="og:description" content="" /></head><body></body></html>"#;
+    let html =
+        r#"<html><head><meta property="og:description" content="" /></head><body></body></html>"#;
     let document = Html::parse_document(html);
     assert!(extract_og_description(&document).is_none());
 }

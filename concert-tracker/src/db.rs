@@ -7,6 +7,7 @@ use crate::events::{self, Event};
 use crate::model::{Concert, ErrorEntry, Musician};
 
 const MIGRATION: &str = include_str!("../migrations/0001_init.sql");
+const MIGRATION_002: &str = include_str!("../migrations/0002_archive.sql");
 
 pub struct NewListing {
     pub source_url: String,
@@ -43,8 +44,42 @@ fn configure(conn: &Connection) -> Result<()> {
 
 fn run_migrations(conn: &Connection) -> Result<()> {
     conn.execute_batch(MIGRATION)
-        .context("Failed to run migrations")?;
+        .context("Failed to run migration 001")?;
+    conn.execute_batch(MIGRATION_002)
+        .context("Failed to run migration 002")?;
     events::backfill(conn).context("Failed to backfill events")?;
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct Settings {
+    pub archive_location: Option<String>,
+}
+
+pub fn get_settings(conn: &Connection) -> Result<Settings> {
+    conn.query_row(
+        "SELECT archive_location FROM settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(Settings {
+                archive_location: row.get(0)?,
+            })
+        },
+    )
+    .context("Failed to read settings")
+}
+
+pub fn update_archive_location(conn: &Connection, location: &str) -> Result<()> {
+    let value = if location.trim().is_empty() {
+        None
+    } else {
+        Some(location.trim())
+    };
+    conn.execute(
+        "UPDATE settings SET archive_location = ?1 WHERE id = 1",
+        params![value],
+    )
+    .context("Failed to update archive location")?;
     Ok(())
 }
 
@@ -62,10 +97,13 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
     let musicians: Vec<Musician> = musicians_json
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
+    let archive_errors_json: String = row.get("archive_errors_json")?;
     let download_errors: Vec<ErrorEntry> =
         serde_json::from_str(&download_errors_json).unwrap_or_default();
     let split_errors: Vec<ErrorEntry> =
         serde_json::from_str(&split_errors_json).unwrap_or_default();
+    let archive_errors: Vec<ErrorEntry> =
+        serde_json::from_str(&archive_errors_json).unwrap_or_default();
 
     Ok(Concert {
         id: row.get("id")?,
@@ -87,6 +125,9 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         split_started_at: row.get("split_started_at")?,
         split_at: row.get("split_at")?,
         split_errors,
+        archive_started_at: row.get("archive_started_at")?,
+        archived_at: row.get("archived_at")?,
+        archive_errors,
         first_seen_at: row.get("first_seen_at")?,
         metadata_scraped_at: row.get("metadata_scraped_at")?,
     })
@@ -325,6 +366,43 @@ pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
+pub fn try_mark_archive_started(conn: &Connection, id: i64) -> Result<bool> {
+    let rows = conn
+        .execute(
+            "UPDATE concerts SET archive_started_at = datetime('now')
+             WHERE id = ?1 AND archive_started_at IS NULL AND archived_at IS NULL",
+            params![id],
+        )
+        .context("Failed to mark archive started")?;
+    if rows > 0 {
+        events::record_now(conn, id, Event::ArchiveStarted, None);
+    }
+    Ok(rows > 0)
+}
+
+pub fn mark_archive_succeeded(conn: &Connection, id: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE concerts SET archived_at = datetime('now'), archive_started_at = NULL
+         WHERE id = ?1",
+        params![id],
+    )
+    .context("Failed to mark archive succeeded")?;
+    events::record_now(conn, id, Event::Archived, None);
+    Ok(())
+}
+
+pub fn mark_archive_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
+    append_error(conn, id, "archive_errors_json", error)?;
+    conn.execute(
+        "UPDATE concerts SET archive_started_at = NULL WHERE id = ?1",
+        params![id],
+    )
+    .context("Failed to clear archive_started_at")?;
+    let json = serde_json::json!({"error": error}).to_string();
+    events::record_now(conn, id, Event::ArchiveError, Some(&json));
+    Ok(())
+}
+
 /// Set downloaded_at from filesystem mtime if not already set (for scan/recovery).
 pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<()> {
     conn.execute(
@@ -353,8 +431,8 @@ pub fn set_split_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<(
 /// to its `*_errors_json`, leaving the concert in DownloadError / SplitError
 /// state where the slot UI already exposes a retry button.
 ///
-/// Returns `(download_count, split_count)` of rows touched.
-pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<(usize, usize)> {
+/// Returns `(download_count, split_count, archive_count)` of rows touched.
+pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<(usize, usize, usize)> {
     let dl_ids: Vec<i64> = conn
         .prepare("SELECT id FROM concerts WHERE download_started_at IS NOT NULL")?
         .query_map([], |row| row.get::<_, i64>(0))?
@@ -373,15 +451,24 @@ pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<(usize, u
         mark_split_failed(conn, *id, error)?;
     }
 
-    Ok((dl_ids.len(), sp_ids.len()))
+    let ar_ids: Vec<i64> = conn
+        .prepare("SELECT id FROM concerts WHERE archive_started_at IS NOT NULL")?
+        .query_map([], |row| row.get::<_, i64>(0))?
+        .collect::<rusqlite::Result<_>>()
+        .context("Failed to read in-progress archives")?;
+    for id in &ar_ids {
+        mark_archive_failed(conn, *id, error)?;
+    }
+
+    Ok((dl_ids.len(), sp_ids.len(), ar_ids.len()))
 }
 
 /// Clear all stale in-progress flags (e.g. after an unclean shutdown).
 pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
     let rows = conn
         .execute(
-            "UPDATE concerts SET download_started_at = NULL, split_started_at = NULL
-             WHERE download_started_at IS NOT NULL OR split_started_at IS NOT NULL",
+            "UPDATE concerts SET download_started_at = NULL, split_started_at = NULL, archive_started_at = NULL
+             WHERE download_started_at IS NOT NULL OR split_started_at IS NOT NULL OR archive_started_at IS NOT NULL",
             [],
         )
         .context("Failed to reset in-progress")?;
@@ -391,8 +478,8 @@ pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
 pub fn list_in_progress(conn: &Connection) -> Result<Vec<Concert>> {
     let mut stmt = conn.prepare(
         "SELECT * FROM concerts
-         WHERE download_started_at IS NOT NULL OR split_started_at IS NOT NULL
-         ORDER BY download_started_at, split_started_at",
+         WHERE download_started_at IS NOT NULL OR split_started_at IS NOT NULL OR archive_started_at IS NOT NULL
+         ORDER BY download_started_at, split_started_at, archive_started_at",
     )?;
     let concerts = stmt
         .query_map([], concert_from_row)?
@@ -405,7 +492,8 @@ pub fn count_active_jobs(conn: &Connection) -> Result<usize> {
     let count: usize = conn.query_row(
         "SELECT
            (SELECT COUNT(*) FROM concerts WHERE download_started_at IS NOT NULL AND downloaded_at IS NULL)
-         + (SELECT COUNT(*) FROM concerts WHERE split_started_at IS NOT NULL AND split_at IS NULL)",
+         + (SELECT COUNT(*) FROM concerts WHERE split_started_at IS NOT NULL AND split_at IS NULL)
+         + (SELECT COUNT(*) FROM concerts WHERE archive_started_at IS NOT NULL AND archived_at IS NULL)",
         [],
         |row| row.get(0),
     )?;
@@ -728,9 +816,10 @@ pub mod tests {
         try_mark_split_started(&conn, id1).unwrap();
         try_mark_download_started(&conn, id2).unwrap();
 
-        let (dl, sp) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
+        let (dl, sp, ar) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
         assert_eq!(dl, 1);
         assert_eq!(sp, 1);
+        assert_eq!(ar, 0);
 
         let c1 = get_concert(&conn, id1).unwrap();
         assert!(c1.split_started_at.is_none());
@@ -741,8 +830,8 @@ pub mod tests {
         assert_eq!(c2.download_errors.last().unwrap().error, "server restarted");
 
         // Idempotent: a second call on the now-clean state touches nothing.
-        let (dl2, sp2) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
-        assert_eq!((dl2, sp2), (0, 0));
+        let (dl2, sp2, ar2) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
+        assert_eq!((dl2, sp2, ar2), (0, 0, 0));
     }
 
     #[test]
@@ -1011,6 +1100,115 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         assert!(get_failed_job(&conn, 9999).is_err());
     }
+
+    #[test]
+    fn settings_roundtrip() {
+        let conn = open_in_memory().unwrap();
+        let s = get_settings(&conn).unwrap();
+        assert!(s.archive_location.is_none());
+
+        update_archive_location(&conn, "/nas/media/music").unwrap();
+        let s = get_settings(&conn).unwrap();
+        assert_eq!(s.archive_location.as_deref(), Some("/nas/media/music"));
+
+        update_archive_location(&conn, "").unwrap();
+        let s = get_settings(&conn).unwrap();
+        assert!(s.archive_location.is_none());
+    }
+
+    #[test]
+    fn settings_trims_whitespace() {
+        let conn = open_in_memory().unwrap();
+        update_archive_location(&conn, "  /nas/media  ").unwrap();
+        assert_eq!(
+            get_settings(&conn).unwrap().archive_location.as_deref(),
+            Some("/nas/media")
+        );
+    }
+
+    #[test]
+    fn try_mark_archive_started_blocks_double_start() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+
+        assert!(try_mark_archive_started(&conn, id).unwrap());
+        assert!(!try_mark_archive_started(&conn, id).unwrap());
+    }
+
+    #[test]
+    fn try_mark_archive_started_blocks_if_already_archived() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+
+        assert!(try_mark_archive_started(&conn, id).unwrap());
+        mark_archive_succeeded(&conn, id).unwrap();
+        assert!(!try_mark_archive_started(&conn, id).unwrap());
+    }
+
+    #[test]
+    fn mark_archive_succeeded_clears_started_and_sets_archived() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+
+        mark_archive_succeeded(&conn, id).unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.archive_started_at.is_none());
+        assert!(c.archived_at.is_some());
+        assert!(c.archive_errors.is_empty());
+    }
+
+    #[test]
+    fn mark_archive_failed_appends_error_and_clears_started() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+
+        mark_archive_failed(&conn, id, "disk full").unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.archive_started_at.is_none());
+        assert!(c.archived_at.is_none());
+        assert_eq!(c.archive_errors.len(), 1);
+        assert_eq!(c.archive_errors[0].error, "disk full");
+    }
+
+    #[test]
+    fn fail_in_progress_catches_archive_jobs() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+
+        let (dl, sp, ar) = fail_in_progress_jobs(&conn, "restart").unwrap();
+        assert_eq!((dl, sp, ar), (0, 0, 1));
+
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.archive_started_at.is_none());
+        assert_eq!(c.archive_errors[0].error, "restart");
+    }
+
+    #[test]
+    fn count_active_jobs_includes_archiving() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id).unwrap();
+
+        assert_eq!(count_active_jobs(&conn).unwrap(), 0);
+        try_mark_archive_started(&conn, id).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 1);
+        mark_archive_succeeded(&conn, id).unwrap();
+        assert_eq!(count_active_jobs(&conn).unwrap(), 0);
+    }
 }
 
 // ── Failed jobs ─────────────────────────────────────────────────────────────
@@ -1091,7 +1289,9 @@ pub fn get_failed_job(conn: &Connection, id: i64) -> Result<FailedJob> {
 
 fn append_error(conn: &Connection, id: i64, column: &str, error: &str) -> Result<()> {
     assert!(
-        column == "download_errors_json" || column == "split_errors_json",
+        column == "download_errors_json"
+            || column == "split_errors_json"
+            || column == "archive_errors_json",
         "invalid error column"
     );
     let current: String = conn

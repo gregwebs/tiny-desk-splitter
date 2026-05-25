@@ -100,6 +100,7 @@
     .card.status-wanted  { border-left: 4px solid #0d6efd; }
     .card.status-split   { border-left: 4px solid #198754; }
     .card.status-downloaded { border-left: 4px solid #0dcaf0; }
+    .card.status-archived  { border-left: 4px solid #7e57c2; }
 
     .card-body { padding: 0.85rem 1rem; flex: 1; display: flex; flex-direction: column; }
 
@@ -157,6 +158,10 @@
     .badge-splitting    { background: #fff3cd; color: #664d03; }
     .badge-split-error,
     .badge-download-error { background: #f8d7da; color: #58151c; }
+    .badge-archived     { background: #d1c4e9; color: #4a148c; }
+    .badge-archiving    { background: #fff3cd; color: #664d03; }
+    .badge-archive-error { background: #f8d7da; color: #58151c; }
+    .badge-not-archived { background: #e9ecef; color: #495057; }
     .badge-not-started,
     .badge-not-downloaded,
     .badge-not-split    { background: #e9ecef; color: #495057; }
@@ -254,6 +259,7 @@
     <h1>Tiny Desk Concerts</h1>
     <a href="/jobs" style="font-size: 0.85em; text-decoration: none; font-weight: 500;">Jobs<span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></a>
     <span id="banner"></span>
+    <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings">&#9881;</a>
   </header>
   {% block content %}{% endblock %}
 </body>

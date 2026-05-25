@@ -45,11 +45,16 @@ pub fn router(state: AppState) -> Router {
             "/concerts/:id/tracks/:idx/delete",
             post(handlers::delete_track),
         )
+        .route("/concerts/:id/archive", post(handlers::archive))
         .route("/concerts/:id/status", get(handlers::status_row))
         .route("/jobs", get(handlers::jobs_list))
         .route("/jobs/count", get(handlers::jobs_count))
         .route("/jobs/:id/log", get(handlers::job_log))
         .route("/jobs/:id/cancel/:kind", post(handlers::cancel_job))
+        .route(
+            "/settings",
+            get(handlers::settings_page).post(handlers::settings_save),
+        )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .layer(TraceLayer::new_for_http())

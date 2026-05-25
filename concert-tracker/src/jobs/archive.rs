@@ -1,0 +1,221 @@
+use anyhow::Result;
+use rusqlite::Connection;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use crate::db;
+use crate::jobs::{JobKey, JobKind, JobRegistry};
+use crate::model::{concert_dir, sanitize_album};
+
+pub struct ArchiveJob {
+    pub concert_id: i64,
+    pub source_dir: PathBuf,
+    pub dest_dir: PathBuf,
+}
+
+pub enum StartOutcome {
+    Spawned,
+    AlreadyRunning,
+    NothingToArchive,
+}
+
+pub async fn start_archive(
+    db: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    working_dir: &Path,
+    archive_location: &str,
+    concert_id: i64,
+) -> Result<StartOutcome> {
+    let key = JobKey {
+        concert_id,
+        kind: JobKind::Archive,
+    };
+    if registry.is_running(&key) {
+        return Ok(StartOutcome::AlreadyRunning);
+    }
+
+    let (album, title) = {
+        let conn = db.lock().unwrap();
+        let concert = db::get_concert(&conn, concert_id)?;
+        if concert.downloaded_at.is_none() && concert.split_at.is_none() {
+            return Ok(StartOutcome::NothingToArchive);
+        }
+        let album = concert
+            .album
+            .ok_or_else(|| anyhow::anyhow!("concert {} has no album", concert_id))?;
+        (album, concert.title)
+    };
+
+    {
+        let conn = db.lock().unwrap();
+        if !db::try_mark_archive_started(&conn, concert_id)? {
+            tracing::info!("archive already running for concert {}", concert_id);
+            return Ok(StartOutcome::AlreadyRunning);
+        }
+    }
+
+    let source_dir = concert_dir(working_dir, &album);
+    let dest_dir = Path::new(archive_location).join(sanitize_album(&album));
+
+    tracing::info!(
+        "archive started for concert {} ({}) -> {}",
+        concert_id,
+        title,
+        dest_dir.display()
+    );
+
+    let job = ArchiveJob {
+        concert_id,
+        source_dir,
+        dest_dir,
+    };
+
+    let handle = tokio::task::spawn(run_archive(db.clone(), job));
+    registry.insert(key, handle);
+
+    Ok(StartOutcome::Spawned)
+}
+
+async fn run_archive(db: Arc<Mutex<Connection>>, job: ArchiveJob) {
+    let concert_id = job.concert_id;
+    match tokio::task::spawn_blocking(move || do_archive(&job)).await {
+        Ok(Ok(())) => {
+            tracing::info!("archive completed for concert {}", concert_id);
+            let conn = db.lock().unwrap();
+            let _ = db::mark_archive_succeeded(&conn, concert_id);
+        }
+        Ok(Err(e)) => {
+            let error = format!("{:#}", e);
+            tracing::warn!("archive failed for concert {}: {}", concert_id, error);
+            let conn = db.lock().unwrap();
+            let _ = db::mark_archive_failed(&conn, concert_id, &error);
+        }
+        Err(e) => {
+            let error = format!("task panicked: {}", e);
+            tracing::warn!("archive failed for concert {}: {}", concert_id, error);
+            let conn = db.lock().unwrap();
+            let _ = db::mark_archive_failed(&conn, concert_id, &error);
+        }
+    }
+}
+
+fn do_archive(job: &ArchiveJob) -> anyhow::Result<()> {
+    if !job.source_dir.exists() {
+        anyhow::bail!(
+            "source directory does not exist: {}",
+            job.source_dir.display()
+        );
+    }
+
+    if let Some(parent) = job.dest_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    tracing::debug!(
+        "attempting rename {} -> {}",
+        job.source_dir.display(),
+        job.dest_dir.display()
+    );
+
+    match std::fs::rename(&job.source_dir, &job.dest_dir) {
+        Ok(()) => {
+            tracing::debug!("rename succeeded (same filesystem)");
+        }
+        Err(e) if is_cross_device(&e) => {
+            tracing::debug!("cross-device move, falling back to copy+delete");
+            copy_dir_recursive(&job.source_dir, &job.dest_dir)?;
+            std::fs::remove_dir_all(&job.source_dir)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    #[cfg(unix)]
+    {
+        tracing::debug!(
+            "creating symlink {} -> {}",
+            job.source_dir.display(),
+            job.dest_dir.display()
+        );
+        std::os::unix::fs::symlink(&job.dest_dir, &job.source_dir)?;
+    }
+
+    Ok(())
+}
+
+fn is_cross_device(e: &std::io::Error) -> bool {
+    // EXDEV is 18 on macOS and Linux
+    e.raw_os_error() == Some(18)
+}
+
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let dest_path = dst.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_recursive(&entry.path(), &dest_path)?;
+        } else {
+            std::fs::copy(entry.path(), &dest_path)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn do_archive_moves_and_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Test Album");
+        let dest = tmp.path().join("archive").join("Test Album");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("test.mp4"), b"data").unwrap();
+
+        let job = ArchiveJob {
+            concert_id: 1,
+            source_dir: source.clone(),
+            dest_dir: dest.clone(),
+        };
+
+        do_archive(&job).unwrap();
+
+        assert!(dest.join("test.mp4").exists());
+        assert!(source.is_symlink());
+        assert_eq!(std::fs::read_link(&source).unwrap(), dest);
+        assert_eq!(
+            std::fs::read_to_string(source.join("test.mp4")).unwrap(),
+            "data"
+        );
+    }
+
+    #[test]
+    fn do_archive_fails_if_source_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let job = ArchiveJob {
+            concert_id: 1,
+            source_dir: tmp.path().join("nope"),
+            dest_dir: tmp.path().join("archive"),
+        };
+        assert!(do_archive(&job).is_err());
+    }
+
+    #[test]
+    fn copy_dir_recursive_copies_nested() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src");
+        let dst = tmp.path().join("dst");
+        std::fs::create_dir_all(src.join("sub")).unwrap();
+        std::fs::write(src.join("a.txt"), b"hello").unwrap();
+        std::fs::write(src.join("sub").join("b.txt"), b"world").unwrap();
+
+        copy_dir_recursive(&src, &dst).unwrap();
+
+        assert_eq!(std::fs::read_to_string(dst.join("a.txt")).unwrap(), "hello");
+        assert_eq!(
+            std::fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
+            "world"
+        );
+    }
+}
