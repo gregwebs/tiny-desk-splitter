@@ -89,12 +89,14 @@ async fn run_archive(db: Arc<Mutex<Connection>>, job: ArchiveJob) {
             tracing::warn!("archive failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_archive_failed(&conn, concert_id, &error);
+            let _ = db::insert_failed_job(&conn, concert_id, "archive", &error);
         }
         Err(e) => {
             let error = format!("task panicked: {}", e);
             tracing::warn!("archive failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_archive_failed(&conn, concert_id, &error);
+            let _ = db::insert_failed_job(&conn, concert_id, "archive", &error);
         }
     }
 }

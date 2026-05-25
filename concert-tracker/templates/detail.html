@@ -1,40 +1,14 @@
 {% extends "layout.html" %}
 {% block content %}
 <p><a href="/">&#8592; Back to list</a></p>
-<h2>{{ concert.title }}</h2>
+
+{{ card_html|safe }}
+
 {% if let Some(url) = preview_url.as_ref() %}
 <img class="preview-image" src="{{ url }}" alt="{{ concert.title }} preview">
 {% endif %}
-<p>
-  <span class="badge badge-{{ concert_status }}">{{ concert_status }}</span>
-  <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
-  <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
-  {% if show_archive_badge %}<span class="badge badge-{{ archive_status }}">{{ archive_status_label }}</span>{% endif %}
-  {% if let Some(date) = concert.display_date() %}<strong>Date:</strong> {{ date }}{% endif %}
-</p>
-{% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 
-<h3>Actions</h3>
-{% if can_download %}
-<button hx-post="/concerts/{{ concert.id }}/download">Download</button>
-{% endif %}
-{% if can_delete_download %}
-<button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ concert.id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕ Delete download</button>
-{% endif %}
-{% if can_split %}
-<button hx-post="/concerts/{{ concert.id }}/split">Split</button>
-{% endif %}
-{% if can_delete_split %}
-<button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ concert.id }}/delete-split" hx-target="this" hx-swap="outerHTML">✕ Delete tracks</button>
-{% endif %}
-{% if can_listen %}
-<button class="btn-listen" hx-post="/concerts/{{ concert.id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
-{% endif %}
-{% if can_archive %}
-<button hx-post="/concerts/{{ concert.id }}/archive" hx-disabled-elt="this"
-        hx-on::before-request="this.textContent='Archiving…'">Archive</button>
-{% endif %}
-<button hx-post="/concerts/{{ concert.id }}/scrape">Re-scrape</button>
+{% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 
 {% for para in concert.description_paragraphs() %}<p>{{ para }}</p>{% endfor %}
 

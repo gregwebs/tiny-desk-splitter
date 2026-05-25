@@ -66,20 +66,7 @@ struct RowTemplate {
 #[template(path = "detail.html")]
 struct DetailTemplate {
     concert: Concert,
-    concert_status: String,
-    download_status: String,
-    download_status_label: String,
-    split_status: String,
-    split_status_label: String,
-    can_download: bool,
-    can_delete_download: bool,
-    can_split: bool,
-    can_delete_split: bool,
-    can_listen: bool,
-    can_archive: bool,
-    show_archive_badge: bool,
-    archive_status: String,
-    archive_status_label: String,
+    card_html: String,
     notes_value: String,
     preview_url: Option<String>,
     tracks: Vec<TrackInfo>,
@@ -113,6 +100,7 @@ struct TrackListenButtonTemplate {
 #[template(path = "settings.html")]
 struct SettingsTemplate {
     archive_location: String,
+    saved: bool,
 }
 
 #[derive(Template)]
@@ -453,26 +441,9 @@ pub async fn detail(
         initial
     };
 
-    let ds = concert.download_status();
-    let ss = concert.split_status();
-    let archive_s = concert.archive_status();
     let has_al = has_archive_location(&state);
-    let can_download = matches!(
-        &ds,
-        DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
-    ) && concert.album.is_some();
-    let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
-    let can_split = matches!(&ds, DownloadStatus::Downloaded)
-        && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
-    let can_delete_split = matches!(&ss, SplitStatus::Split);
-    let can_listen = matches!(&ds, DownloadStatus::Downloaded);
-    let can_archive = has_al
-        && (concert.downloaded_at.is_some() || concert.split_at.is_some())
-        && matches!(
-            &archive_s,
-            ArchiveStatus::NotArchived | ArchiveStatus::ArchiveError
-        );
-    let show_archive_badge = !matches!(&archive_s, ArchiveStatus::NotArchived);
+    let card_html = render_row(&concert, has_al)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url(&state.jobs.working_dir);
     let mut tracks = concert
@@ -490,20 +461,7 @@ pub async fn detail(
     }
 
     Ok(DetailTemplate {
-        concert_status: concert.concert_status().slug().to_string(),
-        download_status: ds.slug().to_string(),
-        download_status_label: ds.label().to_string(),
-        split_status: ss.slug().to_string(),
-        split_status_label: ss.label().to_string(),
-        can_download,
-        can_delete_download,
-        can_split,
-        can_delete_split,
-        can_listen,
-        can_archive,
-        show_archive_badge,
-        archive_status: archive_s.slug().to_string(),
-        archive_status_label: archive_s.label().to_string(),
+        card_html,
         notes_value,
         preview_url,
         tracks,
@@ -1170,13 +1128,18 @@ pub async fn cancel_job(
     Ok((headers, "").into_response())
 }
 
-pub async fn settings_page(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+pub async fn settings_page(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<impl IntoResponse, AppError> {
     let settings = {
         let conn = state.db.lock().unwrap();
         db::get_settings(&conn)?
     };
+    let saved = params.get("saved").map(|v| v == "1").unwrap_or(false);
     Ok(SettingsTemplate {
         archive_location: settings.archive_location.unwrap_or_default(),
+        saved,
     })
 }
 
@@ -1194,15 +1157,13 @@ pub async fn settings_save(
     }
     tracing::info!("settings updated: archive_location={:?}", location);
 
-    let mut headers = HeaderMap::new();
-    headers.insert("HX-Redirect", "/settings".parse().unwrap());
-    Ok((headers, "").into_response())
+    Ok(axum::response::Redirect::to("/settings?saved=1").into_response())
 }
 
 pub async fn archive(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     let archive_location = {
         let conn = state.db.lock().unwrap();
         db::get_settings(&conn)?
@@ -1219,12 +1180,9 @@ pub async fn archive(
     )
     .await?;
 
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)?
-    };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    Ok((headers, "").into_response())
 }
 
 pub async fn sync_month_handler(
