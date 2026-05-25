@@ -24,3 +24,4 @@ See README.md for an overview of the project
 - verify manually that the changes work as expected in the application
   * start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information
   * data from the real concerts.db can be copied into the test db. Do not modify the real concerts.db during testing!
+  * test edge cases and failure modes in addition to the happy path
