@@ -8,6 +8,62 @@ use unidecode::unidecode;
 
 pub type OcrParse = (Vec<String>, bool);
 
+pub trait OcrEngine {
+    fn ocr_text(&mut self, image_path: &str) -> Result<String>;
+}
+
+pub struct SubprocessOcr {
+    psm: Option<String>,
+}
+
+impl SubprocessOcr {
+    pub fn new(psm: Option<&str>) -> Self {
+        Self {
+            psm: psm.map(|s| s.to_string()),
+        }
+    }
+}
+
+impl OcrEngine for SubprocessOcr {
+    fn ocr_text(&mut self, image_path: &str) -> Result<String> {
+        run_tesseract_ocr(image_path, self.psm.as_deref())
+    }
+}
+
+#[cfg(feature = "leptess-ocr")]
+pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
+    psm_modes
+        .iter()
+        .map(|psm| {
+            let engine: Box<dyn OcrEngine> = Box::new(
+                crate::ocr_leptess::LeptessOcr::new(*psm)
+                    .expect("Failed to create leptess OCR engine"),
+            );
+            engine
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "leptess-ocr"))]
+pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
+    psm_modes
+        .iter()
+        .map(|psm| {
+            let engine: Box<dyn OcrEngine> = Box::new(SubprocessOcr::new(*psm));
+            engine
+        })
+        .collect()
+}
+
+pub fn run_ocr_parse(
+    engine: &mut dyn OcrEngine,
+    image_path: &str,
+    artist_cmp: &str,
+) -> Result<Option<OcrParse>> {
+    let text = engine.ocr_text(image_path)?;
+    Ok(parse_tesseract_output(&text, artist_cmp))
+}
+
 pub fn run_tesseract_ocr_parse(
     image_path: &str,
     artist_cmp: &str,
@@ -22,10 +78,8 @@ pub fn run_tesseract_ocr_parse(
 
 pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> {
     let mut output_path = image_path.to_string();
-    // Run tesseract OCR on the image
     let mut cmd = Command::new("tesseract");
 
-    // Add PSM option if specified
     if let Some(psm_value) = psm {
         cmd.args(&["--psm", psm_value]);
         output_path = format!("{}_psm{}", output_path, psm_value);
@@ -42,7 +96,6 @@ pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> 
         return Err(anyhow::anyhow!("Tesseract OCR failed: {}", error_message));
     }
 
-    // Read the OCR result from the output text file
     let out_txt_path = format!("{}.txt", &output_path);
     let text = fs::read_to_string(&out_txt_path)
         .with_context(|| format!("Failed to read OCR output file: {}", out_txt_path))?;
@@ -401,7 +454,6 @@ fn check_line_match(
     None
 }
 
-
 fn spell_number(i: u8) -> &'static str {
     match i {
         1 => "one",
@@ -413,7 +465,7 @@ fn spell_number(i: u8) -> &'static str {
         7 => "seven",
         8 => "eight",
         9 => "nine",
-        _ => panic!("{} given but only 1-9 supported", i)
+        _ => panic!("{} given but only 1-9 supported", i),
     }
 }
 
@@ -434,8 +486,10 @@ fn strip_movement_prefix(song_title: &str) -> Option<String> {
                         un_coloned = &un_coloned[1..];
                         // println!("no quote now: {}", &un_coloned);
                     }
-                    if un_coloned.len() > 0 && un_coloned.chars().nth(un_coloned.chars().count() -1) == Some('"') {
-                        un_coloned = &un_coloned[..un_coloned.len()-1];
+                    if un_coloned.len() > 0
+                        && un_coloned.chars().nth(un_coloned.chars().count() - 1) == Some('"')
+                    {
+                        un_coloned = &un_coloned[..un_coloned.len() - 1];
                         // println!("no quote now: {}", &un_coloned);
                     }
                     return Some(un_coloned.to_string());
@@ -443,7 +497,7 @@ fn strip_movement_prefix(song_title: &str) -> Option<String> {
             }
         }
     }
-    return None
+    return None;
 }
 
 pub fn matches_song_title_weighted(
@@ -591,8 +645,13 @@ mod tests_matches_song_title {
 
     #[test]
     fn test_multi_line() {
-        let lines = vec!["Lay Me Down".to_string(), "(feat, LaDonna Harley-Péters)".to_string()];
-        assert!(matches_song_title(&lines, "Lay Me Down (feat. LaDonna Harley-Peters)", true).is_some());
+        let lines = vec![
+            "Lay Me Down".to_string(),
+            "(feat, LaDonna Harley-Péters)".to_string(),
+        ];
+        assert!(
+            matches_song_title(&lines, "Lay Me Down (feat. LaDonna Harley-Peters)", true).is_some()
+        );
     }
 
     #[test]

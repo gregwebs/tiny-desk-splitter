@@ -1,4 +1,6 @@
-mod ocr;
+pub mod ocr;
+#[cfg(feature = "leptess-ocr")]
+pub mod ocr_leptess;
 use crate::ocr::{
     matches_song_title, matches_song_title_weighted, weights_for_greedy_extractor,
     weights_for_stingy_extractor,
@@ -96,16 +98,11 @@ struct SongSegment {
 ///   - `concert.json` — a verbatim copy of the input metadata, only if not
 ///     already present.
 ///   - `timestamps.json` — the timestamps-augmented concert struct.
-fn write_concert_json_outputs(
-    output_dir: &str,
-    input_path: &str,
-    concert: &Concert,
-) -> Result<()> {
+fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &Concert) -> Result<()> {
     let canonical_path = format!("{}/concert.json", output_dir);
     if !Path::new(&canonical_path).exists() {
-        fs::copy(input_path, &canonical_path).with_context(|| {
-            format!("Failed to copy {} -> {}", input_path, canonical_path)
-        })?;
+        fs::copy(input_path, &canonical_path)
+            .with_context(|| format!("Failed to copy {} -> {}", input_path, canonical_path))?;
     }
 
     let timestamps_path = format!("{}/timestamps.json", output_dir);
@@ -875,6 +872,8 @@ fn detect_song_boundaries_from_text(
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
     });
 
+    let mut ocr_engines = ocr::create_ocr_engines(&[Some("11"), None, Some("6")]);
+
     let mut last_song_start_time: Option<f64> = None;
     for mut frame_path in frames {
         // Extract frame number to calculate timestamp
@@ -926,13 +925,10 @@ fn detect_song_boundaries_from_text(
                 }
             }
             let frame_path_str = frame_path.to_str().unwrap();
-            // Define an iterator for different PSM options
-            let psm_options = [Some("11"), None, Some("6")].iter();
 
             // Collect all OCR results from different PSM options
-            for &psm in psm_options {
-                // Run tesseract OCR on the frame with current PSM option
-                let parsed = ocr::run_tesseract_ocr_parse(frame_path_str, &artist_cmp, psm)?;
+            for engine in ocr_engines.iter_mut() {
+                let parsed = ocr::run_ocr_parse(engine.as_mut(), frame_path_str, &artist_cmp)?;
                 if let Some(lo) = parsed {
                     all_ocr_results.push(lo);
                 }
@@ -1334,32 +1330,25 @@ fn refine_song_start_time(
     let frame_count = frames.len();
 
     // Try different PSM options until we find a valid result
-    let psm_options = [
-        (weights_for_stingy_extractor(), Some("11")),
-        (weights_for_stingy_extractor(), None),
-        (weights_for_greedy_extractor(), Some("6")),
-        (weights_for_greedy_extractor(), Some("12")),
-        (weights_for_greedy_extractor(), Some("10")),
+    let weights_list = [
+        weights_for_stingy_extractor(),
+        weights_for_stingy_extractor(),
+        weights_for_greedy_extractor(),
+        weights_for_greedy_extractor(),
+        weights_for_greedy_extractor(),
     ];
+    let mut refine_engines =
+        ocr::create_ocr_engines(&[Some("11"), None, Some("6"), Some("12"), Some("10")]);
 
     // Process each refined frame
     for frame_path in frames {
         let frame_file = frame_path.to_str().unwrap();
-        /*
-        let mut frame_file = frame_path.to_str().unwrap().to_string();
-        frame_file.push_str("bw");
-        let status = Command::new("convert").arg("-monochrome").arg(&frame_path)
-        .arg(&frame_file).status()?;
-        if !status.success() {
-            return Err(format!("Failed to convert file to bw {}", &frame_file).into());
-        }
-        */
         // Extract frame number
         let frame_num = frame_number_from_image_filename(&frame_path);
 
         let mut earliest_match_found = false;
-        for (weights, psm) in &psm_options {
-            let result = ocr::run_tesseract_ocr_parse(&frame_file, artist, *psm)?;
+        for (engine, weights) in refine_engines.iter_mut().zip(weights_list.iter()) {
+            let result = ocr::run_ocr_parse(engine.as_mut(), frame_file, artist)?;
             match result {
                 None => continue,
                 Some(parsed) => {
@@ -1498,4 +1487,3 @@ fn save_matched_image(
 
     Ok(())
 }
-

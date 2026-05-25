@@ -36,6 +36,18 @@ stringmetrics = "2.2.2"
 image = "0.24"         # Image processing library
 anyhow = "1.0.97"
 unidecode = "0.3.0"
+leptess = { version = "0.14", optional = true }
+
+[features]
+default = ["leptess-ocr"]
+leptess-ocr = ["leptess"]
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "ocr_benchmark"
+harness = false
 
 # Optional: for more advanced audio processing
 # Note: these are optional and can be added if needed

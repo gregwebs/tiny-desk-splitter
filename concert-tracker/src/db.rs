@@ -47,7 +47,35 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         .context("Failed to run migration 001")?;
     conn.execute_batch(MIGRATION_002)
         .context("Failed to run migration 002")?;
+    add_column_if_missing(conn, "concerts", "archive_started_at", "TEXT")?;
+    add_column_if_missing(conn, "concerts", "archived_at", "TEXT")?;
+    add_column_if_missing(
+        conn,
+        "concerts",
+        "archive_errors_json",
+        "TEXT NOT NULL DEFAULT '[]'",
+    )?;
     events::backfill(conn).context("Failed to backfill events")?;
+    Ok(())
+}
+
+fn add_column_if_missing(
+    conn: &Connection,
+    table: &str,
+    column: &str,
+    col_type: &str,
+) -> Result<()> {
+    let has_column: bool = conn
+        .prepare(&format!("PRAGMA table_info({})", table))?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|name| name.as_deref() == Ok(column));
+    if !has_column {
+        conn.execute_batch(&format!(
+            "ALTER TABLE {} ADD COLUMN {} {}",
+            table, column, col_type
+        ))
+        .with_context(|| format!("Failed to add column {}.{}", table, column))?;
+    }
     Ok(())
 }
 
