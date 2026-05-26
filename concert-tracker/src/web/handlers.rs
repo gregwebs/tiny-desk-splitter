@@ -56,6 +56,8 @@ struct RowTemplate {
     can_delete_split: bool,
     can_listen: bool,
     can_watch: bool,
+    track_count: usize,
+    track_total: usize,
     can_archive: bool,
     /// Whether to show the download badge alongside slot contents.
     /// False only for the NotDownloaded "fresh" state.
@@ -255,6 +257,16 @@ fn render_row(
                     .map(is_video_extension)
             })
             .unwrap_or(false);
+    let (track_count, track_total) = if can_delete_split {
+        let count = c
+            .album
+            .as_deref()
+            .map(|a| crate::model::list_tracks(working_dir, a, &c.set_list).len())
+            .unwrap_or(0);
+        (count, c.set_list.len())
+    } else {
+        (0, 0)
+    };
     let can_archive = has_archive_location
         && (c.downloaded_at.is_some() || c.split_at.is_some())
         && matches!(
@@ -298,6 +310,8 @@ fn render_row(
         can_delete_split,
         can_listen,
         can_watch,
+        track_count,
+        track_total,
         can_archive,
         show_download_badge,
         show_split_badge,

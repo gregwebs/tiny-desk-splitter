@@ -291,6 +291,14 @@
       #player-seek { flex: 1; }
     }
 
+    /* ── Tracks row ── */
+    .card-tracks-row {
+      padding: 0.4rem 0 0;
+      border-top: 1px solid #f0f0f0;
+      margin-top: 0.4rem;
+    }
+    .btn-tracks { cursor: pointer; }
+
     /* Now-playing indicator */
     .btn-track-listen.playing { font-weight: 700; }
     .btn-track-listen.playing::before { content: "\25B6 "; }
@@ -318,6 +326,19 @@
     <span id="player-time">0:00 / 0:00</span>
     <audio id="player-audio"></audio>
   </div>
+  <script>
+    function toggleTracks(btn, concertId) {
+      var target = document.getElementById("tracks-" + concertId);
+      if (!target) return;
+      if (target.children.length > 0) {
+        target.innerHTML = "";
+        return;
+      }
+      fetch("/concerts/" + concertId + "/tracks")
+        .then(function(r) { return r.text(); })
+        .then(function(html) { target.innerHTML = html; });
+    }
+  </script>
   <script src="/static/player.js"></script>
 </body>
 </html>
