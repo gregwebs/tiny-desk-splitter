@@ -52,6 +52,11 @@ async fn main() -> Result<()> {
         );
     }
 
+    let backfilled = concert_tracker::scan::backfill_tracks_present(&conn, &cli.workdir);
+    if backfilled > 0 {
+        tracing::info!("backfilled tracks_present for {} concert(s)", backfilled);
+    }
+
     let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),

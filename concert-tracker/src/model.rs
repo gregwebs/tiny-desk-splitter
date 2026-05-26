@@ -300,6 +300,7 @@ pub struct Concert {
     pub archive_errors: Vec<ErrorEntry>,
     pub first_seen_at: String,
     pub metadata_scraped_at: Option<String>,
+    pub tracks_present: Vec<bool>,
 }
 
 impl Concert {
@@ -317,6 +318,18 @@ impl Concert {
 
     pub fn archive_status(&self) -> ArchiveStatus {
         ArchiveStatus::from_concert(self)
+    }
+
+    pub fn track_count(&self) -> usize {
+        self.tracks_present.iter().filter(|&&p| p).count()
+    }
+
+    pub fn track_total(&self) -> usize {
+        if self.tracks_present.is_empty() {
+            self.set_list.len()
+        } else {
+            self.tracks_present.len()
+        }
     }
 
     /// Date portion of `concert_date` for display. Archive sync stores
@@ -388,6 +401,7 @@ mod tests {
             archive_errors: vec![],
             first_seen_at: "2024-01-01T00:00:00Z".to_string(),
             metadata_scraped_at: None,
+            tracks_present: vec![],
         }
     }
 
@@ -789,6 +803,30 @@ mod tests {
         let deleted = HashSet::new();
         let tracks = list_tracks_from_events(&set_list, &deleted);
         assert_eq!(tracks.len(), 2);
+    }
+
+    #[test]
+    fn track_count_counts_true_values() {
+        let mut c = bare_concert();
+        c.tracks_present = vec![true, false, true, true, false];
+        assert_eq!(c.track_count(), 3);
+        assert_eq!(c.track_total(), 5);
+    }
+
+    #[test]
+    fn track_count_empty_falls_back_to_set_list_len() {
+        let mut c = bare_concert();
+        c.set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        assert_eq!(c.track_count(), 0);
+        assert_eq!(c.track_total(), 3);
+    }
+
+    #[test]
+    fn track_count_all_present() {
+        let mut c = bare_concert();
+        c.tracks_present = vec![true, true, true];
+        assert_eq!(c.track_count(), 3);
+        assert_eq!(c.track_total(), 3);
     }
 
     #[test]

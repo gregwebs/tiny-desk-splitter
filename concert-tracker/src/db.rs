@@ -55,6 +55,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         "archive_errors_json",
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
+    add_column_if_missing(conn, "concerts", "tracks_present", "TEXT")?;
     events::backfill(conn).context("Failed to backfill events")?;
     Ok(())
 }
@@ -126,6 +127,7 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         .and_then(|j| serde_json::from_str(&j).ok())
         .unwrap_or_default();
     let archive_errors_json: String = row.get("archive_errors_json")?;
+    let tracks_present_json: Option<String> = row.get("tracks_present")?;
     let download_errors: Vec<ErrorEntry> =
         serde_json::from_str(&download_errors_json).unwrap_or_default();
     let split_errors: Vec<ErrorEntry> =
@@ -158,6 +160,9 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         archive_errors,
         first_seen_at: row.get("first_seen_at")?,
         metadata_scraped_at: row.get("metadata_scraped_at")?,
+        tracks_present: tracks_present_json
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
     })
 }
 
@@ -386,11 +391,21 @@ pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
 /// Clear split-related timestamps. Error history is preserved.
 pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE concerts SET split_at = NULL, split_started_at = NULL WHERE id = ?1",
+        "UPDATE concerts SET split_at = NULL, split_started_at = NULL, tracks_present = NULL WHERE id = ?1",
         params![id],
     )
     .context("Failed to clear split state")?;
     events::record_now(conn, id, Event::SplitDelete, None);
+    Ok(())
+}
+
+pub fn set_tracks_present(conn: &Connection, id: i64, tracks: &[bool]) -> Result<()> {
+    let json = serde_json::to_string(tracks).unwrap();
+    conn.execute(
+        "UPDATE concerts SET tracks_present = ?1 WHERE id = ?2",
+        params![json, id],
+    )
+    .context("Failed to set tracks_present")?;
     Ok(())
 }
 
@@ -439,6 +454,17 @@ pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Res
     )
     .context("Failed to set downloaded_at")?;
     Ok(())
+}
+
+pub fn list_concerts_needing_tracks_backfill(conn: &Connection) -> Result<Vec<Concert>> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM concerts WHERE split_at IS NOT NULL AND tracks_present IS NULL")
+        .context("Failed to prepare tracks backfill query")?;
+    let concerts = stmt
+        .query_map([], concert_from_row)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(concerts)
 }
 
 /// Set split_at from filesystem mtime if not already set (for scan/recovery).
@@ -928,6 +954,24 @@ pub mod tests {
         assert!(c.split_at.is_none());
         assert!(c.split_started_at.is_none());
         assert_eq!(c.split_errors.len(), 1, "split errors preserved");
+        assert!(c.tracks_present.is_empty(), "tracks_present cleared");
+    }
+
+    #[test]
+    fn set_tracks_present_roundtrip() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        set_tracks_present(&conn, id, &[true, false, true]).unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.tracks_present, vec![true, false, true]);
+    }
+
+    #[test]
+    fn tracks_present_defaults_to_empty_when_null() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.tracks_present.is_empty());
     }
 
     #[test]

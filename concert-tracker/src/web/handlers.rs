@@ -257,16 +257,8 @@ fn render_row(
                     .map(is_video_extension)
             })
             .unwrap_or(false);
-    let (track_count, track_total) = if can_delete_split {
-        let count = c
-            .album
-            .as_deref()
-            .map(|a| crate::model::list_tracks(working_dir, a, &c.set_list).len())
-            .unwrap_or(0);
-        (count, c.set_list.len())
-    } else {
-        (0, 0)
-    };
+    let track_count = c.track_count();
+    let track_total = c.track_total();
     let can_archive = has_archive_location
         && (c.downloaded_at.is_some() || c.split_at.is_some())
         && matches!(
@@ -1076,15 +1068,21 @@ pub async fn delete_track(
         crate::events::record_now(&conn, id, crate::events::Event::TrackDelete, Some(&json));
     }
 
-    let remaining_tracks =
-        crate::model::list_tracks(&state.jobs.working_dir, album, &concert.set_list);
-    if remaining_tracks.is_empty() {
+    let mut tracks_present = concert.tracks_present.clone();
+    if idx < tracks_present.len() {
+        tracks_present[idx] = false;
+    }
+
+    if tracks_present.iter().all(|&p| !p) {
         let conn = state.db.lock().unwrap();
         db::clear_split_state(&conn, id)?;
         tracing::info!(
             "delete_track: no tracks remain, cleared split state for concert {}",
             id
         );
+    } else {
+        let conn = state.db.lock().unwrap();
+        db::set_tracks_present(&conn, id, &tracks_present)?;
     }
 
     let concert = {

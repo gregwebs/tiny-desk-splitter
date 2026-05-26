@@ -162,6 +162,20 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
             drop(temp_file);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_succeeded(&conn, concert_id);
+            let concert = db::get_concert(&conn, concert_id);
+            if let Ok(c) = concert {
+                if let Some(album) = c.album.as_deref() {
+                    let present: Vec<bool> = c
+                        .set_list
+                        .iter()
+                        .map(|title| {
+                            crate::model::find_track_file(&config.working_dir, album, title)
+                                .is_some()
+                        })
+                        .collect();
+                    let _ = db::set_tracks_present(&conn, concert_id, &present);
+                }
+            }
         }
         Ok((status, stderr_tail)) => {
             let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());

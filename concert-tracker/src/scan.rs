@@ -44,6 +44,16 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
             match mtime_iso(&split_dir) {
                 Ok(at) => {
                     db::set_split_at_if_missing(conn, concert.id, &at)?;
+                    if concert.tracks_present.is_empty() && !concert.set_list.is_empty() {
+                        let present: Vec<bool> = concert
+                            .set_list
+                            .iter()
+                            .map(|title| {
+                                crate::model::find_track_file(dir, &album, title).is_some()
+                            })
+                            .collect();
+                        db::set_tracks_present(conn, concert.id, &present)?;
+                    }
                     report.splits_found += 1;
                 }
                 Err(e) => report
@@ -87,6 +97,30 @@ pub fn has_split_tracks(dir: &Path, album: &str) -> bool {
             })
         })
         .unwrap_or(false)
+}
+
+pub fn backfill_tracks_present(conn: &Connection, working_dir: &Path) -> usize {
+    let concerts = match db::list_concerts_needing_tracks_backfill(conn) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!("tracks_present backfill query failed: {}", e);
+            return 0;
+        }
+    };
+    let mut count = 0;
+    for c in &concerts {
+        if let Some(album) = c.album.as_deref() {
+            let present: Vec<bool> = c
+                .set_list
+                .iter()
+                .map(|title| crate::model::find_track_file(working_dir, album, title).is_some())
+                .collect();
+            if db::set_tracks_present(conn, c.id, &present).is_ok() {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 fn mtime_iso(path: &Path) -> Result<String> {
