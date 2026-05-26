@@ -13,12 +13,7 @@ Tools for downloading and splitting NPR Tiny Desk Concerts into individual track
 ## Quick start
 
 ```sh
-# 1. Sync the archive and import any existing JSON files
-concert-db sync --from 2024-01 --to 2024-12
-concert-db import .
-
-# 2. Open the web UI
-concert-web --port 3000
+cargo run --bin concert-web
 # → http://localhost:3000
 ```
 
