@@ -6,6 +6,7 @@ use axum::{
     extract::{Form, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::Response,
+    Json,
 };
 use rusqlite::Connection;
 
@@ -14,7 +15,10 @@ use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
 use crate::jobs::{JobKey, JobKind};
-use crate::model::{concert_dir, ArchiveStatus, Concert, DownloadStatus, SplitStatus, TrackInfo};
+use crate::model::{
+    concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
+    SplitStatus, TrackInfo,
+};
 use crate::sync::{sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
 
@@ -734,48 +738,26 @@ pub async fn listen(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (album, working_dir) = {
+    let album = {
         let conn = state.db.lock().unwrap();
         let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert.album, state.jobs.working_dir.clone())
+        concert.album
     };
 
-    let render_state = match album
+    let file_exists = album
         .as_deref()
-        .and_then(|a| find_downloaded_file(&working_dir, a))
-    {
-        None => {
-            tracing::warn!("listen: file not found for concert {}", id);
-            "error"
-        }
-        Some(path) => {
-            tracing::info!("listen: opening {} for concert {}", path.display(), id);
-            match tokio::process::Command::new("open")
-                .arg(&path)
-                .status()
-                .await
-            {
-                Ok(status) if status.success() => "success",
-                Ok(status) => {
-                    tracing::warn!(
-                        "listen: `open` exited {:?} for concert {}",
-                        status.code(),
-                        id
-                    );
-                    "error"
-                }
-                Err(e) => {
-                    tracing::warn!("listen: spawn `open` failed for concert {}: {}", id, e);
-                    "error"
-                }
-            }
-        }
-    };
+        .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a))
+        .is_some();
 
-    if render_state == "success" {
+    let render_state = if file_exists {
+        tracing::info!("listen: recording listen event for concert {}", id);
         let conn = state.db.lock().unwrap();
         crate::events::record_now(&conn, id, crate::events::Event::Listen, None);
-    }
+        "success"
+    } else {
+        tracing::warn!("listen: file not found for concert {}", id);
+        "error"
+    };
 
     ListenButtonTemplate {
         id,
@@ -783,6 +765,146 @@ pub async fn listen(
     }
     .render()
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+#[derive(serde::Serialize)]
+pub struct MediaInfo {
+    pub url: String,
+    pub title: String,
+    pub artist: String,
+    pub is_video: bool,
+    pub playable: bool,
+}
+
+pub async fn media_info(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<MediaInfo>, AppError> {
+    let (concert, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert, state.jobs.working_dir.clone())
+    };
+
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let path = find_downloaded_file(&working_dir, album).ok_or(AppError::NotFound)?;
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let filename = path
+        .file_name()
+        .and_then(|f| f.to_str())
+        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("invalid filename")))?;
+    let sanitized_album = crate::model::sanitize_album(album);
+    let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+
+    Ok(Json(MediaInfo {
+        url,
+        title: album.to_string(),
+        artist: concert.artist.unwrap_or_default(),
+        is_video: is_video_extension(ext),
+        playable: is_browser_playable(ext),
+    }))
+}
+
+pub async fn track_media_info(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<Json<MediaInfo>, AppError> {
+    let (concert, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert, state.jobs.working_dir.clone())
+    };
+
+    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let filename =
+        crate::model::find_track_file(&working_dir, album, &title).ok_or(AppError::NotFound)?;
+    let ext = filename.rsplit('.').next().unwrap_or("");
+    let sanitized_album = crate::model::sanitize_album(album);
+    let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+
+    Ok(Json(MediaInfo {
+        url,
+        title,
+        artist: concert.artist.unwrap_or_default(),
+        is_video: is_video_extension(ext),
+        playable: is_browser_playable(ext),
+    }))
+}
+
+pub async fn watch(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    let (album, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert.album, state.jobs.working_dir.clone())
+    };
+
+    let path = album
+        .as_deref()
+        .and_then(|a| find_downloaded_file(&working_dir, a))
+        .ok_or(AppError::NotFound)?;
+
+    tracing::info!("watch: opening {} for concert {}", path.display(), id);
+    match tokio::process::Command::new("open")
+        .arg(&path)
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => Ok(StatusCode::OK),
+        Ok(s) => {
+            tracing::warn!("watch: `open` exited {:?} for concert {}", s.code(), id);
+            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(e) => {
+            tracing::warn!("watch: spawn `open` failed for concert {}: {}", id, e);
+            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+pub async fn watch_track(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<StatusCode, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?;
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let filename = crate::model::find_track_file(&state.jobs.working_dir, album, title)
+        .ok_or(AppError::NotFound)?;
+    let path = concert_dir(&state.jobs.working_dir, album).join(&filename);
+
+    tracing::info!(
+        "watch_track: opening {} for concert {} track {}",
+        path.display(),
+        id,
+        idx
+    );
+    match tokio::process::Command::new("open")
+        .arg(&path)
+        .status()
+        .await
+    {
+        Ok(s) if s.success() => Ok(StatusCode::OK),
+        Ok(s) => {
+            tracing::warn!(
+                "watch_track: `open` exited {:?} for concert {}",
+                s.code(),
+                id
+            );
+            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+        Err(e) => {
+            tracing::warn!("watch_track: spawn `open` failed for concert {}: {}", id, e);
+            Ok(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
 }
 
 pub async fn tracks(
@@ -824,58 +946,27 @@ pub async fn listen_track(
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let stem = crate::model::sanitize_filename(&title);
-    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
-    let mp4 = dir.join(format!("{stem}.mp4"));
-    let path = if mp4.exists() {
-        mp4
-    } else {
-        dir.join(format!("{stem}.m4a"))
-    };
+    let file_exists =
+        crate::model::find_track_file(&state.jobs.working_dir, album, &title).is_some();
 
-    let render_state = if !path.exists() {
+    let render_state = if file_exists {
+        tracing::info!(
+            "listen_track: recording listen event for concert {} track {}",
+            id,
+            idx
+        );
+        let conn = state.db.lock().unwrap();
+        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
+        crate::events::record_now(&conn, id, crate::events::Event::Listen, Some(&json));
+        "success"
+    } else {
         tracing::warn!(
             "listen_track: file not found for concert {} track {}",
             id,
             idx
         );
         "error"
-    } else {
-        tracing::info!(
-            "listen_track: opening {} for concert {}",
-            path.display(),
-            id
-        );
-        match tokio::process::Command::new("open")
-            .arg(&path)
-            .status()
-            .await
-        {
-            Ok(status) if status.success() => "success",
-            Ok(status) => {
-                tracing::warn!(
-                    "listen_track: `open` exited {:?} for concert {}",
-                    status.code(),
-                    id
-                );
-                "error"
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "listen_track: spawn `open` failed for concert {}: {}",
-                    id,
-                    e
-                );
-                "error"
-            }
-        }
     };
-
-    if render_state == "success" {
-        let conn = state.db.lock().unwrap();
-        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
-        crate::events::record_now(&conn, id, crate::events::Event::Listen, Some(&json));
-    }
 
     TrackListenButtonTemplate {
         id,
@@ -1213,6 +1304,13 @@ pub async fn sync_month_handler(
         headers,
         format!("Synced {} concerts for {}/{:02}", count, year, month),
     ))
+}
+
+pub async fn player_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/player.js"),
+    )
 }
 
 #[cfg(test)]

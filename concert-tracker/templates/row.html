@@ -35,7 +35,7 @@
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
         {% endif %}
         {% if can_listen %}
-          <button class="btn-listen" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+          <button class="btn-listen" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">Listen</button>
         {% endif %}
       </span>
 

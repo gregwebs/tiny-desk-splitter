@@ -30,6 +30,31 @@ pub fn concert_dir(working_dir: &Path, album: &str) -> PathBuf {
     working_dir.join("concerts").join(sanitize_album(album))
 }
 
+pub fn is_video_extension(ext: &str) -> bool {
+    matches!(ext.to_lowercase().as_str(), "mp4" | "webm")
+}
+
+pub fn is_browser_playable(ext: &str) -> bool {
+    matches!(
+        ext.to_lowercase().as_str(),
+        "mp4" | "m4a" | "webm" | "mp3" | "ogg" | "opus" | "wav" | "flac"
+    )
+}
+
+pub fn find_track_file(working_dir: &Path, album: &str, title: &str) -> Option<String> {
+    let stem = sanitize_filename(title);
+    let dir = concert_dir(working_dir, album);
+    for ext in &[
+        "mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac", "mkv",
+    ] {
+        let filename = format!("{stem}.{ext}");
+        if dir.join(&filename).exists() {
+            return Some(filename);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
     pub index: usize,
@@ -749,5 +774,59 @@ mod tests {
         let deleted = HashSet::new();
         let tracks = list_tracks_from_events(&set_list, &deleted);
         assert_eq!(tracks.len(), 2);
+    }
+
+    #[test]
+    fn is_video_extension_recognizes_video_formats() {
+        assert!(is_video_extension("mp4"));
+        assert!(is_video_extension("webm"));
+        assert!(is_video_extension("MP4"));
+        assert!(!is_video_extension("m4a"));
+        assert!(!is_video_extension("mp3"));
+        assert!(!is_video_extension("mkv"));
+    }
+
+    #[test]
+    fn is_browser_playable_recognizes_supported_formats() {
+        for ext in &["mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac"] {
+            assert!(is_browser_playable(ext), "{ext} should be playable");
+        }
+        assert!(!is_browser_playable("mkv"));
+        assert!(!is_browser_playable("avi"));
+    }
+
+    #[test]
+    fn find_track_file_finds_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("Song One.mp4"), b"data").unwrap();
+
+        assert_eq!(
+            find_track_file(dir.path(), album, "Song One"),
+            Some("Song One.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn find_track_file_prefers_mp4_over_m4a() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("Song.mp4"), b"data").unwrap();
+        std::fs::write(cd.join("Song.m4a"), b"data").unwrap();
+
+        assert_eq!(
+            find_track_file(dir.path(), album, "Song"),
+            Some("Song.mp4".to_string())
+        );
+    }
+
+    #[test]
+    fn find_track_file_returns_none_when_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_track_file(dir.path(), "No Album", "No Song"), None);
     }
 }

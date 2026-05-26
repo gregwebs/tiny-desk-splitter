@@ -1,1 +1,1 @@
-<button class="btn-listen btn-listen-{{ state }}" hx-post="/concerts/{{ id }}/listen" hx-target="this" hx-swap="outerHTML">Listen</button>
+<button class="btn-listen btn-listen-{{ state }}" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">Listen</button>

@@ -36,10 +36,20 @@ pub fn router(state: AppState) -> Router {
         .route("/concerts/:id/split", post(handlers::split))
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
         .route("/concerts/:id/listen", post(handlers::listen))
+        .route("/concerts/:id/watch", post(handlers::watch))
+        .route("/concerts/:id/media-info", get(handlers::media_info))
         .route("/concerts/:id/tracks", get(handlers::tracks))
         .route(
             "/concerts/:id/tracks/:idx/listen",
             post(handlers::listen_track),
+        )
+        .route(
+            "/concerts/:id/tracks/:idx/media-info",
+            get(handlers::track_media_info),
+        )
+        .route(
+            "/concerts/:id/tracks/:idx/watch",
+            post(handlers::watch_track),
         )
         .route(
             "/concerts/:id/tracks/:idx/delete",
@@ -56,6 +66,7 @@ pub fn router(state: AppState) -> Router {
             get(handlers::settings_page).post(handlers::settings_save),
         )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
+        .route("/static/player.js", get(handlers::player_js))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state)

@@ -252,9 +252,50 @@
       overflow-x: auto; font-size: 0.82em; line-height: 1.6;
       max-height: 80vh; overflow-y: auto;
     }
+
+    /* ── Player bar ── */
+    #player-bar {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      height: 56px; background: #1a1a1a; color: #fff;
+      display: none; align-items: center;
+      padding: 0 1rem; gap: 0.75rem; z-index: 1000;
+      box-shadow: 0 -2px 8px rgba(0,0,0,0.2);
+      font-size: 0.85em;
+    }
+    #player-bar.active { display: flex; }
+    body.player-active { padding-bottom: 60px; }
+    #player-play-pause {
+      background: none; border: none; color: #fff; font-size: 1.4em;
+      cursor: pointer; padding: 0.2rem 0.4rem; min-width: 2em; text-align: center;
+    }
+    #player-play-pause:hover { color: #ccc; }
+    #player-watch {
+      background: none; border: 1px solid #666; color: #fff; font-size: 0.85em;
+      cursor: pointer; padding: 0.15rem 0.5rem; border-radius: 3px; display: none;
+    }
+    #player-watch:hover { border-color: #aaa; background: rgba(255,255,255,0.1); }
+    #player-info { flex: 1; min-width: 0; overflow: hidden; }
+    #player-title {
+      display: block; font-weight: 600; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
+    }
+    #player-artist { display: block; font-size: 0.85em; color: #aaa; }
+    #player-seek { flex: 2; accent-color: #fff; }
+    #player-time { font-variant-numeric: tabular-nums; min-width: 8.5em; text-align: right; }
+    #player-error { color: #ff6b6b; font-size: 0.85em; display: none; }
+
+    @media (max-width: 480px) {
+      #player-time { display: none; }
+      #player-seek { flex: 1; }
+    }
+
+    /* Now-playing indicator */
+    .btn-track-listen.playing { font-weight: 700; }
+    .btn-track-listen.playing::before { content: "\25B6 "; }
+    .btn-listen.playing { background: #198754; color: #fff; border-color: #198754; }
   </style>
 </head>
-<body>
+<body hx-boost="true">
   <header>
     <h1>Tiny Desk Concerts</h1>
     <a href="/jobs" style="font-size: 0.85em; text-decoration: none; font-weight: 500;">Jobs<span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></a>
@@ -262,5 +303,19 @@
     <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings">&#9881;</a>
   </header>
   {% block content %}{% endblock %}
+  <div id="player-bar" hx-preserve="true">
+    <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
+    <button id="player-watch" onclick="Player.watch()">Watch</button>
+    <div id="player-info">
+      <span id="player-title"></span>
+      <span id="player-artist"></span>
+    </div>
+    <span id="player-error"></span>
+    <input id="player-seek" type="range" min="0" max="100" value="0"
+      oninput="Player.seek(this.value)">
+    <span id="player-time">0:00 / 0:00</span>
+    <audio id="player-audio"></audio>
+  </div>
+  <script src="/static/player.js"></script>
 </body>
 </html>

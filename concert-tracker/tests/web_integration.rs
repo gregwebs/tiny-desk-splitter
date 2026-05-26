@@ -570,7 +570,7 @@ async fn listen_button_visible_after_successful_split() {
         .unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(
-        html.contains("/concerts/1/listen\""),
+        html.contains("Player.playAlbum(this, 1)"),
         "Listen button must remain visible after split; got: {}",
         html
     );
