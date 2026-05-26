@@ -120,6 +120,46 @@ pub fn default_splitter_bin() -> PathBuf {
     PathBuf::from("live-set-splitter")
 }
 
+fn binary_exists(path: &Path) -> bool {
+    if path.is_absolute() || path.components().count() > 1 {
+        path.exists()
+    } else {
+        which::which(path).is_ok()
+    }
+}
+
+/// Check that required external binaries are available. Returns a list of
+/// human-readable warnings for any that are missing.
+pub fn check_dependencies(splitter_bin: &Path) -> Vec<String> {
+    let mut warnings = Vec::new();
+
+    if !binary_exists(splitter_bin) {
+        warnings.push(format!(
+            "splitter binary not found at '{}'. Splitting will fail. \
+             Build it with: cargo build --bin live-set-splitter",
+            splitter_bin.display()
+        ));
+    }
+
+    if which::which("yt-dlp").is_err() {
+        warnings.push(
+            "yt-dlp not found in PATH. Downloads will fail. \
+             Install it: https://github.com/yt-dlp/yt-dlp#installation"
+                .to_string(),
+        );
+    }
+
+    if which::which("ffmpeg").is_err() {
+        warnings.push(
+            "ffmpeg not found in PATH. Splitting will fail. \
+             Install it: https://ffmpeg.org/download.html"
+                .to_string(),
+        );
+    }
+
+    warnings
+}
+
 impl JobConfig {
     pub fn log_dir(&self) -> PathBuf {
         self.working_dir.join("log").join("job")
@@ -502,5 +542,43 @@ mod tests {
         let cmd = Command::new("true");
         let (status, _) = run_with_logging(cmd, "test", 1, None).await.unwrap();
         assert!(status.success());
+    }
+
+    #[test]
+    fn binary_exists_finds_absolute_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("my-tool");
+        File::create(&bin).unwrap();
+        assert!(binary_exists(&bin));
+    }
+
+    #[test]
+    fn binary_exists_rejects_missing_absolute_path() {
+        assert!(!binary_exists(Path::new("/nonexistent/binary")));
+    }
+
+    #[test]
+    fn binary_exists_finds_command_on_path() {
+        assert!(binary_exists(Path::new("sh")));
+    }
+
+    #[test]
+    fn binary_exists_rejects_unknown_command() {
+        assert!(!binary_exists(Path::new("nonexistent-binary-xyz-123")));
+    }
+
+    #[test]
+    fn check_dependencies_warns_for_missing_splitter() {
+        let warnings = check_dependencies(Path::new("/nonexistent/live-set-splitter"));
+        assert!(warnings.iter().any(|w| w.contains("splitter binary not found")));
+    }
+
+    #[test]
+    fn check_dependencies_no_splitter_warning_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("live-set-splitter");
+        File::create(&bin).unwrap();
+        let warnings = check_dependencies(&bin);
+        assert!(!warnings.iter().any(|w| w.contains("splitter")));
     }
 }

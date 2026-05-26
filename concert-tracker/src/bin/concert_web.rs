@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
-use concert_tracker::jobs::{default_splitter_bin, JobConfig, JobRegistry};
+use concert_tracker::jobs::{check_dependencies, default_splitter_bin, JobConfig, JobRegistry};
 use concert_tracker::web::{router, AppState};
 
 #[derive(Parser)]
@@ -58,6 +58,11 @@ async fn main() -> Result<()> {
     }
 
     let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
+
+    for warning in check_dependencies(&splitter_bin) {
+        tracing::warn!("{}", warning);
+    }
+
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),

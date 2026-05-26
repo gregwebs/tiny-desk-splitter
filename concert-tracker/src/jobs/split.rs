@@ -185,7 +185,12 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
             persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
         }
         Err(e) => {
-            let error = format!("spawn error: {}", e);
+            let hint = if e.kind() == std::io::ErrorKind::NotFound {
+                ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter"
+            } else {
+                ""
+            };
+            let error = format!("spawn error: {}{}", e, hint);
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);

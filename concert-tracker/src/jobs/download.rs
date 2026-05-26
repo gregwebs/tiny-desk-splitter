@@ -83,7 +83,12 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
             persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
         }
         Err(e) => {
-            let error = format!("spawn error: {}", e);
+            let hint = if e.kind() == std::io::ErrorKind::NotFound {
+                ". Is yt-dlp installed? See: https://github.com/yt-dlp/yt-dlp#installation"
+            } else {
+                ""
+            };
+            let error = format!("spawn error: {}{}", e, hint);
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);

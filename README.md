@@ -13,6 +13,7 @@ Tools for downloading and splitting NPR Tiny Desk Concerts into individual track
 ## Quick start
 
 ```sh
+cargo build
 cargo run --bin concert-web
 # → http://localhost:3000
 ```
