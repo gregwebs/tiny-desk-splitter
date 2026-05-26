@@ -216,9 +216,7 @@
     /* ── Detail page ── */
     .detail-header { margin-bottom: 1.5rem; }
     .detail-header h2 { margin: 0 0 0.4rem; }
-    .back-link { font-size: 0.85em; color: #555; text-decoration: none; }
-    .back-link:hover { text-decoration: underline; }
-    .set-list { margin: 0; padding-left: 1.5rem; }
+.set-list { margin: 0; padding-left: 1.5rem; }
     .track-list { margin: 0; padding: 0.4rem 0.6rem; list-style: none; font-size: 0.82em; }
     .track-list li { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; }
     .btn-track-listen {
@@ -307,7 +305,7 @@
 </head>
 <body hx-boost="true">
   <header>
-    <h1>Tiny Desk Concerts</h1>
+    <h1><a href="/" style="text-decoration: none;">Tiny Desk Concerts</a></h1>
     <a href="/jobs" style="font-size: 0.85em; text-decoration: none; font-weight: 500;">Jobs<span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></a>
     <span id="banner"></span>
     <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings">&#9881;</a>

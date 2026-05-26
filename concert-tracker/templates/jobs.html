@@ -1,6 +1,5 @@
 {% extends "layout.html" %}
 {% block content %}
-<p><a href="/" class="back-link">&larr; Back to list</a></p>
 <h2>Jobs</h2>
 <div id="jobs-content" hx-get="/jobs{% if !failed_filter.is_empty() %}?failed_filter={{ failed_filter }}{% endif %}" hx-trigger="every 5s" hx-select="#jobs-content" hx-target="this" hx-swap="outerHTML">
 {% if jobs.is_empty() %}

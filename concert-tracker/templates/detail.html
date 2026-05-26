@@ -1,7 +1,5 @@
 {% extends "layout.html" %}
 {% block content %}
-<p><a href="/">&#8592; Back to list</a></p>
-
 {{ card_html|safe }}
 
 {% if let Some(url) = preview_url.as_ref() %}
