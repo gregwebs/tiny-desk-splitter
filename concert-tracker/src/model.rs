@@ -60,11 +60,19 @@ pub struct TrackInfo {
     pub index: usize,
     pub title: String,
     pub available: bool,
+    pub is_video: bool,
 }
 
-fn track_file_exists(dir: &Path, title: &str) -> bool {
+fn track_file_extension(dir: &Path, title: &str) -> Option<&'static str> {
     let stem = sanitize_filename(title);
-    dir.join(format!("{stem}.mp4")).exists() || dir.join(format!("{stem}.m4a")).exists()
+    for ext in &[
+        "mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac", "mkv",
+    ] {
+        if dir.join(format!("{stem}.{ext}")).exists() {
+            return Some(ext);
+        }
+    }
+    None
 }
 
 pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<TrackInfo> {
@@ -72,11 +80,13 @@ pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<
     set_list
         .iter()
         .enumerate()
-        .filter(|(_, title)| track_file_exists(&dir, title))
-        .map(|(index, title)| TrackInfo {
-            index,
-            title: title.clone(),
-            available: true,
+        .filter_map(|(index, title)| {
+            track_file_extension(&dir, title).map(|ext| TrackInfo {
+                index,
+                title: title.clone(),
+                available: true,
+                is_video: is_video_extension(ext),
+            })
         })
         .collect()
 }
@@ -93,6 +103,7 @@ pub fn list_tracks_from_events(
             index,
             title: title.clone(),
             available: false,
+            is_video: false,
         })
         .collect()
 }
@@ -102,10 +113,14 @@ pub fn list_all_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> 
     set_list
         .iter()
         .enumerate()
-        .map(|(index, title)| TrackInfo {
-            index,
-            title: title.clone(),
-            available: track_file_exists(&dir, title),
+        .map(|(index, title)| {
+            let ext = track_file_extension(&dir, title);
+            TrackInfo {
+                index,
+                title: title.clone(),
+                available: ext.is_some(),
+                is_video: ext.map_or(false, is_video_extension),
+            }
         })
         .collect()
 }

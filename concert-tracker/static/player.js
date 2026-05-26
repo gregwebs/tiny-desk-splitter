@@ -213,11 +213,35 @@ const Player = (() => {
     }
   }
 
+  async function watchDirect(concertId) {
+    if (audio && state.concertId === concertId && !audio.paused) {
+      audio.pause();
+      clearPlaying();
+    }
+    try {
+      await fetch(`/concerts/${concertId}/watch`, { method: "POST" });
+    } catch (e) {
+      tracing("watchDirect fetch failed", e);
+    }
+  }
+
+  async function watchTrackDirect(concertId, trackIdx) {
+    if (audio && state.concertId === concertId && state.trackIdx === trackIdx && !audio.paused) {
+      audio.pause();
+      clearPlaying();
+    }
+    try {
+      await fetch(`/concerts/${concertId}/tracks/${trackIdx}/watch`, { method: "POST" });
+    } catch (e) {
+      tracing("watchTrackDirect fetch failed", e);
+    }
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
     init();
   }
 
-  return { playAlbum, playTrack, togglePause, seek, watch };
+  return { playAlbum, playTrack, togglePause, seek, watch, watchDirect, watchTrackDirect };
 })();
