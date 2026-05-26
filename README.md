@@ -35,12 +35,54 @@ A SQLite-backed tool for tracking the full lifecycle of Tiny Desk Concerts: disc
 concert-web [--db concerts.db] [--workdir .] [--port 3000]
 ```
 
-Opens a local web UI at `http://localhost:<port>`. Features:
+Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and askama templates.
 
-- Filter by status: All / Wanted / Available / Ignored / Downloaded / Split
-- Per-row actions: Want, Ignore, Download, Split, Re-scrape
-- In-progress rows auto-refresh every 3 seconds
-- Sync button fetches the current month's archive listings
+#### Concert list
+
+- **Card grid** of all concerts, grouped by month with divider headers
+- **Filter chips**: Wanted / Available / Ignored / Downloaded / Tracks
+- **Per-card status badges** with color-coded left borders (blue = wanted, green = split, cyan = downloaded, purple = archived)
+- **Per-card actions**: Want, Ignore, Download, Split, Archive, Delete download/split
+- **In-progress auto-refresh**: cards with active jobs poll every 3 seconds
+- **Month sync buttons**: fetch new listings from the NPR archive for any month
+
+#### Concert detail
+
+- **Auto-scrape**: automatically fetches full metadata (artist, description, set list, musicians, preview image) on first view
+- **Re-scrape** button to refresh metadata from NPR
+- **Preview image** display
+- **Track list** with per-track playback, watch, and delete buttons
+- **Set list** display for concerts that haven't been split yet
+- **Musicians** listing with instruments
+- **Notes** field with save (persisted to DB)
+- **Error history** for download, split, and archive failures
+- **Event log** table showing all lifecycle events (listen, download, split, archive, etc.)
+- **Link to NPR source page**
+
+#### Media player
+
+- **Persistent player bar** fixed to the bottom of the page
+- **Album playback**: play the full downloaded concert file (audio or video)
+- **Track playback**: play individual split tracks, with auto-advance to the next track
+- **Seek bar** and time display
+- **Watch button**: opens video files in the system player (macOS `open`)
+- **Now-playing indicator** on the currently playing track button
+
+#### Jobs dashboard
+
+- **Active jobs table** with concert, artist, job type (Download/Split/Archive), and start time
+- **Cancel** button for running jobs
+- **Failed jobs table** with error messages, filterable by job type (Download/Split/Archive)
+- **Job log viewer** with full output for failed jobs
+- **Live badge count** in the header nav, polling every 5 seconds
+
+#### Settings
+
+- **Archive location**: configure a directory for archiving concerts (e.g. NAS path)
+
+#### Static file serving
+
+- Concert files (downloads, split tracks) served from `workdir/concerts/` via `/concert-files/`
 
 ### CLI (`concert-db`)
 
