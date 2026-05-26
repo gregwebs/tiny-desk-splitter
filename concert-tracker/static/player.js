@@ -5,19 +5,65 @@ const Player = (() => {
   let bar = null;
   let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null };
 
+  function onPlay() { setPlayPauseIcon(true); }
+  function onPause() { setPlayPauseIcon(false); }
+
+  function bindAudioEvents() {
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    audio.addEventListener("loadedmetadata", onTimeUpdate);
+    audio.addEventListener("ended", onEnded);
+    audio.addEventListener("error", onError);
+    audio.addEventListener("play", onPlay);
+    audio.addEventListener("pause", onPause);
+  }
+
+  function unbindAudioEvents(el) {
+    el.removeEventListener("timeupdate", onTimeUpdate);
+    el.removeEventListener("loadedmetadata", onTimeUpdate);
+    el.removeEventListener("ended", onEnded);
+    el.removeEventListener("error", onError);
+    el.removeEventListener("play", onPlay);
+    el.removeEventListener("pause", onPause);
+  }
+
   function init() {
     audio = document.getElementById("player-audio");
     bar = document.getElementById("player-bar");
     if (!audio || !bar) return;
 
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    audio.addEventListener("loadedmetadata", onTimeUpdate);
-    audio.addEventListener("ended", onEnded);
-    audio.addEventListener("error", onError);
-    audio.addEventListener("play", () => setPlayPauseIcon(true));
-    audio.addEventListener("pause", () => setPlayPauseIcon(false));
+    bindAudioEvents();
 
-    document.body.addEventListener("htmx:afterSwap", reapplyPlaying);
+    document.body.addEventListener("htmx:afterSettle", () => {
+      rebind();
+      reapplyPlaying();
+    });
+  }
+
+  function rebind() {
+    if (!audio) return;
+    if (document.body.contains(audio)) return;
+
+    const wasPlaying = !audio.paused;
+    const oldSrc = audio.src;
+    const oldTime = audio.currentTime;
+
+    unbindAudioEvents(audio);
+    audio.pause();
+
+    audio = document.getElementById("player-audio");
+    bar = document.getElementById("player-bar");
+    if (!audio || !bar) return;
+
+    bindAudioEvents();
+
+    if (oldSrc) {
+      audio.src = oldSrc;
+      audio.currentTime = oldTime;
+      if (wasPlaying) {
+        showBar();
+        audio.play().catch(() => {});
+      }
+    }
   }
 
   function setPlayPauseIcon(playing) {
@@ -114,7 +160,7 @@ const Player = (() => {
   }
 
   async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl) {
-    if (!audio) init();
+    if (!audio) init(); else rebind();
     if (!audio) return;
 
     hideError();
