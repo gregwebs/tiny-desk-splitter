@@ -603,6 +603,15 @@ pub fn get_concert_by_url(conn: &Connection, url: &str) -> Result<Option<Concert
     }
 }
 
+pub fn get_concert_by_album(conn: &Connection, album: &str) -> Result<Option<Concert>> {
+    let mut stmt = conn.prepare("SELECT * FROM concerts WHERE album = ?1")?;
+    let mut iter = stmt.query_map(params![album], concert_from_row)?;
+    match iter.next() {
+        Some(row) => Ok(Some(row.context("Failed to read concert")?)),
+        None => Ok(None),
+    }
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;

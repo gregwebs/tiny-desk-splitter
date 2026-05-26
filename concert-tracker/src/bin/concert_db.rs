@@ -63,6 +63,8 @@ enum Command {
     BackfillTrackDeletes,
     /// Backfill split events with track names and count
     BackfillSplitTracks,
+    /// Import pre-archived concerts from an archive directory
+    ImportArchive { dir: PathBuf },
 }
 
 fn main() -> Result<()> {
@@ -197,6 +199,26 @@ fn main() -> Result<()> {
         Command::BackfillSplitTracks => {
             let count = concert_tracker::events::backfill_split_tracks(&conn)?;
             println!("Backfilled {} split events with track info", count);
+        }
+
+        Command::ImportArchive { dir } => {
+            let report =
+                concert_tracker::archive_import::import_archive(&conn, &dir, &cli.workdir)?;
+            println!(
+                "Imported {} concerts ({} skipped, {} errors)",
+                report.imported,
+                report.skipped,
+                report.errors.len()
+            );
+            if !report.not_in_db.is_empty() {
+                println!("\nNot found in database ({}):", report.not_in_db.len());
+                for album in &report.not_in_db {
+                    println!("  - {}", album);
+                }
+            }
+            for e in &report.errors {
+                eprintln!("  Error: {}", e);
+            }
         }
 
         Command::UpdateJsonTeasers => {

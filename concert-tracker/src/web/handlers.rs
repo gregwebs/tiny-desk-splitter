@@ -442,8 +442,8 @@ pub async fn detail(
     };
 
     let has_al = has_archive_location(&state);
-    let card_html = render_row(&concert, has_al)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let card_html =
+        render_row(&concert, has_al).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url(&state.jobs.working_dir);
     let mut tracks = concert

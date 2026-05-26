@@ -1,3 +1,4 @@
+pub mod archive_import;
 pub mod db;
 pub mod events;
 pub mod import;
