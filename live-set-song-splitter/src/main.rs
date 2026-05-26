@@ -147,14 +147,6 @@ struct Timestamps {
     songs: Vec<SongTimestamp>,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct OutputMetadata {
-    #[serde(flatten)]
-    metadata: concert::SetMetaData,
-    #[serde(flatten)]
-    timestamps: Timestamps,
-}
-
 fn main() -> Result<()> {
     // Parse command line arguments using clap
     let cli = Cli::parse();
