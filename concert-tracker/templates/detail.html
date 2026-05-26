@@ -16,7 +16,7 @@
 <h3>Tracks</h3>
 <ol class="track-list">
   {% for t in tracks.iter() %}
-  <li{% if !t.available %} class="track-unavailable"{% endif %}>
+  <li>
     {% if t.available %}
     <button class="btn-track-listen" data-concert-id="{{ concert.id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ concert.id }}, {{ t.index }})">{{ t.title }}</button>
     {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect({{ concert.id }}, {{ t.index }})">Watch</button>{% endif %}
