@@ -827,15 +827,169 @@ fn extract_frames(
         }
     }
 
-    // Get list of extracted frames
+    // Get list of extracted frames, excluding BW variants and refined subdirectories
     let frames = fs::read_dir(&temp_dir)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .filter(|entry| {
+            let path = entry.path();
+            path.extension().map_or(false, |ext| ext == "png")
+                && path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .map_or(false, |s| s.parse::<usize>().is_ok())
+        })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
     println!("Extracted {} frames, analyzing for text...", frames.len());
     return Ok(frames);
+}
+
+const MIN_GAP_FOR_FIRST_SONG_FALLBACK: f64 = 60.0;
+
+/// If exactly one song is missing and the earliest detected song starts
+/// well into the video, the missing song almost certainly fills the gap
+/// at the beginning. Add it at time 0.
+fn first_song_missing_fallback(
+    songs: &[Song],
+    song_title_matched: &mut HashMap<String, f64>,
+) {
+    let total_songs = songs.len();
+    let matched_songs = song_title_matched.len();
+    if matched_songs + 1 != total_songs {
+        return;
+    }
+    let earliest_detected_time = song_title_matched
+        .values()
+        .copied()
+        .min_by(|a, b| a.partial_cmp(b).unwrap())
+        .unwrap_or(0.0);
+    if earliest_detected_time <= MIN_GAP_FOR_FIRST_SONG_FALLBACK {
+        return;
+    }
+    let matched_titles: std::collections::HashSet<String> =
+        song_title_matched.keys().cloned().collect();
+    let missing_song: Option<String> = songs
+        .iter()
+        .map(|s| s.title.to_lowercase())
+        .find(|title| !matched_titles.contains(title));
+    if let Some(missing) = missing_song {
+        println!(
+            "Adding missing song '{}' at time 0.0 (first-song fallback: earliest detected song is at {}s)",
+            missing, earliest_detected_time
+        );
+        song_title_matched.insert(missing, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests_first_song_fallback {
+    use super::*;
+
+    fn make_songs(titles: &[&str]) -> Vec<Song> {
+        titles
+            .iter()
+            .map(|t| Song {
+                title: t.to_string(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn adds_missing_first_song_when_gap_is_large() {
+        let songs = make_songs(&["ohio", "another living soul", "strange fruit", "hujan"]);
+        let mut matched = HashMap::new();
+        matched.insert("another living soul".to_string(), 291.0);
+        matched.insert("strange fruit".to_string(), 676.0);
+        matched.insert("hujan".to_string(), 1018.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 4);
+        assert_eq!(matched.get("ohio"), Some(&0.0));
+    }
+
+    #[test]
+    fn does_not_add_when_gap_is_small() {
+        let songs = make_songs(&["ohio", "another living soul"]);
+        let mut matched = HashMap::new();
+        matched.insert("another living soul".to_string(), 30.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 1);
+        assert!(!matched.contains_key("ohio"));
+    }
+
+    #[test]
+    fn does_not_add_when_more_than_one_missing() {
+        let songs = make_songs(&["ohio", "another living soul", "strange fruit"]);
+        let mut matched = HashMap::new();
+        matched.insert("strange fruit".to_string(), 676.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 1);
+    }
+
+    #[test]
+    fn does_not_add_when_all_matched() {
+        let songs = make_songs(&["ohio", "another living soul"]);
+        let mut matched = HashMap::new();
+        matched.insert("ohio".to_string(), 0.0);
+        matched.insert("another living soul".to_string(), 291.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 2);
+    }
+
+    #[test]
+    fn adds_missing_middle_song_when_gap_is_large() {
+        let songs = make_songs(&["ohio", "another living soul", "strange fruit"]);
+        let mut matched = HashMap::new();
+        matched.insert("ohio".to_string(), 100.0);
+        matched.insert("strange fruit".to_string(), 676.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 3);
+        assert_eq!(matched.get("another living soul"), Some(&0.0));
+    }
+
+    #[test]
+    fn does_not_add_at_boundary_of_60s() {
+        let songs = make_songs(&["ohio", "another living soul"]);
+        let mut matched = HashMap::new();
+        matched.insert("another living soul".to_string(), 60.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 1);
+        assert!(!matched.contains_key("ohio"));
+    }
+
+    #[test]
+    fn does_not_add_when_no_songs() {
+        let songs = make_songs(&["ohio"]);
+        let mut matched: HashMap<String, f64> = HashMap::new();
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 0);
+    }
+
+    #[test]
+    fn uses_lowercase_title() {
+        let songs = make_songs(&["Ohio", "Another Living Soul"]);
+        let mut matched: HashMap<String, f64> = HashMap::new();
+        matched.insert("another living soul".to_string(), 291.0);
+
+        first_song_missing_fallback(&songs, &mut matched);
+
+        assert_eq!(matched.len(), 2);
+        assert_eq!(matched.get("ohio"), Some(&0.0));
+    }
 }
 
 fn detect_song_boundaries_from_text(
@@ -1008,6 +1162,8 @@ fn detect_song_boundaries_from_text(
             }
         }
     }
+
+    first_song_missing_fallback(songs, &mut song_title_matched);
 
     // Sort song start times by timestamp
     let mut song_start_times: Vec<(&String, &f64)> = song_title_matched.iter().collect();
