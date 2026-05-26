@@ -37,7 +37,6 @@ struct ListTemplate {
 struct RowTemplate {
     id: i64,
     title: String,
-    artist: String,
     concert_date: String,
     teaser: String,
     download_status: String,
@@ -284,8 +283,7 @@ fn render_row(
 
     RowTemplate {
         id: c.id,
-        title: c.title.clone(),
-        artist: c.artist.clone().unwrap_or_default(),
+        title: c.title.trim_end_matches(": Tiny Desk Concert").to_string(),
         concert_date: c.display_date().unwrap_or_default(),
         teaser: c.teaser.clone().unwrap_or_default(),
         download_status: ds.slug().to_string(),

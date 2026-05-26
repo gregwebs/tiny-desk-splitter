@@ -1,6 +1,5 @@
 <div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   <div class="card-body">
-    {% if !artist.is_empty() %}<div class="card-artist">{{ artist }}</div>{% endif %}
     <h3 class="card-title"><a href="/concerts/{{ id }}">{{ title }}</a></h3>
     <div class="card-meta">
       {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
