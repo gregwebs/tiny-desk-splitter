@@ -10,7 +10,7 @@ use tower::ServiceExt;
 use concert_tracker::{
     db::{self, MetadataUpdate, NewListing},
     jobs::{JobConfig, JobRegistry},
-    model::concert_dir,
+    model::{concert_dir, sanitize_filename},
     web::{router, AppState},
 };
 
@@ -822,4 +822,137 @@ async fn ignore_deletes_preview_image() {
         !preview.exists(),
         "preview.jpg should be deleted when concert is ignored"
     );
+}
+
+fn seed_split_concert(
+    conn: &rusqlite::Connection,
+    workdir: &std::path::Path,
+    album: &str,
+    set_list: Vec<String>,
+    available_indices: &[usize],
+) {
+    db::upsert_listing(
+        conn,
+        &NewListing {
+            source_url: format!("https://npr.org/c/{}", album),
+            title: album.to_string(),
+            concert_date: Some("2024-01-15".to_string()),
+            teaser: None,
+        },
+    )
+    .unwrap();
+    db::update_metadata(
+        conn,
+        1,
+        &MetadataUpdate {
+            artist: "Test Artist".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: set_list.clone(),
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+
+    let cd = concert_dir(workdir, album);
+    std::fs::create_dir_all(&cd).unwrap();
+    for &idx in available_indices {
+        let stem = sanitize_filename(&set_list[idx]);
+        std::fs::write(cd.join(format!("{stem}.mp3")), b"fake").unwrap();
+    }
+}
+
+#[tokio::test]
+async fn next_media_info_returns_next_available_track() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Next Track Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into(), "Song C".into()],
+        &[0, 1, 2],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/0/next-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["title"], "Song B");
+    assert_eq!(info["track_index"], 1);
+    assert_eq!(info["playable"], true);
+}
+
+#[tokio::test]
+async fn next_media_info_skips_unavailable_tracks() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Skip Album";
+    let conn = db::open_in_memory().unwrap();
+    // Track 1 ("Song B") has no file on disk — should be skipped
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into(), "Song C".into()],
+        &[0, 2],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/0/next-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["title"], "Song C");
+    assert_eq!(info["track_index"], 2);
+}
+
+#[tokio::test]
+async fn next_media_info_returns_404_at_last_track() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Last Track Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into()],
+        &[0, 1],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/1/next-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }

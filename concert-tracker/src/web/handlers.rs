@@ -818,6 +818,7 @@ pub struct MediaInfo {
     pub artist: String,
     pub is_video: bool,
     pub playable: bool,
+    pub track_index: Option<usize>,
 }
 
 pub async fn media_info(
@@ -846,6 +847,7 @@ pub async fn media_info(
         artist: concert.artist.unwrap_or_default(),
         is_video: is_video_extension(ext),
         playable: is_browser_playable(ext),
+        track_index: None,
     }))
 }
 
@@ -873,7 +875,46 @@ pub async fn track_media_info(
         artist: concert.artist.unwrap_or_default(),
         is_video: is_video_extension(ext),
         playable: is_browser_playable(ext),
+        track_index: Some(idx),
     }))
+}
+
+pub async fn next_track_media_info(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<Json<MediaInfo>, AppError> {
+    let (concert, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert, state.jobs.working_dir.clone())
+    };
+
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let artist = concert.artist.unwrap_or_default();
+    let sanitized_album = crate::model::sanitize_album(album);
+
+    for next_idx in (idx + 1)..concert.set_list.len() {
+        let title = &concert.set_list[next_idx];
+        if let Some(filename) =
+            crate::model::find_track_file(&working_dir, album, title)
+        {
+            let ext = filename.rsplit('.').next().unwrap_or("");
+            if !is_browser_playable(ext) {
+                continue;
+            }
+            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+            return Ok(Json(MediaInfo {
+                url,
+                title: title.clone(),
+                artist,
+                is_video: is_video_extension(ext),
+                playable: true,
+                track_index: Some(next_idx),
+            }));
+        }
+    }
+
+    Err(AppError::NotFound)
 }
 
 pub async fn watch(

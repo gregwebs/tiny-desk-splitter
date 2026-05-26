@@ -4,6 +4,7 @@ const Player = (() => {
   let audio = null;
   let bar = null;
   let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null };
+  let autoAdvanceController = null;
 
   function onPlay() { setPlayPauseIcon(true); }
   function onPause() { setPlayPauseIcon(false); }
@@ -105,12 +106,58 @@ const Player = (() => {
   }
 
   function onEnded() {
-    setPlayPauseIcon(false);
+    playNextTrack();
   }
 
   function onError() {
     showError("Failed to load media");
     tracing("audio error", audio.error);
+    playNextTrack();
+  }
+
+  function cancelAutoAdvance() {
+    if (autoAdvanceController) {
+      autoAdvanceController.abort();
+      autoAdvanceController = null;
+    }
+  }
+
+  async function playNextTrack() {
+    if (state.trackIdx == null || state.concertId == null) {
+      setPlayPauseIcon(false);
+      return;
+    }
+
+    cancelAutoAdvance();
+    autoAdvanceController = new AbortController();
+    const signal = autoAdvanceController.signal;
+    const concertId = state.concertId;
+    const trackIdx = state.trackIdx;
+
+    try {
+      const resp = await fetch(
+        `/concerts/${concertId}/tracks/${trackIdx}/next-media-info`,
+        { signal }
+      );
+      if (!resp.ok) {
+        setPlayPauseIcon(false);
+        return;
+      }
+      if (signal.aborted) return;
+      const info = await resp.json();
+
+      const btn = document.querySelector(
+        `[data-concert-id="${concertId}"][data-track-idx="${info.track_index}"]`
+      );
+      await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
+        `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
+        `/concerts/${concertId}/tracks/${info.track_index}/watch`);
+    } catch (e) {
+      if (e.name !== "AbortError") {
+        tracing("playNextTrack failed", e);
+        setPlayPauseIcon(false);
+      }
+    }
   }
 
   function tracing(label, obj) {
@@ -189,6 +236,7 @@ const Player = (() => {
   }
 
   async function playAlbum(btn, concertId) {
+    cancelAutoAdvance();
     try {
       const resp = await fetch(`/concerts/${concertId}/media-info`);
       if (!resp.ok) {
@@ -212,6 +260,7 @@ const Player = (() => {
   }
 
   async function playTrack(btn, concertId, trackIdx) {
+    cancelAutoAdvance();
     try {
       const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
       if (!resp.ok) {

@@ -48,6 +48,10 @@ pub fn router(state: AppState) -> Router {
             get(handlers::track_media_info),
         )
         .route(
+            "/concerts/:id/tracks/:idx/next-media-info",
+            get(handlers::next_track_media_info),
+        )
+        .route(
             "/concerts/:id/tracks/:idx/watch",
             post(handlers::watch_track),
         )
