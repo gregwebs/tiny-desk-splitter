@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tiny_desk_scraper::{fetch_bytes, fetch_html, parse_concert_info, ConcertInfo};
+use tiny_desk_scraper::{ConcertInfo, fetch_bytes, fetch_html, parse_concert_info, save_concert_info};
 
 use crate::db::{self, MetadataUpdate, NewListing};
 use crate::model::{concert_dir, Musician};
@@ -13,6 +13,7 @@ use crate::model::{concert_dir, Musician};
 pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()> {
     let html = fetch_html(url)?;
     let info = parse_concert_info(&html, url)?;
+    save_concert_info(&info)?;
     apply_concert_info(conn, &info)?;
 
     if let Some(image_url) = info.preview_image_url.as_deref() {
