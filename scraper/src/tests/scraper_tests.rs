@@ -2,7 +2,7 @@ use super::fixtures;
 use super::save_failed_html;
 use crate::scraper::{
     extract_og_description, extract_preview_image_url, extract_teaser_from_html,
-    parse_concert_info, Musician,
+    parse_concert_info, save_concert_info_to, Musician,
 };
 use anyhow::Result;
 use scraper::Html;
@@ -402,4 +402,60 @@ fn test_musicians_colon() {
             },
         ]
     );
+}
+
+#[test]
+fn save_concert_info_preserves_timestamps() {
+    use concert_types::{ConcertInfo, Song};
+
+    let tmp = std::env::temp_dir().join("scraper_test_timestamps");
+    let _ = std::fs::remove_dir_all(&tmp);
+
+    let info = ConcertInfo {
+        artist: "Test Artist".into(),
+        source: "https://example.com".into(),
+        show: "Tiny Desk Concerts".into(),
+        date: Some("2025-01-15".into()),
+        album: "Test Artist Tiny Desk Concert".into(),
+        description: None,
+        set_list: vec![Song { title: "Song A".into() }],
+        musicians: vec![],
+        preview_image_url: None,
+        teaser: None,
+        timestamps: None,
+    };
+
+    // First save — no existing file.
+    save_concert_info_to(&info, &tmp).unwrap();
+    let path = tmp.join("Test Artist Tiny Desk Concert/concert.json");
+    let v: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert!(v.get("timestamps").is_none());
+
+    // Simulate the splitter writing timestamps into the existing file.
+    let mut with_ts = v.clone();
+    with_ts["timestamps"] = serde_json::json!([
+        {"title": "Song A", "start_time": 0.0, "end_time": 180.0, "duration": 180.0}
+    ]);
+    std::fs::write(&path, serde_json::to_string_pretty(&with_ts).unwrap()).unwrap();
+
+    // Re-scrape with updated data — timestamps must survive alongside new fields.
+    let updated_info = ConcertInfo {
+        description: Some("A great concert".into()),
+        ..info
+    };
+    save_concert_info_to(&updated_info, &tmp).unwrap();
+
+    let after: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    assert_eq!(
+        after["description"], "A great concert",
+        "re-scraped data should be updated"
+    );
+    assert_eq!(
+        after["timestamps"][0]["title"], "Song A",
+        "timestamps should survive re-save"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }

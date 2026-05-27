@@ -519,6 +519,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "concert-types"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1739,6 +1746,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "concert-types",
  "criterion",
  "env_logger",
  "ffmpeg-next",
@@ -3015,6 +3023,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "clap",
+ "concert-types",
  "regex",
  "reqwest",
  "scraper",

@@ -10,5 +10,5 @@ pub use crate::archive_scraper::{
 pub use crate::scraper::{
     extract_content, extract_musicians, extract_og_description, extract_preview_image_url,
     extract_set_list, extract_teaser_from_html, fetch_bytes, fetch_html, parse_concert_info,
-    save_concert_info, scrape_data, ConcertInfo, Musician, Song,
+    save_concert_info, save_concert_info_to, scrape_data, ConcertInfo, Musician, Song,
 };

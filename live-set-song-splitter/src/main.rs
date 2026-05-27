@@ -10,7 +10,7 @@ mod ffmpeg;
 mod io;
 mod video;
 use crate::video::VideoInfo;
-mod concert;
+use concert_types::{ConcertInfo, Song, SongTimestamp};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
@@ -76,11 +76,6 @@ struct Cli {
     reuse_frames: bool,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Song {
-    title: String,
-}
-
 #[derive(Clone, Debug)]
 struct AudioSegment {
     pub start_time: f64,
@@ -98,7 +93,7 @@ struct SongSegment {
 ///   - `concert.json` — a verbatim copy of the input metadata, only if not
 ///     already present.
 ///   - `timestamps.json` — the timestamps-augmented concert struct.
-fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &Concert) -> Result<()> {
+fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &ConcertInfo) -> Result<()> {
     let canonical_path = format!("{}/concert.json", output_dir);
     if !Path::new(&canonical_path).exists() {
         fs::copy(input_path, &canonical_path)
@@ -111,35 +106,15 @@ fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &Conc
     Ok(())
 }
 
-fn folder_name(concertdata: &concert::SetMetaData) -> String {
+fn folder_name(info: &ConcertInfo) -> String {
     // Strip colons only (matches concert-tracker's sanitize_album so the same
-    // directory is referenced from both sides). Previously this inserted ' - '
-    // around ': ', leaving disk artifacts named e.g. `Air - Tiny Desk Concert`
-    // while the tracker looked for `Air Tiny Desk Concert`.
-    io::sanitize_filename(
-        &concertdata
-            .album
-            .as_ref()
-            .unwrap_or(&concertdata.artist)
-            .to_string()
-            .replace(':', ""),
-    )
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct Concert {
-    #[serde(flatten)]
-    metadata: concert::SetMetaData,
-    set_list: Vec<Song>,
-    timestamps: Option<Vec<SongTimestamp>>,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct SongTimestamp {
-    title: String,
-    start_time: f64,
-    end_time: f64,
-    duration: f64,
+    // directory is referenced from both sides).
+    let name = if info.album.is_empty() {
+        &info.artist
+    } else {
+        &info.album
+    };
+    io::sanitize_filename(&name.replace(':', ""))
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -158,18 +133,19 @@ fn main() -> Result<()> {
     let concert_file = File::open(concert_path)
         .with_context(|| format!("Failed to open setlist file: {}", concert_path))?;
     let concert_reader = BufReader::new(concert_file);
-    let mut concert: Concert = serde_json::from_reader(concert_reader)
+    let mut concert: ConcertInfo = serde_json::from_reader(concert_reader)
         .with_context(|| format!("Failed to parse setlist JSON from {}", concert_path))?;
-    let metadata = concert.metadata.clone();
+    let info = concert.clone();
 
     let num_songs = concert.set_list.len();
 
     let input_file = match cli_input_file {
         Some(file) => file.clone(),
         None => {
-            let album = metadata.album.clone().ok_or(
-                anyhow!("No album found in concert metadata file. Please specify a --input-path to the mp4 file for the concert.")
-            )?.replace(":", "");
+            if info.album.is_empty() {
+                return Err(anyhow!("No album found in concert metadata file. Please specify a --input-path to the mp4 file for the concert."));
+            }
+            let album = info.album.replace(':', "");
             let input_dir = match std::path::Path::new(&concert_path).parent() {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",
@@ -183,7 +159,7 @@ fn main() -> Result<()> {
     };
 
     println!("Analyzing file: {}", input_file);
-    println!("Artist: {}", metadata.artist);
+    println!("Artist: {}", info.artist);
     println!("Expected number of songs: {}", num_songs);
     println!("Songs:");
     for (i, song) in concert.set_list.iter().enumerate() {
@@ -204,7 +180,7 @@ fn main() -> Result<()> {
         println!("Using custom output directory: {}", custom_dir);
         custom_dir.clone()
     } else {
-        folder_name(&metadata)
+        folder_name(&info)
     };
 
     // If timestamps file is provided, read from it instead of detecting segments
@@ -255,7 +231,7 @@ fn main() -> Result<()> {
     }
 
     io::ensure_dir("temp_frames")?;
-    let temp_dir = format!("temp_frames/{}", folder_name(&metadata));
+    let temp_dir = format!("temp_frames/{}", folder_name(&info));
     io::ensure_dir(&temp_dir)?;
 
     if segments.len() == 0 {
@@ -270,7 +246,7 @@ fn main() -> Result<()> {
         // Get song segments from text detection
         let song_segments = detect_song_boundaries_from_text(
             &input_file,
-            &metadata.artist,
+            &info.artist,
             &concert.set_list,
             &video_info,
             &settings,
@@ -656,11 +632,11 @@ fn create_song_timestamps(segments: &[SongSegment], song_list: &[Song]) -> Vec<S
 fn process_segments(
     input_file: &str,
     segments: &[SongSegment],
-    concert: Concert,
+    concert: ConcertInfo,
     output_dir: &str,
     output_format: OutputFormat,
 ) -> Result<()> {
-    let songs = concert.set_list;
+    let songs = &concert.set_list;
     println!("Processing {} segments...", segments.len());
     if segments.len() > songs.len() {
         return Err(anyhow!(
@@ -723,7 +699,7 @@ fn process_segments(
                     segment.segment.start_time,
                     segment.segment.end_time,
                     Some(song_title),
-                    &concert.metadata,
+                    &concert,
                     Some(song_counter), // Add song number as track metadata
                 )?;
             }
@@ -740,7 +716,7 @@ fn process_segments(
                     segment.segment.start_time,
                     segment.segment.end_time,
                     Some(song_title),
-                    &concert.metadata,
+                    &concert,
                     Some(song_counter), // Add song number as track metadata
                 )?;
             }
@@ -1576,7 +1552,7 @@ fn extract_segment(
     start_time: f64,
     end_time: f64,
     song_title: Option<&str>,
-    concertdata: &concert::SetMetaData,
+    concertdata: &ConcertInfo,
     track_number: Option<usize>,
 ) -> Result<()> {
     let mut ffmpeg = ffmpeg::create_ffmpeg_command();

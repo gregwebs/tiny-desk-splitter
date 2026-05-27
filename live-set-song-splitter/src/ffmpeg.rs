@@ -1,7 +1,7 @@
 use std::ffi::OsStr;
 use std::process::Command;
 
-use crate::concert;
+use concert_types::ConcertInfo;
 
 use anyhow::{anyhow, Result};
 
@@ -101,7 +101,7 @@ pub fn extract_audio_segment(
     start_time: f64,
     end_time: f64,
     song_title: Option<&str>,
-    concertdata: &concert::SetMetaData,
+    concertdata: &ConcertInfo,
     track_number: Option<usize>,
 ) -> Result<()> {
     let mut ffmpeg = create_ffmpeg_command();
@@ -138,7 +138,7 @@ pub fn extract_audio_segment(
 pub fn add_metadata_to_cmd(
     cmd: &mut std::process::Command,
     song_title: Option<&str>,
-    concertdata: &concert::SetMetaData,
+    concertdata: &ConcertInfo,
     track_number: Option<usize>,
 ) {
     // Add artist metadata
@@ -149,9 +149,8 @@ pub fn add_metadata_to_cmd(
         cmd.args(&["-metadata", &format!("title={}", title)]);
     }
 
-    // Add album metadata if available
-    if let Some(ref album) = concertdata.album {
-        cmd.args(&["-metadata", &format!("album={}", album)]);
+    if !concertdata.album.is_empty() {
+        cmd.args(&["-metadata", &format!("album={}", concertdata.album)]);
     }
 
     // Add year metadata if available

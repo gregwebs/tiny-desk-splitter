@@ -2,36 +2,10 @@ use anyhow::{Context, Result};
 use regex::Regex;
 use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
-use serde::{Deserialize, Serialize};
 use std::fs;
 use std::sync::OnceLock;
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct Musician {
-    pub name: String,
-    pub instruments: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct Song {
-    pub title: String,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct ConcertInfo {
-    pub artist: String,
-    pub source: String,
-    pub show: String,
-    pub date: Option<String>,
-    pub album: String,
-    pub description: Option<String>,
-    pub set_list: Vec<Song>,
-    pub musicians: Vec<Musician>,
-    #[serde(default)]
-    pub preview_image_url: Option<String>,
-    #[serde(default)]
-    pub teaser: Option<String>,
-}
+pub use concert_types::{ConcertInfo, Musician, Song};
 
 pub fn fetch_html(url: &str) -> Result<String> {
     let client = Client::new();
@@ -149,6 +123,7 @@ pub fn parse_concert_info(html: &str, source_url: &str) -> Result<ConcertInfo> {
         musicians,
         preview_image_url,
         teaser,
+        timestamps: None,
     };
 
     Ok(concert_info)
@@ -395,8 +370,14 @@ fn sanitize_album_for_dir(album: &str) -> String {
 }
 
 pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
-    let concert_dir =
-        std::path::Path::new("concerts").join(sanitize_album_for_dir(&concert_info.album));
+    save_concert_info_to(concert_info, std::path::Path::new("concerts"))
+}
+
+pub fn save_concert_info_to(
+    concert_info: &ConcertInfo,
+    base_dir: &std::path::Path,
+) -> Result<String> {
+    let concert_dir = base_dir.join(sanitize_album_for_dir(&concert_info.album));
     fs::create_dir_all(&concert_dir).with_context(|| {
         format!(
             "Failed to create concert directory {}",
@@ -405,8 +386,18 @@ pub fn save_concert_info(concert_info: &ConcertInfo) -> Result<String> {
     })?;
     let output_file = concert_dir.join("concert.json");
 
-    let json =
-        serde_json::to_string_pretty(&concert_info).context("Failed to serialize concert info")?;
+    let mut info = concert_info.clone();
+
+    // Preserve timestamps from the existing file if present (written by the splitter).
+    if info.timestamps.is_none() {
+        if let Ok(existing) = fs::read_to_string(&output_file) {
+            if let Ok(existing_info) = serde_json::from_str::<ConcertInfo>(&existing) {
+                info.timestamps = existing_info.timestamps;
+            }
+        }
+    }
+
+    let json = serde_json::to_string_pretty(&info).context("Failed to serialize concert info")?;
 
     fs::write(&output_file, json)
         .with_context(|| format!("Failed to write JSON file {}", output_file.display()))?;
