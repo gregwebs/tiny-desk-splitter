@@ -72,8 +72,15 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
         Ok((status, _)) if status.success() => {
             tracing::info!("download completed for concert {}", concert_id);
             drop(temp_file);
+            let ext = crate::jobs::find_downloaded_file(&config.working_dir, &job.album)
+                .and_then(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "mp4".to_string());
             let conn = db.lock().unwrap();
-            let _ = db::mark_download_succeeded(&conn, concert_id);
+            let _ = db::mark_download_succeeded(&conn, concert_id, &ext);
         }
         Ok((status, stderr_tail)) => {
             let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());

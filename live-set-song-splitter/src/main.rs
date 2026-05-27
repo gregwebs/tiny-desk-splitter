@@ -842,10 +842,7 @@ const MIN_GAP_FOR_FIRST_SONG_FALLBACK: f64 = 60.0;
 /// If exactly one song is missing and the earliest detected song starts
 /// well into the video, the missing song almost certainly fills the gap
 /// at the beginning. Add it at time 0.
-fn first_song_missing_fallback(
-    songs: &[Song],
-    song_title_matched: &mut HashMap<String, f64>,
-) {
+fn first_song_missing_fallback(songs: &[Song], song_title_matched: &mut HashMap<String, f64>) {
     let total_songs = songs.len();
     let matched_songs = song_title_matched.len();
     if matched_songs + 1 != total_songs {

@@ -340,7 +340,7 @@ fn seed_downloaded(conn: &rusqlite::Connection, url: &str, album: &str) {
     )
     .unwrap();
     db::try_mark_download_started(conn, 1).unwrap();
-    db::mark_download_succeeded(conn, 1).unwrap();
+    db::mark_download_succeeded(conn, 1, "mp4").unwrap();
 }
 
 #[tokio::test]
@@ -509,7 +509,7 @@ async fn downloaded_filter_includes_split_concerts() {
     )
     .unwrap();
     db::try_mark_download_started(&conn, id2).unwrap();
-    db::mark_download_succeeded(&conn, id2).unwrap();
+    db::mark_download_succeeded(&conn, id2, "mp4").unwrap();
     db::try_mark_split_started(&conn, id2).unwrap();
     db::mark_split_succeeded(&conn, id2).unwrap();
 

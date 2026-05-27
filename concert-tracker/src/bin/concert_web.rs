@@ -36,12 +36,15 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    tracing::debug!("opening database: {:?}", cli.db);
     let conn = db::open(&cli.db)?;
+    tracing::debug!("database opened");
 
     // Recover from unclean shutdowns: any row still flagged Downloading or
     // Splitting belongs to a process that's no longer running. Move them to
     // *Error so the slot UI exposes a retry button instead of pinning the
     // concert at an unactionable "splitting" / "downloading" badge.
+    tracing::debug!("failing in-progress jobs");
     let (stale_dl, stale_sp, stale_ar) = db::fail_in_progress_jobs(&conn, "server restarted")?;
     if stale_dl + stale_sp + stale_ar > 0 {
         tracing::info!(
@@ -51,17 +54,36 @@ async fn main() -> Result<()> {
             stale_ar
         );
     }
+    tracing::debug!("fail_in_progress_jobs done");
 
-    let backfilled = concert_tracker::scan::backfill_tracks_present(&conn, &cli.workdir);
-    if backfilled > 0 {
-        tracing::info!("backfilled tracks_present for {} concert(s)", backfilled);
-    }
+    tracing::debug!("backfilling tracks_present");
+    let workdir_for_backfill = cli.workdir.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let count = concert_tracker::scan::backfill_tracks_present(&conn, &workdir_for_backfill);
+        let _ = tx.send((conn, count));
+    });
+    let conn = match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok((conn, count)) => {
+            if count > 0 {
+                tracing::info!("backfilled tracks_present for {} concert(s)", count);
+            }
+            tracing::debug!("backfill done");
+            conn
+        }
+        Err(_) => {
+            tracing::warn!("tracks_present backfill timed out (NAS may be unavailable), skipping");
+            db::open(&cli.db)?
+        }
+    };
 
     let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
 
+    tracing::debug!("checking dependencies");
     for warning in check_dependencies(&splitter_bin) {
         tracing::warn!("{}", warning);
     }
+    tracing::debug!("dependency check done");
 
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),

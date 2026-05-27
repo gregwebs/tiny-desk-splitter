@@ -33,6 +33,11 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
             match mtime_iso(&mp4_path) {
                 Ok(at) => {
                     db::set_downloaded_at_if_missing(conn, concert.id, &at)?;
+                    let ext = mp4_path
+                        .extension()
+                        .and_then(|e| e.to_str())
+                        .unwrap_or("mp4");
+                    db::set_downloaded_extension_if_missing(conn, concert.id, ext)?;
                     report.downloads_found += 1;
                 }
                 Err(e) => report.errors.push(format!("{}: {}", mp4_path.display(), e)),

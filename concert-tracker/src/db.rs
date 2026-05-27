@@ -56,6 +56,12 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
     add_column_if_missing(conn, "concerts", "tracks_present", "TEXT")?;
+    add_column_if_missing(conn, "concerts", "downloaded_extension", "TEXT")?;
+    conn.execute_batch(
+        "UPDATE concerts SET downloaded_extension = 'mp4'
+         WHERE downloaded_at IS NOT NULL AND downloaded_extension IS NULL",
+    )
+    .context("Failed to backfill downloaded_extension")?;
     events::backfill(conn).context("Failed to backfill events")?;
     Ok(())
 }
@@ -151,6 +157,7 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         notes: row.get("notes")?,
         download_started_at: row.get("download_started_at")?,
         downloaded_at: row.get("downloaded_at")?,
+        downloaded_extension: row.get("downloaded_extension")?,
         download_errors,
         split_started_at: row.get("split_started_at")?,
         split_at: row.get("split_at")?,
@@ -299,11 +306,17 @@ pub fn try_mark_download_started(conn: &Connection, id: i64) -> Result<bool> {
     Ok(rows > 0)
 }
 
-pub fn mark_download_succeeded(conn: &Connection, id: i64) -> Result<()> {
+pub fn mark_download_succeeded(conn: &Connection, id: i64, extension: &str) -> Result<()> {
+    tracing::debug!(
+        concert_id = id,
+        ext = extension,
+        "storing download extension"
+    );
     conn.execute(
-        "UPDATE concerts SET downloaded_at = datetime('now'), download_started_at = NULL
+        "UPDATE concerts SET downloaded_at = datetime('now'), download_started_at = NULL,
+         downloaded_extension = ?2
          WHERE id = ?1",
-        params![id],
+        params![id, extension],
     )
     .context("Failed to mark download succeeded")?;
     events::record_now(conn, id, Event::Downloaded, None);
@@ -379,7 +392,8 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
 /// Split state is intentionally preserved — tracks may still exist on disk.
 pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL
+        "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL,
+         downloaded_extension = NULL
          WHERE id = ?1",
         params![id],
     )
@@ -453,6 +467,20 @@ pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Res
         params![at, id],
     )
     .context("Failed to set downloaded_at")?;
+    Ok(())
+}
+
+pub fn set_downloaded_extension_if_missing(conn: &Connection, id: i64, ext: &str) -> Result<()> {
+    tracing::debug!(
+        concert_id = id,
+        ext,
+        "setting downloaded_extension if missing"
+    );
+    conn.execute(
+        "UPDATE concerts SET downloaded_extension = ?1 WHERE id = ?2 AND downloaded_extension IS NULL",
+        params![ext, id],
+    )
+    .context("Failed to set downloaded_extension")?;
     Ok(())
 }
 
@@ -782,7 +810,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         let c = get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_some());
         assert!(c.download_started_at.is_none());
@@ -813,7 +841,7 @@ pub mod tests {
         // No downloaded_at yet — should return false
         assert!(!try_mark_split_started(&conn, id).unwrap());
 
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         // Now it should succeed
         assert!(try_mark_split_started(&conn, id).unwrap());
         // Double start blocked
@@ -824,7 +852,7 @@ pub mod tests {
     fn mark_split_succeeded_and_failed() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         try_mark_split_started(&conn, id).unwrap();
         mark_split_failed(&conn, id, "ffmpeg error").unwrap();
@@ -850,7 +878,7 @@ pub mod tests {
             .id;
 
         try_mark_download_started(&conn, id1).unwrap();
-        mark_download_succeeded(&conn, id1).unwrap();
+        mark_download_succeeded(&conn, id1, "mp4").unwrap();
         try_mark_split_started(&conn, id1).unwrap(); // split in progress
         try_mark_download_started(&conn, id2).unwrap(); // download in progress
 
@@ -875,7 +903,7 @@ pub mod tests {
 
         // id1: split in progress; id2: download in progress.
         try_mark_download_started(&conn, id1).unwrap();
-        mark_download_succeeded(&conn, id1).unwrap();
+        mark_download_succeeded(&conn, id1, "mp4").unwrap();
         try_mark_split_started(&conn, id1).unwrap();
         try_mark_download_started(&conn, id2).unwrap();
 
@@ -914,7 +942,7 @@ pub mod tests {
         try_mark_download_started(&conn, id).unwrap();
         mark_download_failed(&conn, id, "earlier 403").unwrap();
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         try_mark_split_started(&conn, id).unwrap();
         mark_split_failed(&conn, id, "ffmpeg blew up").unwrap();
         try_mark_split_started(&conn, id).unwrap();
@@ -931,6 +959,46 @@ pub mod tests {
         // split state must be preserved — tracks still exist on disk.
         assert!(c.split_at.is_some(), "split_at must be untouched");
         assert_eq!(c.split_errors.len(), 1);
+        // downloaded_extension must be cleared
+        assert!(c.downloaded_extension.is_none());
+    }
+
+    #[test]
+    fn mark_download_succeeded_stores_extension() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "webm").unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.downloaded_extension.as_deref(), Some("webm"));
+    }
+
+    #[test]
+    fn set_downloaded_extension_if_missing_is_idempotent() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        set_downloaded_extension_if_missing(&conn, id, "mp4").unwrap();
+        set_downloaded_extension_if_missing(&conn, id, "webm").unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.downloaded_extension.as_deref(), Some("mp4"));
+    }
+
+    #[test]
+    fn backfill_sets_mp4_for_existing_downloads() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+        // Simulate pre-migration state: clear the extension
+        conn.execute(
+            "UPDATE concerts SET downloaded_extension = NULL WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        // Re-run migrations to trigger backfill
+        run_migrations(&conn).unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.downloaded_extension.as_deref(), Some("mp4"));
     }
 
     #[test]
@@ -938,7 +1006,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         try_mark_split_started(&conn, id).unwrap();
         mark_split_failed(&conn, id, "first try").unwrap();
         try_mark_split_started(&conn, id).unwrap();
@@ -1073,7 +1141,7 @@ pub mod tests {
 
         try_mark_download_started(&conn, id1).unwrap();
         try_mark_download_started(&conn, id2).unwrap();
-        mark_download_succeeded(&conn, id2).unwrap();
+        mark_download_succeeded(&conn, id2, "mp4").unwrap();
         try_mark_split_started(&conn, id2).unwrap();
 
         let in_progress = list_in_progress(&conn).unwrap();
@@ -1098,14 +1166,14 @@ pub mod tests {
         try_mark_download_started(&conn, id2).unwrap();
         assert_eq!(count_active_jobs(&conn).unwrap(), 2);
 
-        mark_download_succeeded(&conn, id2).unwrap();
+        mark_download_succeeded(&conn, id2, "mp4").unwrap();
         assert_eq!(count_active_jobs(&conn).unwrap(), 1);
 
         try_mark_split_started(&conn, id2).unwrap();
         assert_eq!(count_active_jobs(&conn).unwrap(), 2);
 
         // Completed jobs should not be counted
-        mark_download_succeeded(&conn, id1).unwrap();
+        mark_download_succeeded(&conn, id1, "mp4").unwrap();
         mark_split_succeeded(&conn, id2).unwrap();
         assert_eq!(count_active_jobs(&conn).unwrap(), 0);
 
@@ -1212,7 +1280,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         assert!(try_mark_archive_started(&conn, id).unwrap());
         assert!(!try_mark_archive_started(&conn, id).unwrap());
@@ -1223,7 +1291,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         assert!(try_mark_archive_started(&conn, id).unwrap());
         mark_archive_succeeded(&conn, id).unwrap();
@@ -1235,7 +1303,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         try_mark_archive_started(&conn, id).unwrap();
 
         mark_archive_succeeded(&conn, id).unwrap();
@@ -1250,7 +1318,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         try_mark_archive_started(&conn, id).unwrap();
 
         mark_archive_failed(&conn, id, "disk full").unwrap();
@@ -1266,7 +1334,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
         try_mark_archive_started(&conn, id).unwrap();
 
         let (dl, sp, ar) = fail_in_progress_jobs(&conn, "restart").unwrap();
@@ -1282,7 +1350,7 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         assert_eq!(count_active_jobs(&conn).unwrap(), 0);
         try_mark_archive_started(&conn, id).unwrap();

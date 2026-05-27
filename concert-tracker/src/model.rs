@@ -291,6 +291,7 @@ pub struct Concert {
     pub notes: Option<String>,
     pub download_started_at: Option<String>,
     pub downloaded_at: Option<String>,
+    pub downloaded_extension: Option<String>,
     pub download_errors: Vec<ErrorEntry>,
     pub split_started_at: Option<String>,
     pub split_at: Option<String>,
@@ -369,6 +370,38 @@ impl Concert {
         }
         Some(format!("/concert-files/{}/preview.jpg", sanitized))
     }
+
+    /// DB-only version: returns the URL when metadata has been scraped (which
+    /// downloads the preview image). No filesystem check — the browser handles
+    /// a 404 if the file is missing.
+    pub fn preview_image_url_from_db(&self) -> Option<String> {
+        self.metadata_scraped_at.as_ref()?;
+        let album = self.album.as_deref()?;
+        let sanitized = sanitize_album(album);
+        tracing::debug!(album, "preview_image_url_from_db");
+        Some(format!("/concert-files/{}/preview.jpg", sanitized))
+    }
+}
+
+pub fn list_all_tracks_from_db(set_list: &[String], tracks_present: &[bool]) -> Vec<TrackInfo> {
+    tracing::debug!(
+        set_list_len = set_list.len(),
+        tracks_present_len = tracks_present.len(),
+        "list_all_tracks_from_db"
+    );
+    set_list
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let available = tracks_present.get(index).copied().unwrap_or(false);
+            TrackInfo {
+                index,
+                title: title.clone(),
+                available,
+                is_video: false,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -392,6 +425,7 @@ mod tests {
             notes: None,
             download_started_at: None,
             downloaded_at: None,
+            downloaded_extension: None,
             download_errors: vec![],
             split_started_at: None,
             split_at: None,
@@ -741,6 +775,80 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let c = bare_concert();
         assert!(c.preview_image_url(dir.path()).is_none());
+    }
+
+    #[test]
+    fn preview_image_url_from_db_returns_url_when_scraped() {
+        let mut c = bare_concert();
+        c.album = Some("Foo Album".to_string());
+        c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert_eq!(
+            c.preview_image_url_from_db().as_deref(),
+            Some("/concert-files/Foo Album/preview.jpg")
+        );
+    }
+
+    #[test]
+    fn preview_image_url_from_db_returns_none_when_not_scraped() {
+        let mut c = bare_concert();
+        c.album = Some("Foo Album".to_string());
+        assert!(c.preview_image_url_from_db().is_none());
+    }
+
+    #[test]
+    fn preview_image_url_from_db_returns_none_when_album_missing() {
+        let mut c = bare_concert();
+        c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert!(c.preview_image_url_from_db().is_none());
+    }
+
+    #[test]
+    fn preview_image_url_from_db_strips_colons() {
+        let mut c = bare_concert();
+        c.album = Some("Some: Concert".to_string());
+        c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert_eq!(
+            c.preview_image_url_from_db().as_deref(),
+            Some("/concert-files/Some Concert/preview.jpg")
+        );
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_maps_presence() {
+        let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let tracks_present = vec![true, false, true];
+        let tracks = list_all_tracks_from_db(&set_list, &tracks_present);
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks[0].available);
+        assert!(!tracks[1].available);
+        assert!(tracks[2].available);
+        assert!(!tracks[0].is_video);
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_empty_set_list() {
+        let tracks = list_all_tracks_from_db(&[], &[]);
+        assert!(tracks.is_empty());
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_empty_tracks_present() {
+        let set_list = vec!["A".to_string(), "B".to_string()];
+        let tracks = list_all_tracks_from_db(&set_list, &[]);
+        assert_eq!(tracks.len(), 2);
+        assert!(!tracks[0].available);
+        assert!(!tracks[1].available);
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_short_tracks_present() {
+        let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let tracks_present = vec![true];
+        let tracks = list_all_tracks_from_db(&set_list, &tracks_present);
+        assert_eq!(tracks.len(), 3);
+        assert!(tracks[0].available);
+        assert!(!tracks[1].available);
+        assert!(!tracks[2].available);
     }
 
     #[test]

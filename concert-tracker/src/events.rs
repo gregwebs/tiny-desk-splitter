@@ -491,7 +491,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         let events = events_for(&conn, id);
         let event_types: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
@@ -518,7 +518,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
 
@@ -537,7 +537,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_failed(&conn, id, "ffmpeg error").unwrap();
 
@@ -552,7 +552,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::clear_download_state(&conn, id).unwrap();
 
         let events = events_for(&conn, id);
@@ -566,7 +566,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
         crate::db::clear_split_state(&conn, id).unwrap();
@@ -582,7 +582,7 @@ mod tests {
         // Simulate a concert that was imported and downloaded before events existed
         conn.execute("DELETE FROM events", []).unwrap();
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
         assert_eq!(event_count(&conn), 0);
 
@@ -685,7 +685,7 @@ mod tests {
         )
         .unwrap();
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
 
@@ -729,7 +729,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
 
@@ -747,7 +747,7 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
 
@@ -849,7 +849,7 @@ mod tests {
         )
         .unwrap();
         crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id).unwrap();
+        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
         crate::db::try_mark_split_started(&conn, id).unwrap();
         crate::db::mark_split_succeeded(&conn, id).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();

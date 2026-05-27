@@ -4,6 +4,7 @@ pub mod events;
 pub mod import;
 pub mod jobs;
 pub mod model;
+pub mod month_walk;
 pub mod scan;
 pub mod scrape;
 pub mod sync;

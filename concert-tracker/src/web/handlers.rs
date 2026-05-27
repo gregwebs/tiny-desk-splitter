@@ -229,11 +229,7 @@ fn has_archive_location(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-fn render_row(
-    c: &Concert,
-    has_archive_location: bool,
-    working_dir: &std::path::Path,
-) -> Result<String, askama::Error> {
+fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
     let archive_s = c.archive_status();
@@ -247,14 +243,9 @@ fn render_row(
     let can_delete_split = matches!(&ss, SplitStatus::Split);
     let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let can_watch = can_listen
-        && c.album
+        && c.downloaded_extension
             .as_deref()
-            .and_then(|a| find_downloaded_file(working_dir, a))
-            .and_then(|p| {
-                p.extension()
-                    .and_then(|e| e.to_str())
-                    .map(is_video_extension)
-            })
+            .map(is_video_extension)
             .unwrap_or(false);
     let track_count = c.track_count();
     let track_total = c.track_total();
@@ -331,22 +322,6 @@ fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -
 
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
-fn render_month_divider(ym: &YearMonth, show_sync: bool) -> String {
-    let label = ym.display_label();
-    let sync_button = if show_sync {
-        format!(
-            " <button hx-post='/sync/{}/{}' hx-target='#banner' hx-swap='innerHTML' hx-disabled-elt='this'>Sync</button>",
-            ym.year, ym.month
-        )
-    } else {
-        String::new()
-    };
-    format!(
-        "<div class='month-divider'><span class='month-label'>{}</span>{}</div>",
-        label, sync_button
-    )
-}
-
 pub async fn list(
     State(state): State<AppState>,
     Query(params): Query<HashMap<String, String>>,
@@ -373,17 +348,10 @@ pub async fn list(
 
     let current = YearMonth::current();
 
-    let earliest_ym = earliest_date
-        .as_deref()
-        .and_then(YearMonth::from_date_str)
-        .unwrap_or_else(|| current.clone());
-    let stop_at = earliest_ym.previous();
-
-    // Group filtered concerts by YYYY-MM
     let mut by_month: HashMap<YearMonth, Vec<String>> = HashMap::new();
     let mut no_date_rows: Vec<String> = Vec::new();
     for c in &filtered {
-        let row = render_row(c, has_archive_location, &state.jobs.working_dir)
+        let row = render_row(c, has_archive_location)
             .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
         match c.concert_date.as_deref().and_then(YearMonth::from_date_str) {
             Some(ym) => by_month.entry(ym).or_default().push(row),
@@ -391,28 +359,13 @@ pub async fn list(
         }
     }
 
-    // Walk from current month backward to (earliest - 1), building output
-    let mut items: Vec<String> = Vec::new();
-    let mut ym = current.clone();
-    loop {
-        let show_sync = ym == current || !synced.contains(&ym);
-        items.push(render_month_divider(&ym, show_sync));
-        if let Some(rows) = by_month.remove(&ym) {
-            items.extend(rows);
-        }
-        if ym == stop_at {
-            break;
-        }
-        ym = ym.previous();
-    }
-
-    if !no_date_rows.is_empty() {
-        items.push(
-            r#"<div class="month-divider"><span class="month-label">Unknown date</span></div>"#
-                .to_string(),
-        );
-        items.extend(no_date_rows);
-    }
+    let items = crate::month_walk::build_month_items(
+        &current,
+        earliest_date.as_deref(),
+        &synced,
+        by_month,
+        no_date_rows,
+    );
 
     Ok(ListTemplate {
         rows: items,
@@ -466,15 +419,12 @@ pub async fn detail(
     };
 
     let has_al = has_archive_location(&state);
-    let card_html = render_row(&concert, has_al, &state.jobs.working_dir)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let card_html =
+        render_row(&concert, has_al).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
-    let preview_url = concert.preview_image_url(&state.jobs.working_dir);
-    let mut tracks = concert
-        .album
-        .as_deref()
-        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
-        .unwrap_or_default();
+    let preview_url = concert.preview_image_url_from_db();
+    let mut tracks =
+        crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
     let events = {
         let conn = state.db.lock().unwrap();
         crate::events::list_for_concert(&conn, id)
@@ -517,12 +467,8 @@ pub async fn ignore(
             }
         }
     }
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn want(
@@ -534,12 +480,8 @@ pub async fn want(
         db::toggle_wanted(&conn, id)?;
         db::get_concert(&conn, id)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn notes(
@@ -553,12 +495,8 @@ pub async fn notes(
         db::set_notes(&conn, id, text)?;
         db::get_concert(&conn, id)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn scrape_concert(
@@ -593,12 +531,8 @@ pub async fn scrape_concert(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn download(
@@ -639,12 +573,8 @@ pub async fn download(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn split(
@@ -662,12 +592,8 @@ pub async fn split(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn delete_download(
@@ -895,9 +821,7 @@ pub async fn next_track_media_info(
 
     for next_idx in (idx + 1)..concert.set_list.len() {
         let title = &concert.set_list[next_idx];
-        if let Some(filename) =
-            crate::model::find_track_file(&working_dir, album, title)
-        {
+        if let Some(filename) = crate::model::find_track_file(&working_dir, album, title) {
             let ext = filename.rsplit('.').next().unwrap_or("");
             if !is_browser_playable(ext) {
                 continue;
@@ -1010,11 +934,8 @@ pub async fn tracks(
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
-    let mut tracks = concert
-        .album
-        .as_deref()
-        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
-        .unwrap_or_default();
+    let mut tracks =
+        crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
 
     if tracks.is_empty() && concert.archived_at.is_some() && !concert.set_list.is_empty() {
         let events = {
@@ -1129,11 +1050,7 @@ pub async fn delete_track(
         db::get_concert(&conn, id)?
     };
 
-    let tracks = concert
-        .album
-        .as_deref()
-        .map(|a| crate::model::list_all_tracks(&state.jobs.working_dir, a, &concert.set_list))
-        .unwrap_or_default();
+    let tracks = crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
 
     Ok(TracksTemplate { id, tracks }
         .render()
@@ -1149,12 +1066,8 @@ pub async fn status_row(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(&concert, has_archive_location(&state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn jobs_list(

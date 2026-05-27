@@ -570,7 +570,9 @@ mod tests {
     #[test]
     fn check_dependencies_warns_for_missing_splitter() {
         let warnings = check_dependencies(Path::new("/nonexistent/live-set-splitter"));
-        assert!(warnings.iter().any(|w| w.contains("splitter binary not found")));
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("splitter binary not found")));
     }
 
     #[test]
