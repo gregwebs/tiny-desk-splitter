@@ -5,6 +5,7 @@ pub mod import;
 pub mod jobs;
 pub mod model;
 pub mod month_walk;
+pub mod normalize;
 pub mod scan;
 pub mod scrape;
 pub mod sync;

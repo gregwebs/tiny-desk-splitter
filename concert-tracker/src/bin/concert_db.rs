@@ -65,6 +65,16 @@ enum Command {
     BackfillSplitTracks,
     /// Import pre-archived concerts from an archive directory
     ImportArchive { dir: PathBuf },
+    /// Normalize concert metadata: merge concert-metadata with in-dir timestamps,
+    /// write concert.json, apply to DB, and clean up old files
+    NormalizeMetadata {
+        /// Directory containing rich metadata JSON files
+        #[arg(long, default_value = "concert-metadata")]
+        metadata_dir: PathBuf,
+        /// Print what would happen without making changes
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -218,6 +228,36 @@ fn main() -> Result<()> {
             }
             for e in &report.errors {
                 eprintln!("  Error: {}", e);
+            }
+        }
+
+        Command::NormalizeMetadata {
+            metadata_dir,
+            dry_run,
+        } => {
+            let report = concert_tracker::normalize::normalize_metadata(
+                &conn,
+                &cli.workdir,
+                &metadata_dir,
+                dry_run,
+            )?;
+            println!("Merged: {}", report.merged);
+            println!("Scraped: {}", report.scraped);
+            println!("Renamed: {}", report.renamed);
+            println!("Already had concert.json: {}", report.already_ok);
+            println!("Imported to DB: {}", report.imported_to_db);
+            println!("Old files removed: {}", report.old_files_removed);
+            if !report.missing_source.is_empty() {
+                println!(
+                    "\nStill missing source URL ({}):",
+                    report.missing_source.len()
+                );
+                for dir in &report.missing_source {
+                    println!("  - {}", dir);
+                }
+            }
+            for e in &report.errors {
+                eprintln!("Error: {}", e);
             }
         }
 
