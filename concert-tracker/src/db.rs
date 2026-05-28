@@ -402,10 +402,15 @@ pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Clear split-related timestamps. Error history is preserved.
+/// Clear split-related state, including split_errors_json. Without resetting
+/// the error history, a prior failed attempt would resurrect the split-error
+/// badge once split_at is nulled (see SplitStatus::from_concert). The
+/// SplitError events in the events table preserve the audit trail.
 pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
-        "UPDATE concerts SET split_at = NULL, split_started_at = NULL, tracks_present = NULL WHERE id = ?1",
+        "UPDATE concerts SET split_at = NULL, split_started_at = NULL,
+                tracks_present = NULL, split_errors_json = '[]'
+         WHERE id = ?1",
         params![id],
     )
     .context("Failed to clear split state")?;
@@ -1002,7 +1007,7 @@ pub mod tests {
     }
 
     #[test]
-    fn clear_split_state_nulls_only_split_columns() {
+    fn clear_split_state_resets_split_columns_and_errors() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
@@ -1021,8 +1026,30 @@ pub mod tests {
         );
         assert!(c.split_at.is_none());
         assert!(c.split_started_at.is_none());
-        assert_eq!(c.split_errors.len(), 1, "split errors preserved");
+        assert!(c.split_errors.is_empty(), "split errors cleared");
         assert!(c.tracks_present.is_empty(), "tracks_present cleared");
+    }
+
+    #[test]
+    fn clear_split_state_does_not_resurrect_split_error_badge() {
+        use crate::model::SplitStatus;
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_failed(&conn, id, "first try").unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+
+        let before = get_concert(&conn, id).unwrap();
+        assert_eq!(SplitStatus::from_concert(&before), SplitStatus::Split);
+
+        clear_split_state(&conn, id).unwrap();
+
+        let after = get_concert(&conn, id).unwrap();
+        assert!(after.split_errors.is_empty());
+        assert_eq!(SplitStatus::from_concert(&after), SplitStatus::NotSplit);
     }
 
     #[test]
