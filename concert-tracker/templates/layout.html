@@ -350,7 +350,13 @@
       }
       fetch("/concerts/" + concertId + "/tracks")
         .then(function(r) { return r.text(); })
-        .then(function(html) { target.innerHTML = html; });
+        .then(function(html) {
+          target.innerHTML = html;
+          // Wire up hx-* attributes on the just-injected tracks list (the
+          // delete ✕ button uses hx-post). innerHTML bypasses htmx so we have
+          // to process it manually; htmx auto-processes its own swap responses.
+          if (window.htmx) htmx.process(target);
+        });
     }
   </script>
   <script src="/static/player.js"></script>

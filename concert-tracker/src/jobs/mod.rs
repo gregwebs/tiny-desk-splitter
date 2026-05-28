@@ -186,7 +186,11 @@ impl JobConfig {
                     .arg("--input-file")
                     .arg(&job.input_file)
                     .arg("--output-dir")
-                    .arg(&job.output_dir);
+                    .arg(&job.output_dir)
+                    // Silence Leptonica's stderr chatter (e.g. "boxClipToRectangle:
+                    // box outside rectangle") emitted during OCR refinement on
+                    // near-empty frames. 4 == L_SEVERITY_NONE.
+                    .env("LEPT_MSG_SEVERITY", "4");
                 cmd
             }),
         }
