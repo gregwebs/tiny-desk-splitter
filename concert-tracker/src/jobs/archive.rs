@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -144,6 +144,69 @@ fn do_archive(job: &ArchiveJob) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Reverse `do_archive`. The symlink at `source_dir` is the authoritative
+/// record of where the files went — read it (don't recompute from current
+/// settings), then move the dest back over the symlink. Recomputing was
+/// brittle: settings.archive_location or sanitize_album can have drifted
+/// since archiving (observed in the wild: archive at
+/// `/nas/.../Bloc Party - Tiny Desk Concert` vs. recomputed
+/// `/nas/.../Bloc Party Tiny Desk Concert`).
+///
+/// The rename happy path covers same-filesystem moves; the EXDEV branch
+/// mirrors `do_archive`'s and is exercised manually rather than in unit
+/// tests.
+pub fn do_unarchive(source_dir: &Path) -> anyhow::Result<()> {
+    let source_meta = std::fs::symlink_metadata(source_dir).ok();
+    let dest_dir = match source_meta {
+        Some(meta) if meta.file_type().is_symlink() => std::fs::read_link(source_dir)
+            .with_context(|| {
+                format!("failed to read archive symlink at {}", source_dir.display())
+            })?,
+        Some(_) => anyhow::bail!(
+            "source path is a real directory, refusing to clobber: {}",
+            source_dir.display()
+        ),
+        None => anyhow::bail!(
+            "no archive symlink at {}, cannot determine archive location",
+            source_dir.display()
+        ),
+    };
+
+    if !dest_dir.exists() {
+        anyhow::bail!(
+            "archive directory does not exist: {}",
+            dest_dir.display()
+        );
+    }
+
+    tracing::debug!("removing archive symlink {}", source_dir.display());
+    std::fs::remove_file(source_dir)?;
+
+    if let Some(parent) = source_dir.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    tracing::debug!(
+        "attempting rename {} -> {}",
+        dest_dir.display(),
+        source_dir.display()
+    );
+
+    match std::fs::rename(&dest_dir, source_dir) {
+        Ok(()) => {
+            tracing::debug!("rename succeeded (same filesystem)");
+        }
+        Err(e) if is_cross_device(&e) => {
+            tracing::debug!("cross-device move, falling back to copy+delete");
+            copy_dir_recursive(&dest_dir, source_dir)?;
+            std::fs::remove_dir_all(&dest_dir)?;
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    Ok(())
+}
+
 fn is_cross_device(e: &std::io::Error) -> bool {
     // EXDEV is 18 on macOS and Linux
     e.raw_os_error() == Some(18)
@@ -201,6 +264,98 @@ mod tests {
             dest_dir: tmp.path().join("archive"),
         };
         assert!(do_archive(&job).is_err());
+    }
+
+    #[test]
+    fn do_unarchive_restores_files_and_removes_symlink() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Test Album");
+        let dest = tmp.path().join("archive").join("Test Album");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("test.mp4"), b"data").unwrap();
+
+        do_archive(&ArchiveJob {
+            concert_id: 1,
+            source_dir: source.clone(),
+            dest_dir: dest.clone(),
+        })
+        .unwrap();
+
+        do_unarchive(&source).unwrap();
+
+        assert!(source.is_dir());
+        assert!(!source.is_symlink());
+        assert!(!dest.exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("test.mp4")).unwrap(),
+            "data"
+        );
+    }
+
+    #[test]
+    fn do_unarchive_follows_symlink_with_drifted_name() {
+        // Simulates the wild case: sanitize_album drift means the recomputed
+        // dest path would not match, but the symlink records the real one.
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Bloc Party Tiny Desk Concert");
+        let real_dest = tmp
+            .path()
+            .join("archive")
+            .join("Bloc Party - Tiny Desk Concert");
+        std::fs::create_dir_all(&real_dest).unwrap();
+        std::fs::write(real_dest.join("test.mp4"), b"data").unwrap();
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&real_dest, &source).unwrap();
+
+        do_unarchive(&source).unwrap();
+
+        assert!(source.is_dir());
+        assert!(!source.is_symlink());
+        assert!(!real_dest.exists());
+        assert_eq!(
+            std::fs::read_to_string(source.join("test.mp4")).unwrap(),
+            "data"
+        );
+    }
+
+    #[test]
+    fn do_unarchive_fails_if_dest_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Test Album");
+        let dest = tmp.path().join("archive").join("Test Album");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&dest, &source).unwrap();
+
+        assert!(do_unarchive(&source).is_err());
+    }
+
+    #[test]
+    fn do_unarchive_fails_if_source_is_real_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Test Album");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::write(source.join("user-data.txt"), b"keep me").unwrap();
+
+        let err = do_unarchive(&source).unwrap_err().to_string();
+        assert!(
+            err.contains("real directory"),
+            "expected clobber-refusal error, got: {err}"
+        );
+        assert!(
+            source.join("user-data.txt").exists(),
+            "source must not be touched"
+        );
+    }
+
+    #[test]
+    fn do_unarchive_fails_if_source_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("concerts").join("Test Album");
+        let err = do_unarchive(&source).unwrap_err().to_string();
+        assert!(
+            err.contains("no archive symlink"),
+            "expected missing-symlink error, got: {err}"
+        );
     }
 
     #[test]

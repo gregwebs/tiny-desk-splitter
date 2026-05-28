@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
             post(handlers::delete_track),
         )
         .route("/concerts/:id/archive", post(handlers::archive))
+        .route("/concerts/:id/unarchive", post(handlers::unarchive))
         .route("/concerts/:id/status", get(handlers::status_row))
         .route("/jobs", get(handlers::jobs_list))
         .route("/jobs/count", get(handlers::jobs_count))

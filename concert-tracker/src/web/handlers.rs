@@ -58,6 +58,7 @@ struct RowTemplate {
     track_count: usize,
     track_total: usize,
     can_archive: bool,
+    can_unarchive: bool,
     /// Whether to show the download badge alongside slot contents.
     /// False only for the NotDownloaded "fresh" state.
     show_download_badge: bool,
@@ -281,6 +282,7 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
             &archive_s,
             ArchiveStatus::NotArchived | ArchiveStatus::ArchiveError
         );
+    let can_unarchive = matches!(&archive_s, ArchiveStatus::Archived);
     let show_download_badge = !matches!(&ds, DownloadStatus::NotDownloaded);
     let show_split_badge = !matches!(&ss, SplitStatus::NotSplit);
     let show_archive_badge = !matches!(&archive_s, ArchiveStatus::NotArchived);
@@ -320,6 +322,7 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
         track_count,
         track_total,
         can_archive,
+        can_unarchive,
         show_download_badge,
         show_split_badge,
         show_archive_badge,
@@ -1320,6 +1323,66 @@ pub async fn archive(
         id,
     )
     .await?;
+
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    Ok((headers, "").into_response())
+}
+
+pub async fn unarchive(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let album = {
+        let conn = state.db.lock().unwrap();
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        if c.archived_at.is_none() {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "concert {} is not archived",
+                id
+            )));
+        }
+        if c.archive_started_at.is_some() {
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "concert {} has an archive job in flight; cannot unarchive",
+                id
+            )));
+        }
+        c.album
+            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("concert {} has no album", id)))?
+    };
+
+    let source_dir = concert_dir(&state.jobs.working_dir, &album);
+
+    tracing::info!(
+        "unarchive started for concert {} ({}) <- symlink at {}",
+        id,
+        album,
+        source_dir.display()
+    );
+
+    let result = {
+        let source = source_dir.clone();
+        tokio::task::spawn_blocking(move || crate::jobs::archive::do_unarchive(&source))
+            .await
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))?
+    };
+
+    match result {
+        Ok(()) => {
+            let conn = state.db.lock().unwrap();
+            db::clear_archive_state(&conn, id)?;
+            tracing::info!("unarchive completed for concert {}", id);
+        }
+        Err(e) => {
+            let error = format!("{:#}", e);
+            tracing::warn!("unarchive failed for concert {}: {}", id, error);
+            let conn = state.db.lock().unwrap();
+            let _ = db::mark_archive_failed(&conn, id, &error);
+            let _ = db::insert_failed_job(&conn, id, "unarchive", &error);
+            return Err(AppError::Internal(anyhow::anyhow!(error)));
+        }
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert("HX-Refresh", "true".parse().unwrap());

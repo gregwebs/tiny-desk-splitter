@@ -21,6 +21,7 @@ pub enum Event {
     ArchiveStarted,
     Archived,
     ArchiveError,
+    ArchiveDelete,
     Watch,
 }
 
@@ -46,6 +47,7 @@ impl Event {
             Event::ArchiveStarted => "archive_started",
             Event::Archived => "archived",
             Event::ArchiveError => "archive_error",
+            Event::ArchiveDelete => "archive_delete",
             Event::Watch => "watch",
         }
     }

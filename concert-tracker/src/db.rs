@@ -465,6 +465,28 @@ pub fn mark_archive_failed(conn: &Connection, id: i64, error: &str) -> Result<()
     Ok(())
 }
 
+/// Clear archive state. Guards on `archived_at IS NOT NULL` so a stale
+/// page can't stomp an in-flight archive (which has `archive_started_at`
+/// set but `archived_at` still NULL). Resets `archive_errors_json` for the
+/// same reason `clear_split_state` resets `split_errors_json`: otherwise
+/// a prior failed archive would resurrect the `archive-error` badge once
+/// `archived_at` is nulled (see `ArchiveStatus::from_concert`). Returns
+/// true iff a row was actually cleared.
+pub fn clear_archive_state(conn: &Connection, id: i64) -> Result<bool> {
+    let rows = conn
+        .execute(
+            "UPDATE concerts SET archived_at = NULL, archive_started_at = NULL,
+                    archive_errors_json = '[]'
+             WHERE id = ?1 AND archived_at IS NOT NULL",
+            params![id],
+        )
+        .context("Failed to clear archive state")?;
+    if rows > 0 {
+        events::record_now(conn, id, Event::ArchiveDelete, None);
+    }
+    Ok(rows > 0)
+}
+
 /// Set downloaded_at from filesystem mtime if not already set (for scan/recovery).
 pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<()> {
     conn.execute(
@@ -1354,6 +1376,46 @@ pub mod tests {
         assert!(c.archived_at.is_none());
         assert_eq!(c.archive_errors.len(), 1);
         assert_eq!(c.archive_errors[0].error, "disk full");
+    }
+
+    #[test]
+    fn clear_archive_state_clears_when_archived() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+        mark_archive_failed(&conn, id, "disk full").unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+        mark_archive_succeeded(&conn, id).unwrap();
+
+        let cleared = clear_archive_state(&conn, id).unwrap();
+        assert!(cleared);
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.archived_at.is_none());
+        assert!(c.archive_started_at.is_none());
+        assert!(
+            c.archive_errors.is_empty(),
+            "errors_json should be reset so the archive-error badge does not resurface"
+        );
+    }
+
+    #[test]
+    fn clear_archive_state_noop_when_archive_in_flight() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+        try_mark_archive_started(&conn, id).unwrap();
+
+        let cleared = clear_archive_state(&conn, id).unwrap();
+        assert!(!cleared, "must not clear while archive is in flight");
+        let c = get_concert(&conn, id).unwrap();
+        assert!(
+            c.archive_started_at.is_some(),
+            "in-flight archive's started_at must be preserved"
+        );
+        assert!(c.archived_at.is_none());
     }
 
     #[test]
