@@ -420,9 +420,16 @@ fn check_line_match(
         title_normalized_for_matching = title_normalized.chars().take(take).collect::<String>();
     }
     let mut levenshtein_limit = (line_normalized.len() as f64 / 3.0).floor() as u32;
-    if is_overlay {
+    // The overlay bonus forgives a couple of OCR errors in a readable title.
+    // For very short OCR text, +2 lets ~3 of 4 characters differ — enough to match
+    // anything. Require at least 6 chars of line text before granting the bonus.
+    if is_overlay && line_count >= 6 {
         levenshtein_limit += 2
     }
+    // Hard cap: never tolerate more than half the shorter string differing,
+    // no matter how generous the per-line/overlay budget would otherwise be.
+    let limit_cap = (std::cmp::min(line_count, title_count) as u32) / 2;
+    levenshtein_limit = std::cmp::min(levenshtein_limit, limit_cap);
     // If we have an overlay and no exact match was found, try fuzzy matching
     let lev = levenshtein_weight(
         &line_normalized,
@@ -630,6 +637,22 @@ mod tests_matches_song_title {
     fn test_accents() {
         let lines = vec!["No Timé to’ Lose".to_string()];
         assert!(matches_song_title(&lines, "No Time to Lose", true).is_some());
+    }
+
+    #[test]
+    fn test_short_overlay_noise_does_not_match_short_title() {
+        // Regression: Bloc Party concert (4-char songs: "Blue", "Signs").
+        // Tesseract OCR produced "ee Se" on a non-overlay frame, which previously
+        // matched "blue" via 3 cheap substitutions under the +2 overlay bonus,
+        // locking the splitter into the wrong "Blue" timestamp and dropping Mercury.
+        let lines = vec!["Bloc Party".to_string(), "ee".to_string(), "Se".to_string()];
+        assert!(matches_song_title(&lines, "Blue", true).is_none());
+        // The real "Blue" overlay must still match.
+        let real = vec!["Bloc Party".to_string(), "Blue".to_string()];
+        assert!(matches_song_title(&real, "Blue", true).is_some());
+        // A single OCR error on a short title (Blue -> Biue) should still match.
+        let near = vec!["Bloc Party".to_string(), "Biue".to_string()];
+        assert!(matches_song_title(&near, "Blue", true).is_some());
     }
 
     #[test]
