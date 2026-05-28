@@ -28,7 +28,9 @@
         {% endif %}
         {% if can_archive %}
           <button hx-post="/concerts/{{ id }}/archive" hx-target="closest .card" hx-swap="outerHTML"
-                  hx-disabled-elt="this" hx-on::before-request="this.textContent='Archiving…'">Archive</button>
+                  hx-disabled-elt="this"
+                  hx-on::before-request="this.textContent='Archiving…'"
+                  hx-on::response-error="this.textContent='Archive'">Archive</button>
         {% endif %}
       </span>
 
@@ -39,7 +41,9 @@
         {% endif %}
         {% if can_download %}
           <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML"
-                  hx-disabled-elt="this" hx-on::before-request="this.textContent='Starting…'">Download</button>
+                  hx-disabled-elt="this"
+                  hx-on::before-request="this.textContent='Starting…'"
+                  hx-on::response-error="this.textContent='Download'">Download</button>
         {% endif %}
         {% if can_delete_download %}
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML">✕</button>
@@ -58,7 +62,10 @@
           <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
         {% endif %}
         {% if can_split %}
-          <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML">Split</button>
+          <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML"
+                  hx-disabled-elt="this"
+                  hx-on::before-request="this.textContent='Starting…'"
+                  hx-on::response-error="this.textContent='Split'">Split</button>
         {% endif %}
       </span>
 

@@ -3,8 +3,9 @@
 {{ card_html|safe }}
 <button hx-post="/concerts/{{ concert.id }}/scrape"
         hx-target="#concert-{{ concert.id }}" hx-swap="outerHTML"
-        hx-disabled-elt="this" hx-on::before-request="this.textContent='Scraping…'"
-        hx-on::after-request="if(event.detail.successful){this.textContent='Re-scrape'}else{this.textContent='Scrape failed';this.style.color='#c4352a'}"
+        hx-disabled-elt="this"
+        hx-on::before-request="this.textContent='Scraping…'"
+        hx-on::after-request="this.textContent='Re-scrape'"
         style="margin: 0.5rem 0;">Re-scrape</button>
 
 {% if let Some(url) = preview_url.as_ref() %}

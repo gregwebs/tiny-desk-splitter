@@ -108,23 +108,37 @@ pub async fn start_split(
     }
 
     let title = concert.title.clone();
-    let album = concert.album.as_deref().ok_or_else(|| {
-        anyhow::anyhow!(
-            "Concert {} has no album, cannot locate input file",
-            concert_id
-        )
-    })?;
-    let input_file = find_downloaded_file(&config.working_dir, album).ok_or_else(|| {
-        anyhow::anyhow!(
-            "Downloaded file for concert {} (album {:?}) not found in {}",
-            concert_id,
-            album,
-            config.working_dir.display()
-        )
-    })?;
-    let temp_file = write_splitter_input(&concert)?;
+    let setup = (|| -> Result<(NamedTempFile, std::path::PathBuf, std::path::PathBuf)> {
+        let album = concert.album.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "Concert {} has no album, cannot locate input file",
+                concert_id
+            )
+        })?;
+        let input_file = find_downloaded_file(&config.working_dir, album).ok_or_else(|| {
+            anyhow::anyhow!(
+                "Downloaded file for concert {} (album {:?}) not found in {}",
+                concert_id,
+                album,
+                config.working_dir.display()
+            )
+        })?;
+        let temp_file = write_splitter_input(&concert)?;
+        let output_dir = concert_dir(&config.working_dir, album);
+        Ok((temp_file, input_file, output_dir))
+    })();
+
+    let (temp_file, input_file, output_dir) = match setup {
+        Ok(parts) => parts,
+        Err(e) => {
+            // Setup failed after we marked the split as started — clear the flag
+            // so the user can retry, and surface the error.
+            let conn = db.lock().unwrap();
+            let _ = db::mark_split_failed(&conn, concert_id, &e.to_string());
+            return Err(e);
+        }
+    };
     let json_path = temp_file.path().to_path_buf();
-    let output_dir = concert_dir(&config.working_dir, album);
     let job = SplitJob {
         concert_id: concert.id,
         json_path,
