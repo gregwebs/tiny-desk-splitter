@@ -9,7 +9,23 @@ pub const HOP_SIZE: usize = 1024;
 pub const MIN_SILENCE_DURATION: f64 = 2.0; // Seconds of silence to detect a gap
 pub const ENERGY_THRESHOLD: f64 = 0.005; // Threshold for audio energy detection (lowered for better sensitivity)
 
-// const MAX_GAP_DURATION: f64 = 15.0; // Seconds - gaps longer than this are considered "talking" segments
+/// Minimum spacing between two recovered song boundaries (and between a
+/// recovered boundary and the surrounding anchors). Without this guard, two
+/// long silences clustered at one end of a gap could place "different" songs
+/// only a few seconds apart.
+pub const MIN_SONG_GAP_SECONDS: f64 = 20.0;
+
+/// Energy-profile frames per audio second.
+pub fn frames_per_second() -> f64 {
+    SAMPLE_RATE as f64 / HOP_SIZE as f64
+}
+
+/// A contiguous silent region in the energy profile, expressed in seconds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SilenceSpan {
+    pub midpoint_seconds: f64,
+    pub duration_seconds: f64,
+}
 
 pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>> {
     // Create a temporary WAV file
@@ -93,53 +109,122 @@ pub fn calculate_energy_profile(samples: &[f32]) -> Vec<f64> {
     smoothed_profile
 }
 
-pub fn find_silence_points(energy_profile: &[f64], threshold: f64) -> Vec<usize> {
-    let mut silence_points = Vec::new();
-    let frames_per_second = SAMPLE_RATE as f64 / HOP_SIZE as f64;
-    let min_silence_frames = (MIN_SILENCE_DURATION * frames_per_second) as usize;
+/// Find all silence spans in the energy profile whose duration meets
+/// `MIN_SILENCE_DURATION`. Returns the midpoint and duration of each span
+/// in seconds.
+pub fn find_silence_spans(energy_profile: &[f64], threshold: f64) -> Vec<SilenceSpan> {
+    let mut spans = Vec::new();
+    let fps = frames_per_second();
+    let min_silence_frames = (MIN_SILENCE_DURATION * fps) as usize;
 
-    let mut silence_start = None;
+    let mut silence_start: Option<usize> = None;
     let mut silence_length = 0;
 
-    // Find silence spans
+    let record_span = |start: usize, length: usize, spans: &mut Vec<SilenceSpan>| {
+        if length >= min_silence_frames {
+            let midpoint_frame = start + length / 2;
+            let span = SilenceSpan {
+                midpoint_seconds: midpoint_frame as f64 / fps,
+                duration_seconds: length as f64 / fps,
+            };
+            log::debug!(
+                "Silence detected at {:.2}s (length: {:.2}s)",
+                span.midpoint_seconds,
+                span.duration_seconds
+            );
+            spans.push(span);
+        }
+    };
+
     for (i, &energy) in energy_profile.iter().enumerate() {
         if energy < threshold {
-            // Low energy detected (silence)
             if silence_start.is_none() {
                 silence_start = Some(i);
             }
             silence_length += 1;
-        } else {
-            // Energy above threshold (sound)
-            if let Some(start) = silence_start {
-                if silence_length >= min_silence_frames {
-                    // We found a silence span that's long enough
-                    let midpoint = start + silence_length / 2;
-                    silence_points.push(midpoint);
-                    println!(
-                        "Silence detected at {:.2}s (length: {:.2}s)",
-                        midpoint as f64 / frames_per_second,
-                        silence_length as f64 / frames_per_second
-                    );
-                }
-                silence_start = None;
-                silence_length = 0;
+        } else if let Some(start) = silence_start.take() {
+            record_span(start, silence_length, &mut spans);
+            silence_length = 0;
+        }
+    }
+
+    if let Some(start) = silence_start {
+        record_span(start, silence_length, &mut spans);
+    }
+
+    spans
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frames_per_second_matches_constants() {
+        let expected = SAMPLE_RATE as f64 / HOP_SIZE as f64;
+        assert!((frames_per_second() - expected).abs() < f64::EPSILON);
+    }
+
+    /// Build an energy profile with explicit (loud-frames, silent-frames) blocks.
+    fn build_profile(blocks: &[(usize, bool)]) -> Vec<f64> {
+        let loud = 0.5_f64;
+        let silent = 0.0001_f64;
+        let mut out = Vec::new();
+        for &(frames, is_silent) in blocks {
+            let value = if is_silent { silent } else { loud };
+            for _ in 0..frames {
+                out.push(value);
             }
         }
+        out
     }
 
-    // Check if we ended with silence
-    if let Some(start) = silence_start {
-        if silence_length >= min_silence_frames {
-            let midpoint = start + silence_length / 2;
-            silence_points.push(midpoint);
-            println!(
-                "Final silence detected at {:.2}s (length: {:.2}s)",
-                midpoint as f64 / frames_per_second,
-                silence_length as f64 / frames_per_second
-            );
-        }
+    #[test]
+    fn test_find_silence_spans_reports_midpoint_and_duration() {
+        let fps = frames_per_second();
+        // 5s loud, 4s silent, 5s loud, 6s silent, 5s loud
+        let profile = build_profile(&[
+            ((5.0 * fps) as usize, false),
+            ((4.0 * fps) as usize, true),
+            ((5.0 * fps) as usize, false),
+            ((6.0 * fps) as usize, true),
+            ((5.0 * fps) as usize, false),
+        ]);
+
+        let spans = find_silence_spans(&profile, ENERGY_THRESHOLD);
+        assert_eq!(spans.len(), 2, "expected two silence spans, got {:?}", spans);
+
+        // First silence: starts at 5s, runs 4s -> midpoint ~7s, duration ~4s.
+        assert!((spans[0].midpoint_seconds - 7.0).abs() < 0.2, "{:?}", spans[0]);
+        assert!((spans[0].duration_seconds - 4.0).abs() < 0.2, "{:?}", spans[0]);
+
+        // Second silence: starts at 14s, runs 6s -> midpoint ~17s, duration ~6s.
+        assert!((spans[1].midpoint_seconds - 17.0).abs() < 0.2, "{:?}", spans[1]);
+        assert!((spans[1].duration_seconds - 6.0).abs() < 0.2, "{:?}", spans[1]);
     }
 
-    silence_points
+    #[test]
+    fn test_find_silence_spans_filters_short_silences() {
+        let fps = frames_per_second();
+        // 5s loud, 1s silent (below MIN_SILENCE_DURATION=2.0), 5s loud
+        let profile = build_profile(&[
+            ((5.0 * fps) as usize, false),
+            ((1.0 * fps) as usize, true),
+            ((5.0 * fps) as usize, false),
+        ]);
+        let spans = find_silence_spans(&profile, ENERGY_THRESHOLD);
+        assert!(spans.is_empty(), "expected no spans, got {:?}", spans);
+    }
+
+    #[test]
+    fn test_find_silence_spans_handles_trailing_silence() {
+        let fps = frames_per_second();
+        let profile = build_profile(&[
+            ((5.0 * fps) as usize, false),
+            ((3.0 * fps) as usize, true),
+        ]);
+        let spans = find_silence_spans(&profile, ENERGY_THRESHOLD);
+        assert_eq!(spans.len(), 1);
+        assert!((spans[0].duration_seconds - 3.0).abs() < 0.2, "{:?}", spans[0]);
+    }
 }

@@ -2,11 +2,20 @@
 Split a live performance set into individual songs
 
 ## Overview
-This tool analyzes audio files to detect silence between songs in a live recording and splits the file into separate song tracks.
+This tool uses 2 techniques to split a live recording into separate song tracks.
+* image analysis- look for an overlay that has the artist and song (Tiny Desk)
+* audio analysis- detect silence between songs
+
+The image analysis, with some heuristics works for most Tiny Desk concerts.
+Silence analysis is used
+* as a fallback if an overlay is missing for a track
+* to further refine the song start timing since the overlay is usually late
 
 ## Requirements
 - Rust (with Cargo)
 - FFmpeg (for audio analysis)
+- tesseract/leptonica
+- magick (generate black and white images to help with OCR detection)
 
 ## Usage
 ```bash
