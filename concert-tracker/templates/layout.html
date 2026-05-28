@@ -270,6 +270,17 @@
       cursor: pointer; padding: 0.2rem 0.4rem; min-width: 2em; text-align: center;
     }
     #player-play-pause:hover { color: #ccc; }
+    #player-next {
+      background: none; border: none; color: #fff; font-size: 1.2em;
+      cursor: pointer; padding: 0.2rem 0.3rem; min-width: 1.5em; text-align: center;
+    }
+    #player-next:hover { color: #ccc; }
+    #player-queue-badge {
+      background: #e63946; color: #fff; font-size: 0.7em; font-weight: 700;
+      min-width: 1.3em; height: 1.3em; border-radius: 50%;
+      display: none; align-items: center; justify-content: center;
+      padding: 0.1em;
+    }
     #player-watch {
       background: none; border: 1px solid #666; color: #fff; font-size: 0.85em;
       cursor: pointer; padding: 0.15rem 0.5rem; border-radius: 3px; display: none;
@@ -314,6 +325,8 @@
   {% block content %}{% endblock %}
   <div id="player-bar" hx-preserve="true">
     <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
+    <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
+    <span id="player-queue-badge"></span>
     <button id="player-watch" onclick="Player.watch()">Watch</button>
     <div id="player-info">
       <span id="player-title"></span>

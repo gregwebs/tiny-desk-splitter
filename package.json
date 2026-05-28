@@ -1,0 +1,26 @@
+{
+  "name": "tiny-desk-splitter",
+  "version": "1.0.0",
+  "description": "Tools for downloading and splitting NPR Tiny Desk Concerts into individual tracks with metadata.",
+  "main": "index.js",
+  "directories": {
+    "doc": "doc"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gregwebs/tiny-desk-splitter.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/gregwebs/tiny-desk-splitter/issues"
+  },
+  "homepage": "https://github.com/gregwebs/tiny-desk-splitter#readme",
+  "devDependencies": {
+    "@playwright/test": "^1.60.0"
+  }
+}

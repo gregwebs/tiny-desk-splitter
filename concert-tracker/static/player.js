@@ -4,6 +4,7 @@ const Player = (() => {
   let audio = null;
   let bar = null;
   let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null };
+  let queue = [];
   let autoAdvanceController = null;
 
   function onPlay() { setPlayPauseIcon(true); }
@@ -105,14 +106,16 @@ const Player = (() => {
     if (time) time.textContent = formatTime(audio.currentTime) + " / " + formatTime(audio.duration);
   }
 
-  function onEnded() {
-    playNextTrack();
+  async function onEnded() {
+    const played = await playFromQueue();
+    if (!played) playNextTrack();
   }
 
-  function onError() {
+  async function onError() {
     showError("Failed to load media");
     tracing("audio error", audio.error);
-    playNextTrack();
+    const played = await playFromQueue();
+    if (!played) playNextTrack();
   }
 
   function cancelAutoAdvance() {
@@ -146,9 +149,7 @@ const Player = (() => {
       if (signal.aborted) return;
       const info = await resp.json();
 
-      const btn = document.querySelector(
-        `[data-concert-id="${concertId}"][data-track-idx="${info.track_index}"]`
-      );
+      const btn = findTrackButton(concertId, info.track_index);
       await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
         `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
         `/concerts/${concertId}/tracks/${info.track_index}/watch`);
@@ -170,6 +171,13 @@ const Player = (() => {
     return m + ":" + (s < 10 ? "0" : "") + s;
   }
 
+  function findTrackButton(concertId, trackIdx) {
+    if (trackIdx != null) {
+      return document.querySelector(`[data-concert-id="${concertId}"][data-track-idx="${trackIdx}"]`);
+    }
+    return document.querySelector(`[data-concert-id="${concertId}"][data-role="listen-album"]`);
+  }
+
   function clearPlaying() {
     if (state.activeButton) {
       state.activeButton.classList.remove("playing");
@@ -187,13 +195,7 @@ const Player = (() => {
 
   function reapplyPlaying() {
     if (state.concertId == null) return;
-    let selector;
-    if (state.trackIdx != null) {
-      selector = `[data-concert-id="${state.concertId}"][data-track-idx="${state.trackIdx}"]`;
-    } else {
-      selector = `[data-concert-id="${state.concertId}"][data-role="listen-album"]`;
-    }
-    const btn = document.querySelector(selector);
+    const btn = findTrackButton(state.concertId, state.trackIdx);
     if (btn && !audio.paused) {
       clearPlaying();
       btn.classList.add("playing");
@@ -260,6 +262,14 @@ const Player = (() => {
   }
 
   async function playTrack(btn, concertId, trackIdx) {
+    if (state.concertId === concertId && state.trackIdx === trackIdx && audio) {
+      togglePause();
+      return;
+    }
+    if (audio && !audio.paused && !audio.ended) {
+      enqueue(concertId, trackIdx, btn.textContent.trim());
+      return;
+    }
     cancelAutoAdvance();
     try {
       const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
@@ -295,6 +305,70 @@ const Player = (() => {
   function seek(val) {
     if (!audio || !audio.duration) return;
     audio.currentTime = (val / 100) * audio.duration;
+  }
+
+  function enqueue(concertId, trackIdx, title) {
+    if (queue.some(q => q.concertId === concertId && q.trackIdx === trackIdx)) {
+      tracing("enqueue duplicate skipped", { concertId, trackIdx });
+      return;
+    }
+    queue.push({ concertId, trackIdx, title });
+    tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
+    updateQueueBadge();
+  }
+
+  async function playFromQueue() {
+    while (queue.length > 0) {
+      const entry = queue.shift();
+      updateQueueBadge();
+      cancelAutoAdvance();
+      tracing("playFromQueue", { concertId: entry.concertId, trackIdx: entry.trackIdx });
+
+      try {
+        const resp = await fetch(
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/media-info`
+        );
+        if (!resp.ok) {
+          tracing("playFromQueue track unavailable", { concertId: entry.concertId, trackIdx: entry.trackIdx });
+          continue;
+        }
+        const info = await resp.json();
+        if (!info.playable) continue;
+
+        const btn = findTrackButton(entry.concertId, entry.trackIdx);
+        await play(btn, info.url, info.title, info.artist, entry.concertId, entry.trackIdx,
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/listen`, info.is_video,
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`);
+        return true;
+      } catch (e) {
+        tracing("playFromQueue failed", e);
+      }
+    }
+    return false;
+  }
+
+  async function skipToNext() {
+    if (!audio) return;
+    tracing("skipToNext", { queueLength: queue.length });
+    cancelAutoAdvance();
+    audio.pause();
+
+    const played = await playFromQueue();
+    if (!played) playNextTrack();
+  }
+
+  function updateQueueBadge() {
+    const badge = document.getElementById("player-queue-badge");
+    if (!badge) return;
+    if (queue.length > 0) {
+      badge.textContent = queue.length;
+      badge.style.display = "inline-flex";
+      badge.title = queue.map(q => q.title).join("\n");
+    } else {
+      badge.textContent = "";
+      badge.style.display = "none";
+      badge.title = "";
+    }
   }
 
   async function watch() {
@@ -338,5 +412,5 @@ const Player = (() => {
     init();
   }
 
-  return { playAlbum, playTrack, togglePause, seek, watch, watchDirect, watchTrackDirect };
+  return { playAlbum, playTrack, togglePause, seek, skipToNext, watch, watchDirect, watchTrackDirect };
 })();
