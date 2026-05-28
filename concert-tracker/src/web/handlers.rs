@@ -167,6 +167,7 @@ impl IntoResponse for AppError {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "Not found").into_response(),
             AppError::Internal(e) => {
+                tracing::error!("{e:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
             }
         }
