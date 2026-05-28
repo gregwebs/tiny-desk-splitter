@@ -38,11 +38,7 @@ pub fn normalize_metadata(
     let concerts = db::list_concerts(conn)?;
     let album_lookup: HashMap<String, &crate::model::Concert> = concerts
         .iter()
-        .filter_map(|c| {
-            c.album
-                .as_deref()
-                .map(|a| (sanitize_album(a), c))
-        })
+        .filter_map(|c| c.album.as_deref().map(|a| (sanitize_album(a), c)))
         .collect();
 
     let mut entries: Vec<_> = fs::read_dir(&concerts_dir)?
@@ -291,7 +287,10 @@ mod tests {
             merged.source,
             "https://www.npr.org/test-artist-tiny-desk-concert"
         );
-        assert_eq!(merged.description.as_deref(), Some("A wonderful performance."));
+        assert_eq!(
+            merged.description.as_deref(),
+            Some("A wonderful performance.")
+        );
         assert_eq!(merged.musicians.len(), 1);
         assert!(merged.timestamps.is_some());
         assert_eq!(merged.timestamps.as_ref().unwrap().len(), 2);
@@ -307,8 +306,7 @@ mod tests {
         let metadata_dir = td.path().join("concert-metadata");
         fs::create_dir_all(&metadata_dir).unwrap();
 
-        let report =
-            normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
+        let report = normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
 
         assert_eq!(report.already_ok, 1);
         assert_eq!(report.merged, 0);
@@ -325,10 +323,12 @@ mod tests {
 
         let metadata_dir = td.path().join("concert-metadata");
         fs::create_dir_all(&metadata_dir).unwrap();
-        write_json(&metadata_dir.join("test_artist.json"), &full_metadata_json());
+        write_json(
+            &metadata_dir.join("test_artist.json"),
+            &full_metadata_json(),
+        );
 
-        let report =
-            normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
+        let report = normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
 
         assert_eq!(report.merged, 1);
         assert_eq!(report.old_files_removed, 1);
@@ -359,8 +359,7 @@ mod tests {
         let metadata_dir = td.path().join("concert-metadata");
         fs::create_dir_all(&metadata_dir).unwrap();
 
-        let report =
-            normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
+        let report = normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
 
         assert_eq!(report.renamed, 1);
         assert!(dir.join("concert.json").exists());
@@ -378,10 +377,12 @@ mod tests {
 
         let metadata_dir = td.path().join("concert-metadata");
         fs::create_dir_all(&metadata_dir).unwrap();
-        write_json(&metadata_dir.join("test_artist.json"), &full_metadata_json());
+        write_json(
+            &metadata_dir.join("test_artist.json"),
+            &full_metadata_json(),
+        );
 
-        let report =
-            normalize_metadata(&conn, td.path(), &metadata_dir, true).unwrap();
+        let report = normalize_metadata(&conn, td.path(), &metadata_dir, true).unwrap();
 
         assert_eq!(report.merged, 1);
         assert_eq!(report.old_files_removed, 0);
@@ -406,14 +407,10 @@ mod tests {
         meta.as_object_mut().unwrap().remove("timestamps");
         write_json(&metadata_dir.join("no_source.json"), &meta);
 
-        let report =
-            normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
+        let report = normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
 
         assert_eq!(report.missing_source.len(), 1);
-        assert_eq!(
-            report.missing_source[0],
-            "No Source Tiny Desk Concert"
-        );
+        assert_eq!(report.missing_source[0], "No Source Tiny Desk Concert");
     }
 
     #[test]
@@ -426,11 +423,13 @@ mod tests {
 
         let metadata_dir = td.path().join("concert-metadata");
         fs::create_dir_all(&metadata_dir).unwrap();
-        write_json(&metadata_dir.join("test_artist.json"), &full_metadata_json());
+        write_json(
+            &metadata_dir.join("test_artist.json"),
+            &full_metadata_json(),
+        );
 
         normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
-        let report2 =
-            normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
+        let report2 = normalize_metadata(&conn, td.path(), &metadata_dir, false).unwrap();
 
         assert_eq!(report2.already_ok, 1);
         assert_eq!(report2.merged, 0);

@@ -382,26 +382,36 @@ const Player = (() => {
     }
   }
 
-  async function watchDirect(concertId) {
+  function markWatchError(btn) {
+    if (!btn) return;
+    btn.classList.add("btn-watch-error");
+    btn.textContent = "Error";
+  }
+
+  async function watchDirect(btn, concertId) {
     if (audio && state.concertId === concertId && !audio.paused) {
       audio.pause();
       clearPlaying();
     }
     try {
-      await fetch(`/concerts/${concertId}/watch`, { method: "POST" });
+      const resp = await fetch(`/concerts/${concertId}/watch`, { method: "POST" });
+      if (!resp.ok) markWatchError(btn);
     } catch (e) {
+      markWatchError(btn);
       tracing("watchDirect fetch failed", e);
     }
   }
 
-  async function watchTrackDirect(concertId, trackIdx) {
+  async function watchTrackDirect(btn, concertId, trackIdx) {
     if (audio && state.concertId === concertId && state.trackIdx === trackIdx && !audio.paused) {
       audio.pause();
       clearPlaying();
     }
     try {
-      await fetch(`/concerts/${concertId}/tracks/${trackIdx}/watch`, { method: "POST" });
+      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/watch`, { method: "POST" });
+      if (!resp.ok) markWatchError(btn);
     } catch (e) {
+      markWatchError(btn);
       tracing("watchTrackDirect fetch failed", e);
     }
   }

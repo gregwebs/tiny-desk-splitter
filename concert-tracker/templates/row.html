@@ -52,7 +52,7 @@
           <button class="btn-listen" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">Listen</button>
         {% endif %}
         {% if can_watch %}
-          <button class="btn-watch" onclick="Player.watchDirect({{ id }})">Watch</button>
+          <button class="btn-watch" onclick="Player.watchDirect(this, {{ id }})">Watch</button>
         {% endif %}
       </span>
 

@@ -2,7 +2,9 @@ use anyhow::{Context, Result};
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tiny_desk_scraper::{ConcertInfo, fetch_bytes, fetch_html, parse_concert_info, save_concert_info};
+use tiny_desk_scraper::{
+    fetch_bytes, fetch_html, parse_concert_info, save_concert_info, ConcertInfo,
+};
 
 use crate::db::{self, MetadataUpdate, NewListing};
 use crate::model::{concert_dir, Musician};

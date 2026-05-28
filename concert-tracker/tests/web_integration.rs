@@ -956,3 +956,92 @@ async fn next_media_info_returns_404_at_last_track() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn watch_returns_500_when_downloaded_but_file_missing() {
+    // Concert is marked downloaded in the DB but the media file is not on
+    // disk (e.g. an old import whose archive never contained the source).
+    // The handler must signal a server-side data-integrity issue, not a 404,
+    // so the UI can surface an error indicator to the user.
+    let workdir = tempfile::tempdir().unwrap();
+    let conn = db::open_in_memory().unwrap();
+    seed_downloaded(&conn, "https://npr.org/d/no-file", "Missing File Album");
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/watch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn media_info_returns_500_when_downloaded_but_file_missing() {
+    let workdir = tempfile::tempdir().unwrap();
+    let conn = db::open_in_memory().unwrap();
+    seed_downloaded(&conn, "https://npr.org/d/no-file-mi", "Missing File Album");
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn watch_returns_404_when_concert_not_downloaded() {
+    // Regression: only the "downloaded but file missing" case escalates to
+    // 500. A concert that simply hasn't been downloaded yet still 404s.
+    let workdir = tempfile::tempdir().unwrap();
+    let conn = db::open_in_memory().unwrap();
+    db::upsert_listing(
+        &conn,
+        &NewListing {
+            source_url: "https://npr.org/d/not-dl".to_string(),
+            title: "Not Yet Downloaded".to_string(),
+            concert_date: None,
+            teaser: None,
+        },
+    )
+    .unwrap();
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "X".to_string(),
+            album: "Pending Album".to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/watch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

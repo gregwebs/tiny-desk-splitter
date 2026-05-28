@@ -3,7 +3,7 @@
   <li{% if !t.available %} class="track-unavailable"{% endif %}>
     {% if t.available %}
     <button class="btn-track-listen" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})">{{ t.title }}</button>
-    {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect({{ id }}, {{ t.index }})">Watch</button>{% endif %}
+    {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect(this, {{ id }}, {{ t.index }})">Watch</button>{% endif %}
     <button class="btn-delete" title="Delete track files" hx-post="/concerts/{{ id }}/tracks/{{ t.index }}/delete" hx-target="closest .track-list" hx-swap="outerHTML">✕</button>
     {% else %}
     <span class="track-title-unavailable">{{ t.title }}</span>

@@ -223,6 +223,31 @@ where
     }
 }
 
+/// Locate the full-concert media file. Returns 500 when the concert is
+/// marked as downloaded but the file is missing on disk (data-integrity
+/// issue — the DB and filesystem disagree), and 404 when the concert
+/// genuinely has no download yet.
+fn locate_full_concert_file(
+    working_dir: &std::path::Path,
+    concert_id: i64,
+    album: Option<&str>,
+    downloaded_at: Option<&str>,
+) -> Result<std::path::PathBuf, AppError> {
+    if let Some(a) = album {
+        if let Some(p) = find_downloaded_file(working_dir, a) {
+            return Ok(p);
+        }
+    }
+    if downloaded_at.is_some() {
+        Err(AppError::Internal(anyhow::anyhow!(
+            "Concert {} is marked downloaded but the media file is missing on disk",
+            concert_id
+        )))
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
 fn has_archive_location(state: &AppState) -> bool {
     let conn = state.db.lock().unwrap();
     db::get_settings(&conn)
@@ -759,7 +784,12 @@ pub async fn media_info(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let path = find_downloaded_file(&working_dir, album).ok_or(AppError::NotFound)?;
+    let path = locate_full_concert_file(
+        &working_dir,
+        id,
+        Some(album),
+        concert.downloaded_at.as_deref(),
+    )?;
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
     let filename = path
         .file_name()
@@ -846,16 +876,18 @@ pub async fn watch(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, AppError> {
-    let (album, working_dir) = {
+    let (album, downloaded_at, working_dir) = {
         let conn = state.db.lock().unwrap();
         let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert.album, state.jobs.working_dir.clone())
+        (
+            concert.album,
+            concert.downloaded_at,
+            state.jobs.working_dir.clone(),
+        )
     };
 
-    let path = album
-        .as_deref()
-        .and_then(|a| find_downloaded_file(&working_dir, a))
-        .ok_or(AppError::NotFound)?;
+    let path =
+        locate_full_concert_file(&working_dir, id, album.as_deref(), downloaded_at.as_deref())?;
 
     tracing::info!("watch: opening {} for concert {}", path.display(), id);
     {
