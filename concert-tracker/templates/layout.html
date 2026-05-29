@@ -329,6 +329,16 @@
     button.btn-watch { background: var(--btn-watch); color: #fff; border-color: var(--btn-watch); }
     button.btn-watch:hover { background: var(--btn-watch-hover); }
 
+    /* Monochrome trash icon driven by currentColor (works on light cards and the
+       dark player bar). Uses a CSS mask so a single rule serves every delete
+       button without a templating include. */
+    .icon-trash {
+      display: inline-block; width: 1em; height: 1em; vertical-align: -0.125em;
+      background-color: currentColor;
+      -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'/%3E%3C/svg%3E") center / contain no-repeat;
+      mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z'/%3E%3C/svg%3E") center / contain no-repeat;
+    }
+
     /* ── Preview image ── */
     .preview-image { max-width: 100%; height: auto; border-radius: 8px; margin: 0.5rem 0 1rem; display: block; }
 
@@ -369,6 +379,8 @@
     }
     .btn-like.liked { color: var(--like-color); }
     .btn-like:hover { color: var(--like-color); }
+    /* A starred track is protected from deletion: hide its delete button. */
+    .track-list li:has(.btn-like.liked) .btn-delete { display: none; }
     .track-unavailable { opacity: 0.65; }
     .track-title-unavailable { flex: 1; }
     .error-list { color: var(--error-fg); font-size: 0.85em; }
@@ -457,6 +469,11 @@
       cursor: pointer; padding: 0.15rem 0.5rem; border-radius: 3px; display: none;
     }
     #player-watch:hover, #player-open:hover { border-color: #aaa; background: rgba(255,255,255,0.1); }
+    #player-delete {
+      background: none; border: 1px solid #666; color: #fff; cursor: pointer;
+      padding: 0.15rem 0.5rem; border-radius: 3px; display: none; font-size: 0.85em;
+    }
+    #player-delete:hover { border-color: #e63946; color: #e63946; background: rgba(230,57,70,0.1); }
     #player-info { flex: 1; min-width: 0; overflow: hidden; }
     .player-title-line { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }
     #player-track {
@@ -516,6 +533,7 @@
       <span id="player-queue-badge"></span>
       <button id="player-watch" onclick="Player.watch()" title="Watch video in player">Watch</button>
       <button id="player-open" onclick="Player.openExternal()" title="Open in system player">&#10697;</button>
+      <button id="player-delete" onclick="Player.deleteTrack()" title="Delete this track" aria-label="Delete this track"><span class="icon-trash"></span></button>
       <div id="player-info">
         <span class="player-title-line">
           <span id="player-track"></span>

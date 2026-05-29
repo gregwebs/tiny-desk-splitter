@@ -803,3 +803,274 @@ test.describe("Player like star", () => {
       .toBe(playingBefore);
   });
 });
+
+// Mock the track delete endpoint, returning a track-list fragment containing the
+// given remaining tracks (with the data attributes findTrackButton relies on).
+function mockDeletePost(page, concertId, trackIdx, remaining, opts = {}) {
+  const state = { hits: 0 };
+  page.route(
+    `**/concerts/${concertId}/tracks/${trackIdx}/delete`,
+    async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      state.hits += 1;
+      if (opts.abort) return route.abort();
+      if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
+      const items = remaining
+        .map(
+          (t) => `<li>
+            <button class="btn-like" title="Like">☆</button>
+            <button class="btn-track-listen" data-concert-id="${concertId}" data-track-idx="${t.index}" onclick="Player.playTrack(this, ${concertId}, ${t.index})">${t.title}</button>
+            <button class="btn-delete" hx-post="/concerts/${concertId}/tracks/${t.index}/delete" hx-target="closest .track-list" hx-swap="outerHTML"><span class="icon-trash"></span></button>
+          </li>`
+        )
+        .join("");
+      await route.fulfill({
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        body: `<ol class="track-list">${items}</ol>`,
+      });
+    }
+  );
+  return state;
+}
+
+test.describe("Player delete", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAudioFile(page);
+    await mockMediaInfo(page);
+    await mockNextMediaInfo(page);
+    await mockListenPost(page);
+    await page.goto("/");
+  });
+
+  test("delete button is shown when a track is playing", async ({ page }) => {
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-delete")).toBeVisible();
+  });
+
+  test("delete button is hidden during whole-album playback", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Whole album",
+          artist: "Artist 2",
+          is_video: false,
+          playable: true,
+          track_index: null,
+          has_next: false,
+          liked: false,
+        }),
+      });
+    });
+
+    await page.evaluate(() =>
+      Player.playAlbum(document.createElement("button"), 2)
+    );
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-delete")).toBeHidden();
+  });
+
+  test("clicking delete posts to the delete endpoint and advances to the next track", async ({
+    page,
+  }) => {
+    const del = mockDeletePost(page, 2, 0, [
+      { index: 1, title: "Limbo" },
+      { index: 2, title: "track4" },
+    ]);
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await page.locator("#player-delete").click();
+
+    await expect.poll(() => del.hits).toBe(1);
+    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("deleting the last track stops playback", async ({ page }) => {
+    // No track after this one: next-media-info 404s, so the player stops.
+    await page.route("**/concerts/2/tracks/0/next-media-info", (route) =>
+      route.fulfill({ status: 404, body: "" })
+    );
+    mockDeletePost(page, 2, 0, []);
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await page.locator("#player-delete").click();
+
+    await expect(page.locator("#player-bar")).not.toHaveClass(/active/);
+    await expect(page.locator("#player-delete")).toBeHidden();
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+  });
+
+  test("a delete that completes after playback moved on does not interrupt the new track", async ({
+    page,
+  }) => {
+    // The delete POST is slow; the track ends mid-flight and auto-advances. When
+    // the delete finally resolves it must not disturb the now-playing track.
+    mockDeletePost(page, 2, 0, [{ index: 1, title: "Limbo" }], { delayMs: 600 });
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await page.locator("#player-delete").click();
+    // While the delete is in flight, the current track ends and auto-advances.
+    await simulateTrackEnd(page);
+    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+
+    // Wait past the delete's delay; the resolved delete must leave track 1 alone.
+    await page.waitForTimeout(800);
+    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("a failing delete keeps playback going and shows an error", async ({
+    page,
+  }) => {
+    mockDeletePost(page, 2, 0, [], { abort: true });
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await page.locator("#player-delete").click();
+
+    await expect(page.locator("#player-error")).toBeVisible();
+    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("the on-page track list is refreshed when a track is deleted", async ({
+    page,
+  }) => {
+    // Returned fragment omits track 0, so its listen button disappears.
+    mockDeletePost(page, 2, 0, [
+      { index: 1, title: "Limbo" },
+      { index: 2, title: "track4" },
+    ]);
+
+    await expandTracks(page, 2);
+    await expect(trackButton(page, 2, 0)).toBeVisible();
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await page.locator("#player-delete").click();
+
+    await expect(trackButton(page, 2, 0)).toHaveCount(0);
+    await expect(trackButton(page, 2, 1)).toBeVisible();
+  });
+});
+
+// The track-list delete (trash) button lives in the same <li> as the track's
+// listen button, after it.
+function trackListDeleteButton(page, concertId, trackIdx) {
+  return page
+    .locator("li")
+    .filter({ has: trackButton(page, concertId, trackIdx) })
+    .locator(".btn-delete");
+}
+
+test.describe("Starred tracks hide the delete button", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAudioFile(page);
+    await mockMediaInfo(page);
+    await mockNextMediaInfo(page);
+    await mockListenPost(page);
+    await page.goto("/");
+  });
+
+  test("player: starring the playing track hides #player-delete, unstarring restores it", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/tracks/0/like", (route) =>
+      route.fulfill({ status: 200, body: "" })
+    );
+
+    await playTrackWithLiked(page, 2, 0, false);
+    const del = page.locator("#player-delete");
+    await expect(del).toBeVisible();
+
+    await page.locator("#player-like").click(); // star
+    await expect(page.locator("#player-like")).toHaveText("★");
+    await expect(del).toBeHidden();
+
+    await page.locator("#player-like").click(); // unstar
+    await expect(page.locator("#player-like")).toHaveText("☆");
+    await expect(del).toBeVisible();
+  });
+
+  test("player: an already-starred track shows no delete button from the start", async ({
+    page,
+  }) => {
+    await playTrackWithLiked(page, 2, 0, true);
+
+    await expect(page.locator("#player-like")).toHaveText("★");
+    await expect(page.locator("#player-delete")).toBeHidden();
+  });
+
+  test("track list: starring the playing track from the player hides its row delete button", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/tracks/0/like", (route) =>
+      route.fulfill({ status: 200, body: "" })
+    );
+
+    await playTrackWithLiked(page, 2, 0, false);
+    const rowDelete = trackListDeleteButton(page, 2, 0);
+
+    // Star via the player — the in-place class flip drives the CSS :has() rule.
+    await page.locator("#player-like").click();
+    await expect(rowDelete).toBeHidden();
+    await expect(page.locator("#player-delete")).toBeHidden();
+
+    // Unstar — both delete buttons come back.
+    await page.locator("#player-like").click();
+    await expect(rowDelete).toBeVisible();
+    await expect(page.locator("#player-delete")).toBeVisible();
+  });
+
+  test("track list: a row's delete visibility tracks its own star (htmx re-render)", async ({
+    page,
+  }) => {
+    // Uses the real /like endpoint so the swapped-in row reflects the toggle.
+    // Assertion is relational, so it is independent of the track's initial DB state.
+    await expandTracks(page, 2);
+    const relationHolds = async () => {
+      const liked = await trackListLikeButton(page, 2, 0).evaluate((el) =>
+        el.classList.contains("liked")
+      );
+      const hidden = await trackListDeleteButton(page, 2, 0).evaluate(
+        (el) => getComputedStyle(el).display === "none"
+      );
+      return liked === hidden; // starred iff delete hidden
+    };
+
+    await trackListLikeButton(page, 2, 0).click();
+    await expect.poll(relationHolds).toBe(true);
+
+    await trackListLikeButton(page, 2, 0).click();
+    await expect.poll(relationHolds).toBe(true);
+  });
+});

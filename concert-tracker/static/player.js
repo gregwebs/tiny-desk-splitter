@@ -79,6 +79,7 @@ const Player = (() => {
     if (liked !== state.liked) {
       state.liked = liked;
       updateLikeStar();
+      updateDeleteButton();
     }
   }
 
@@ -92,9 +93,11 @@ const Player = (() => {
       audio.play().catch(() => {});
     }
     reapplyPlaying();
-    // #player-like lives in the preserved container but its display/text are
-    // JS-driven, so re-assert it after Back/Forward and boosted swaps.
+    // #player-like / #player-delete live in the preserved container but their
+    // display/text are JS-driven, so re-assert them after Back/Forward and
+    // boosted swaps.
     updateLikeStar();
+    updateDeleteButton();
   }
 
   // Restore src/position onto the current audio node, seeking once metadata is
@@ -206,10 +209,13 @@ const Player = (() => {
     }
   }
 
+  // Returns true when a following track started playing, false otherwise (no
+  // next track, fetch error, or aborted). Callers decide what to do when false;
+  // this never stops playback itself.
   async function playNextTrack() {
     if (state.trackIdx == null || state.concertId == null) {
       setPlayPauseIcon(false);
-      return;
+      return false;
     }
 
     cancelAutoAdvance();
@@ -225,20 +231,22 @@ const Player = (() => {
       );
       if (!resp.ok) {
         setPlayPauseIcon(false);
-        return;
+        return false;
       }
-      if (signal.aborted) return;
+      if (signal.aborted) return false;
       const info = await resp.json();
 
       const btn = findTrackButton(concertId, info.track_index);
       await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
         `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
         `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next, info.liked);
+      return true;
     } catch (e) {
       if (e.name !== "AbortError") {
         tracing("playNextTrack failed", e);
         setPlayPauseIcon(false);
       }
+      return false;
     }
   }
 
@@ -331,12 +339,22 @@ const Player = (() => {
     star.classList.toggle("liked", state.liked);
   }
 
+  // Show the delete button only while an individual track is playing (no
+  // per-track delete for whole-album playback) and the track is not starred —
+  // a starred track is protected from deletion until it is unstarred.
+  function updateDeleteButton() {
+    const btn = document.getElementById("player-delete");
+    if (!btn) return;
+    btn.style.display = state.trackIdx == null || state.liked ? "none" : "inline-block";
+  }
+
   // Set the liked state on the player star and mirror it onto the playing
   // track's track-list button when that row is on the page (in-place, no
   // re-render). No-op for the row when it isn't present (cross-concert safe).
   function setLikeState(liked) {
     state.liked = liked;
     updateLikeStar();
+    updateDeleteButton();
     const lb = currentTrackLikeButton();
     if (lb) {
       lb.classList.toggle("liked", liked);
@@ -391,6 +409,7 @@ const Player = (() => {
     state.hasNext = !!hasNext;
     state.liked = !!liked;
     updateLikeStar();
+    updateDeleteButton();
     updateMediaButtons(isVideo);
     // An audio-only track can't be watched; collapse the panel if it was open.
     // A video track keeps the panel open so auto-advance keeps showing video.
@@ -595,6 +614,94 @@ const Player = (() => {
     if (await startTrack(btn, concertId, trackIdx)) showVideoPanel();
   }
 
+  // Tear the player down completely: nothing is playing and there is nothing to
+  // advance to. Used after deleting the last remaining track.
+  function stopPlayback() {
+    tracing("stopPlayback", {});
+    cancelAutoAdvance();
+    if (audio) {
+      audio.pause();
+      // Clearing via removeAttribute + load() avoids audio.src = "" which
+      // resolves to the page URL and fires a spurious error -> auto-advance.
+      audio.removeAttribute("src");
+      audio.load();
+    }
+    clearPlaying();
+    hideVideoPanel();
+    queue = [];
+    updateQueueBadge();
+    state.concertId = null;
+    state.trackIdx = null;
+    state.isVideo = false;
+    state.watchUrl = null;
+    state.hasNext = false;
+    state.liked = false;
+    if (bar) bar.classList.remove("active");
+    document.body.classList.remove("player-active");
+    setPlayPauseIcon(false);
+    updateLikeStar();
+    updateDeleteButton();
+    updateMediaButtons(false);
+    updateNextButton();
+  }
+
+  // Player-bar Delete button: delete the currently-playing track's files (no
+  // confirmation, matching the track-list button), refresh the on-page track
+  // list, then advance to the next track — or stop if nothing is next.
+  async function deleteTrack() {
+    if (state.trackIdx == null) return;
+    const concertId = state.concertId;
+    const trackIdx = state.trackIdx;
+    tracing("deleteTrack", { concertId, trackIdx });
+
+    let resp;
+    try {
+      resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/delete`, { method: "POST" });
+    } catch (e) {
+      showError("Delete failed");
+      tracing("deleteTrack fetch failed", e);
+      return;
+    }
+    if (!resp.ok) {
+      showError("Delete failed");
+      return;
+    }
+    const html = await resp.text();
+
+    // Refresh the on-page track list (if the deleted row is present) so it shows
+    // the track as unavailable. No-op when playing a track whose row isn't on the
+    // current page (cross-concert safe).
+    const onPage = findTrackButton(concertId, trackIdx);
+    const list = onPage && onPage.closest(".track-list");
+    if (list) {
+      // outerHTML detaches the old node; capture the parent first so we can
+      // re-query the fresh list and let htmx process its hx-* attributes (each
+      // concert's list lives in its own container, so one .track-list per parent).
+      const parent = list.parentNode;
+      list.outerHTML = html;
+      const fresh = parent && parent.querySelector(".track-list");
+      if (fresh && window.htmx) window.htmx.process(fresh);
+    }
+
+    // The delete succeeded server-side, but if playback moved on while the POST
+    // was in flight (track ended, or the user switched), do not disturb whatever
+    // is playing now — just leave the refreshed list.
+    if (state.concertId !== concertId || state.trackIdx !== trackIdx) {
+      tracing("deleteTrack: playback moved on, not advancing", {});
+      return;
+    }
+
+    // Advance like the Next button (state left intact so "next" is computed
+    // after the deleted index); stop if there is nothing to advance to.
+    cancelAutoAdvance();
+    if (audio) audio.pause();
+    const played = await playFromQueue();
+    if (!played) {
+      const advanced = await playNextTrack();
+      if (!advanced) stopPlayback();
+    }
+  }
+
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", init);
   } else {
@@ -602,5 +709,5 @@ const Player = (() => {
   }
 
   return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
-    watch, openExternal, watchDirect, watchTrackDirect, toggleLike };
+    watch, openExternal, watchDirect, watchTrackDirect, toggleLike, deleteTrack };
 })();
