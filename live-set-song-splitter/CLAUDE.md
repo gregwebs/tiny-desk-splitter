@@ -23,6 +23,10 @@
 - The overlay is shown a few seconds after the song has started.
   - Refine the starting point by looking backwards frame by frame for a previous frame with overlay.
   - Use audio processing to look for silent points a few seconds before the overlay.
+    - Look backwards `REFINE_LOOK_BACK_SECONDS` (3s) for the latest silence and snap the start there.
+    - If nothing is found behind, fall back to looking forward `REFINE_LOOK_FORWARD_SECONDS` (2s)
+      for a *genuine* drop into silence (clear sound, then silence) and snap the start to it.
+      Moving the start forward extends the previous song into the intervening gap.
 
 ## Features
 

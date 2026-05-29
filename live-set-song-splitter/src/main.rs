@@ -93,7 +93,11 @@ struct SongSegment {
 ///   - `concert.json` — a verbatim copy of the input metadata, only if not
 ///     already present.
 ///   - `timestamps.json` — the timestamps-augmented concert struct.
-fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &ConcertInfo) -> Result<()> {
+fn write_concert_json_outputs(
+    output_dir: &str,
+    input_path: &str,
+    concert: &ConcertInfo,
+) -> Result<()> {
     let canonical_path = format!("{}/concert.json", output_dir);
     if !Path::new(&canonical_path).exists() {
         fs::copy(input_path, &canonical_path)
@@ -301,8 +305,9 @@ fn main() -> Result<()> {
             Some(w) => w,
             None => {
                 println!("Extracting audio waveform for refinement...");
-                audio::extract_audio_waveform(&input_file)
-                    .with_context(|| format!("Failed to extract audio waveform from {}", input_file))?
+                audio::extract_audio_waveform(&input_file).with_context(|| {
+                    format!("Failed to extract audio waveform from {}", input_file)
+                })?
             }
         };
 
@@ -576,15 +581,17 @@ fn recover_missing_songs_from_silence(
         }
 
         // Find prev anchor (last AlreadyFound or Recovered before i).
-        let prev_idx = (0..i).rev().find(|&j| results[j] != RecoveryResult::StillMissing);
+        let prev_idx = (0..i)
+            .rev()
+            .find(|&j| results[j] != RecoveryResult::StillMissing);
         // Find run of missing songs starting at i.
         let mut run_end = i;
         while run_end + 1 < set_list.len() && results[run_end + 1] == RecoveryResult::StillMissing {
             run_end += 1;
         }
         // Find next anchor after run_end.
-        let next_idx = ((run_end + 1)..set_list.len())
-            .find(|&j| results[j] != RecoveryResult::StillMissing);
+        let next_idx =
+            ((run_end + 1)..set_list.len()).find(|&j| results[j] != RecoveryResult::StillMissing);
 
         let (prev_idx, next_idx) = match (prev_idx, next_idx) {
             (Some(p), Some(n)) => (p, n),
@@ -632,7 +639,8 @@ fn recover_missing_songs_from_silence(
             if candidates.is_empty() {
                 break;
             }
-            let expected = gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64);
+            let expected =
+                gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64);
             // Pick the candidate closest to `expected`.
             let (best_i, &best_mid) = candidates
                 .iter()
@@ -766,10 +774,7 @@ fn refine_segments_with_audio_analysis(
     println!("Using energy threshold for refinement: {:.6}", threshold);
 
     let silence_spans = audio::find_silence_spans(&energy_profile, threshold);
-    let silence_timestamps: Vec<f64> = silence_spans
-        .iter()
-        .map(|s| s.midpoint_seconds)
-        .collect();
+    let silence_timestamps: Vec<f64> = silence_spans.iter().map(|s| s.midpoint_seconds).collect();
 
     println!(
         "Found {} potential silence points for refinement",
@@ -778,7 +783,6 @@ fn refine_segments_with_audio_analysis(
 
     // Create refined segments
     let mut refined_segments = Vec::new();
-    let look_back_seconds = 3.0; // Look back this many seconds from detected start time
 
     for (i, segment) in segments.iter().enumerate() {
         if i == 0 || !segment.segment.is_song {
@@ -788,7 +792,7 @@ fn refine_segments_with_audio_analysis(
         }
 
         let song_start = segment.segment.start_time;
-        let search_start = (song_start - look_back_seconds).max(0.0);
+        let search_start = (song_start - audio::REFINE_LOOK_BACK_SECONDS).max(0.0);
 
         // Find silence points within the look-back window
         let nearby_silence: Vec<f64> = silence_timestamps
@@ -797,13 +801,32 @@ fn refine_segments_with_audio_analysis(
             .cloned()
             .collect();
 
-        if !nearby_silence.is_empty() {
-            // Find the latest silence point before the current start time
-            let new_start = *nearby_silence
-                .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
+        // Snap this segment's start to `new_start`, extending the previous song
+        // segment's end to meet it, then emit the refined segment. The
+        // `new_start > prev.start_time` guard prevents inverting the previous
+        // segment when the start moves forward (see the forward branch below).
+        let apply_refined_start = |refined: &mut Vec<SongSegment>, new_start: f64| {
+            if let Some(prev) = refined.last_mut() {
+                if prev.segment.is_song && new_start > prev.segment.start_time {
+                    prev.segment.end_time = new_start;
+                }
+            }
+            refined.push(SongSegment {
+                song: segment.song.clone(),
+                segment: AudioSegment {
+                    start_time: new_start,
+                    end_time: segment.segment.end_time,
+                    is_song: true,
+                },
+            });
+        };
 
+        if let Some(new_start) = nearby_silence
+            .iter()
+            .cloned()
+            .max_by(|a, b| a.partial_cmp(b).unwrap())
+        {
+            // Backward: snap to the latest silence just before the detected start.
             println!(
                 "Refined song {} start time from {:.2}s to {:.2}s (-{:.2}s)",
                 i,
@@ -811,24 +834,32 @@ fn refine_segments_with_audio_analysis(
                 new_start,
                 song_start - new_start
             );
-
-            // Update the previous segment's end time if it exists and is a song
-            if i > 0 && refined_segments[i - 1].segment.is_song {
-                refined_segments[i - 1].segment.end_time = new_start;
-            }
-
-            // Add refined segment
-            let segment_audio = AudioSegment {
-                start_time: new_start,
-                end_time: segment.segment.end_time,
-                is_song: true,
-            };
-            refined_segments.push(SongSegment {
-                song: segment.song.clone(),
-                segment: segment_audio,
-            });
+            apply_refined_start(&mut refined_segments, new_start);
+        } else if let Some(new_start) = audio::find_forward_drop(
+            &energy_profile,
+            &silence_spans,
+            threshold,
+            song_start,
+            audio::REFINE_LOOK_FORWARD_SECONDS,
+        )
+        .filter(|&ns| ns < segment.segment.end_time)
+        {
+            // Forward fallback: nothing behind us, but there is a genuine drop
+            // into silence just ahead. Unlike the backward case, moving the
+            // start FORWARD *extends the previous segment* into the gap
+            // [old_start, new_start] — that audio is the tail of the previous
+            // song, which is why the forward look only fires on a real
+            // sound→silence drop.
+            println!(
+                "Refined song {} start FORWARD from {:.2}s to {:.2}s (+{:.2}s)",
+                i,
+                song_start,
+                new_start,
+                new_start - song_start
+            );
+            apply_refined_start(&mut refined_segments, new_start);
         } else {
-            // No silence found in the look-back window, keep original
+            // No silence found in either window, keep original
             refined_segments.push(segment.clone());
         }
     }
@@ -1304,9 +1335,9 @@ mod tests_recover_missing_songs {
         // detected song.
         let audio = synth_audio(&[
             (25.0, false),
-            (6.0, true),  // longest silence; midpoint ~28s, far from midpoint=50
+            (6.0, true), // longest silence; midpoint ~28s, far from midpoint=50
             (15.0, false),
-            (4.0, true),  // shorter; midpoint ~48s, close to midpoint=50
+            (4.0, true), // shorter; midpoint ~48s, close to midpoint=50
             (50.0, false),
         ]);
         // gap_start=0, gap_end=100, expected midpoint=50.
@@ -1327,11 +1358,11 @@ mod tests_recover_missing_songs {
         // Three qualifying silences: 7s long at ~33s, 6s at ~62s, 5s at ~92s.
         let audio = synth_audio(&[
             (30.0, false),
-            (7.0, true),  // longest, mid ~33.5s
+            (7.0, true), // longest, mid ~33.5s
             (20.0, false),
-            (6.0, true),  // mid ~62.5s
+            (6.0, true), // mid ~62.5s
             (20.0, false),
-            (5.0, true),  // mid ~92s
+            (5.0, true), // mid ~92s
             (15.0, false),
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
@@ -1358,9 +1389,9 @@ mod tests_recover_missing_songs {
         // Two silences only ~4s apart inside a 200s gap.
         let audio = synth_audio(&[
             (90.0, false),
-            (3.0, true),  // mid ~91.5s
+            (3.0, true), // mid ~91.5s
             (1.0, false),
-            (3.0, true),  // mid ~96s (only ~4.5s after first)
+            (3.0, true), // mid ~96s (only ~4.5s after first)
             (103.0, false),
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
@@ -1403,7 +1434,11 @@ mod tests_recover_missing_songs {
         let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
         assert_eq!(results[0], RecoveryResult::StillMissing);
         assert_eq!(results[1], RecoveryResult::AlreadyFound);
-        assert_eq!(segments.len(), 1, "no segment should have been inserted for A");
+        assert_eq!(
+            segments.len(),
+            1,
+            "no segment should have been inserted for A"
+        );
     }
 
     #[test]
@@ -1433,18 +1468,19 @@ mod tests_recover_missing_songs {
 
     #[test]
     fn end_times_chain_through_inserted_segments() {
-        let audio = synth_audio(&[
-            (10.0, false),
-            (5.0, true),
-            (15.0, false),
-        ]);
+        let audio = synth_audio(&[(10.0, false), (5.0, true), (15.0, false)]);
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 30.0)];
         let _ = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
 
         // After recovery, segments should be sorted by start_time and chained:
         // A.end == B.start, B.end == C.start.
-        segments.sort_by(|a, b| a.segment.start_time.partial_cmp(&b.segment.start_time).unwrap());
+        segments.sort_by(|a, b| {
+            a.segment
+                .start_time
+                .partial_cmp(&b.segment.start_time)
+                .unwrap()
+        });
         let a = &segments[0];
         let b = &segments[1];
         let c = &segments[2];
@@ -1457,11 +1493,7 @@ mod tests_recover_missing_songs {
     /// energy-smoothing window swallowing short silences in fixture data.
     #[test]
     fn synth_audio_produces_detectable_silence() {
-        let audio = synth_audio(&[
-            (10.0, false),
-            (5.0, true),
-            (10.0, false),
-        ]);
+        let audio = synth_audio(&[(10.0, false), (5.0, true), (10.0, false)]);
         let profile = audio::calculate_energy_profile(&audio);
         let threshold = adaptive_silence_threshold(&profile);
         let spans = audio::find_silence_spans(&profile, threshold);
