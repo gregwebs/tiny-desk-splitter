@@ -463,6 +463,13 @@
       display: none; flex: none; font-size: 0.85em; font-weight: 600; color: #aaa;
       font-variant-numeric: tabular-nums; white-space: nowrap;
     }
+    /* The player bar is always dark, so use a fixed light idle color (matching
+       #player-track / #player-artist) rather than the theme-tracking --like-idle,
+       which would be near-invisible (#555) on the dark bar in dark mode. */
+    #player-like {
+      flex: none; color: #aaa; font-size: 1em;
+    }
+    #player-like.liked { color: var(--like-color); }
     #player-title {
       flex: 1; font-weight: 600; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
@@ -512,6 +519,7 @@
       <div id="player-info">
         <span class="player-title-line">
           <span id="player-track"></span>
+          <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
           <span id="player-title"></span>
         </span>
         <span id="player-artist"></span>

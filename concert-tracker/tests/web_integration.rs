@@ -1088,6 +1088,127 @@ async fn like_track_toggles_state_and_renders_star() {
 }
 
 #[tokio::test]
+async fn track_media_info_reports_liked_state() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Liked Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into()],
+        &[0, 1],
+    );
+    // Like only the second track.
+    db::toggle_track_liked(&conn, 1, 1).unwrap();
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let liked: serde_json::Value = {
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/concerts/1/tracks/1/media-info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    };
+    assert_eq!(liked["liked"], true, "track 1 was liked");
+
+    let unliked: serde_json::Value = {
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/concerts/1/tracks/0/media-info")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        serde_json::from_slice(&body).unwrap()
+    };
+    assert_eq!(unliked["liked"], false, "track 0 was not liked");
+}
+
+#[tokio::test]
+async fn track_media_info_liked_false_when_tracks_liked_unset() {
+    // No like has ever been recorded, so `tracks_liked` is empty/shorter than
+    // the set list; the .get(idx).unwrap_or(false) read must default to false
+    // rather than panic.
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "No Likes Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into()],
+        &[0, 1],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/1/media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["liked"], false);
+}
+
+#[tokio::test]
+async fn next_media_info_carries_liked_state() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Next Liked Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into(), "Song C".into()],
+        &[0, 1, 2],
+    );
+    // Like the track that auto-advance will land on (index 1).
+    db::toggle_track_liked(&conn, 1, 1).unwrap();
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/0/next-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["track_index"], 1);
+    assert_eq!(info["liked"], true);
+}
+
+#[tokio::test]
 async fn like_track_out_of_range_returns_404() {
     let conn = db::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/1", "Concert");

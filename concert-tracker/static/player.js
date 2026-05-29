@@ -3,7 +3,7 @@
 const Player = (() => {
   let audio = null;
   let bar = null;
-  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false };
+  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, liked: false };
   let queue = [];
   let autoAdvanceController = null;
   // Snapshot of playback taken just before an htmx body swap / history save.
@@ -56,6 +56,30 @@ const Player = (() => {
     // restore; the latter does not always fire afterSettle.
     document.body.addEventListener("htmx:afterSettle", restorePlayback);
     document.body.addEventListener("htmx:historyRestore", restorePlayback);
+
+    // Reverse like-sync: when a track list re-renders (track-list star toggled,
+    // or a track deleted), re-read the liked state of the playing track so the
+    // player star matches. findTrackButton only matches the current DOM, so this
+    // is a no-op when the playing track's row isn't on the page (cross-concert).
+    document.body.addEventListener("htmx:afterSwap", syncLikeFromTrackList);
+  }
+
+  // Locate the .btn-like in the same row as the playing track's listen button.
+  function currentTrackLikeButton() {
+    if (state.trackIdx == null) return null;
+    const btn = findTrackButton(state.concertId, state.trackIdx);
+    const li = btn && btn.closest("li");
+    return li ? li.querySelector(".btn-like") : null;
+  }
+
+  function syncLikeFromTrackList() {
+    const lb = currentTrackLikeButton();
+    if (!lb) return;
+    const liked = lb.classList.contains("liked");
+    if (liked !== state.liked) {
+      state.liked = liked;
+      updateLikeStar();
+    }
   }
 
   function restorePlayback() {
@@ -68,6 +92,9 @@ const Player = (() => {
       audio.play().catch(() => {});
     }
     reapplyPlaying();
+    // #player-like lives in the preserved container but its display/text are
+    // JS-driven, so re-assert it after Back/Forward and boosted swaps.
+    updateLikeStar();
   }
 
   // Restore src/position onto the current audio node, seeking once metadata is
@@ -206,7 +233,7 @@ const Player = (() => {
       const btn = findTrackButton(concertId, info.track_index);
       await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
         `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next);
+        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next, info.liked);
     } catch (e) {
       if (e.name !== "AbortError") {
         tracing("playNextTrack failed", e);
@@ -290,6 +317,55 @@ const Player = (() => {
     else showVideoPanel();
   }
 
+  // Show the like star only while an individual track is playing (whole-album
+  // playback has no per-track like), and reflect the current liked state.
+  function updateLikeStar() {
+    const star = document.getElementById("player-like");
+    if (!star) return;
+    if (state.trackIdx == null) {
+      star.style.display = "none";
+      return;
+    }
+    star.style.display = "inline-block";
+    star.textContent = state.liked ? "★" : "☆";
+    star.classList.toggle("liked", state.liked);
+  }
+
+  // Set the liked state on the player star and mirror it onto the playing
+  // track's track-list button when that row is on the page (in-place, no
+  // re-render). No-op for the row when it isn't present (cross-concert safe).
+  function setLikeState(liked) {
+    state.liked = liked;
+    updateLikeStar();
+    const lb = currentTrackLikeButton();
+    if (lb) {
+      lb.classList.toggle("liked", liked);
+      lb.textContent = liked ? "★" : "☆";
+    }
+  }
+
+  // Player-bar like star: toggle the like for the currently-playing track.
+  // Optimistically flips the UI, POSTs to the same /like endpoint the track-list
+  // star uses, and reverts on failure. The HTML body is ignored — the in-place
+  // button update already reflects the new state.
+  async function toggleLike() {
+    if (state.trackIdx == null) return;
+    const concertId = state.concertId;
+    const trackIdx = state.trackIdx;
+    const next = !state.liked;
+    setLikeState(next);
+    try {
+      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/like`, { method: "POST" });
+      if (!resp.ok) throw new Error("like POST failed: " + resp.status);
+    } catch (e) {
+      // Only revert if the user hasn't moved on to a different track meanwhile.
+      if (state.concertId === concertId && state.trackIdx === trackIdx) {
+        setLikeState(!next);
+      }
+      tracing("toggleLike failed", e);
+    }
+  }
+
   // There is "something next" when the queue is non-empty or the current track
   // has a following track to auto-advance to. Disable the Next button otherwise
   // so clicking it cannot stop the current track with nothing to replace it.
@@ -299,7 +375,7 @@ const Player = (() => {
     btn.disabled = queue.length === 0 && !state.hasNext;
   }
 
-  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext) {
+  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked) {
     if (!audio) init(); else rebind();
     if (!audio) return;
 
@@ -313,6 +389,8 @@ const Player = (() => {
     state.isVideo = isVideo;
     state.watchUrl = watchUrl;
     state.hasNext = !!hasNext;
+    state.liked = !!liked;
+    updateLikeStar();
     updateMediaButtons(isVideo);
     // An audio-only track can't be watched; collapse the panel if it was open.
     // A video track keeps the panel open so auto-advance keeps showing video.
@@ -352,7 +430,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, null,
         `/concerts/${concertId}/listen`, info.is_video,
-        `/concerts/${concertId}/watch`, info.has_next);
+        `/concerts/${concertId}/watch`, info.has_next, info.liked);
       return true;
     } catch (e) {
       btn.classList.add("btn-listen-error");
@@ -385,7 +463,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, trackIdx,
         `/concerts/${concertId}/tracks/${trackIdx}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next);
+        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next, info.liked);
       return true;
     } catch (e) {
       btn.classList.add("btn-listen-error");
@@ -453,7 +531,7 @@ const Player = (() => {
         const btn = findTrackButton(entry.concertId, entry.trackIdx);
         await play(btn, info.url, info.title, info.artist, entry.concertId, entry.trackIdx,
           `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/listen`, info.is_video,
-          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next);
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next, info.liked);
         return true;
       } catch (e) {
         tracing("playFromQueue failed", e);
@@ -524,5 +602,5 @@ const Player = (() => {
   }
 
   return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
-    watch, openExternal, watchDirect, watchTrackDirect };
+    watch, openExternal, watchDirect, watchTrackDirect, toggleLike };
 })();

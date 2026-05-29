@@ -813,6 +813,9 @@ pub struct MediaInfo {
     /// Whether a playable track exists after this one in the same concert, so the
     /// player can disable its Next button when there is nothing left to advance to.
     pub has_next: bool,
+    /// Whether this track is liked, so the player bar can show its like star.
+    /// Always false for whole-album playback (no per-track like).
+    pub liked: bool,
 }
 
 /// Locate the next browser-playable track in `set_list` after `after_idx`.
@@ -873,6 +876,8 @@ pub async fn media_info(
         track_index: None,
         // Whole-album playback does not auto-advance per track.
         has_next: false,
+        // No per-track like for whole-album playback; the star is hidden.
+        liked: false,
     }))
 }
 
@@ -895,6 +900,7 @@ pub async fn track_media_info(
     let url = format!("/concert-files/{}/{}", sanitized_album, filename);
     let has_next =
         find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
+    let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
 
     Ok(Json(MediaInfo {
         url,
@@ -904,6 +910,7 @@ pub async fn track_media_info(
         playable: is_browser_playable(ext),
         track_index: Some(idx),
         has_next,
+        liked,
     }))
 }
 
@@ -918,6 +925,8 @@ pub async fn next_track_media_info(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    // Read the liked flags before `artist` is moved out of `concert` below.
+    let tracks_liked = concert.tracks_liked.clone();
     let artist = concert.artist.unwrap_or_default();
 
     match find_next_playable_track(&working_dir, album, &concert.set_list, idx) {
@@ -931,6 +940,7 @@ pub async fn next_track_media_info(
             // Keep the Next button correct after auto-advancing onto this track.
             has_next: find_next_playable_track(&working_dir, album, &concert.set_list, next_idx)
                 .is_some(),
+            liked: tracks_liked.get(next_idx).copied().unwrap_or(false),
         })),
         None => Err(AppError::NotFound),
     }

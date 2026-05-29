@@ -49,6 +49,7 @@ function mockMediaInfo(page) {
         track_index: parseInt(trackIdx),
         // The mock concert is effectively endless, so there is always a next track.
         has_next: true,
+        liked: false,
       }),
     });
   });
@@ -77,6 +78,7 @@ function mockNextMediaInfo(page) {
         playable: true,
         track_index: nextIdx,
         has_next: true,
+        liked: false,
       }),
     });
   });
@@ -619,5 +621,185 @@ test.describe("Inline video", () => {
 
     // #player-video-panel lives inside the hx-preserve'd #player-container.
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+});
+
+// The track-list like button (☆/★) lives in the same <li> as the track's
+// listen button, before it.
+function trackListLikeButton(page, concertId, trackIdx) {
+  return page
+    .locator("li")
+    .filter({ has: trackButton(page, concertId, trackIdx) })
+    .locator(".btn-like");
+}
+
+// Override a track's media-info to report a specific liked state, then play it.
+async function playTrackWithLiked(page, concertId, trackIdx, liked) {
+  await page.route(
+    `**/concerts/${concertId}/tracks/${trackIdx}/media-info`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: `Track ${trackIdx} of C${concertId}`,
+          artist: `Artist ${concertId}`,
+          is_video: false,
+          playable: true,
+          track_index: trackIdx,
+          has_next: true,
+          liked,
+        }),
+      });
+    }
+  );
+  await expandTracks(page, concertId);
+  await trackButton(page, concertId, trackIdx).click();
+  await waitForPlaying(page);
+}
+
+test.describe("Player like star", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAudioFile(page);
+    await mockMediaInfo(page);
+    await mockNextMediaInfo(page);
+    await mockListenPost(page);
+    await page.goto("/");
+  });
+
+  test("star is shown and reflects an unliked track", async ({ page }) => {
+    await playTrackWithLiked(page, 2, 0, false);
+
+    const star = page.locator("#player-like");
+    await expect(star).toBeVisible();
+    await expect(star).toHaveText("☆");
+    await expect(star).not.toHaveClass(/liked/);
+  });
+
+  test("star reflects a liked track", async ({ page }) => {
+    await playTrackWithLiked(page, 2, 0, true);
+
+    const star = page.locator("#player-like");
+    await expect(star).toBeVisible();
+    await expect(star).toHaveText("★");
+    await expect(star).toHaveClass(/liked/);
+  });
+
+  test("star is hidden during whole-album playback", async ({ page }) => {
+    // Album media-info (no /tracks/ segment) → track_index null → star hidden.
+    await page.route("**/concerts/2/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Whole album",
+          artist: "Artist 2",
+          is_video: false,
+          playable: true,
+          track_index: null,
+          has_next: false,
+          liked: false,
+        }),
+      });
+    });
+
+    await page.evaluate(() =>
+      Player.playAlbum(document.createElement("button"), 2)
+    );
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-like")).toBeHidden();
+  });
+
+  test("clicking the star POSTs to /like and flips the star and the track-list button", async ({
+    page,
+  }) => {
+    let likePosted = false;
+    await page.route("**/concerts/2/tracks/0/like", async (route) => {
+      if (route.request().method() === "POST") likePosted = true;
+      // The player ignores the body; a 200 is enough for the optimistic update.
+      await route.fulfill({ status: 200, body: "" });
+    });
+
+    await playTrackWithLiked(page, 2, 0, false);
+    const star = page.locator("#player-like");
+    await expect(star).toHaveText("☆");
+
+    await star.click();
+
+    await expect.poll(() => likePosted).toBe(true);
+    await expect(star).toHaveText("★");
+    await expect(star).toHaveClass(/liked/);
+    // The on-page track-list button mirrors the new state in place.
+    await expect(trackListLikeButton(page, 2, 0)).toHaveClass(/liked/);
+  });
+
+  test("a failing /like POST reverts the star", async ({ page }) => {
+    await page.route("**/concerts/2/tracks/0/like", (route) => route.abort());
+
+    await playTrackWithLiked(page, 2, 0, false);
+    const star = page.locator("#player-like");
+    await expect(star).toHaveText("☆");
+
+    await star.click();
+
+    // Optimistic flip is rolled back once the POST fails.
+    await expect(star).toHaveText("☆");
+    await expect(star).not.toHaveClass(/liked/);
+    await expect(trackListLikeButton(page, 2, 0)).not.toHaveClass(/liked/);
+  });
+
+  test("toggling the track-list star updates the player star (reverse sync)", async ({
+    page,
+  }) => {
+    // Uses the real /like endpoint so the swapped-in track list reflects the
+    // toggled state; the assertion is relational so it is independent of the
+    // track's initial liked state in the DB.
+    await playTrackWithLiked(page, 2, 0, false);
+
+    const listBtn = trackListLikeButton(page, 2, 0);
+    await listBtn.click();
+    // After the htmx swap, the player star must match the track-list button.
+    await expect
+      .poll(async () => {
+        const listLiked = await trackListLikeButton(page, 2, 0).evaluate((el) =>
+          el.classList.contains("liked")
+        );
+        const starLiked = await page
+          .locator("#player-like")
+          .evaluate((el) => el.classList.contains("liked"));
+        return listLiked === starLiked;
+      })
+      .toBe(true);
+  });
+
+  test("toggling a different concert's star does not change the playing track's like", async ({
+    page,
+  }) => {
+    await playTrackWithLiked(page, 2, 0, false);
+    const playing = trackListLikeButton(page, 2, 0);
+    const playingBefore = await playing.evaluate((el) =>
+      el.classList.contains("liked")
+    );
+
+    // Toggle the like on an unrelated concert's track (real endpoint + swap).
+    await expandTracks(page, 3);
+    await trackListLikeButton(page, 3, 0).click();
+    await expect(trackListLikeButton(page, 3, 0)).toBeVisible();
+
+    // The playing track (concert 2/0) must be untouched by concert 3's toggle,
+    // and the player star stays in sync with the playing track's button.
+    expect(await playing.evaluate((el) => el.classList.contains("liked"))).toBe(
+      playingBefore
+    );
+    await expect
+      .poll(() =>
+        page
+          .locator("#player-like")
+          .evaluate((el) => el.classList.contains("liked"))
+      )
+      .toBe(playingBefore);
   });
 });
