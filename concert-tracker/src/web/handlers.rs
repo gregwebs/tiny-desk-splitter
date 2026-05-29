@@ -67,6 +67,9 @@ struct RowTemplate {
     archive_status: String,
     archive_status_label: String,
     is_in_progress: bool,
+    /// Browser URL for the concert's preview thumbnail, or `None` when metadata
+    /// hasn't been scraped (or the concert has no album).
+    preview_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -329,6 +332,7 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
         archive_status: archive_s.slug().to_string(),
         archive_status_label: archive_s.label().to_string(),
         is_in_progress,
+        preview_url: c.preview_image_url_from_db(),
     }
     .render()
 }
@@ -1485,6 +1489,45 @@ mod tests {
             |r| r.get::<_, i64>(0),
         )
         .unwrap()
+    }
+
+    #[test]
+    fn render_row_includes_thumbnail_when_scraped_with_album() {
+        let conn = db::open_in_memory().unwrap();
+        let url = "https://example.org/with-album";
+        let id = seed_listing(&conn, url);
+        db::update_metadata(
+            &conn,
+            id,
+            &MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Some Album".to_string(),
+                description: None,
+                set_list: vec![],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        let concert = db::get_concert(&conn, id).unwrap();
+
+        let html = render_row(&concert, false).unwrap();
+        assert!(html.contains("class=\"card-thumb\""), "html: {html}");
+        assert!(
+            html.contains("/concert-files/Some Album/preview.jpg"),
+            "html: {html}"
+        );
+    }
+
+    #[test]
+    fn render_row_omits_thumbnail_when_not_scraped() {
+        let conn = db::open_in_memory().unwrap();
+        let url = "https://example.org/unscraped";
+        let id = seed_listing(&conn, url);
+        let concert = db::get_concert(&conn, id).unwrap();
+        assert!(concert.metadata_scraped_at.is_none());
+
+        let html = render_row(&concert, false).unwrap();
+        assert!(!html.contains("card-thumb"), "html: {html}");
     }
 
     #[test]

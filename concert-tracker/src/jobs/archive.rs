@@ -173,10 +173,7 @@ pub fn do_unarchive(source_dir: &Path) -> anyhow::Result<()> {
     };
 
     if !dest_dir.exists() {
-        anyhow::bail!(
-            "archive directory does not exist: {}",
-            dest_dir.display()
-        );
+        anyhow::bail!("archive directory does not exist: {}", dest_dir.display());
     }
 
     tracing::debug!("removing archive symlink {}", source_dir.display());
@@ -297,7 +294,10 @@ mod tests {
         // Simulates the wild case: sanitize_album drift means the recomputed
         // dest path would not match, but the symlink records the real one.
         let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path().join("concerts").join("Bloc Party Tiny Desk Concert");
+        let source = tmp
+            .path()
+            .join("concerts")
+            .join("Bloc Party Tiny Desk Concert");
         let real_dest = tmp
             .path()
             .join("archive")

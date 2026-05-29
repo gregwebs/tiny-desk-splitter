@@ -1,10 +1,18 @@
 <div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   <div class="card-body">
-    <h3 class="card-title"><a href="/concerts/{{ id }}">{{ title }}</a></h3>
-    <div class="card-meta">
-      {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
+    <div class="card-head">
+      {% if let Some(url) = preview_url.as_ref() %}
+      <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
+           onerror="this.style.display='none'">
+      {% endif %}
+      <div class="card-head-text">
+        <h3 class="card-title"><a href="/concerts/{{ id }}">{{ title }}</a></h3>
+        <div class="card-meta">
+          {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
+        </div>
+        {% if !teaser.is_empty() %}<p class="card-teaser">{{ teaser }}</p>{% endif %}
+      </div>
     </div>
-    {% if !teaser.is_empty() %}<p class="card-teaser">{{ teaser }}</p>{% endif %}
     <div class="card-actions">
 
       {# Concert-status slot: Available shows action buttons; Wanted/Ignored show badge + ✕ #}

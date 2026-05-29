@@ -1076,9 +1076,14 @@ async fn like_track_toggles_state_and_renders_star() {
         .await
         .unwrap();
     assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("btn-like liked"), "filled star class expected");
+    assert!(
+        html.contains("btn-like liked"),
+        "filled star class expected"
+    );
     assert!(html.contains("★"), "filled star glyph expected");
 }
 

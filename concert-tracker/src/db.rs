@@ -1160,9 +1160,15 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed_with_album(&conn); // 2-song set list: "Song A", "Song B"
         assert!(toggle_track_liked(&conn, id, 1).unwrap());
-        assert_eq!(get_concert(&conn, id).unwrap().tracks_liked, vec![false, true]);
+        assert_eq!(
+            get_concert(&conn, id).unwrap().tracks_liked,
+            vec![false, true]
+        );
         assert!(!toggle_track_liked(&conn, id, 1).unwrap());
-        assert_eq!(get_concert(&conn, id).unwrap().tracks_liked, vec![false, false]);
+        assert_eq!(
+            get_concert(&conn, id).unwrap().tracks_liked,
+            vec![false, false]
+        );
     }
 
     #[test]
@@ -1231,7 +1237,10 @@ pub mod tests {
         let result = toggle_track_liked(&conn, id, 5);
         assert!(result.is_err());
         let c = get_concert(&conn, id).unwrap();
-        assert!(c.tracks_liked.is_empty(), "no write should occur on rejection");
+        assert!(
+            c.tracks_liked.is_empty(),
+            "no write should occur on rejection"
+        );
     }
 
     #[test]

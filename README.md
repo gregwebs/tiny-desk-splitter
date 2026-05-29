@@ -44,6 +44,7 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 #### Concert list
 
 - **Card grid** of all concerts, grouped by month with divider headers
+- **Per-card thumbnail**: small preview image beside the title (once metadata is scraped)
 - **Filter chips**: Wanted / Available / Ignored / Downloaded / Tracks
 - **Per-card status badges** with color-coded left borders (blue = wanted, green = split, cyan = downloaded, purple = archived)
 - **Per-card actions**: Want, Ignore, Download, Split, Archive, Delete download/split
