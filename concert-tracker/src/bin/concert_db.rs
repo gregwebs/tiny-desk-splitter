@@ -51,6 +51,8 @@ enum Command {
     Want { id: i64 },
     /// Clear stale in-progress download/split flags
     ResetInProgress,
+    /// Reset stale download errors on downloads that were deleted after erroring
+    ClearStaleDownloadErrors,
     /// Import JSON files + scan directory (one-time backfill)
     InitFromFiles { dir: PathBuf },
     /// Backfill missing teasers by re-scraping concert pages for og:description
@@ -161,6 +163,11 @@ fn main() -> Result<()> {
         Command::ResetInProgress => {
             let count = db::reset_in_progress(&conn)?;
             println!("Cleared {} stale in-progress rows", count);
+        }
+
+        Command::ClearStaleDownloadErrors => {
+            let count = db::clear_stale_download_errors(&conn)?;
+            println!("Cleared stale download errors for {count} concert(s)");
         }
 
         Command::InitFromFiles { dir } => {

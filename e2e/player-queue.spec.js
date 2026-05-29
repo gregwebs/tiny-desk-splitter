@@ -1089,3 +1089,99 @@ test.describe("Starred tracks hide the delete button", () => {
     await expect.poll(relationHolds).toBe(true);
   });
 });
+
+test.describe("Deleting a download/split keeps the player playing", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAudioFile(page);
+    await mockMediaInfo(page);
+    await mockNextMediaInfo(page);
+    await mockListenPost(page);
+    await page.goto("/");
+  });
+
+  // Assert the player survived a card swap (no full page reload): a window
+  // sentinel set after load persists, audio is still playing, currentTime keeps
+  // advancing (not reset by node recreation), and the bar stays active.
+  async function expectPlayerStillPlaying(page, t0) {
+    expect(await page.evaluate(() => window.__noReload)).toBe(true);
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+    await expect
+      .poll(() =>
+        page.evaluate(() => document.getElementById("player-audio").currentTime)
+      )
+      .toBeGreaterThan(t0);
+    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+  }
+
+  async function playConcertTrack(page, concertId, trackIdx) {
+    await expandTracks(page, concertId);
+    await trackButton(page, concertId, trackIdx).click();
+    await waitForPlaying(page);
+    await page.evaluate(() => {
+      window.__noReload = true;
+    });
+    return page.evaluate(() => document.getElementById("player-audio").currentTime);
+  }
+
+  test("deleting another concert's tracks (delete-split) does not stop playback", async ({
+    page,
+  }) => {
+    // Card-swap response (its trash targets `closest .card`); no HX-Refresh.
+    await page.route("**/concerts/2/delete-split", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        body: `<div class="card status-downloaded" id="concert-2"><div class="card-body">card updated</div></div>`,
+      })
+    );
+
+    const t0 = await playConcertTrack(page, 3, 0);
+    await page.locator('#concert-2 button[title="Clear split record"]').click();
+
+    await expect(page.locator("#concert-2")).toContainText("card updated");
+    await expectPlayerStillPlaying(page, t0);
+  });
+
+  test("deleting another concert's download does not stop playback", async ({
+    page,
+  }) => {
+    // delete-download's trash targets `this`; the response retargets the card.
+    await page.route("**/concerts/2/delete-download", (route) =>
+      route.fulfill({
+        status: 200,
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+          "HX-Retarget": "#concert-2",
+          "HX-Reswap": "outerHTML",
+        },
+        body: `<div class="card status-available" id="concert-2"><div class="card-body">card updated</div></div>`,
+      })
+    );
+
+    const t0 = await playConcertTrack(page, 3, 0);
+    await page.locator('#concert-2 button[title="Delete downloaded file"]').click();
+
+    await expect(page.locator("#concert-2")).toContainText("card updated");
+    await expectPlayerStillPlaying(page, t0);
+  });
+
+  test("deleting the currently-playing concert's own card keeps playback going", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/delete-split", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html; charset=utf-8",
+        body: `<div class="card status-downloaded" id="concert-2"><div class="card-body">card updated</div></div>`,
+      })
+    );
+
+    const t0 = await playConcertTrack(page, 2, 0);
+    await page.locator('#concert-2 button[title="Clear split record"]').click();
+
+    await expect(page.locator("#concert-2")).toContainText("card updated");
+    await expectPlayerStillPlaying(page, t0);
+  });
+});

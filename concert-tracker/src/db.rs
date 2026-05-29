@@ -447,18 +447,48 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
     Ok(())
 }
 
-/// Clear download-related state (downloaded_at, download_started_at).
-/// Split state is intentionally preserved — tracks may still exist on disk.
+/// Clear download-related state, including download_errors_json. Without
+/// resetting the error history, a prior failed attempt would resurrect the
+/// download-error badge once downloaded_at is nulled (see
+/// DownloadStatus::from_concert). The DownloadDelete event (recorded here) and
+/// the failed_jobs table preserve the audit trail. Split state is intentionally
+/// preserved — tracks may still exist on disk.
 pub fn clear_download_state(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "UPDATE concerts SET downloaded_at = NULL, download_started_at = NULL,
-         downloaded_extension = NULL
+                downloaded_extension = NULL, download_errors_json = '[]'
          WHERE id = ?1",
         params![id],
     )
     .context("Failed to clear download state")?;
     events::record_now(conn, id, Event::DownloadDelete, None);
     Ok(())
+}
+
+/// One-time cleanup: reset download_errors_json for concerts whose latest
+/// download_delete event is newer than their latest download_error event — the
+/// download was deleted after the error, so the leftover error is stale (it
+/// predates the fix that clears errors on delete) and is wrongly resurrecting
+/// the download-error badge. Returns the number of concerts fixed.
+///
+/// Done as a direct UPDATE (not via clear_download_state) so it records no
+/// spurious download_delete event and touches only download_errors_json. The
+/// MAX(..) > MAX(..) comparison is NULL — and so does not match — when either
+/// event type is absent, leaving concerts with no delete (or no error) alone.
+/// Idempotent: a fixed row becomes '[]' and no longer matches.
+pub fn clear_stale_download_errors(conn: &Connection) -> Result<usize> {
+    let n = conn
+        .execute(
+            "UPDATE concerts SET download_errors_json = '[]'
+             WHERE COALESCE(download_errors_json, '[]') != '[]'
+               AND (SELECT MAX(at) FROM events e
+                      WHERE e.concert_id = concerts.id AND e.event = 'download_delete')
+                 > (SELECT MAX(at) FROM events e
+                      WHERE e.concert_id = concerts.id AND e.event = 'download_error')",
+            [],
+        )
+        .context("Failed to clear stale download errors")?;
+    Ok(n)
 }
 
 /// Clear split-related state, including split_errors_json. Without resetting
@@ -1064,7 +1094,7 @@ pub mod tests {
     }
 
     #[test]
-    fn clear_download_state_only_clears_download_columns() {
+    fn clear_download_state_resets_download_columns_and_errors() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         try_mark_download_started(&conn, id).unwrap();
@@ -1081,14 +1111,86 @@ pub mod tests {
         let c = get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_none());
         assert!(c.download_started_at.is_none());
-        // download_errors stays as audit trail of past download attempts.
-        assert_eq!(c.download_errors.len(), 1);
-        assert_eq!(c.download_errors[0].error, "earlier 403");
+        // download_errors cleared so the download-error badge doesn't resurface.
+        assert!(c.download_errors.is_empty(), "download errors cleared");
         // split state must be preserved — tracks still exist on disk.
         assert!(c.split_at.is_some(), "split_at must be untouched");
         assert_eq!(c.split_errors.len(), 1);
         // downloaded_extension must be cleared
         assert!(c.downloaded_extension.is_none());
+    }
+
+    #[test]
+    fn clear_download_state_does_not_resurrect_download_error_badge() {
+        use crate::model::DownloadStatus;
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_failed(&conn, id, "first try").unwrap();
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+
+        let before = get_concert(&conn, id).unwrap();
+        assert_eq!(DownloadStatus::from_concert(&before), DownloadStatus::Downloaded);
+
+        clear_download_state(&conn, id).unwrap();
+
+        let after = get_concert(&conn, id).unwrap();
+        assert!(after.download_errors.is_empty());
+        assert_eq!(
+            DownloadStatus::from_concert(&after),
+            DownloadStatus::NotDownloaded
+        );
+    }
+
+    #[test]
+    fn clear_stale_download_errors_clears_when_delete_after_error() {
+        use crate::events::{record, Event};
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        // An error, then (pre-fix) a delete recorded later that left the error.
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_failed(&conn, id, "earlier 403").unwrap();
+        record(&conn, id, Event::DownloadDelete, "2999-01-01T00:00:00Z", None);
+        assert!(!get_concert(&conn, id).unwrap().download_errors.is_empty());
+
+        let n = clear_stale_download_errors(&conn).unwrap();
+        assert_eq!(n, 1);
+        assert!(get_concert(&conn, id).unwrap().download_errors.is_empty());
+
+        // Idempotent: a second run fixes nothing.
+        assert_eq!(clear_stale_download_errors(&conn).unwrap(), 0);
+    }
+
+    #[test]
+    fn clear_stale_download_errors_keeps_current_error_after_delete() {
+        use crate::events::{record, Event};
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        // An old delete, then a more recent error → the error is current.
+        record(&conn, id, Event::DownloadDelete, "2000-01-01T00:00:00Z", None);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_failed(&conn, id, "recent error").unwrap();
+
+        let n = clear_stale_download_errors(&conn).unwrap();
+        assert_eq!(n, 0);
+        assert_eq!(
+            get_concert(&conn, id).unwrap().download_errors.len(),
+            1,
+            "a current error must be preserved"
+        );
+    }
+
+    #[test]
+    fn clear_stale_download_errors_keeps_errors_without_delete_event() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_failed(&conn, id, "boom").unwrap();
+
+        let n = clear_stale_download_errors(&conn).unwrap();
+        assert_eq!(n, 0);
+        assert!(!get_concert(&conn, id).unwrap().download_errors.is_empty());
     }
 
     #[test]

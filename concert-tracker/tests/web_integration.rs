@@ -378,15 +378,37 @@ async fn delete_download_removes_file_and_clears_state() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    // Swap just the card in place (so the JS player survives) — not a full reload.
+    assert!(
+        response.headers().get("HX-Refresh").is_none(),
+        "delete must NOT trigger a full page reload"
+    );
     assert_eq!(
         response
             .headers()
-            .get("HX-Refresh")
+            .get("HX-Retarget")
             .and_then(|v| v.to_str().ok()),
-        Some("true"),
-        "successful delete must trigger a full htmx refresh"
+        Some("#concert-1"),
+        "delete must retarget the swap to the concert's card"
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("HX-Reswap")
+            .and_then(|v| v.to_str().ok()),
+        Some("outerHTML")
     );
     assert!(!mp4.exists(), "mp4 file must be removed from disk");
+
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("id=\"concert-1\""), "body is the re-rendered card");
+    assert!(
+        html.contains("/concerts/1/download\""),
+        "Download button must reappear after the download is cleared"
+    );
 
     let c = {
         let conn = db_arc.lock().unwrap();
@@ -654,13 +676,21 @@ async fn delete_download_force_clears_state_when_file_missing() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
+    assert!(
+        response.headers().get("HX-Refresh").is_none(),
+        "delete must NOT trigger a full page reload"
+    );
     assert_eq!(
         response
             .headers()
-            .get("HX-Refresh")
+            .get("HX-Retarget")
             .and_then(|v| v.to_str().ok()),
-        Some("true")
+        Some("#concert-1")
     );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    assert!(String::from_utf8_lossy(&body).contains("id=\"concert-1\""));
     let c = {
         let conn = db_arc.lock().unwrap();
         db::get_concert(&conn, 1).unwrap()
@@ -698,12 +728,18 @@ async fn delete_split_clears_state() {
         .unwrap();
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(
-        response
-            .headers()
-            .get("HX-Refresh")
-            .and_then(|v| v.to_str().ok()),
-        Some("true")
+    assert!(
+        response.headers().get("HX-Refresh").is_none(),
+        "delete-split must NOT trigger a full page reload"
+    );
+    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("id=\"concert-1\""), "body is the re-rendered card");
+    assert!(
+        html.contains("/concerts/1/split\""),
+        "Split button must reappear after split state is cleared"
     );
     let c = {
         let conn = db_arc.lock().unwrap();

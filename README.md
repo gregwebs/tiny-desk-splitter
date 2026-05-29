@@ -121,6 +121,10 @@ concert-db want <ID>
 
 # Clear stale in-progress flags after an unclean shutdown
 concert-db reset-in-progress
+
+# Reset stale download errors on downloads that were deleted after erroring
+# (one-time cleanup for concerts deleted before the error-on-delete fix)
+concert-db clear-stale-download-errors
 ```
 
 ### Database schema

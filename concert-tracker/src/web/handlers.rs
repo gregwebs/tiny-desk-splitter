@@ -4,7 +4,7 @@ use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
     extract::{Form, Path, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode},
     response::Response,
     Json,
 };
@@ -284,6 +284,19 @@ fn has_archive_location(state: &AppState) -> bool {
     db::get_settings(&conn)
         .map(|s| s.archive_location.is_some())
         .unwrap_or(false)
+}
+
+/// Re-render a single concert card (its `<div class="card" id="concert-{id}">`).
+/// Used by handlers that mutate a concert and want to swap just that card in
+/// place — instead of `HX-Refresh: true`, which would reload the whole page and
+/// tear down the persistent (hx-preserve'd) JS player. Mirrors `status_row`.
+fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+    render_row(&concert, has_archive_location(state))
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
@@ -734,9 +747,20 @@ pub async fn delete_download(
     }
     tracing::info!("delete-download completed for concert {}", id);
 
+    // Swap just this card in place rather than HX-Refresh (a full page reload),
+    // so the persistent JS player keeps playing. The initial trash button targets
+    // `this` and the confirm button targets `.delete-confirm`, so retarget both to
+    // the whole card by id.
+    let body = render_card(&state, id)?;
     let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((headers, "").into_response())
+    headers.insert("content-type", HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(
+        "HX-Retarget",
+        HeaderValue::from_str(&format!("#concert-{id}"))
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
+    );
+    headers.insert("HX-Reswap", HeaderValue::from_static("outerHTML"));
+    Ok((headers, body).into_response())
 }
 
 pub async fn delete_split(
@@ -764,9 +788,14 @@ pub async fn delete_split(
     }
     tracing::info!("delete-split completed for concert {}", id);
 
-    let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((headers, "").into_response())
+    // Swap just this card in place (its trash button targets `closest .card`)
+    // rather than HX-Refresh, so the persistent JS player keeps playing.
+    let body = render_card(&state, id)?;
+    Ok((
+        [("content-type", "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response())
 }
 
 pub async fn listen(
