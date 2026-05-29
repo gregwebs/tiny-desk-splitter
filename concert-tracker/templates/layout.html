@@ -238,10 +238,12 @@
     .card-head { display: flex; gap: 0.6rem; align-items: flex-start; }
     .card-head-text { flex: 1; min-width: 0; }
     .card-thumb {
-      flex: 0 0 auto;
-      width: 80px; height: 60px; object-fit: cover;
-      border-radius: 4px; display: block;
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
     }
+    .card.tracks-open .card-thumb { display: none; }
 
     .card-title { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; line-height: 1.3; }
     .card-title a { text-decoration: none; }
@@ -524,10 +526,13 @@
     function toggleTracks(btn, concertId) {
       var target = document.getElementById("tracks-" + concertId);
       if (!target) return;
+      var card = target.closest(".card");
       if (target.children.length > 0) {
         target.innerHTML = "";
+        if (card) card.classList.remove("tracks-open");
         return;
       }
+      if (card) card.classList.add("tracks-open");
       fetch("/concerts/" + concertId + "/tracks")
         .then(function(r) { return r.text(); })
         .then(function(html) {
