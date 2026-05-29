@@ -77,7 +77,6 @@ struct RowTemplate {
     can_split: bool,
     can_delete_split: bool,
     can_listen: bool,
-    can_watch: bool,
     track_count: usize,
     track_total: usize,
     can_archive: bool,
@@ -312,11 +311,6 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
         && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
     let can_delete_split = matches!(&ss, SplitStatus::Split);
     let can_listen = matches!(&ds, DownloadStatus::Downloaded);
-    let can_watch = can_listen
-        && c.downloaded_extension
-            .as_deref()
-            .map(is_video_extension)
-            .unwrap_or(false);
     let track_count = c.track_count();
     let track_total = c.track_total();
     let can_archive = has_archive_location
@@ -361,7 +355,6 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
         can_split,
         can_delete_split,
         can_listen,
-        can_watch,
         track_count,
         track_total,
         can_archive,

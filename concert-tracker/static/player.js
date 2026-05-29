@@ -605,12 +605,6 @@ const Player = (() => {
     }
   }
 
-  // Row/album Watch button: start the concert playing inline and fold up the
-  // video panel. Interrupts whatever is playing (explicit intent to watch now).
-  async function watchDirect(btn, concertId) {
-    if (await startAlbum(btn, concertId)) showVideoPanel();
-  }
-
   // Track-list/detail Watch button: start this track playing inline and fold up
   // the video panel.
   async function watchTrackDirect(btn, concertId, trackIdx) {
@@ -712,5 +706,5 @@ const Player = (() => {
   }
 
   return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
-    watch, openExternal, watchDirect, watchTrackDirect, toggleLike, deleteTrack };
+    watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
 })();

@@ -564,12 +564,13 @@ async fn downloaded_filter_includes_split_concerts() {
 }
 
 #[tokio::test]
-async fn listen_button_visible_after_successful_split() {
+async fn play_button_visible_after_successful_split() {
     // Once tracks have been split, the source mp4 is still on disk and still
     // playable. With the old combined ProcessingStatus, `Split` shadowed
-    // `Downloaded` and the Listen button disappeared. With the new
-    // DownloadStatus / SplitStatus split, Listen is gated only on
-    // DownloadStatus == Downloaded.
+    // `Downloaded` and the play button disappeared. With the new
+    // DownloadStatus / SplitStatus split, it is gated only on
+    // DownloadStatus == Downloaded. (seed_downloaded uses an mp4 — a video —
+    // so this also guards that there is no separate album Watch button.)
     let conn = db::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/split-listen", "Some Album");
     db::try_mark_split_started(&conn, 1).unwrap();
@@ -593,7 +594,18 @@ async fn listen_button_visible_after_successful_split() {
     let html = String::from_utf8_lossy(&body);
     assert!(
         html.contains("Player.playAlbum(this, 1)"),
-        "Listen button must remain visible after split; got: {}",
+        "Play button must remain visible after split; got: {}",
+        html
+    );
+    assert!(
+        html.contains(">Play</button>"),
+        "the album button is labelled Play; got: {}",
+        html
+    );
+    // The album-level Watch button was removed — video is chosen from the player.
+    assert!(
+        !html.contains("Player.watchDirect") && !html.contains(">Watch</button>"),
+        "no separate album Watch button (even for a video download); got: {}",
         html
     );
     // Split action button should be gone (already split), but delete-split X
