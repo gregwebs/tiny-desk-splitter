@@ -47,6 +47,8 @@ function mockMediaInfo(page) {
         is_video: false,
         playable: true,
         track_index: parseInt(trackIdx),
+        // The mock concert is effectively endless, so there is always a next track.
+        has_next: true,
       }),
     });
   });
@@ -74,6 +76,7 @@ function mockNextMediaInfo(page) {
         is_video: false,
         playable: true,
         track_index: nextIdx,
+        has_next: true,
       }),
     });
   });
@@ -154,6 +157,67 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-track")).toHaveText("#1");
     await expect(page.locator("#player-track")).toBeVisible();
     await expect(page.locator("#player-queue-badge")).toBeHidden();
+  });
+
+  test("Next button is disabled when nothing is next to play", async ({
+    page,
+  }) => {
+    // Report this track as the last one: no following track in the concert.
+    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Last track",
+          artist: "Artist 2",
+          is_video: false,
+          playable: true,
+          track_index: 0,
+          has_next: false,
+        }),
+      });
+    });
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-next")).toBeDisabled();
+
+    // The guard must also stop the public skip API from pausing the track.
+    await page.evaluate(() => Player.skipToNext());
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Next button re-enables once a track is queued", async ({ page }) => {
+    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Last track",
+          artist: "Artist 2",
+          is_video: false,
+          playable: true,
+          track_index: 0,
+          has_next: false,
+        }),
+      });
+    });
+
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+    await expect(page.locator("#player-next")).toBeDisabled();
+
+    // Queue another track — Next now has something to advance to.
+    await expandTracks(page, 3);
+    await trackButton(page, 3, 0).click();
+    await expect(page.locator("#player-next")).toBeEnabled();
   });
 
   test("clicking a track while playing enqueues it", async ({ page }) => {

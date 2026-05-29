@@ -810,6 +810,33 @@ pub struct MediaInfo {
     pub is_video: bool,
     pub playable: bool,
     pub track_index: Option<usize>,
+    /// Whether a playable track exists after this one in the same concert, so the
+    /// player can disable its Next button when there is nothing left to advance to.
+    pub has_next: bool,
+}
+
+/// Locate the next browser-playable track in `set_list` after `after_idx`.
+/// Returns its index, title, media URL and whether it is a video. Mirrors the
+/// auto-advance logic so `has_next` and `next_track_media_info` stay in sync.
+fn find_next_playable_track(
+    working_dir: &std::path::Path,
+    album: &str,
+    set_list: &[String],
+    after_idx: usize,
+) -> Option<(usize, String, String, bool)> {
+    let sanitized_album = crate::model::sanitize_album(album);
+    for next_idx in (after_idx + 1)..set_list.len() {
+        let title = &set_list[next_idx];
+        if let Some(filename) = crate::model::find_track_file(working_dir, album, title) {
+            let ext = filename.rsplit('.').next().unwrap_or("");
+            if !is_browser_playable(ext) {
+                continue;
+            }
+            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+            return Some((next_idx, title.clone(), url, is_video_extension(ext)));
+        }
+    }
+    None
 }
 
 pub async fn media_info(
@@ -844,6 +871,8 @@ pub async fn media_info(
         is_video: is_video_extension(ext),
         playable: is_browser_playable(ext),
         track_index: None,
+        // Whole-album playback does not auto-advance per track.
+        has_next: false,
     }))
 }
 
@@ -864,6 +893,8 @@ pub async fn track_media_info(
     let ext = filename.rsplit('.').next().unwrap_or("");
     let sanitized_album = crate::model::sanitize_album(album);
     let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+    let has_next =
+        find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
 
     Ok(Json(MediaInfo {
         url,
@@ -872,6 +903,7 @@ pub async fn track_media_info(
         is_video: is_video_extension(ext),
         playable: is_browser_playable(ext),
         track_index: Some(idx),
+        has_next,
     }))
 }
 
@@ -887,28 +919,21 @@ pub async fn next_track_media_info(
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
     let artist = concert.artist.unwrap_or_default();
-    let sanitized_album = crate::model::sanitize_album(album);
 
-    for next_idx in (idx + 1)..concert.set_list.len() {
-        let title = &concert.set_list[next_idx];
-        if let Some(filename) = crate::model::find_track_file(&working_dir, album, title) {
-            let ext = filename.rsplit('.').next().unwrap_or("");
-            if !is_browser_playable(ext) {
-                continue;
-            }
-            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-            return Ok(Json(MediaInfo {
-                url,
-                title: title.clone(),
-                artist,
-                is_video: is_video_extension(ext),
-                playable: true,
-                track_index: Some(next_idx),
-            }));
-        }
+    match find_next_playable_track(&working_dir, album, &concert.set_list, idx) {
+        Some((next_idx, title, url, is_video)) => Ok(Json(MediaInfo {
+            url,
+            title,
+            artist,
+            is_video,
+            playable: true,
+            track_index: Some(next_idx),
+            // Keep the Next button correct after auto-advancing onto this track.
+            has_next: find_next_playable_track(&working_dir, album, &concert.set_list, next_idx)
+                .is_some(),
+        })),
+        None => Err(AppError::NotFound),
     }
-
-    Err(AppError::NotFound)
 }
 
 pub async fn watch(

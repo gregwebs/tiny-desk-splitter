@@ -3,7 +3,7 @@
 const Player = (() => {
   let audio = null;
   let bar = null;
-  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null };
+  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false };
   let queue = [];
   let autoAdvanceController = null;
   // Snapshot of playback taken just before an htmx body swap / history save.
@@ -206,7 +206,7 @@ const Player = (() => {
       const btn = findTrackButton(concertId, info.track_index);
       await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
         `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${info.track_index}/watch`);
+        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next);
     } catch (e) {
       if (e.name !== "AbortError") {
         tracing("playNextTrack failed", e);
@@ -262,7 +262,16 @@ const Player = (() => {
     if (btn) btn.style.display = isVideo ? "inline-block" : "none";
   }
 
-  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl) {
+  // There is "something next" when the queue is non-empty or the current track
+  // has a following track to auto-advance to. Disable the Next button otherwise
+  // so clicking it cannot stop the current track with nothing to replace it.
+  function updateNextButton() {
+    const btn = document.getElementById("player-next");
+    if (!btn) return;
+    btn.disabled = queue.length === 0 && !state.hasNext;
+  }
+
+  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext) {
     if (!audio) init(); else rebind();
     if (!audio) return;
 
@@ -275,7 +284,9 @@ const Player = (() => {
     state.trackIdx = trackIdx;
     state.isVideo = isVideo;
     state.watchUrl = watchUrl;
+    state.hasNext = !!hasNext;
     updateWatchButton(isVideo);
+    updateNextButton();
 
     audio.src = url;
     try {
@@ -307,7 +318,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, null,
         `/concerts/${concertId}/listen`, info.is_video,
-        `/concerts/${concertId}/watch`);
+        `/concerts/${concertId}/watch`, info.has_next);
     } catch (e) {
       btn.classList.add("btn-listen-error");
       btn.textContent = "Error";
@@ -339,7 +350,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, trackIdx,
         `/concerts/${concertId}/tracks/${trackIdx}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${trackIdx}/watch`);
+        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next);
     } catch (e) {
       btn.classList.add("btn-listen-error");
       btn.textContent = "Error";
@@ -369,6 +380,7 @@ const Player = (() => {
     queue.push({ concertId, trackIdx, title });
     tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
     updateQueueBadge();
+    updateNextButton();
   }
 
   async function playFromQueue() {
@@ -392,7 +404,7 @@ const Player = (() => {
         const btn = findTrackButton(entry.concertId, entry.trackIdx);
         await play(btn, info.url, info.title, info.artist, entry.concertId, entry.trackIdx,
           `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/listen`, info.is_video,
-          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`);
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next);
         return true;
       } catch (e) {
         tracing("playFromQueue failed", e);
@@ -403,6 +415,12 @@ const Player = (() => {
 
   async function skipToNext() {
     if (!audio) return;
+    // Defensive guard mirroring updateNextButton(): never pause the current
+    // track when there is nothing queued and nothing to auto-advance to.
+    if (queue.length === 0 && !state.hasNext) {
+      tracing("skipToNext ignored: nothing next", {});
+      return;
+    }
     tracing("skipToNext", { queueLength: queue.length });
     cancelAutoAdvance();
     audio.pause();
