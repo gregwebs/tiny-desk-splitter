@@ -18,20 +18,7 @@
 
 {% if !tracks.is_empty() %}
 <h3>Tracks</h3>
-<ol class="track-list">
-  {% for t in tracks.iter() %}
-  <li{% if !t.available %} class="track-unavailable"{% endif %}>
-    <button class="btn-like{% if t.liked %} liked{% endif %}" title="Like" hx-post="/concerts/{{ concert.id }}/tracks/{{ t.index }}/like" hx-target="closest .track-list" hx-swap="outerHTML">{% if t.liked %}★{% else %}☆{% endif %}</button>
-    {% if t.available %}
-    <button class="btn-track-listen" data-concert-id="{{ concert.id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ concert.id }}, {{ t.index }})">{{ t.title }}</button>
-    {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect(this, {{ concert.id }}, {{ t.index }})">Watch</button>{% endif %}
-    <button class="btn-delete" title="Delete track files" hx-post="/concerts/{{ concert.id }}/tracks/{{ t.index }}/delete" hx-target="closest .track-list" hx-swap="outerHTML"><span class="icon-trash"></span></button>
-    {% else %}
-    <span class="track-title-unavailable">{{ t.title }}</span>
-    {% endif %}
-  </li>
-  {% endfor %}
-</ol>
+{% include "tracks.html" %}
 {% else if !concert.set_list.is_empty() %}
 <h3>Set List</h3>
 <ol class="set-list">

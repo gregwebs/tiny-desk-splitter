@@ -98,6 +98,9 @@ struct RowTemplate {
 #[template(path = "detail.html")]
 struct DetailTemplate {
     chrome: Chrome,
+    /// Concert id, mirrored out of `concert` so the shared `tracks.html` partial
+    /// (included by this template) can reference `id` like `TracksTemplate` does.
+    id: i64,
     concert: Concert,
     card_html: String,
     notes_value: String,
@@ -506,6 +509,7 @@ pub async fn detail(
 
     Ok(DetailTemplate {
         chrome: Chrome::from_state(&state),
+        id: concert.id,
         card_html,
         notes_value,
         preview_url,
