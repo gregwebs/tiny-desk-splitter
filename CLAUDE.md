@@ -15,13 +15,24 @@ See README.md for an overview of the project
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
 # Workflow
-- plan the changes and get approval for the changes
-- when making database changes, first create a backup of the existing database
-- update documentation
-- write tests for all changes
-- check the code using `cargo check` as frequently as possible- every time a series of code changes is complete enough to pass `cargo check`.
-- run tests frequently
-- verify manually that the changes work as expected in the application
+- Planning
+  * Create a plan
+    * Suggest breaking larger changes into iterative steps
+    * Describe the future phases of coding (including tests and documentation) and verification, 
+  * get feedback and rework the plan
+    * Have engineering-lead review any new features or non-trivial bug fixes
+  * get approval before implementing
+- Changing dada
+  * When making database changes, first create a backup of the existing database
+- Coding
+  * When deviating from the plan, ask for approval
+  * Write tests before writing code and run tests frequently
+  * Check the code using `cargo check` as frequently as possible
+  * Update documentation
+- Verification
+  * verify manually that the changes work as expected in the application
   * start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information
   * data from the real concerts.db can be copied into the test db. Do not modify the real concerts.db during testing!
   * test edge cases and failure modes in addition to the happy path
+  * use Playwright to confirm visual/interaction aspects of the UI
+    * maintain playwright scripts as e2e tests
