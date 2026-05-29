@@ -595,6 +595,9 @@ const Player = (() => {
   async function openExternal() {
     if (!state.watchUrl) return;
     tracing("openExternal", { watchUrl: state.watchUrl });
+    // Handing off to the system player: stop our playback so audio doesn't play
+    // in both places at once.
+    if (audio) audio.pause();
     try {
       await fetch(state.watchUrl, { method: "POST" });
     } catch (e) {

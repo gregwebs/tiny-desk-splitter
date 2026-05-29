@@ -462,16 +462,31 @@ test.describe("Inline video", () => {
     await expect.poll(() => watchPosted).toBe(true);
   });
 
-  test("Open keeps playing when the watch POST fails", async ({ page }) => {
+  test("Open pauses the JS player so audio doesn't double up", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/tracks/0/watch", (route) =>
+      route.fulfill({ status: 200, body: "" })
+    );
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-open").click();
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+  });
+
+  test("Open still pauses even when the watch POST fails", async ({ page }) => {
     await page.route("**/concerts/2/tracks/0/watch", (route) => route.abort());
 
     await playVideoTrack(page, 2, 0);
     await page.locator("#player-open").click();
 
-    // openExternal swallows the error; playback continues uninterrupted.
-    expect(
-      await page.evaluate(() => document.getElementById("player-audio").paused)
-    ).toBe(false);
+    // Playback is paused up front, independent of the POST result.
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
   });
 
   test("Open is a no-op when nothing is playing", async ({ page }) => {
