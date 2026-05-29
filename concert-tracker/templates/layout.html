@@ -9,6 +9,7 @@
   <script src="https://unpkg.com/htmx.org@1.9.12"></script>
   <style>
     :root {
+      --player-bar-height: 56px;
       --bg: #f7f7f7;
       --fg: #1a1a1a;
       --fg-muted: #555;
@@ -325,8 +326,6 @@
     button.btn-listen-error:hover { background: var(--btn-error-hover); }
     button.btn-watch { background: var(--btn-watch); color: #fff; border-color: var(--btn-watch); }
     button.btn-watch:hover { background: var(--btn-watch-hover); }
-    button.btn-watch-error { background: var(--btn-error); color: #fff; border-color: var(--btn-error); }
-    button.btn-watch-error:hover { background: var(--btn-error-hover); }
 
     /* ── Preview image ── */
     .preview-image { max-width: 100%; height: auto; border-radius: 8px; margin: 0.5rem 0 1rem; display: block; }
@@ -405,14 +404,35 @@
     /* ── Player bar ── */
     #player-bar {
       position: fixed; bottom: 0; left: 0; right: 0;
-      height: 56px; background: #1a1a1a; color: #fff;
+      height: var(--player-bar-height); background: #1a1a1a; color: #fff;
       display: none; align-items: center;
       padding: 0 1rem; gap: 0.75rem; z-index: 1000;
       box-shadow: 0 -2px 8px rgba(0,0,0,0.2);
       font-size: 0.85em;
     }
     #player-bar.active { display: flex; }
-    body.player-active { padding-bottom: 60px; }
+    body.player-active { padding-bottom: calc(var(--player-bar-height) + 4px); }
+
+    /* Fold-up video panel above the bar. Collapsed via max-height (never
+       display:none) so the <video id="player-audio"> stays laid out and keeps
+       playing audio while hidden, and so the fold animates. */
+    #player-video-panel {
+      position: fixed; left: 0; right: 0; bottom: var(--player-bar-height);
+      background: #000; z-index: 1000;
+      max-height: 0; overflow: hidden;
+      transition: max-height 0.2s ease;
+      box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
+    }
+    #player-video-panel.open { max-height: calc(100vh - var(--player-bar-height)); }
+    /* Scale the video up to the largest size that fits the available space
+       (full width, up to the viewport height above the bar), preserving aspect
+       ratio via object-fit: contain (letterboxing only when one axis is the
+       binding constraint). */
+    #player-video-panel video {
+      display: block; width: 100%;
+      max-height: calc(100vh - var(--player-bar-height));
+      object-fit: contain; margin: 0 auto; background: #000;
+    }
     #player-play-pause {
       background: none; border: none; color: #fff; font-size: 1.4em;
       cursor: pointer; padding: 0.2rem 0.4rem; min-width: 2em; text-align: center;
@@ -430,11 +450,11 @@
       display: none; align-items: center; justify-content: center;
       padding: 0.1em;
     }
-    #player-watch {
+    #player-watch, #player-open {
       background: none; border: 1px solid #666; color: #fff; font-size: 0.85em;
       cursor: pointer; padding: 0.15rem 0.5rem; border-radius: 3px; display: none;
     }
-    #player-watch:hover { border-color: #aaa; background: rgba(255,255,255,0.1); }
+    #player-watch:hover, #player-open:hover { border-color: #aaa; background: rgba(255,255,255,0.1); }
     #player-info { flex: 1; min-width: 0; overflow: hidden; }
     .player-title-line { display: flex; align-items: baseline; gap: 0.4rem; min-width: 0; }
     #player-track {
@@ -477,23 +497,28 @@
     <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings">&#9881;</a>
   </header>
   {% block content %}{% endblock %}
-  <div id="player-bar" hx-preserve="true">
-    <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
-    <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
-    <span id="player-queue-badge"></span>
-    <button id="player-watch" onclick="Player.watch()">Watch</button>
-    <div id="player-info">
-      <span class="player-title-line">
-        <span id="player-track"></span>
-        <span id="player-title"></span>
-      </span>
-      <span id="player-artist"></span>
+  <div id="player-container" hx-preserve="true">
+    <div id="player-video-panel">
+      <video id="player-audio" playsinline webkit-playsinline onclick="Player.togglePause()"></video>
     </div>
-    <span id="player-error"></span>
-    <input id="player-seek" type="range" min="0" max="100" value="0"
-      oninput="Player.seek(this.value)">
-    <span id="player-time">0:00 / 0:00</span>
-    <audio id="player-audio"></audio>
+    <div id="player-bar">
+      <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
+      <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
+      <span id="player-queue-badge"></span>
+      <button id="player-watch" onclick="Player.watch()" title="Watch video in player">Watch</button>
+      <button id="player-open" onclick="Player.openExternal()" title="Open in system player">&#10697;</button>
+      <div id="player-info">
+        <span class="player-title-line">
+          <span id="player-track"></span>
+          <span id="player-title"></span>
+        </span>
+        <span id="player-artist"></span>
+      </div>
+      <span id="player-error"></span>
+      <input id="player-seek" type="range" min="0" max="100" value="0"
+        oninput="Player.seek(this.value)">
+      <span id="player-time">0:00 / 0:00</span>
+    </div>
   </div>
   <script>
     function toggleTracks(btn, concertId) {

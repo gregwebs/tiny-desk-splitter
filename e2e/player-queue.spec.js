@@ -135,6 +135,32 @@ async function simulateTrackEnd(page) {
   });
 }
 
+// Override a track's media-info so it reports as a (playable) video, then start
+// it playing by clicking its track button.
+async function playVideoTrack(page, concertId, trackIdx, title = "Video track") {
+  await page.route(
+    `**/concerts/${concertId}/tracks/${trackIdx}/media-info`,
+    async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title,
+          artist: `Artist ${concertId}`,
+          is_video: true,
+          playable: true,
+          track_index: trackIdx,
+          has_next: true,
+        }),
+      });
+    }
+  );
+  await expandTracks(page, concertId);
+  await trackButton(page, concertId, trackIdx).click();
+  await waitForPlaying(page);
+}
+
 test.describe("Player Queue", () => {
   test.beforeEach(async ({ page }) => {
     await mockAudioFile(page);
@@ -353,5 +379,245 @@ test.describe("Player Queue", () => {
     const title = await badge.getAttribute("title");
     expect(title).toBeTruthy();
     expect(title.split("\n")).toHaveLength(2);
+  });
+});
+
+test.describe("Inline video", () => {
+  test.beforeEach(async ({ page }) => {
+    await mockAudioFile(page);
+    await mockMediaInfo(page);
+    await mockNextMediaInfo(page);
+    await mockListenPost(page);
+    await page.goto("/");
+  });
+
+  test("Watch and Open buttons are hidden for audio-only tracks", async ({
+    page,
+  }) => {
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click(); // default mock: is_video false
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-watch")).toBeHidden();
+    await expect(page.locator("#player-open")).toBeHidden();
+  });
+
+  test("Watch and Open buttons are shown for video tracks", async ({ page }) => {
+    await playVideoTrack(page, 2, 0);
+
+    await expect(page.locator("#player-watch")).toBeVisible();
+    await expect(page.locator("#player-open")).toBeVisible();
+  });
+
+  test("Watch button folds the video panel open and closed", async ({ page }) => {
+    await playVideoTrack(page, 2, 0);
+    const panel = page.locator("#player-video-panel");
+    await expect(panel).not.toHaveClass(/open/);
+
+    await page.locator("#player-watch").click();
+    await expect(panel).toHaveClass(/open/);
+    // Revealing the video must not interrupt playback.
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+
+    await page.locator("#player-watch").click();
+    await expect(panel).not.toHaveClass(/open/);
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("toggling the panel does not reset playback position", async ({ page }) => {
+    await playVideoTrack(page, 2, 0);
+    await page.waitForFunction(
+      () => document.getElementById("player-audio").currentTime > 0.1
+    );
+
+    await page.locator("#player-watch").click(); // open
+    await page.locator("#player-watch").click(); // close
+
+    // Same element throughout, so position continues rather than resetting.
+    const t = await page.evaluate(
+      () => document.getElementById("player-audio").currentTime
+    );
+    expect(t).toBeGreaterThan(0);
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("Open button posts to the watch endpoint", async ({ page }) => {
+    let watchPosted = false;
+    await page.route("**/concerts/2/tracks/0/watch", async (route) => {
+      if (route.request().method() === "POST") watchPosted = true;
+      await route.fulfill({ status: 200, body: "" });
+    });
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-open").click();
+
+    await expect.poll(() => watchPosted).toBe(true);
+  });
+
+  test("Open keeps playing when the watch POST fails", async ({ page }) => {
+    await page.route("**/concerts/2/tracks/0/watch", (route) => route.abort());
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-open").click();
+
+    // openExternal swallows the error; playback continues uninterrupted.
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("Open is a no-op when nothing is playing", async ({ page }) => {
+    await page.evaluate(() => Player.openExternal());
+    await expect(page.locator("#player-bar")).not.toHaveClass(/active/);
+  });
+
+  test("watchTrackDirect starts inline playback and opens the panel", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Video track",
+          artist: "Artist 2",
+          is_video: true,
+          playable: true,
+          track_index: 0,
+          has_next: true,
+        }),
+      });
+    });
+
+    await page.evaluate(() =>
+      Player.watchTrackDirect(document.createElement("button"), 2, 0)
+    );
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("inline Watch of a non-playable file does not open the panel", async ({
+    page,
+  }) => {
+    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          url: "/test-audio/silence.wav",
+          title: "Unplayable",
+          artist: "Artist 2",
+          is_video: true,
+          playable: false,
+          track_index: 0,
+          has_next: false,
+        }),
+      });
+    });
+    await page.evaluate(() => {
+      window.__opened = null;
+      window.open = (u) => {
+        window.__opened = u;
+      };
+    });
+
+    await page.evaluate(() =>
+      Player.watchTrackDirect(document.createElement("button"), 2, 0)
+    );
+
+    await expect
+      .poll(() => page.evaluate(() => window.__opened))
+      .toBe("/test-audio/silence.wav");
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+  });
+
+  test("auto-advancing from video to audio collapses the panel", async ({
+    page,
+  }) => {
+    await page.route(
+      "**/concerts/2/tracks/0/next-media-info",
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            url: "/test-audio/silence.wav",
+            title: "Audio next",
+            artist: "Artist 2",
+            is_video: false,
+            playable: true,
+            track_index: 1,
+            has_next: true,
+          }),
+        });
+      }
+    );
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    await simulateTrackEnd(page);
+
+    await expect(page.locator("#player-title")).toHaveText("Audio next");
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+    await expect(page.locator("#player-watch")).toBeHidden();
+  });
+
+  test("auto-advancing from video to video keeps the panel open", async ({
+    page,
+  }) => {
+    await page.route(
+      "**/concerts/2/tracks/0/next-media-info",
+      async (route) => {
+        await route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({
+            url: "/test-audio/silence.wav",
+            title: "Video next",
+            artist: "Artist 2",
+            is_video: true,
+            playable: true,
+            track_index: 1,
+            has_next: true,
+          }),
+        });
+      }
+    );
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    await simulateTrackEnd(page);
+
+    await expect(page.locator("#player-title")).toHaveText("Video next");
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("video panel stays open across Back/Forward navigation", async ({
+    page,
+  }) => {
+    await page.route("**/listen", (r) => r.fulfill({ status: 200, body: "" }));
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    await page.locator('header a[href="/settings"]').click();
+    await page.waitForFunction(() => location.pathname === "/settings");
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/");
+
+    // #player-video-panel lives inside the hx-preserve'd #player-container.
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
 });

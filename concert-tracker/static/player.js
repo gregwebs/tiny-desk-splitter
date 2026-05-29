@@ -257,9 +257,37 @@ const Player = (() => {
     }
   }
 
-  function updateWatchButton(isVideo) {
-    const btn = document.getElementById("player-watch");
-    if (btn) btn.style.display = isVideo ? "inline-block" : "none";
+  // The Watch (toggle inline video) and Open (launch system player) buttons only
+  // make sense for video tracks; hide both for audio-only playback.
+  function updateMediaButtons(isVideo) {
+    const display = isVideo ? "inline-block" : "none";
+    const watch = document.getElementById("player-watch");
+    const open = document.getElementById("player-open");
+    if (watch) watch.style.display = display;
+    if (open) open.style.display = display;
+  }
+
+  function showVideoPanel() {
+    const panel = document.getElementById("player-video-panel");
+    if (!panel) return;
+    tracing("showVideoPanel", {});
+    panel.classList.add("open");
+  }
+
+  function hideVideoPanel() {
+    const panel = document.getElementById("player-video-panel");
+    if (!panel || !panel.classList.contains("open")) return;
+    tracing("hideVideoPanel", {});
+    panel.classList.remove("open");
+  }
+
+  // Player-bar Watch button: fold the inline video panel up or down. The video
+  // is the already-playing #player-audio element, so revealing it needs no resync.
+  function watch() {
+    const panel = document.getElementById("player-video-panel");
+    if (!panel) return;
+    if (panel.classList.contains("open")) hideVideoPanel();
+    else showVideoPanel();
   }
 
   // There is "something next" when the queue is non-empty or the current track
@@ -285,7 +313,10 @@ const Player = (() => {
     state.isVideo = isVideo;
     state.watchUrl = watchUrl;
     state.hasNext = !!hasNext;
-    updateWatchButton(isVideo);
+    updateMediaButtons(isVideo);
+    // An audio-only track can't be watched; collapse the panel if it was open.
+    // A video track keeps the panel open so auto-advance keeps showing video.
+    if (!isVideo) hideVideoPanel();
     updateNextButton();
 
     audio.src = url;
@@ -302,27 +333,65 @@ const Player = (() => {
     }
   }
 
-  async function playAlbum(btn, concertId) {
+  // Fetch the whole-album media info and start playing it now (no enqueue).
+  // Returns true when in-browser playback started; false on error or when the
+  // file is not browser-playable (in which case it falls back to window.open).
+  async function startAlbum(btn, concertId) {
     cancelAutoAdvance();
     try {
       const resp = await fetch(`/concerts/${concertId}/media-info`);
       if (!resp.ok) {
         btn.classList.add("btn-listen-error");
         btn.textContent = "Error";
-        return;
+        return false;
       }
       const info = await resp.json();
       if (!info.playable) {
         window.open(info.url, "_blank");
-        return;
+        return false;
       }
       await play(btn, info.url, info.title, info.artist, concertId, null,
         `/concerts/${concertId}/listen`, info.is_video,
         `/concerts/${concertId}/watch`, info.has_next);
+      return true;
     } catch (e) {
       btn.classList.add("btn-listen-error");
       btn.textContent = "Error";
-      tracing("playAlbum fetch failed", e);
+      tracing("startAlbum fetch failed", e);
+      return false;
+    }
+  }
+
+  async function playAlbum(btn, concertId) {
+    await startAlbum(btn, concertId);
+  }
+
+  // Fetch a track's media info and start playing it now (no enqueue, no
+  // toggle-pause). Returns true when in-browser playback started; false on
+  // error or non-playable file (falls back to window.open).
+  async function startTrack(btn, concertId, trackIdx) {
+    cancelAutoAdvance();
+    try {
+      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
+      if (!resp.ok) {
+        btn.classList.add("btn-listen-error");
+        btn.textContent = "Error";
+        return false;
+      }
+      const info = await resp.json();
+      if (!info.playable) {
+        window.open(info.url, "_blank");
+        return false;
+      }
+      await play(btn, info.url, info.title, info.artist, concertId, trackIdx,
+        `/concerts/${concertId}/tracks/${trackIdx}/listen`, info.is_video,
+        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next);
+      return true;
+    } catch (e) {
+      btn.classList.add("btn-listen-error");
+      btn.textContent = "Error";
+      tracing("startTrack fetch failed", e);
+      return false;
     }
   }
 
@@ -335,27 +404,7 @@ const Player = (() => {
       enqueue(concertId, trackIdx, btn.textContent.trim());
       return;
     }
-    cancelAutoAdvance();
-    try {
-      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
-      if (!resp.ok) {
-        btn.classList.add("btn-listen-error");
-        btn.textContent = "Error";
-        return;
-      }
-      const info = await resp.json();
-      if (!info.playable) {
-        window.open(info.url, "_blank");
-        return;
-      }
-      await play(btn, info.url, info.title, info.artist, concertId, trackIdx,
-        `/concerts/${concertId}/tracks/${trackIdx}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next);
-    } catch (e) {
-      btn.classList.add("btn-listen-error");
-      btn.textContent = "Error";
-      tracing("playTrack fetch failed", e);
-    }
+    await startTrack(btn, concertId, trackIdx);
   }
 
   function togglePause() {
@@ -443,49 +492,29 @@ const Player = (() => {
     }
   }
 
-  async function watch() {
+  // Link-out: launch the current file in the system player via the server's
+  // `open`. state.watchUrl is the POST endpoint set by play(). This is the only
+  // path that still records a server-side Watch event.
+  async function openExternal() {
     if (!state.watchUrl) return;
-    if (audio) audio.pause();
-    clearPlaying();
+    tracing("openExternal", { watchUrl: state.watchUrl });
     try {
       await fetch(state.watchUrl, { method: "POST" });
     } catch (e) {
-      tracing("watch fetch failed", e);
+      tracing("openExternal fetch failed", e);
     }
   }
 
-  function markWatchError(btn) {
-    if (!btn) return;
-    btn.classList.add("btn-watch-error");
-    btn.textContent = "Error";
-  }
-
+  // Row/album Watch button: start the concert playing inline and fold up the
+  // video panel. Interrupts whatever is playing (explicit intent to watch now).
   async function watchDirect(btn, concertId) {
-    if (audio && state.concertId === concertId && !audio.paused) {
-      audio.pause();
-      clearPlaying();
-    }
-    try {
-      const resp = await fetch(`/concerts/${concertId}/watch`, { method: "POST" });
-      if (!resp.ok) markWatchError(btn);
-    } catch (e) {
-      markWatchError(btn);
-      tracing("watchDirect fetch failed", e);
-    }
+    if (await startAlbum(btn, concertId)) showVideoPanel();
   }
 
+  // Track-list/detail Watch button: start this track playing inline and fold up
+  // the video panel.
   async function watchTrackDirect(btn, concertId, trackIdx) {
-    if (audio && state.concertId === concertId && state.trackIdx === trackIdx && !audio.paused) {
-      audio.pause();
-      clearPlaying();
-    }
-    try {
-      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/watch`, { method: "POST" });
-      if (!resp.ok) markWatchError(btn);
-    } catch (e) {
-      markWatchError(btn);
-      tracing("watchTrackDirect fetch failed", e);
-    }
+    if (await startTrack(btn, concertId, trackIdx)) showVideoPanel();
   }
 
   if (document.readyState === "loading") {
@@ -494,5 +523,6 @@ const Player = (() => {
     init();
   }
 
-  return { playAlbum, playTrack, togglePause, seek, skipToNext, watch, watchDirect, watchTrackDirect };
+  return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
+    watch, openExternal, watchDirect, watchTrackDirect };
 })();
