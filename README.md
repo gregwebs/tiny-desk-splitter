@@ -55,7 +55,7 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 - **Auto-scrape**: automatically fetches full metadata (artist, description, set list, musicians, preview image) on first view
 - **Re-scrape** button to refresh metadata from NPR
 - **Preview image** display
-- **Track list** with per-track playback, watch, and delete buttons
+- **Track list** with per-track playback, watch, like (★), and delete buttons
 - **Set list** display for concerts that haven't been split yet
 - **Musicians** listing with instruments
 - **Notes** field with save (persisted to DB)

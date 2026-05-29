@@ -61,6 +61,7 @@ pub struct TrackInfo {
     pub title: String,
     pub available: bool,
     pub is_video: bool,
+    pub liked: bool,
 }
 
 fn track_file_extension(dir: &Path, title: &str) -> Option<&'static str> {
@@ -86,6 +87,7 @@ pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<
                 title: title.clone(),
                 available: true,
                 is_video: is_video_extension(ext),
+                liked: false,
             })
         })
         .collect()
@@ -104,6 +106,7 @@ pub fn list_tracks_from_events(
             title: title.clone(),
             available: false,
             is_video: false,
+            liked: false,
         })
         .collect()
 }
@@ -120,6 +123,7 @@ pub fn list_all_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> 
                 title: title.clone(),
                 available: ext.is_some(),
                 is_video: ext.map_or(false, is_video_extension),
+                liked: false,
             }
         })
         .collect()
@@ -302,6 +306,7 @@ pub struct Concert {
     pub first_seen_at: String,
     pub metadata_scraped_at: Option<String>,
     pub tracks_present: Vec<bool>,
+    pub tracks_liked: Vec<bool>,
 }
 
 impl Concert {
@@ -383,10 +388,15 @@ impl Concert {
     }
 }
 
-pub fn list_all_tracks_from_db(set_list: &[String], tracks_present: &[bool]) -> Vec<TrackInfo> {
+pub fn list_all_tracks_from_db(
+    set_list: &[String],
+    tracks_present: &[bool],
+    tracks_liked: &[bool],
+) -> Vec<TrackInfo> {
     tracing::debug!(
         set_list_len = set_list.len(),
         tracks_present_len = tracks_present.len(),
+        tracks_liked_len = tracks_liked.len(),
         "list_all_tracks_from_db"
     );
     set_list
@@ -394,11 +404,13 @@ pub fn list_all_tracks_from_db(set_list: &[String], tracks_present: &[bool]) -> 
         .enumerate()
         .map(|(index, title)| {
             let available = tracks_present.get(index).copied().unwrap_or(false);
+            let liked = tracks_liked.get(index).copied().unwrap_or(false);
             TrackInfo {
                 index,
                 title: title.clone(),
                 available,
                 is_video: false,
+                liked,
             }
         })
         .collect()
@@ -436,6 +448,7 @@ mod tests {
             first_seen_at: "2024-01-01T00:00:00Z".to_string(),
             metadata_scraped_at: None,
             tracks_present: vec![],
+            tracks_liked: vec![],
         }
     }
 
@@ -817,24 +830,25 @@ mod tests {
     fn list_all_tracks_from_db_maps_presence() {
         let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
         let tracks_present = vec![true, false, true];
-        let tracks = list_all_tracks_from_db(&set_list, &tracks_present);
+        let tracks = list_all_tracks_from_db(&set_list, &tracks_present, &[]);
         assert_eq!(tracks.len(), 3);
         assert!(tracks[0].available);
         assert!(!tracks[1].available);
         assert!(tracks[2].available);
         assert!(!tracks[0].is_video);
+        assert!(!tracks[0].liked);
     }
 
     #[test]
     fn list_all_tracks_from_db_empty_set_list() {
-        let tracks = list_all_tracks_from_db(&[], &[]);
+        let tracks = list_all_tracks_from_db(&[], &[], &[]);
         assert!(tracks.is_empty());
     }
 
     #[test]
     fn list_all_tracks_from_db_empty_tracks_present() {
         let set_list = vec!["A".to_string(), "B".to_string()];
-        let tracks = list_all_tracks_from_db(&set_list, &[]);
+        let tracks = list_all_tracks_from_db(&set_list, &[], &[]);
         assert_eq!(tracks.len(), 2);
         assert!(!tracks[0].available);
         assert!(!tracks[1].available);
@@ -844,11 +858,63 @@ mod tests {
     fn list_all_tracks_from_db_short_tracks_present() {
         let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
         let tracks_present = vec![true];
-        let tracks = list_all_tracks_from_db(&set_list, &tracks_present);
+        let tracks = list_all_tracks_from_db(&set_list, &tracks_present, &[]);
         assert_eq!(tracks.len(), 3);
         assert!(tracks[0].available);
         assert!(!tracks[1].available);
         assert!(!tracks[2].available);
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_maps_liked() {
+        let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let tracks_liked = vec![false, true, false];
+        let tracks = list_all_tracks_from_db(&set_list, &[], &tracks_liked);
+        assert!(!tracks[0].liked);
+        assert!(tracks[1].liked);
+        assert!(!tracks[2].liked);
+    }
+
+    #[test]
+    fn list_all_tracks_from_db_handles_short_tracks_liked() {
+        let set_list = vec!["A".to_string(), "B".to_string(), "C".to_string()];
+        let tracks_liked = vec![true];
+        let tracks = list_all_tracks_from_db(&set_list, &[], &tracks_liked);
+        assert!(tracks[0].liked);
+        assert!(!tracks[1].liked);
+        assert!(!tracks[2].liked);
+    }
+
+    #[test]
+    fn list_tracks_defaults_liked_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::File::create(cd.join("Song One.m4a")).unwrap();
+
+        let set_list = vec!["Song One".to_string()];
+        let tracks = list_tracks(dir.path(), album, &set_list);
+        assert_eq!(tracks.len(), 1);
+        assert!(!tracks[0].liked);
+    }
+
+    #[test]
+    fn list_tracks_from_events_defaults_liked_false() {
+        let set_list = vec!["A".to_string(), "B".to_string()];
+        let tracks = list_tracks_from_events(&set_list, &HashSet::new());
+        assert_eq!(tracks.len(), 2);
+        assert!(!tracks[0].liked);
+        assert!(!tracks[1].liked);
+    }
+
+    #[test]
+    fn list_all_tracks_defaults_liked_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let set_list = vec!["Song A".to_string()];
+        let tracks = list_all_tracks(dir.path(), "No Album", &set_list);
+        assert_eq!(tracks.len(), 1);
+        assert!(!tracks[0].liked);
     }
 
     #[test]

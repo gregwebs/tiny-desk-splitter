@@ -1045,3 +1045,71 @@ async fn watch_returns_404_when_concert_not_downloaded() {
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn like_track_toggles_state_and_renders_star() {
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/1", "Concert");
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            description: None,
+            set_list: vec!["Song A".to_string(), "Song B".to_string()],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/tracks/0/like")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8_lossy(&body);
+    assert!(html.contains("btn-like liked"), "filled star class expected");
+    assert!(html.contains("★"), "filled star glyph expected");
+}
+
+#[tokio::test]
+async fn like_track_out_of_range_returns_404() {
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/1", "Concert");
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            description: None,
+            set_list: vec!["Song A".to_string()],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/tracks/5/like")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}

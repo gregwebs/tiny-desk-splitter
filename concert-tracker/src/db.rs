@@ -56,6 +56,7 @@ fn run_migrations(conn: &Connection) -> Result<()> {
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
     add_column_if_missing(conn, "concerts", "tracks_present", "TEXT")?;
+    add_column_if_missing(conn, "concerts", "tracks_liked", "TEXT")?;
     add_column_if_missing(conn, "concerts", "downloaded_extension", "TEXT")?;
     conn.execute_batch(
         "UPDATE concerts SET downloaded_extension = 'mp4'
@@ -134,6 +135,7 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         .unwrap_or_default();
     let archive_errors_json: String = row.get("archive_errors_json")?;
     let tracks_present_json: Option<String> = row.get("tracks_present")?;
+    let tracks_liked_json: Option<String> = row.get("tracks_liked")?;
     let download_errors: Vec<ErrorEntry> =
         serde_json::from_str(&download_errors_json).unwrap_or_default();
     let split_errors: Vec<ErrorEntry> =
@@ -168,6 +170,9 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         first_seen_at: row.get("first_seen_at")?,
         metadata_scraped_at: row.get("metadata_scraped_at")?,
         tracks_present: tracks_present_json
+            .and_then(|j| serde_json::from_str(&j).ok())
+            .unwrap_or_default(),
+        tracks_liked: tracks_liked_json
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
     })
@@ -426,6 +431,48 @@ pub fn set_tracks_present(conn: &Connection, id: i64, tracks: &[bool]) -> Result
     )
     .context("Failed to set tracks_present")?;
     Ok(())
+}
+
+pub fn set_tracks_liked(conn: &Connection, id: i64, tracks: &[bool]) -> Result<()> {
+    let json = serde_json::to_string(tracks).unwrap();
+    conn.execute(
+        "UPDATE concerts SET tracks_liked = ?1 WHERE id = ?2",
+        params![json, id],
+    )
+    .context("Failed to set tracks_liked")?;
+    Ok(())
+}
+
+/// Flip the like bit for one track. Pads `tracks_liked` to `set_list.len()`
+/// with `false` so previously-unsaved indices become writeable. Caller must
+/// validate that `idx < set_list.len()`.
+pub fn toggle_track_liked(conn: &Connection, id: i64, idx: usize) -> Result<bool> {
+    let concert = get_concert(conn, id)?;
+    if idx >= concert.set_list.len() {
+        anyhow::bail!(
+            "track index {} out of range for set_list of length {}",
+            idx,
+            concert.set_list.len()
+        );
+    }
+    let mut liked = concert.tracks_liked.clone();
+    if liked.len() < concert.set_list.len() {
+        liked.resize(concert.set_list.len(), false);
+    }
+    liked[idx] = !liked[idx];
+    let new_state = liked[idx];
+    set_tracks_liked(conn, id, &liked)?;
+
+    let title = &concert.set_list[idx];
+    let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
+    let event = if new_state {
+        Event::TrackLiked
+    } else {
+        Event::TrackLikedDelete
+    };
+    events::record_now(conn, id, event, Some(&json));
+
+    Ok(new_state)
 }
 
 pub fn try_mark_archive_started(conn: &Connection, id: i64) -> Result<bool> {
@@ -1089,6 +1136,102 @@ pub mod tests {
         let id = seed(&conn);
         let c = get_concert(&conn, id).unwrap();
         assert!(c.tracks_present.is_empty());
+    }
+
+    #[test]
+    fn tracks_liked_defaults_to_empty_when_null() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.tracks_liked.is_empty());
+    }
+
+    #[test]
+    fn set_tracks_liked_roundtrip() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        set_tracks_liked(&conn, id, &[false, true, false]).unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.tracks_liked, vec![false, true, false]);
+    }
+
+    #[test]
+    fn toggle_track_liked_roundtrip() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_with_album(&conn); // 2-song set list: "Song A", "Song B"
+        assert!(toggle_track_liked(&conn, id, 1).unwrap());
+        assert_eq!(get_concert(&conn, id).unwrap().tracks_liked, vec![false, true]);
+        assert!(!toggle_track_liked(&conn, id, 1).unwrap());
+        assert_eq!(get_concert(&conn, id).unwrap().tracks_liked, vec![false, false]);
+    }
+
+    #[test]
+    fn toggle_track_liked_from_null_column() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        update_metadata(
+            &conn,
+            id,
+            &MetadataUpdate {
+                artist: "X".to_string(),
+                album: "Y".to_string(),
+                description: None,
+                set_list: vec!["A".to_string(), "B".to_string(), "C".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        // tracks_liked is NULL/empty at this point
+        assert!(get_concert(&conn, id).unwrap().tracks_liked.is_empty());
+        assert!(toggle_track_liked(&conn, id, 1).unwrap());
+        assert_eq!(
+            get_concert(&conn, id).unwrap().tracks_liked,
+            vec![false, true, false]
+        );
+    }
+
+    #[test]
+    fn toggle_track_liked_records_event() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_with_album(&conn);
+        toggle_track_liked(&conn, id, 0).unwrap();
+        let (event, json): (String, Option<String>) = conn
+            .query_row(
+                "SELECT event, json FROM events WHERE concert_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(event, "track_liked");
+        let v: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
+        assert_eq!(v["track_index"], 0);
+        assert_eq!(v["track_title"], "Song A");
+    }
+
+    #[test]
+    fn toggle_track_liked_records_unlike_event() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_with_album(&conn);
+        toggle_track_liked(&conn, id, 0).unwrap();
+        toggle_track_liked(&conn, id, 0).unwrap();
+        let event: String = conn
+            .query_row(
+                "SELECT event FROM events WHERE concert_id = ?1 ORDER BY id DESC LIMIT 1",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(event, "track_liked_delete");
+    }
+
+    #[test]
+    fn toggle_track_liked_rejects_out_of_range_idx() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_with_album(&conn); // 2-song set list
+        let result = toggle_track_liked(&conn, id, 5);
+        assert!(result.is_err());
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.tracks_liked.is_empty(), "no write should occur on rejection");
     }
 
     #[test]

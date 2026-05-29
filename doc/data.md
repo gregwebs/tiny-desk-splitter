@@ -40,6 +40,14 @@ Key columns in the `concerts` table:
 | `download_errors_json` / `split_errors_json` / `archive_errors_json` | TEXT | Accumulating JSON error arrays |
 | `set_list_json` | TEXT | `["Song Title", ...]` |
 | `musicians_json` | TEXT | `[{"name": "...", "instruments": [...]}]` |
+| `tracks_present` | TEXT | JSON `[bool, ...]` parallel to `set_list_json` — whether the track file is on disk. NULL when never set. |
+| `tracks_liked` | TEXT | JSON `[bool, ...]` parallel to `set_list_json` — user "like" state per track. NULL when none liked. |
+
+`tracks_present` and `tracks_liked` index by position in `set_list_json`. This
+assumes `set_list_json` is **append-only** after first scrape. If a re-scrape
+reorders or replaces titles, both arrays will mis-attribute against the new
+positions. The current scraper overwrites `set_list_json` wholesale, so this
+is a known limitation.
 
 ## Events
 
@@ -63,6 +71,8 @@ Events recorded:
 * split_error
 * split_delete
 * track_delete: JSON contains the track number and name
+* track_liked: JSON contains the track index and title
+* track_liked_delete: JSON contains the track index and title
 * listen
 * wanted
 * wanted_delete

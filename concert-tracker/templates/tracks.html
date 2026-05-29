@@ -1,6 +1,7 @@
 <ol class="track-list">
   {% for t in tracks.iter() %}
   <li{% if !t.available %} class="track-unavailable"{% endif %}>
+    <button class="btn-like{% if t.liked %} liked{% endif %}" title="Like" hx-post="/concerts/{{ id }}/tracks/{{ t.index }}/like" hx-target="closest .track-list" hx-swap="outerHTML">{% if t.liked %}★{% else %}☆{% endif %}</button>
     {% if t.available %}
     <button class="btn-track-listen" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})">{{ t.title }}</button>
     {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect(this, {{ id }}, {{ t.index }})">Watch</button>{% endif %}

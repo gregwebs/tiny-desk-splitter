@@ -452,8 +452,11 @@ pub async fn detail(
         render_row(&concert, has_al).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
     let preview_url = concert.preview_image_url_from_db();
-    let mut tracks =
-        crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
+    let mut tracks = crate::model::list_all_tracks_from_db(
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
     let events = {
         let conn = state.db.lock().unwrap();
         crate::events::list_for_concert(&conn, id)
@@ -970,8 +973,11 @@ pub async fn tracks(
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
-    let mut tracks =
-        crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
+    let mut tracks = crate::model::list_all_tracks_from_db(
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
 
     if tracks.is_empty() && concert.archived_at.is_some() && !concert.set_list.is_empty() {
         let events = {
@@ -1086,12 +1092,41 @@ pub async fn delete_track(
         db::get_concert(&conn, id)?
     };
 
-    let tracks = crate::model::list_all_tracks_from_db(&concert.set_list, &concert.tracks_present);
+    let tracks = crate::model::list_all_tracks_from_db(
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
 
     Ok(TracksTemplate { id, tracks }
         .render()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?
         .into_response())
+}
+
+pub async fn like_track(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<impl IntoResponse, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        if idx >= c.set_list.len() {
+            return Err(AppError::NotFound);
+        }
+        db::toggle_track_liked(&conn, id, idx)?;
+        db::get_concert(&conn, id)?
+    };
+
+    let tracks = crate::model::list_all_tracks_from_db(
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
+
+    TracksTemplate { id, tracks }
+        .render()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn status_row(
