@@ -608,6 +608,24 @@ async fn play_button_visible_after_successful_split() {
         "no separate album Watch button (even for a video download); got: {}",
         html
     );
+    // The tracks row also has a Play button that plays the split tracks.
+    assert!(
+        html.contains("Player.playTrack(this, 1, 0)"),
+        "tracks row must have a Play button; got: {}",
+        html
+    );
+    // In both rows the Play button comes before the delete trash.
+    assert!(
+        html.find("Player.playAlbum").unwrap() < html.find("/concerts/1/delete-download").unwrap(),
+        "download-slot Play must come before the delete-download trash; got: {}",
+        html
+    );
+    assert!(
+        html.find("Player.playTrack(this, 1, 0)").unwrap()
+            < html.find("/concerts/1/delete-split").unwrap(),
+        "tracks-row Play must come before the delete-split trash; got: {}",
+        html
+    );
     // Split action button should be gone (already split), but delete-split X
     // should be present.
     assert!(

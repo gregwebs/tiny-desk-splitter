@@ -61,11 +61,11 @@
                   hx-on::before-request="this.textContent='Starting…'"
                   hx-on::response-error="this.textContent='Download'">Download</button>
         {% endif %}
-        {% if can_delete_download %}
-          <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML"><span class="icon-trash"></span></button>
-        {% endif %}
         {% if can_listen %}
           <button class="btn-listen" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">Play</button>
+        {% endif %}
+        {% if can_delete_download %}
+          <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML"><span class="icon-trash"></span></button>
         {% endif %}
       </span>
 
@@ -86,6 +86,7 @@
     {% if can_delete_split %}
     <div class="card-tracks-row">
       <button class="btn-tracks badge badge-{{ split_status }}" onclick="toggleTracks(this, {{ id }})">{{ split_status_label }} ({% if track_count == track_total %}{{ track_count }}{% else %}{{ track_count }}/{{ track_total }}{% endif %})</button>
+      <button class="btn-listen" onclick="Player.playTrack(this, {{ id }}, 0)">Play</button>
       <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
     </div>
     {% endif %}

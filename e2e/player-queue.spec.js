@@ -187,6 +187,19 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-queue-badge")).toBeHidden();
   });
 
+  test("the card's tracks-row Play button plays the split tracks", async ({
+    page,
+  }) => {
+    // The Play button in the split-tracks row starts the first track (and
+    // auto-advances), without needing to expand the track list first.
+    await page.locator("#concert-2 .card-tracks-row button.btn-listen").click();
+
+    await waitForPlaying(page);
+    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-track")).toHaveText("#1");
+  });
+
   test("Next button is disabled when nothing is next to play", async ({
     page,
   }) => {
