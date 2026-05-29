@@ -96,9 +96,24 @@ async fn main() -> Result<()> {
     println!("Listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
+
+    // Streaming media connections (the JS player reads from /concert-files)
+    // stay open for the whole song, so a pure graceful shutdown would block
+    // until playback ends. Cap the drain at SHUTDOWN_GRACE and then bail.
+    const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+    tokio::select! {
+        res = server => res?,
+        _ = async {
+            tokio::signal::ctrl_c().await.ok();
+            tokio::time::sleep(SHUTDOWN_GRACE).await;
+        } => {
+            tracing::warn!(
+                "graceful shutdown exceeded {:?}, abandoning open connections",
+                SHUTDOWN_GRACE
+            );
+        }
+    }
 
     let cancelled = state.registry.cancel_all();
     if cancelled > 0 {
