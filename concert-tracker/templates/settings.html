@@ -1,9 +1,31 @@
 {% extends "layout.html" %}
 {% block content %}
 <h2>Settings</h2>
-<form method="post" action="/settings">
+<form method="post" action="/settings" hx-boost="false">
+  <fieldset style="border: 1px solid var(--border); border-radius: 4px; padding: 0.75rem 1rem; margin-bottom: 1.25rem;">
+    <legend style="padding: 0 0.4rem;"><strong>Theme</strong></legend>
+    <p style="font-size: 0.85em; color: var(--fg-faint); margin: 0 0 0.6rem;">
+      System follows your device preference (and switches to dark at night when your OS does).
+    </p>
+    <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 1.25rem;">
+      <input type="radio" name="theme" value="system"
+             {% if chrome.theme.as_str() == "system" %}checked{% endif %}>
+      System
+    </label>
+    <label style="display: inline-flex; align-items: center; gap: 0.35rem; margin-right: 1.25rem;">
+      <input type="radio" name="theme" value="light"
+             {% if chrome.theme.as_str() == "light" %}checked{% endif %}>
+      Light
+    </label>
+    <label style="display: inline-flex; align-items: center; gap: 0.35rem;">
+      <input type="radio" name="theme" value="dark"
+             {% if chrome.theme.as_str() == "dark" %}checked{% endif %}>
+      Dark
+    </label>
+  </fieldset>
+
   <label for="archive_location"><strong>Archive Location</strong></label>
-  <p style="font-size: 0.85em; color: #666; margin: 0.25rem 0 0.5rem;">
+  <p style="font-size: 0.85em; color: var(--fg-faint); margin: 0.25rem 0 0.5rem;">
     Directory where concerts will be archived (e.g. /nas/media/music).
     Leave empty to disable archiving.
   </p>
@@ -11,9 +33,26 @@
          value="{{ archive_location }}"
          placeholder="/nas/media/music"
          style="width: 100%; padding: 0.5rem; font-family: monospace; font-size: 0.9em;
-                border: 1px solid #ccc; border-radius: 4px;">
+                background: var(--surface); color: var(--fg);
+                border: 1px solid var(--border-strong); border-radius: 4px;">
   <br><br>
   <button type="submit" class="btn-primary">Save</button>
-  {% if saved %}<span style="color: #198754; margin-left: 0.75rem; font-size: 0.85em;">Settings saved.</span>{% endif %}
+  {# Animation re-plays on every render so clicking Save again visibly flashes the message. #}
+  {% if saved %}<span class="settings-saved">Settings saved.</span>{% endif %}
 </form>
+<style>
+  @keyframes settings-saved-flash {
+    0%   { opacity: 0; transform: translateY(-3px); }
+    15%  { opacity: 1; transform: translateY(0); }
+    80%  { opacity: 1; }
+    100% { opacity: 0; }
+  }
+  .settings-saved {
+    color: var(--btn-success);
+    margin-left: 0.75rem;
+    font-size: 0.85em;
+    display: inline-block;
+    animation: settings-saved-flash 2.4s ease-out forwards;
+  }
+</style>
 {% endblock %}

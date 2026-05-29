@@ -91,11 +91,22 @@ const Player = (() => {
     }
   }
 
-  function updateInfo(title, artist) {
+  function updateInfo(title, artist, trackIdx) {
     const t = document.getElementById("player-title");
     const a = document.getElementById("player-artist");
+    const n = document.getElementById("player-track");
     if (t) t.textContent = title;
     if (a) a.textContent = artist;
+    if (n) {
+      // track_index is the 0-based set-list position; null for whole-album playback.
+      if (trackIdx != null) {
+        n.textContent = "#" + (trackIdx + 1);
+        n.style.display = "inline-block";
+      } else {
+        n.textContent = "";
+        n.style.display = "none";
+      }
+    }
   }
 
   function onTimeUpdate() {
@@ -214,7 +225,7 @@ const Player = (() => {
 
     hideError();
     showBar();
-    updateInfo(title, artist);
+    updateInfo(title, artist, trackIdx);
     markPlaying(btn);
 
     state.concertId = concertId;

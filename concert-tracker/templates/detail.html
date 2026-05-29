@@ -101,7 +101,7 @@
 </table>
 {% endif %}
 
-<p style="font-size:0.8em;color:#888">
+<p style="font-size:0.8em;color:var(--fg-fainter)">
   <a href="{{ concert.source_url }}" target="_blank">NPR page</a>
   | First seen: {{ concert.first_seen_at }}
   {% if let Some(at) = concert.metadata_scraped_at.as_ref() %} | Scraped: {{ at }}{% endif %}

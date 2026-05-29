@@ -24,9 +24,32 @@ use crate::web::AppState;
 
 // ── Templates ────────────────────────────────────────────────────────────────
 
+/// Shared layout context — embedded in every page template that extends
+/// `layout.html`. Lives here (not in each handler) so that adding a new
+/// layout-scoped value doesn't require touching five template structs.
+pub struct Chrome {
+    pub theme: db::Theme,
+}
+
+impl Chrome {
+    pub fn from_state(state: &AppState) -> Self {
+        // Default to System on any read error so a missing/corrupt settings
+        // row never blocks a page render.
+        let theme = state
+            .db
+            .lock()
+            .ok()
+            .and_then(|conn| db::get_settings(&conn).ok())
+            .map(|s| s.theme)
+            .unwrap_or(db::Theme::System);
+        Self { theme }
+    }
+}
+
 #[derive(Template)]
 #[template(path = "list.html")]
 struct ListTemplate {
+    chrome: Chrome,
     rows: Vec<String>,
     /// (href, label, active_class)
     filters: Vec<(String, String, String)>,
@@ -75,6 +98,7 @@ struct RowTemplate {
 #[derive(Template)]
 #[template(path = "detail.html")]
 struct DetailTemplate {
+    chrome: Chrome,
     concert: Concert,
     card_html: String,
     notes_value: String,
@@ -109,6 +133,7 @@ struct TrackListenButtonTemplate {
 #[derive(Template)]
 #[template(path = "settings.html")]
 struct SettingsTemplate {
+    chrome: Chrome,
     archive_location: String,
     saved: bool,
 }
@@ -141,6 +166,7 @@ struct FailedJobRow {
 #[derive(Template)]
 #[template(path = "jobs.html")]
 struct JobsTemplate {
+    chrome: Chrome,
     jobs: Vec<JobRow>,
     failed_jobs: Vec<FailedJobRow>,
     failed_filter: String,
@@ -149,6 +175,7 @@ struct JobsTemplate {
 #[derive(Template)]
 #[template(path = "job_log.html")]
 struct JobLogTemplate {
+    chrome: Chrome,
     job: db::FailedJob,
     content: String,
 }
@@ -401,6 +428,7 @@ pub async fn list(
     );
 
     Ok(ListTemplate {
+        chrome: Chrome::from_state(&state),
         rows: items,
         filters: FILTERS
             .iter()
@@ -471,6 +499,7 @@ pub async fn detail(
     }
 
     Ok(DetailTemplate {
+        chrome: Chrome::from_state(&state),
         card_html,
         notes_value,
         preview_url,
@@ -1225,6 +1254,7 @@ pub async fn jobs_list(
         .collect();
 
     Ok(JobsTemplate {
+        chrome: Chrome::from_state(&state),
         jobs,
         failed_jobs,
         failed_filter,
@@ -1245,7 +1275,11 @@ pub async fn job_log(
         .await
         .unwrap_or_else(|_| "Log file not found.".to_string());
 
-    Ok(JobLogTemplate { job, content })
+    Ok(JobLogTemplate {
+        chrome: Chrome::from_state(&state),
+        job,
+        content,
+    })
 }
 
 pub async fn jobs_count(State(state): State<AppState>) -> Result<String, AppError> {
@@ -1321,6 +1355,7 @@ pub async fn settings_page(
     };
     let saved = params.get("saved").map(|v| v == "1").unwrap_or(false);
     Ok(SettingsTemplate {
+        chrome: Chrome { theme: settings.theme },
         archive_location: settings.archive_location.unwrap_or_default(),
         saved,
     })
@@ -1334,11 +1369,23 @@ pub async fn settings_save(
         .get("archive_location")
         .map(|s| s.as_str())
         .unwrap_or("");
+    let theme = form
+        .get("theme")
+        .map(|s| db::Theme::parse(s))
+        .transpose()
+        .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid theme value")))?;
     {
         let conn = state.db.lock().unwrap();
         db::update_archive_location(&conn, location)?;
+        if let Some(t) = theme {
+            db::update_theme(&conn, t)?;
+        }
     }
-    tracing::info!("settings updated: archive_location={:?}", location);
+    tracing::info!(
+        "settings updated: archive_location={:?} theme={:?}",
+        location,
+        theme.map(|t| t.as_str())
+    );
 
     Ok(axum::response::Redirect::to("/settings?saved=1").into_response())
 }

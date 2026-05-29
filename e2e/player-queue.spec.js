@@ -150,6 +150,9 @@ test.describe("Player Queue", () => {
     await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
     await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    // track_index 0 is the first track, shown as #1
+    await expect(page.locator("#player-track")).toHaveText("#1");
+    await expect(page.locator("#player-track")).toBeVisible();
     await expect(page.locator("#player-queue-badge")).toBeHidden();
   });
 
