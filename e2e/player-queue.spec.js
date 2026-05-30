@@ -49,6 +49,8 @@ function mockMediaInfo(page) {
         track_index: parseInt(trackIdx),
         // The mock concert is effectively endless, so there is always a next track.
         has_next: true,
+        // There is a previous track for everything past the first.
+        has_prev: parseInt(trackIdx) > 0,
         liked: false,
       }),
     });
@@ -78,6 +80,44 @@ function mockNextMediaInfo(page) {
         playable: true,
         track_index: nextIdx,
         has_next: true,
+        // We advanced forward, so the track we came from is always behind us.
+        has_prev: true,
+        liked: false,
+      }),
+    });
+  });
+}
+
+// Back button: report the track before `trackIdx` (404 at the first track),
+// mirroring mockNextMediaInfo.
+function mockPrevMediaInfo(page) {
+  return page.route("**/tracks/*/prev-media-info", async (route) => {
+    const url = route.request().url();
+    const match = url.match(
+      /concerts\/(\d+)\/tracks\/(\d+)\/prev-media-info/
+    );
+    if (!match) {
+      await route.fallback();
+      return;
+    }
+    const [, concertId, trackIdx] = match;
+    const prevIdx = parseInt(trackIdx) - 1;
+    if (prevIdx < 0) {
+      await route.fulfill({ status: 404, body: "" });
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        url: "/test-audio/silence.wav",
+        title: `Track ${prevIdx} of C${concertId}`,
+        artist: `Artist ${concertId}`,
+        is_video: false,
+        playable: true,
+        track_index: prevIdx,
+        has_next: true,
+        has_prev: prevIdx > 0,
         liked: false,
       }),
     });
@@ -168,6 +208,7 @@ test.describe("Player Queue", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });
@@ -259,6 +300,36 @@ test.describe("Player Queue", () => {
     await expandTracks(page, 3);
     await trackButton(page, 3, 0).click();
     await expect(page.locator("#player-next")).toBeEnabled();
+  });
+
+  test("Back button is disabled on the first track", async ({ page }) => {
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 0).click();
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-prev")).toBeDisabled();
+
+    // The guard must also stop the public skip API from pausing the track.
+    await page.evaluate(() => Player.skipToPrev());
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Back button plays the previous track", async ({ page }) => {
+    // Start on track 1 so there is a track behind us.
+    await expandTracks(page, 2);
+    await trackButton(page, 2, 1).click();
+    await waitForPlaying(page);
+    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    await expect(page.locator("#player-prev")).toBeEnabled();
+
+    await page.locator("#player-prev").click();
+
+    // prev-media-info reports track 0; once there, Back disables again.
+    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-prev")).toBeDisabled();
+    await waitForPlaying(page);
   });
 
   test("clicking a track while playing enqueues it", async ({ page }) => {
@@ -402,6 +473,7 @@ test.describe("Inline video", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });
@@ -712,6 +784,7 @@ test.describe("Player like star", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });
@@ -887,6 +960,7 @@ test.describe("Player delete", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });
@@ -1045,6 +1119,7 @@ test.describe("Starred tracks hide the delete button", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });
@@ -1128,6 +1203,7 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     await mockAudioFile(page);
     await mockMediaInfo(page);
     await mockNextMediaInfo(page);
+    await mockPrevMediaInfo(page);
     await mockListenPost(page);
     await page.goto("/");
   });

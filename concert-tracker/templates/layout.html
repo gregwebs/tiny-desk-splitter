@@ -452,12 +452,12 @@
       cursor: pointer; padding: 0.2rem 0.4rem; min-width: 2em; text-align: center;
     }
     #player-play-pause:hover { color: #ccc; }
-    #player-next {
+    #player-prev, #player-next {
       background: none; border: none; color: #fff; font-size: 1.2em;
       cursor: pointer; padding: 0.2rem 0.3rem; min-width: 1.5em; text-align: center;
     }
-    #player-next:hover { color: #ccc; }
-    #player-next:disabled { color: #555; cursor: default; }
+    #player-prev:hover, #player-next:hover { color: #ccc; }
+    #player-prev:disabled, #player-next:disabled { color: #555; cursor: default; }
     #player-queue-badge {
       background: #e63946; color: #fff; font-size: 0.7em; font-weight: 700;
       min-width: 1.3em; height: 1.3em; border-radius: 50%;
@@ -528,6 +528,7 @@
       <video id="player-audio" playsinline webkit-playsinline onclick="Player.togglePause()"></video>
     </div>
     <div id="player-bar">
+      <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>
       <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
       <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
       <span id="player-queue-badge"></span>

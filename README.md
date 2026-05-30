@@ -69,6 +69,7 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 - **Persistent player bar** fixed to the bottom of the page
 - **Album playback**: play the full downloaded concert file (audio or video)
 - **Track playback**: play individual split tracks, with auto-advance to the next track
+- **Back / Next buttons** to step to the previous or next playable track (each disables itself when there is nothing to go to)
 - **Seek bar** and time display
 - **Watch button**: plays video files inline in the player — a panel folds up from the player bar showing the video (a separate button opens the file in the system player, macOS `open`)
 - **Like star** before the track title to like/unlike the currently-playing track, kept in sync with the track-list star

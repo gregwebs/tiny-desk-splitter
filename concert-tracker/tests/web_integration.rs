@@ -1024,6 +1024,153 @@ async fn next_media_info_returns_404_at_last_track() {
 }
 
 #[tokio::test]
+async fn prev_media_info_returns_prev_available_track() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Prev Track Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into(), "Song C".into()],
+        &[0, 1, 2],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/2/prev-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["title"], "Song B");
+    assert_eq!(info["track_index"], 1);
+    assert_eq!(info["playable"], true);
+    // Song A is still earlier, and Song C is still later.
+    assert_eq!(info["has_prev"], true);
+    assert_eq!(info["has_next"], true);
+}
+
+#[tokio::test]
+async fn prev_media_info_skips_unavailable_tracks() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Prev Skip Album";
+    let conn = db::open_in_memory().unwrap();
+    // Track 1 ("Song B") has no file on disk — should be skipped going back.
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into(), "Song C".into()],
+        &[0, 2],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/2/prev-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["title"], "Song A");
+    assert_eq!(info["track_index"], 0);
+    assert_eq!(info["has_prev"], false);
+}
+
+#[tokio::test]
+async fn prev_media_info_returns_404_at_first_track() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "First Track Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into()],
+        &[0, 1],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/0/prev-media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn track_media_info_reports_has_prev() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Has Prev Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(
+        &conn,
+        workdir.path(),
+        album,
+        vec!["Song A".into(), "Song B".into()],
+        &[0, 1],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    // First track: nothing before it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/0/media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["has_prev"], false);
+
+    // Second track: Song A is before it.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/tracks/1/media-info")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["has_prev"], true);
+}
+
+#[tokio::test]
 async fn watch_returns_500_when_downloaded_but_file_missing() {
     // Concert is marked downloaded in the DB but the media file is not on
     // disk (e.g. an old import whose archive never contained the source).

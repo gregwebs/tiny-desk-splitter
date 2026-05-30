@@ -839,6 +839,10 @@ pub struct MediaInfo {
     /// Whether a playable track exists after this one in the same concert, so the
     /// player can disable its Next button when there is nothing left to advance to.
     pub has_next: bool,
+    /// Whether a playable track exists before this one in the same concert, so the
+    /// player can disable its Back button when there is nothing to go back to.
+    /// Always false for whole-album playback (no per-track navigation).
+    pub has_prev: bool,
     /// Whether this track is liked, so the player bar can show its like star.
     /// Always false for whole-album playback (no per-track like).
     pub liked: bool,
@@ -863,6 +867,30 @@ fn find_next_playable_track(
             }
             let url = format!("/concert-files/{}/{}", sanitized_album, filename);
             return Some((next_idx, title.clone(), url, is_video_extension(ext)));
+        }
+    }
+    None
+}
+
+/// Locate the nearest browser-playable track in `set_list` before `before_idx`.
+/// Returns its index, title, media URL and whether it is a video. The reverse of
+/// [`find_next_playable_track`]; used by the player's Back button.
+fn find_prev_playable_track(
+    working_dir: &std::path::Path,
+    album: &str,
+    set_list: &[String],
+    before_idx: usize,
+) -> Option<(usize, String, String, bool)> {
+    let sanitized_album = crate::model::sanitize_album(album);
+    for prev_idx in (0..before_idx).rev() {
+        let title = &set_list[prev_idx];
+        if let Some(filename) = crate::model::find_track_file(working_dir, album, title) {
+            let ext = filename.rsplit('.').next().unwrap_or("");
+            if !is_browser_playable(ext) {
+                continue;
+            }
+            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+            return Some((prev_idx, title.clone(), url, is_video_extension(ext)));
         }
     }
     None
@@ -902,6 +930,8 @@ pub async fn media_info(
         track_index: None,
         // Whole-album playback does not auto-advance per track.
         has_next: false,
+        // No per-track navigation for whole-album playback.
+        has_prev: false,
         // No per-track like for whole-album playback; the star is hidden.
         liked: false,
     }))
@@ -926,6 +956,8 @@ pub async fn track_media_info(
     let url = format!("/concert-files/{}/{}", sanitized_album, filename);
     let has_next =
         find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
+    let has_prev =
+        find_prev_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
     let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
 
     Ok(Json(MediaInfo {
@@ -936,6 +968,7 @@ pub async fn track_media_info(
         playable: is_browser_playable(ext),
         track_index: Some(idx),
         has_next,
+        has_prev,
         liked,
     }))
 }
@@ -966,7 +999,48 @@ pub async fn next_track_media_info(
             // Keep the Next button correct after auto-advancing onto this track.
             has_next: find_next_playable_track(&working_dir, album, &concert.set_list, next_idx)
                 .is_some(),
+            // There is always a playable track before this one (the one we came
+            // from), so the Back button stays enabled after advancing.
+            has_prev: find_prev_playable_track(&working_dir, album, &concert.set_list, next_idx)
+                .is_some(),
             liked: tracks_liked.get(next_idx).copied().unwrap_or(false),
+        })),
+        None => Err(AppError::NotFound),
+    }
+}
+
+/// Media info for the nearest playable track *before* `idx` (the Back button).
+/// 404 when there is no earlier playable track. Mirrors [`next_track_media_info`].
+pub async fn prev_track_media_info(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<Json<MediaInfo>, AppError> {
+    let (concert, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        (concert, state.jobs.working_dir.clone())
+    };
+
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    // Read the liked flags before `artist` is moved out of `concert` below.
+    let tracks_liked = concert.tracks_liked.clone();
+    let artist = concert.artist.clone().unwrap_or_default();
+
+    match find_prev_playable_track(&working_dir, album, &concert.set_list, idx) {
+        Some((prev_idx, title, url, is_video)) => Ok(Json(MediaInfo {
+            url,
+            title,
+            artist,
+            is_video,
+            playable: true,
+            track_index: Some(prev_idx),
+            // There is always a playable track after this one (the one we came
+            // from), so the Next button stays enabled after going back.
+            has_next: find_next_playable_track(&working_dir, album, &concert.set_list, prev_idx)
+                .is_some(),
+            has_prev: find_prev_playable_track(&working_dir, album, &concert.set_list, prev_idx)
+                .is_some(),
+            liked: tracks_liked.get(prev_idx).copied().unwrap_or(false),
         })),
         None => Err(AppError::NotFound),
     }

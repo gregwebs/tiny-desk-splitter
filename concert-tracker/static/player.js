@@ -3,7 +3,7 @@
 const Player = (() => {
   let audio = null;
   let bar = null;
-  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, liked: false };
+  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
   let queue = [];
   let autoAdvanceController = null;
   // Snapshot of playback taken just before an htmx body swap / history save.
@@ -247,11 +247,52 @@ const Player = (() => {
       const btn = findTrackButton(concertId, info.track_index);
       await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
         `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next, info.liked);
+        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next, info.liked, info.has_prev);
       return true;
     } catch (e) {
       if (e.name !== "AbortError") {
         tracing("playNextTrack failed", e);
+        setPlayPauseIcon(false);
+      }
+      return false;
+    }
+  }
+
+  // Returns true when the preceding playable track started playing, false
+  // otherwise (no previous track, fetch error, or aborted). Like playNextTrack,
+  // this never stops playback itself.
+  async function playPrevTrack() {
+    if (state.trackIdx == null || state.concertId == null) {
+      setPlayPauseIcon(false);
+      return false;
+    }
+
+    cancelAutoAdvance();
+    autoAdvanceController = new AbortController();
+    const signal = autoAdvanceController.signal;
+    const concertId = state.concertId;
+    const trackIdx = state.trackIdx;
+
+    try {
+      const resp = await fetch(
+        `/concerts/${concertId}/tracks/${trackIdx}/prev-media-info`,
+        { signal }
+      );
+      if (!resp.ok) {
+        setPlayPauseIcon(false);
+        return false;
+      }
+      if (signal.aborted) return false;
+      const info = await resp.json();
+
+      const btn = findTrackButton(concertId, info.track_index);
+      await play(btn, info.url, info.title, info.artist, concertId, info.track_index,
+        `/concerts/${concertId}/tracks/${info.track_index}/listen`, info.is_video,
+        `/concerts/${concertId}/tracks/${info.track_index}/watch`, info.has_next, info.liked, info.has_prev);
+      return true;
+    } catch (e) {
+      if (e.name !== "AbortError") {
+        tracing("playPrevTrack failed", e);
         setPlayPauseIcon(false);
       }
       return false;
@@ -401,7 +442,15 @@ const Player = (() => {
     btn.disabled = queue.length === 0 && !state.hasNext;
   }
 
-  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked) {
+  // Disable the Back button when there is no earlier playable track to go to
+  // (the first track, or whole-album playback which has no per-track nav).
+  function updatePrevButton() {
+    const btn = document.getElementById("player-prev");
+    if (!btn) return;
+    btn.disabled = !state.hasPrev;
+  }
+
+  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev) {
     if (!audio) init(); else rebind();
     if (!audio) return;
 
@@ -415,6 +464,7 @@ const Player = (() => {
     state.isVideo = isVideo;
     state.watchUrl = watchUrl;
     state.hasNext = !!hasNext;
+    state.hasPrev = !!hasPrev;
     state.liked = !!liked;
     updateLikeStar();
     updateDeleteButton();
@@ -423,6 +473,7 @@ const Player = (() => {
     // A video track keeps the panel open so auto-advance keeps showing video.
     if (!isVideo) hideVideoPanel();
     updateNextButton();
+    updatePrevButton();
 
     audio.src = url;
     try {
@@ -457,7 +508,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, null,
         `/concerts/${concertId}/listen`, info.is_video,
-        `/concerts/${concertId}/watch`, info.has_next, info.liked);
+        `/concerts/${concertId}/watch`, info.has_next, info.liked, info.has_prev);
       return true;
     } catch (e) {
       btn.classList.add("btn-listen-error");
@@ -490,7 +541,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, trackIdx,
         `/concerts/${concertId}/tracks/${trackIdx}/listen`, info.is_video,
-        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next, info.liked);
+        `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next, info.liked, info.has_prev);
       return true;
     } catch (e) {
       btn.classList.add("btn-listen-error");
@@ -558,7 +609,7 @@ const Player = (() => {
         const btn = findTrackButton(entry.concertId, entry.trackIdx);
         await play(btn, info.url, info.title, info.artist, entry.concertId, entry.trackIdx,
           `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/listen`, info.is_video,
-          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next, info.liked);
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next, info.liked, info.has_prev);
         return true;
       } catch (e) {
         tracing("playFromQueue failed", e);
@@ -581,6 +632,21 @@ const Player = (() => {
 
     const played = await playFromQueue();
     if (!played) playNextTrack();
+  }
+
+  // Back button: go to the preceding playable track in the set list. Defensively
+  // guarded like skipToNext so it can't pause the current track with nothing to
+  // replace it. The queue (a forward play-ahead list) is left untouched.
+  async function skipToPrev() {
+    if (!audio) return;
+    if (!state.hasPrev) {
+      tracing("skipToPrev ignored: nothing previous", {});
+      return;
+    }
+    tracing("skipToPrev", {});
+    cancelAutoAdvance();
+    audio.pause();
+    await playPrevTrack();
   }
 
   function updateQueueBadge() {
@@ -640,6 +706,7 @@ const Player = (() => {
     state.isVideo = false;
     state.watchUrl = null;
     state.hasNext = false;
+    state.hasPrev = false;
     state.liked = false;
     if (bar) bar.classList.remove("active");
     document.body.classList.remove("player-active");
@@ -648,6 +715,7 @@ const Player = (() => {
     updateDeleteButton();
     updateMediaButtons(false);
     updateNextButton();
+    updatePrevButton();
   }
 
   // Player-bar Delete button: delete the currently-playing track's files (no
@@ -714,5 +782,5 @@ const Player = (() => {
   }
 
   return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
-    watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
+    skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
 })();
