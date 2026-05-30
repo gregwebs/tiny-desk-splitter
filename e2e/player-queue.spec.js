@@ -634,6 +634,26 @@ test.describe("Inline video", () => {
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
 
+  test("ending the last track with no next collapses the video panel", async ({
+    page,
+  }) => {
+    // No following track and an empty queue: next-media-info reports none, so
+    // playback cannot advance once this track ends.
+    await page.route("**/concerts/2/tracks/0/next-media-info", (route) =>
+      route.fulfill({ status: 404, body: "" })
+    );
+
+    await playVideoTrack(page, 2, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    await simulateTrackEnd(page);
+
+    // The inline video folds away so its frozen last frame doesn't cover the
+    // page and block selecting another track.
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+  });
+
   test("video panel stays open across Back/Forward navigation", async ({
     page,
   }) => {

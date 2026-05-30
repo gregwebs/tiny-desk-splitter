@@ -190,16 +190,24 @@ const Player = (() => {
     if (time) time.textContent = formatTime(audio.currentTime) + " / " + formatTime(audio.duration);
   }
 
+  // Play the next queued track, else auto-advance to the following track, else
+  // we have reached the end of everything: collapse the inline video panel so
+  // its frozen last frame doesn't cover the page and block selecting another
+  // track. Shared by the natural end-of-track and load-error dead ends.
+  async function advanceOrCollapse() {
+    if (await playFromQueue()) return;
+    if (await playNextTrack()) return;
+    hideVideoPanel();
+  }
+
   async function onEnded() {
-    const played = await playFromQueue();
-    if (!played) playNextTrack();
+    await advanceOrCollapse();
   }
 
   async function onError() {
     showError("Failed to load media");
     tracing("audio error", audio.error);
-    const played = await playFromQueue();
-    if (!played) playNextTrack();
+    await advanceOrCollapse();
   }
 
   function cancelAutoAdvance() {
