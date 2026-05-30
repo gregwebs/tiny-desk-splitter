@@ -103,6 +103,10 @@ pub struct JobConfig {
     pub working_dir: PathBuf,
     pub download_cmd: Arc<dyn Fn(&DownloadJob) -> Command + Send + Sync>,
     pub split_cmd: Arc<dyn Fn(&SplitJob) -> Command + Send + Sync>,
+    /// Builds the command used to open a media file in the system player (the
+    /// "Open" / watch buttons). Injectable so tests can substitute a no-op and
+    /// never launch a real player.
+    pub open_cmd: Arc<dyn Fn(&Path) -> Command + Send + Sync>,
 }
 
 /// Default location of the splitter binary. Looks for `live-set-splitter`
@@ -165,10 +169,26 @@ impl JobConfig {
         self.working_dir.join("log").join("job")
     }
 
-    pub fn production(working_dir: PathBuf, splitter_bin: PathBuf) -> Self {
+    /// Test config: every external command is a no-op (`true`), so handlers can
+    /// be driven without yt-dlp, the splitter, or a media player on the host.
+    pub fn test(working_dir: PathBuf) -> Self {
+        JobConfig {
+            working_dir,
+            download_cmd: Arc::new(|_| Command::new("true")),
+            split_cmd: Arc::new(|_| Command::new("true")),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        }
+    }
+
+    pub fn production(working_dir: PathBuf, splitter_bin: PathBuf, open_program: String) -> Self {
         let wd = working_dir.clone();
         JobConfig {
             working_dir: working_dir.clone(),
+            open_cmd: Arc::new(move |path: &Path| {
+                let mut cmd = Command::new(&open_program);
+                cmd.arg(path);
+                cmd
+            }),
             download_cmd: Arc::new(move |job: &DownloadJob| {
                 let cd = concert_dir(&wd, &job.album);
                 let _ = std::fs::create_dir_all(&cd);

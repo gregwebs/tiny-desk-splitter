@@ -273,6 +273,7 @@ mod tests {
                 cmd.args(["-c", "sleep 10"]);
                 cmd
             }),
+            open_cmd: Arc::new(|_| Command::new("true")),
         }
     }
 

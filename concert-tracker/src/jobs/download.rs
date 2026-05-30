@@ -118,6 +118,7 @@ mod tests {
             working_dir: PathBuf::from("/tmp"),
             download_cmd: Arc::new(|_job: &DownloadJob| Command::new("true")),
             split_cmd: Arc::new(|_| unreachable!()),
+            open_cmd: Arc::new(|_| Command::new("true")),
         }
     }
 
@@ -130,6 +131,7 @@ mod tests {
                 cmd
             }),
             split_cmd: Arc::new(|_| unreachable!()),
+            open_cmd: Arc::new(|_| Command::new("true")),
         }
     }
 
@@ -200,6 +202,7 @@ mod tests {
                 cmd
             }),
             split_cmd: Arc::new(|_| unreachable!()),
+            open_cmd: Arc::new(|_| Command::new("true")),
         };
         let r1 = start_download(db.clone(), registry.clone(), config.clone(), 1)
             .await

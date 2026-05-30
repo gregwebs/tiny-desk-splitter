@@ -191,3 +191,18 @@ cargo test                    # all crates
 cargo test -p concert-tracker # just the tracker
 cargo test -p tiny-desk-scraper
 ```
+
+### End-to-end (Playwright)
+
+```sh
+npm install        # first time only
+npx playwright test
+```
+
+The e2e suite is fully self-contained — it never touches the real `concerts.db`.
+A global setup builds the `concert-web` binary and a deterministic fixture (an
+isolated SQLite DB plus tiny, genuinely-playable media generated with **ffmpeg**)
+under `e2e/.fixture/`. Each test then copies that fixture into a temp dir and
+runs its own `concert-web` on an ephemeral port, driving the **real** endpoints
+(no request mocking). Requirements: `ffmpeg` on `PATH` and the Playwright
+browser (`npx playwright install chromium`).

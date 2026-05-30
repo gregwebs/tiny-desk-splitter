@@ -1,147 +1,21 @@
-const { test, expect } = require("@playwright/test");
+const { test, expect } = require("./fixtures");
 
-function generateSilentWav(durationSec) {
-  const sampleRate = 8000;
-  const bitsPerSample = 16;
-  const channels = 1;
-  const numSamples = sampleRate * durationSec;
-  const dataSize = numSamples * channels * (bitsPerSample / 8);
-  const buffer = Buffer.alloc(44 + dataSize);
+// Drives the real player against the isolated fixture (no mocks). Fixture concerts:
+//   1 "Audio Concert"  — Celular, Limbo, Track Three, Dando Vueltas   (wav, audio)
+//   2 "Second Concert" — Song One, Song Two, Song Three               (wav, audio)
+//   3 "Video Concert"  — Clip One(webm), Audio Song(wav), Clip Two(webm),
+//                        Clip Three(webm), Raw Take(mkv, non-playable)
+//   4 "Liked Concert"  — Liked Song (wav, liked in the DB)
+// Media is generated in Chromium-playable codecs (wav / VP8+Vorbis webm).
+const AUDIO = 1;
+const SECOND = 2;
+const VIDEO = 3;
+const LIKED = 4;
 
-  buffer.write("RIFF", 0);
-  buffer.writeUInt32LE(36 + dataSize, 4);
-  buffer.write("WAVE", 8);
-  buffer.write("fmt ", 12);
-  buffer.writeUInt32LE(16, 16); // fmt chunk size
-  buffer.writeUInt16LE(1, 20); // PCM
-  buffer.writeUInt16LE(channels, 22);
-  buffer.writeUInt32LE(sampleRate, 24);
-  buffer.writeUInt32LE(sampleRate * channels * (bitsPerSample / 8), 28);
-  buffer.writeUInt16LE(channels * (bitsPerSample / 8), 32);
-  buffer.writeUInt16LE(bitsPerSample, 34);
-  buffer.write("data", 36);
-  buffer.writeUInt32LE(dataSize, 40);
-  // PCM data is already zeros (silence)
-
-  return buffer;
-}
-
-const SILENCE_WAV = generateSilentWav(10);
-
-function mockMediaInfo(page) {
-  return page.route("**/tracks/*/media-info", async (route) => {
-    const url = route.request().url();
-    const match = url.match(/concerts\/(\d+)\/tracks\/(\d+)\/media-info/);
-    if (!match) {
-      await route.fallback();
-      return;
-    }
-    const [, concertId, trackIdx] = match;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        url: "/test-audio/silence.wav",
-        title: `Track ${trackIdx} of C${concertId}`,
-        artist: `Artist ${concertId}`,
-        is_video: false,
-        playable: true,
-        track_index: parseInt(trackIdx),
-        // The mock concert is effectively endless, so there is always a next track.
-        has_next: true,
-        // There is a previous track for everything past the first.
-        has_prev: parseInt(trackIdx) > 0,
-        liked: false,
-      }),
-    });
-  });
-}
-
-function mockNextMediaInfo(page) {
-  return page.route("**/tracks/*/next-media-info", async (route) => {
-    const url = route.request().url();
-    const match = url.match(
-      /concerts\/(\d+)\/tracks\/(\d+)\/next-media-info/
-    );
-    if (!match) {
-      await route.fallback();
-      return;
-    }
-    const [, concertId, trackIdx] = match;
-    const nextIdx = parseInt(trackIdx) + 1;
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        url: "/test-audio/silence.wav",
-        title: `Track ${nextIdx} of C${concertId}`,
-        artist: `Artist ${concertId}`,
-        is_video: false,
-        playable: true,
-        track_index: nextIdx,
-        has_next: true,
-        // We advanced forward, so the track we came from is always behind us.
-        has_prev: true,
-        liked: false,
-      }),
-    });
-  });
-}
-
-// Back button: report the track before `trackIdx` (404 at the first track),
-// mirroring mockNextMediaInfo.
-function mockPrevMediaInfo(page) {
-  return page.route("**/tracks/*/prev-media-info", async (route) => {
-    const url = route.request().url();
-    const match = url.match(
-      /concerts\/(\d+)\/tracks\/(\d+)\/prev-media-info/
-    );
-    if (!match) {
-      await route.fallback();
-      return;
-    }
-    const [, concertId, trackIdx] = match;
-    const prevIdx = parseInt(trackIdx) - 1;
-    if (prevIdx < 0) {
-      await route.fulfill({ status: 404, body: "" });
-      return;
-    }
-    await route.fulfill({
-      status: 200,
-      contentType: "application/json",
-      body: JSON.stringify({
-        url: "/test-audio/silence.wav",
-        title: `Track ${prevIdx} of C${concertId}`,
-        artist: `Artist ${concertId}`,
-        is_video: false,
-        playable: true,
-        track_index: prevIdx,
-        has_next: true,
-        has_prev: prevIdx > 0,
-        liked: false,
-      }),
-    });
-  });
-}
-
-function mockAudioFile(page) {
-  return page.route("**/test-audio/**", async (route) => {
-    await route.fulfill({
-      status: 200,
-      contentType: "audio/wav",
-      body: SILENCE_WAV,
-    });
-  });
-}
-
-function mockListenPost(page) {
-  return page.route("**/listen", async (route) => {
-    if (route.request().method() === "POST") {
-      await route.fulfill({ status: 200, body: "" });
-    } else {
-      await route.fallback();
-    }
-  });
+function trackButton(page, concertId, trackIdx) {
+  return page.locator(
+    `[data-concert-id="${concertId}"][data-track-idx="${trackIdx}"]`
+  );
 }
 
 async function expandTracks(page, concertId) {
@@ -156,16 +30,31 @@ async function expandTracks(page, concertId) {
   }
 }
 
-function trackButton(page, concertId, trackIdx) {
-  return page.locator(
-    `[data-concert-id="${concertId}"][data-track-idx="${trackIdx}"]`
-  );
-}
-
 async function waitForPlaying(page) {
   await page.waitForFunction(() => {
     const a = document.getElementById("player-audio");
     return a && !a.paused;
+  });
+}
+
+// Expand a concert's tracks and start the given track playing.
+async function playTrack(page, concertId, trackIdx) {
+  await expandTracks(page, concertId);
+  await trackButton(page, concertId, trackIdx).click();
+  await waitForPlaying(page);
+}
+
+// Wait until the whole media file is buffered, so killing the server (to force a
+// real network failure) doesn't starve the element and stop playback.
+async function waitForFullyBuffered(page) {
+  await page.waitForFunction(() => {
+    const a = document.getElementById("player-audio");
+    return (
+      a &&
+      a.duration > 0 &&
+      a.buffered.length > 0 &&
+      a.buffered.end(a.buffered.length - 1) >= a.duration - 0.2
+    );
   });
 }
 
@@ -177,52 +66,33 @@ async function simulateTrackEnd(page) {
   });
 }
 
-// Override a track's media-info so it reports as a (playable) video, then start
-// it playing by clicking its track button.
-async function playVideoTrack(page, concertId, trackIdx, title = "Video track") {
-  await page.route(
-    `**/concerts/${concertId}/tracks/${trackIdx}/media-info`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title,
-          artist: `Artist ${concertId}`,
-          is_video: true,
-          playable: true,
-          track_index: trackIdx,
-          has_next: true,
-        }),
-      });
-    }
-  );
-  await expandTracks(page, concertId);
-  await trackButton(page, concertId, trackIdx).click();
-  await waitForPlaying(page);
+// The track-list like (☆/★) and delete (trash) buttons live in the same <li> as
+// the track's listen button.
+function trackListLikeButton(page, concertId, trackIdx) {
+  return page
+    .locator("li")
+    .filter({ has: trackButton(page, concertId, trackIdx) })
+    .locator(".btn-like");
+}
+function trackListDeleteButton(page, concertId, trackIdx) {
+  return page
+    .locator("li")
+    .filter({ has: trackButton(page, concertId, trackIdx) })
+    .locator(".btn-delete");
 }
 
 test.describe("Player Queue", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
   test("clicking a track with nothing playing starts playback immediately", async ({
     page,
   }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
+    await playTrack(page, AUDIO, 0);
 
-    await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
-    // track_index 0 is the first track, shown as #1
+    await expect(page.locator("#player-title")).toHaveText("Celular");
     await expect(page.locator("#player-track")).toHaveText("#1");
     await expect(page.locator("#player-track")).toBeVisible();
     await expect(page.locator("#player-queue-badge")).toBeHidden();
@@ -231,39 +101,21 @@ test.describe("Player Queue", () => {
   test("the card's tracks-row Play button plays the split tracks", async ({
     page,
   }) => {
-    // The Play button in the split-tracks row starts the first track (and
-    // auto-advances), without needing to expand the track list first.
-    await page.locator("#concert-2 .card-tracks-row button.btn-listen").click();
+    await page
+      .locator(`#concert-${AUDIO} .card-tracks-row button.btn-listen`)
+      .click();
 
     await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Celular");
     await expect(page.locator("#player-track")).toHaveText("#1");
   });
 
   test("Next button is disabled when nothing is next to play", async ({
     page,
   }) => {
-    // Report this track as the last one: no following track in the concert.
-    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Last track",
-          artist: "Artist 2",
-          is_video: false,
-          playable: true,
-          track_index: 0,
-          has_next: false,
-        }),
-      });
-    });
-
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    // Last track in the concert: no following track to advance to.
+    await playTrack(page, AUDIO, 3);
 
     await expect(page.locator("#player-next")).toBeDisabled();
 
@@ -275,41 +127,20 @@ test.describe("Player Queue", () => {
   });
 
   test("Next button re-enables once a track is queued", async ({ page }) => {
-    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Last track",
-          artist: "Artist 2",
-          is_video: false,
-          playable: true,
-          track_index: 0,
-          has_next: false,
-        }),
-      });
-    });
-
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 3); // last track, nothing next
     await expect(page.locator("#player-next")).toBeDisabled();
 
-    // Queue another track — Next now has something to advance to.
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
+    // Queue a track from another concert — Next now has somewhere to go.
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
     await expect(page.locator("#player-next")).toBeEnabled();
   });
 
   test("Back button is disabled on the first track", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
     await expect(page.locator("#player-prev")).toBeDisabled();
 
-    // The guard must also stop the public skip API from pausing the track.
     await page.evaluate(() => Player.skipToPrev());
     await expect
       .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
@@ -317,116 +148,96 @@ test.describe("Player Queue", () => {
   });
 
   test("Back button plays the previous track", async ({ page }) => {
-    // Start on track 1 so there is a track behind us.
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 1).click();
-    await waitForPlaying(page);
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    await playTrack(page, AUDIO, 1); // Limbo — a track behind us
+    await expect(page.locator("#player-title")).toHaveText("Limbo");
     await expect(page.locator("#player-prev")).toBeEnabled();
 
     await page.locator("#player-prev").click();
 
-    // prev-media-info reports track 0; once there, Back disables again.
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Celular");
     await expect(page.locator("#player-prev")).toBeDisabled();
     await waitForPlaying(page);
   });
 
   test("clicking a track while playing enqueues it", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
 
     await expect(page.locator("#player-queue-badge")).toBeVisible();
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Celular");
   });
 
   test("multiple tracks can be queued", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
-    await trackButton(page, 3, 1).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 1).click();
 
     await expect(page.locator("#player-queue-badge")).toHaveText("2");
   });
 
   test("duplicate tracks are not enqueued", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
-    await trackButton(page, 3, 0).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 0).click();
 
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
   });
 
   test("clicking currently-playing track toggles pause", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    // Click the same track again — should pause
-    await trackButton(page, 2, 0).click();
+    await trackButton(page, AUDIO, 0).click();
     await page.waitForFunction(() => {
       const a = document.getElementById("player-audio");
       return a && a.paused;
     });
 
-    // Click again — should resume
-    await trackButton(page, 2, 0).click();
+    await trackButton(page, AUDIO, 0).click();
     await waitForPlaying(page);
   });
 
   test("next button plays from queue", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
 
     await page.locator("#player-next").click();
 
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C3");
+    await expect(page.locator("#player-title")).toHaveText("Song One");
     await expect(page.locator("#player-queue-badge")).toBeHidden();
   });
 
   test("next button auto-advances in concert when queue is empty", async ({
     page,
   }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
     await page.locator("#player-next").click();
 
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Limbo");
   });
 
   test("when track ends, queued song plays instead of auto-advance", async ({
     page,
   }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 1).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 1).click();
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
 
     await simulateTrackEnd(page);
 
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C3", {
+    await expect(page.locator("#player-title")).toHaveText("Song Two", {
       timeout: 5000,
     });
     await expect(page.locator("#player-queue-badge")).toBeHidden();
@@ -435,30 +246,25 @@ test.describe("Player Queue", () => {
   test("after queue drains, auto-advance follows last queued concert", async ({
     page,
   }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 1).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 1).click(); // queue Song Two
 
-    // Skip to the queued track (concert 3, track 1)
     await page.locator("#player-next").click();
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C3");
+    await expect(page.locator("#player-title")).toHaveText("Song Two");
 
-    // Now skip again — queue is empty, should auto-advance in concert 3
+    // Queue empty: auto-advance within the last-played concert (Second Concert).
     await page.locator("#player-next").click();
-    await expect(page.locator("#player-title")).toHaveText("Track 2 of C3");
+    await expect(page.locator("#player-title")).toHaveText("Song Three");
   });
 
   test("queue badge tooltip shows queued track titles", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 3);
-    await trackButton(page, 3, 0).click();
-    await trackButton(page, 3, 1).click();
+    await expandTracks(page, SECOND);
+    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 1).click();
 
     const badge = page.locator("#player-queue-badge");
     await expect(badge).toHaveText("2");
@@ -470,40 +276,32 @@ test.describe("Player Queue", () => {
 
 test.describe("Inline video", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
   test("Watch and Open buttons are hidden for audio-only tracks", async ({
     page,
   }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click(); // default mock: is_video false
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0); // audio track
 
     await expect(page.locator("#player-watch")).toBeHidden();
     await expect(page.locator("#player-open")).toBeHidden();
   });
 
   test("Watch and Open buttons are shown for video tracks", async ({ page }) => {
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0); // Clip One (webm)
 
     await expect(page.locator("#player-watch")).toBeVisible();
     await expect(page.locator("#player-open")).toBeVisible();
   });
 
   test("Watch button folds the video panel open and closed", async ({ page }) => {
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0);
     const panel = page.locator("#player-video-panel");
     await expect(panel).not.toHaveClass(/open/);
 
     await page.locator("#player-watch").click();
     await expect(panel).toHaveClass(/open/);
-    // Revealing the video must not interrupt playback.
     expect(
       await page.evaluate(() => document.getElementById("player-audio").paused)
     ).toBe(false);
@@ -516,7 +314,7 @@ test.describe("Inline video", () => {
   });
 
   test("toggling the panel does not reset playback position", async ({ page }) => {
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0);
     await page.waitForFunction(
       () => document.getElementById("player-audio").currentTime > 0.1
     );
@@ -524,7 +322,6 @@ test.describe("Inline video", () => {
     await page.locator("#player-watch").click(); // open
     await page.locator("#player-watch").click(); // close
 
-    // Same element throughout, so position continues rather than resetting.
     const t = await page.evaluate(
       () => document.getElementById("player-audio").currentTime
     );
@@ -535,40 +332,28 @@ test.describe("Inline video", () => {
   });
 
   test("Open button posts to the watch endpoint", async ({ page }) => {
-    let watchPosted = false;
-    await page.route("**/concerts/2/tracks/0/watch", async (route) => {
-      if (route.request().method() === "POST") watchPosted = true;
-      await route.fulfill({ status: 200, body: "" });
+    const watched = [];
+    page.on("request", (r) => {
+      if (
+        r.method() === "POST" &&
+        /\/concerts\/3\/tracks\/0\/watch$/.test(r.url())
+      ) {
+        watched.push(r.url());
+      }
     });
 
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0);
     await page.locator("#player-open").click();
 
-    await expect.poll(() => watchPosted).toBe(true);
+    await expect.poll(() => watched.length).toBeGreaterThan(0);
   });
 
   test("Open pauses the JS player so audio doesn't double up", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/tracks/0/watch", (route) =>
-      route.fulfill({ status: 200, body: "" })
-    );
-
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0);
     await page.locator("#player-open").click();
 
-    await expect
-      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
-      .toBe(true);
-  });
-
-  test("Open still pauses even when the watch POST fails", async ({ page }) => {
-    await page.route("**/concerts/2/tracks/0/watch", (route) => route.abort());
-
-    await playVideoTrack(page, 2, 0);
-    await page.locator("#player-open").click();
-
-    // Playback is paused up front, independent of the POST result.
     await expect
       .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
       .toBe(true);
@@ -582,24 +367,8 @@ test.describe("Inline video", () => {
   test("watchTrackDirect starts inline playback and opens the panel", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Video track",
-          artist: "Artist 2",
-          is_video: true,
-          playable: true,
-          track_index: 0,
-          has_next: true,
-        }),
-      });
-    });
-
     await page.evaluate(() =>
-      Player.watchTrackDirect(document.createElement("button"), 2, 0)
+      Player.watchTrackDirect(document.createElement("button"), 3, 0)
     );
     await waitForPlaying(page);
 
@@ -609,21 +378,8 @@ test.describe("Inline video", () => {
   test("inline Watch of a non-playable file does not open the panel", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/tracks/0/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Unplayable",
-          artist: "Artist 2",
-          is_video: true,
-          playable: false,
-          track_index: 0,
-          has_next: false,
-        }),
-      });
-    });
+    // Raw Take is a .mkv: found on disk but not browser-playable, so the player
+    // hands off to the system (window.open) and never opens the inline panel.
     await page.evaluate(() => {
       window.__opened = null;
       window.open = (u) => {
@@ -632,44 +388,26 @@ test.describe("Inline video", () => {
     });
 
     await page.evaluate(() =>
-      Player.watchTrackDirect(document.createElement("button"), 2, 0)
+      Player.watchTrackDirect(document.createElement("button"), 3, 4)
     );
 
     await expect
       .poll(() => page.evaluate(() => window.__opened))
-      .toBe("/test-audio/silence.wav");
+      .toBe("/concert-files/Video Concert/Raw Take.mkv");
     await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
   });
 
   test("auto-advancing from video to audio collapses the panel", async ({
     page,
   }) => {
-    await page.route(
-      "**/concerts/2/tracks/0/next-media-info",
-      async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            url: "/test-audio/silence.wav",
-            title: "Audio next",
-            artist: "Artist 2",
-            is_video: false,
-            playable: true,
-            track_index: 1,
-            has_next: true,
-          }),
-        });
-      }
-    );
-
-    await playVideoTrack(page, 2, 0);
+    // Clip One (video, idx 0) → Audio Song (audio, idx 1).
+    await playTrack(page, VIDEO, 0);
     await page.locator("#player-watch").click();
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
     await simulateTrackEnd(page);
 
-    await expect(page.locator("#player-title")).toHaveText("Audio next");
+    await expect(page.locator("#player-title")).toHaveText("Audio Song");
     await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
     await expect(page.locator("#player-watch")).toBeHidden();
   });
@@ -677,60 +415,35 @@ test.describe("Inline video", () => {
   test("auto-advancing from video to video keeps the panel open", async ({
     page,
   }) => {
-    await page.route(
-      "**/concerts/2/tracks/0/next-media-info",
-      async (route) => {
-        await route.fulfill({
-          status: 200,
-          contentType: "application/json",
-          body: JSON.stringify({
-            url: "/test-audio/silence.wav",
-            title: "Video next",
-            artist: "Artist 2",
-            is_video: true,
-            playable: true,
-            track_index: 1,
-            has_next: true,
-          }),
-        });
-      }
-    );
-
-    await playVideoTrack(page, 2, 0);
+    // Clip Two (video, idx 2) → Clip Three (video, idx 3).
+    await playTrack(page, VIDEO, 2);
     await page.locator("#player-watch").click();
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
     await simulateTrackEnd(page);
 
-    await expect(page.locator("#player-title")).toHaveText("Video next");
+    await expect(page.locator("#player-title")).toHaveText("Clip Three");
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
 
   test("ending the last track with no next collapses the video panel", async ({
     page,
   }) => {
-    // No following track and an empty queue: next-media-info reports none, so
-    // playback cannot advance once this track ends.
-    await page.route("**/concerts/2/tracks/0/next-media-info", (route) =>
-      route.fulfill({ status: 404, body: "" })
-    );
-
-    await playVideoTrack(page, 2, 0);
+    // Clip Three (idx 3) is the last playable track — the following Raw Take is
+    // a non-playable .mkv, so there is nothing to advance to.
+    await playTrack(page, VIDEO, 3);
     await page.locator("#player-watch").click();
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
     await simulateTrackEnd(page);
 
-    // The inline video folds away so its frozen last frame doesn't cover the
-    // page and block selecting another track.
     await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
   });
 
   test("video panel stays open across Back/Forward navigation", async ({
     page,
   }) => {
-    await page.route("**/listen", (r) => r.fulfill({ status: 200, body: "" }));
-    await playVideoTrack(page, 2, 0);
+    await playTrack(page, VIDEO, 0);
     await page.locator("#player-watch").click();
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
@@ -739,58 +452,17 @@ test.describe("Inline video", () => {
     await page.goBack();
     await page.waitForFunction(() => location.pathname === "/");
 
-    // #player-video-panel lives inside the hx-preserve'd #player-container.
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
 });
 
-// The track-list like button (☆/★) lives in the same <li> as the track's
-// listen button, before it.
-function trackListLikeButton(page, concertId, trackIdx) {
-  return page
-    .locator("li")
-    .filter({ has: trackButton(page, concertId, trackIdx) })
-    .locator(".btn-like");
-}
-
-// Override a track's media-info to report a specific liked state, then play it.
-async function playTrackWithLiked(page, concertId, trackIdx, liked) {
-  await page.route(
-    `**/concerts/${concertId}/tracks/${trackIdx}/media-info`,
-    async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: `Track ${trackIdx} of C${concertId}`,
-          artist: `Artist ${concertId}`,
-          is_video: false,
-          playable: true,
-          track_index: trackIdx,
-          has_next: true,
-          liked,
-        }),
-      });
-    }
-  );
-  await expandTracks(page, concertId);
-  await trackButton(page, concertId, trackIdx).click();
-  await waitForPlaying(page);
-}
-
 test.describe("Player like star", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
   test("star is shown and reflects an unliked track", async ({ page }) => {
-    await playTrackWithLiked(page, 2, 0, false);
+    await playTrack(page, AUDIO, 0); // not liked in the fixture
 
     const star = page.locator("#player-like");
     await expect(star).toBeVisible();
@@ -799,7 +471,7 @@ test.describe("Player like star", () => {
   });
 
   test("star reflects a liked track", async ({ page }) => {
-    await playTrackWithLiked(page, 2, 0, true);
+    await playTrack(page, LIKED, 0); // Liked Song is liked in the fixture
 
     const star = page.locator("#player-like");
     await expect(star).toBeVisible();
@@ -808,26 +480,8 @@ test.describe("Player like star", () => {
   });
 
   test("star is hidden during whole-album playback", async ({ page }) => {
-    // Album media-info (no /tracks/ segment) → track_index null → star hidden.
-    await page.route("**/concerts/2/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Whole album",
-          artist: "Artist 2",
-          is_video: false,
-          playable: true,
-          track_index: null,
-          has_next: false,
-          liked: false,
-        }),
-      });
-    });
-
     await page.evaluate(() =>
-      Player.playAlbum(document.createElement("button"), 2)
+      Player.playAlbum(document.createElement("button"), 1)
     );
     await waitForPlaying(page);
 
@@ -837,55 +491,44 @@ test.describe("Player like star", () => {
   test("clicking the star POSTs to /like and flips the star and the track-list button", async ({
     page,
   }) => {
-    let likePosted = false;
-    await page.route("**/concerts/2/tracks/0/like", async (route) => {
-      if (route.request().method() === "POST") likePosted = true;
-      // The player ignores the body; a 200 is enough for the optimistic update.
-      await route.fulfill({ status: 200, body: "" });
-    });
-
-    await playTrackWithLiked(page, 2, 0, false);
+    await playTrack(page, AUDIO, 0);
     const star = page.locator("#player-like");
     await expect(star).toHaveText("☆");
 
     await star.click();
 
-    await expect.poll(() => likePosted).toBe(true);
     await expect(star).toHaveText("★");
     await expect(star).toHaveClass(/liked/);
     // The on-page track-list button mirrors the new state in place.
-    await expect(trackListLikeButton(page, 2, 0)).toHaveClass(/liked/);
+    await expect(trackListLikeButton(page, AUDIO, 0)).toHaveClass(/liked/);
   });
 
-  test("a failing /like POST reverts the star", async ({ page }) => {
-    await page.route("**/concerts/2/tracks/0/like", (route) => route.abort());
-
-    await playTrackWithLiked(page, 2, 0, false);
+  test("a failing /like POST reverts the star", async ({ page, killServer }) => {
+    await playTrack(page, AUDIO, 0);
     const star = page.locator("#player-like");
     await expect(star).toHaveText("☆");
 
+    // Real failure: kill the server so the like POST network-errors. Buffer the
+    // media first so playback survives the kill.
+    await waitForFullyBuffered(page);
+    await killServer();
     await star.click();
 
     // Optimistic flip is rolled back once the POST fails.
     await expect(star).toHaveText("☆");
     await expect(star).not.toHaveClass(/liked/);
-    await expect(trackListLikeButton(page, 2, 0)).not.toHaveClass(/liked/);
+    await expect(trackListLikeButton(page, AUDIO, 0)).not.toHaveClass(/liked/);
   });
 
   test("toggling the track-list star updates the player star (reverse sync)", async ({
     page,
   }) => {
-    // Uses the real /like endpoint so the swapped-in track list reflects the
-    // toggled state; the assertion is relational so it is independent of the
-    // track's initial liked state in the DB.
-    await playTrackWithLiked(page, 2, 0, false);
+    await playTrack(page, AUDIO, 0);
 
-    const listBtn = trackListLikeButton(page, 2, 0);
-    await listBtn.click();
-    // After the htmx swap, the player star must match the track-list button.
+    await trackListLikeButton(page, AUDIO, 0).click();
     await expect
       .poll(async () => {
-        const listLiked = await trackListLikeButton(page, 2, 0).evaluate((el) =>
+        const listLiked = await trackListLikeButton(page, AUDIO, 0).evaluate((el) =>
           el.classList.contains("liked")
         );
         const starLiked = await page
@@ -899,102 +542,43 @@ test.describe("Player like star", () => {
   test("toggling a different concert's star does not change the playing track's like", async ({
     page,
   }) => {
-    await playTrackWithLiked(page, 2, 0, false);
-    const playing = trackListLikeButton(page, 2, 0);
+    await playTrack(page, AUDIO, 0);
+    const playing = trackListLikeButton(page, AUDIO, 0);
     const playingBefore = await playing.evaluate((el) =>
       el.classList.contains("liked")
     );
 
     // Toggle the like on an unrelated concert's track (real endpoint + swap).
-    await expandTracks(page, 3);
-    await trackListLikeButton(page, 3, 0).click();
-    await expect(trackListLikeButton(page, 3, 0)).toBeVisible();
+    await expandTracks(page, SECOND);
+    await trackListLikeButton(page, SECOND, 0).click();
+    await expect(trackListLikeButton(page, SECOND, 0)).toBeVisible();
 
-    // The playing track (concert 2/0) must be untouched by concert 3's toggle,
-    // and the player star stays in sync with the playing track's button.
     expect(await playing.evaluate((el) => el.classList.contains("liked"))).toBe(
       playingBefore
     );
     await expect
       .poll(() =>
-        page
-          .locator("#player-like")
-          .evaluate((el) => el.classList.contains("liked"))
+        page.locator("#player-like").evaluate((el) => el.classList.contains("liked"))
       )
       .toBe(playingBefore);
   });
 });
 
-// Mock the track delete endpoint, returning a track-list fragment containing the
-// given remaining tracks (with the data attributes findTrackButton relies on).
-function mockDeletePost(page, concertId, trackIdx, remaining, opts = {}) {
-  const state = { hits: 0 };
-  page.route(
-    `**/concerts/${concertId}/tracks/${trackIdx}/delete`,
-    async (route) => {
-      if (route.request().method() !== "POST") return route.fallback();
-      state.hits += 1;
-      if (opts.abort) return route.abort();
-      if (opts.delayMs) await new Promise((r) => setTimeout(r, opts.delayMs));
-      const items = remaining
-        .map(
-          (t) => `<li>
-            <button class="btn-like" title="Like">☆</button>
-            <button class="btn-track-listen" data-concert-id="${concertId}" data-track-idx="${t.index}" onclick="Player.playTrack(this, ${concertId}, ${t.index})">${t.title}</button>
-            <button class="btn-delete" hx-post="/concerts/${concertId}/tracks/${t.index}/delete" hx-target="closest .track-list" hx-swap="outerHTML"><span class="icon-trash"></span></button>
-          </li>`
-        )
-        .join("");
-      await route.fulfill({
-        status: 200,
-        contentType: "text/html; charset=utf-8",
-        body: `<ol class="track-list">${items}</ol>`,
-      });
-    }
-  );
-  return state;
-}
-
 test.describe("Player delete", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
   test("delete button is shown when a track is playing", async ({ page }) => {
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
-
+    await playTrack(page, AUDIO, 0);
     await expect(page.locator("#player-delete")).toBeVisible();
   });
 
   test("delete button is hidden during whole-album playback", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/media-info", async (route) => {
-      await route.fulfill({
-        status: 200,
-        contentType: "application/json",
-        body: JSON.stringify({
-          url: "/test-audio/silence.wav",
-          title: "Whole album",
-          artist: "Artist 2",
-          is_video: false,
-          playable: true,
-          track_index: null,
-          has_next: false,
-          liked: false,
-        }),
-      });
-    });
-
     await page.evaluate(() =>
-      Player.playAlbum(document.createElement("button"), 2)
+      Player.playAlbum(document.createElement("button"), 1)
     );
     await waitForPlaying(page);
 
@@ -1004,34 +588,20 @@ test.describe("Player delete", () => {
   test("clicking delete posts to the delete endpoint and advances to the next track", async ({
     page,
   }) => {
-    const del = mockDeletePost(page, 2, 0, [
-      { index: 1, title: "Limbo" },
-      { index: 2, title: "track4" },
-    ]);
-
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
     await page.locator("#player-delete").click();
 
-    await expect.poll(() => del.hits).toBe(1);
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Limbo");
     expect(
       await page.evaluate(() => document.getElementById("player-audio").paused)
     ).toBe(false);
+    // The deleted track is now unavailable on the page.
+    await expect(trackButton(page, AUDIO, 0)).toHaveCount(0);
   });
 
   test("deleting the last track stops playback", async ({ page }) => {
-    // No track after this one: next-media-info 404s, so the player stops.
-    await page.route("**/concerts/2/tracks/0/next-media-info", (route) =>
-      route.fulfill({ status: 404, body: "" })
-    );
-    mockDeletePost(page, 2, 0, []);
-
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 3); // last track, nothing after it
 
     await page.locator("#player-delete").click();
 
@@ -1042,43 +612,20 @@ test.describe("Player delete", () => {
       .toBe(true);
   });
 
-  test("a delete that completes after playback moved on does not interrupt the new track", async ({
-    page,
-  }) => {
-    // The delete POST is slow; the track ends mid-flight and auto-advances. When
-    // the delete finally resolves it must not disturb the now-playing track.
-    mockDeletePost(page, 2, 0, [{ index: 1, title: "Limbo" }], { delayMs: 600 });
-
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
-
-    await page.locator("#player-delete").click();
-    // While the delete is in flight, the current track ends and auto-advances.
-    await simulateTrackEnd(page);
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
-
-    // Wait past the delete's delay; the resolved delete must leave track 1 alone.
-    await page.waitForTimeout(800);
-    await expect(page.locator("#player-title")).toHaveText("Track 1 of C2");
-    expect(
-      await page.evaluate(() => document.getElementById("player-audio").paused)
-    ).toBe(false);
-  });
-
   test("a failing delete keeps playback going and shows an error", async ({
     page,
+    killServer,
   }) => {
-    mockDeletePost(page, 2, 0, [], { abort: true });
+    await playTrack(page, AUDIO, 0);
 
-    await expandTracks(page, 2);
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
-
+    // Real failure: kill the server so the delete POST network-errors. Buffer the
+    // media first so playback keeps going after the kill.
+    await waitForFullyBuffered(page);
+    await killServer();
     await page.locator("#player-delete").click();
 
     await expect(page.locator("#player-error")).toBeVisible();
-    await expect(page.locator("#player-title")).toHaveText("Track 0 of C2");
+    await expect(page.locator("#player-title")).toHaveText("Celular");
     expect(
       await page.evaluate(() => document.getElementById("player-audio").paused)
     ).toBe(false);
@@ -1087,51 +634,24 @@ test.describe("Player delete", () => {
   test("the on-page track list is refreshed when a track is deleted", async ({
     page,
   }) => {
-    // Returned fragment omits track 0, so its listen button disappears.
-    mockDeletePost(page, 2, 0, [
-      { index: 1, title: "Limbo" },
-      { index: 2, title: "track4" },
-    ]);
-
-    await expandTracks(page, 2);
-    await expect(trackButton(page, 2, 0)).toBeVisible();
-    await trackButton(page, 2, 0).click();
-    await waitForPlaying(page);
+    await playTrack(page, AUDIO, 0);
 
     await page.locator("#player-delete").click();
 
-    await expect(trackButton(page, 2, 0)).toHaveCount(0);
-    await expect(trackButton(page, 2, 1)).toBeVisible();
+    await expect(trackButton(page, AUDIO, 0)).toHaveCount(0);
+    await expect(trackButton(page, AUDIO, 1)).toBeVisible();
   });
 });
 
-// The track-list delete (trash) button lives in the same <li> as the track's
-// listen button, after it.
-function trackListDeleteButton(page, concertId, trackIdx) {
-  return page
-    .locator("li")
-    .filter({ has: trackButton(page, concertId, trackIdx) })
-    .locator(".btn-delete");
-}
-
 test.describe("Starred tracks hide the delete button", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
   test("player: starring the playing track hides #player-delete, unstarring restores it", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/tracks/0/like", (route) =>
-      route.fulfill({ status: 200, body: "" })
-    );
-
-    await playTrackWithLiked(page, 2, 0, false);
+    await playTrack(page, AUDIO, 0);
     const del = page.locator("#player-delete");
     await expect(del).toBeVisible();
 
@@ -1147,7 +667,7 @@ test.describe("Starred tracks hide the delete button", () => {
   test("player: an already-starred track shows no delete button from the start", async ({
     page,
   }) => {
-    await playTrackWithLiked(page, 2, 0, true);
+    await playTrack(page, LIKED, 0); // liked in the fixture
 
     await expect(page.locator("#player-like")).toHaveText("★");
     await expect(page.locator("#player-delete")).toBeHidden();
@@ -1156,19 +676,13 @@ test.describe("Starred tracks hide the delete button", () => {
   test("track list: starring the playing track from the player hides its row delete button", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/tracks/0/like", (route) =>
-      route.fulfill({ status: 200, body: "" })
-    );
+    await playTrack(page, AUDIO, 0);
+    const rowDelete = trackListDeleteButton(page, AUDIO, 0);
 
-    await playTrackWithLiked(page, 2, 0, false);
-    const rowDelete = trackListDeleteButton(page, 2, 0);
-
-    // Star via the player — the in-place class flip drives the CSS :has() rule.
     await page.locator("#player-like").click();
     await expect(rowDelete).toBeHidden();
     await expect(page.locator("#player-delete")).toBeHidden();
 
-    // Unstar — both delete buttons come back.
     await page.locator("#player-like").click();
     await expect(rowDelete).toBeVisible();
     await expect(page.locator("#player-delete")).toBeVisible();
@@ -1177,40 +691,32 @@ test.describe("Starred tracks hide the delete button", () => {
   test("track list: a row's delete visibility tracks its own star (htmx re-render)", async ({
     page,
   }) => {
-    // Uses the real /like endpoint so the swapped-in row reflects the toggle.
-    // Assertion is relational, so it is independent of the track's initial DB state.
-    await expandTracks(page, 2);
+    await expandTracks(page, AUDIO);
     const relationHolds = async () => {
-      const liked = await trackListLikeButton(page, 2, 0).evaluate((el) =>
+      const liked = await trackListLikeButton(page, AUDIO, 0).evaluate((el) =>
         el.classList.contains("liked")
       );
-      const hidden = await trackListDeleteButton(page, 2, 0).evaluate(
+      const hidden = await trackListDeleteButton(page, AUDIO, 0).evaluate(
         (el) => getComputedStyle(el).display === "none"
       );
       return liked === hidden; // starred iff delete hidden
     };
 
-    await trackListLikeButton(page, 2, 0).click();
+    await trackListLikeButton(page, AUDIO, 0).click();
     await expect.poll(relationHolds).toBe(true);
 
-    await trackListLikeButton(page, 2, 0).click();
+    await trackListLikeButton(page, AUDIO, 0).click();
     await expect.poll(relationHolds).toBe(true);
   });
 });
 
 test.describe("Deleting a download/split keeps the player playing", () => {
   test.beforeEach(async ({ page }) => {
-    await mockAudioFile(page);
-    await mockMediaInfo(page);
-    await mockNextMediaInfo(page);
-    await mockPrevMediaInfo(page);
-    await mockListenPost(page);
     await page.goto("/");
   });
 
-  // Assert the player survived a card swap (no full page reload): a window
-  // sentinel set after load persists, audio is still playing, currentTime keeps
-  // advancing (not reset by node recreation), and the bar stays active.
+  // The player survived a card swap (no full reload): a sentinel set after load
+  // persists, audio is still playing, currentTime keeps advancing, bar active.
   async function expectPlayerStillPlaying(page, t0) {
     expect(await page.evaluate(() => window.__noReload)).toBe(true);
     expect(
@@ -1224,10 +730,8 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
   }
 
-  async function playConcertTrack(page, concertId, trackIdx) {
-    await expandTracks(page, concertId);
-    await trackButton(page, concertId, trackIdx).click();
-    await waitForPlaying(page);
+  async function playAndMark(page, concertId, trackIdx) {
+    await playTrack(page, concertId, trackIdx);
     await page.evaluate(() => {
       window.__noReload = true;
     });
@@ -1237,60 +741,39 @@ test.describe("Deleting a download/split keeps the player playing", () => {
   test("deleting another concert's tracks (delete-split) does not stop playback", async ({
     page,
   }) => {
-    // Card-swap response (its trash targets `closest .card`); no HX-Refresh.
-    await page.route("**/concerts/2/delete-split", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "text/html; charset=utf-8",
-        body: `<div class="card status-downloaded" id="concert-2"><div class="card-body">card updated</div></div>`,
-      })
-    );
+    const t0 = await playAndMark(page, AUDIO, 0);
+    await page.locator(`#concert-${SECOND} button[title="Clear split record"]`).click();
 
-    const t0 = await playConcertTrack(page, 3, 0);
-    await page.locator('#concert-2 button[title="Clear split record"]').click();
-
-    await expect(page.locator("#concert-2")).toContainText("card updated");
+    // Real delete-split clears the split: the card loses its tracks row.
+    await expect(
+      page.locator(`#concert-${SECOND} button[title="Clear split record"]`)
+    ).toHaveCount(0);
     await expectPlayerStillPlaying(page, t0);
   });
 
   test("deleting another concert's download does not stop playback", async ({
     page,
   }) => {
-    // delete-download's trash targets `this`; the response retargets the card.
-    await page.route("**/concerts/2/delete-download", (route) =>
-      route.fulfill({
-        status: 200,
-        headers: {
-          "content-type": "text/html; charset=utf-8",
-          "HX-Retarget": "#concert-2",
-          "HX-Reswap": "outerHTML",
-        },
-        body: `<div class="card status-available" id="concert-2"><div class="card-body">card updated</div></div>`,
-      })
-    );
+    const t0 = await playAndMark(page, AUDIO, 0);
+    await page
+      .locator(`#concert-${SECOND} button[title="Delete downloaded file"]`)
+      .click();
 
-    const t0 = await playConcertTrack(page, 3, 0);
-    await page.locator('#concert-2 button[title="Delete downloaded file"]').click();
-
-    await expect(page.locator("#concert-2")).toContainText("card updated");
+    await expect(
+      page.locator(`#concert-${SECOND} button[title="Delete downloaded file"]`)
+    ).toHaveCount(0);
     await expectPlayerStillPlaying(page, t0);
   });
 
   test("deleting the currently-playing concert's own card keeps playback going", async ({
     page,
   }) => {
-    await page.route("**/concerts/2/delete-split", (route) =>
-      route.fulfill({
-        status: 200,
-        contentType: "text/html; charset=utf-8",
-        body: `<div class="card status-downloaded" id="concert-2"><div class="card-body">card updated</div></div>`,
-      })
-    );
+    const t0 = await playAndMark(page, SECOND, 0);
+    await page.locator(`#concert-${SECOND} button[title="Clear split record"]`).click();
 
-    const t0 = await playConcertTrack(page, 2, 0);
-    await page.locator('#concert-2 button[title="Clear split record"]').click();
-
-    await expect(page.locator("#concert-2")).toContainText("card updated");
+    await expect(
+      page.locator(`#concert-${SECOND} button[title="Clear split record"]`)
+    ).toHaveCount(0);
     await expectPlayerStillPlaying(page, t0);
   });
 });

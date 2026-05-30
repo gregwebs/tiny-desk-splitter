@@ -17,6 +17,8 @@ struct Cli {
     #[arg(long, default_value = ".")]
     workdir: PathBuf,
 
+    /// Port to listen on. Use 0 for an ephemeral port (the chosen port is
+    /// printed once the listener is bound).
     #[arg(long, default_value = "3000")]
     port: u16,
 
@@ -24,6 +26,12 @@ struct Cli {
     /// running executable, falling back to a PATH lookup of `live-set-splitter`.
     #[arg(long)]
     splitter_bin: Option<PathBuf>,
+
+    /// Program used to open a media file in the system player (the watch/Open
+    /// buttons). Defaults to `open` (macOS). Override (e.g. `true`) to make it a
+    /// no-op, mainly for tests.
+    #[arg(long, default_value = "open")]
+    open_cmd: String,
 }
 
 #[tokio::main]
@@ -88,14 +96,16 @@ async fn main() -> Result<()> {
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::production(cli.workdir, splitter_bin),
+        jobs: JobConfig::production(cli.workdir, splitter_bin, cli.open_cmd),
     };
 
     let app = router(state.clone());
     let addr = SocketAddr::from(([127, 0, 0, 1], cli.port));
-    println!("Listening on http://{}", addr);
-
     let listener = tokio::net::TcpListener::bind(addr).await?;
+    // Print the *bound* address so callers learn the real port when `--port 0`
+    // was used (ephemeral). Tests parse this line to find the server.
+    let bound = listener.local_addr()?;
+    println!("Listening on http://{}", bound);
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());
 
     // Streaming media connections (the JS player reads from /concert-files)

@@ -1,4 +1,4 @@
-const { test, expect } = require("@playwright/test");
+const { test, expect } = require("./fixtures");
 
 // The listing uses the small, always-local thumbnail (served from /thumbnails);
 // the detail-page card uses the full-size preview (served from /concert-files).

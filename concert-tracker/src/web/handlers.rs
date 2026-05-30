@@ -1086,11 +1086,8 @@ pub async fn watch(
         let conn = state.db.lock().unwrap();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, None);
     }
-    match tokio::process::Command::new("open")
-        .arg(&path)
-        .status()
-        .await
-    {
+    let mut cmd = (state.jobs.open_cmd)(&path);
+    match cmd.status().await {
         Ok(s) if s.success() => Ok(StatusCode::OK),
         Ok(s) => {
             tracing::warn!("watch: `open` exited {:?} for concert {}", s.code(), id);
@@ -1129,11 +1126,8 @@ pub async fn watch_track(
         let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, Some(&json));
     }
-    match tokio::process::Command::new("open")
-        .arg(&path)
-        .status()
-        .await
-    {
+    let mut cmd = (state.jobs.open_cmd)(&path);
+    match cmd.status().await {
         Ok(s) if s.success() => Ok(StatusCode::OK),
         Ok(s) => {
             tracing::warn!(

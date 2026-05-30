@@ -18,11 +18,7 @@ fn test_state(conn: rusqlite::Connection) -> AppState {
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(PathBuf::from("/tmp")),
     }
 }
 
@@ -267,11 +263,7 @@ async fn detail_page_auto_scrape_failure_still_renders() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(PathBuf::from("/tmp")),
     };
     let app = router(state);
 
@@ -308,11 +300,7 @@ fn state_with_workdir(conn: rusqlite::Connection, workdir: PathBuf) -> AppState 
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: workdir,
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(workdir),
     }
 }
 
@@ -358,11 +346,7 @@ async fn delete_download_removes_file_and_clears_state() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
 
@@ -442,11 +426,7 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
 
@@ -689,11 +669,7 @@ async fn delete_download_force_clears_state_when_file_missing() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
 
@@ -741,11 +717,7 @@ async fn delete_split_clears_state() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(PathBuf::from("/tmp")),
     };
     let app = router(state);
 
@@ -870,11 +842,7 @@ async fn ignore_deletes_preview_image() {
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-        },
+        jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
 
@@ -1186,6 +1154,86 @@ async fn watch_returns_500_when_downloaded_but_file_missing() {
     let conn = db::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/no-file", "Missing File Album");
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/watch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+/// Build an AppState whose opener runs `program` (e.g. "true"/"false") instead
+/// of the real `open`, so watch tests never launch a media player.
+fn state_with_opener(
+    conn: rusqlite::Connection,
+    workdir: PathBuf,
+    program: &'static str,
+) -> AppState {
+    let mut jobs = JobConfig::test(workdir);
+    jobs.open_cmd = Arc::new(move |path| {
+        let mut c = Command::new(program);
+        c.arg(path);
+        c
+    });
+    AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        jobs,
+    }
+}
+
+#[tokio::test]
+async fn watch_uses_injected_opener_and_succeeds() {
+    // The injected opener (`true`) is invoked instead of the real `open`, so the
+    // handler returns 200 without launching a media player.
+    let workdir = tempfile::tempdir().unwrap();
+    let conn = db::open_in_memory().unwrap();
+    seed_downloaded(&conn, "https://npr.org/d/open-ok", "Opener Album");
+    let cd = concert_dir(workdir.path(), "Opener Album");
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join("Opener Album.mp4"), b"fake mp4 bytes").unwrap();
+    let app = router(state_with_opener(
+        conn,
+        workdir.path().to_path_buf(),
+        "true",
+    ));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/watch")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn watch_returns_500_when_opener_fails() {
+    // A failing opener (`false`, exit 1) escalates to 500 even though the file
+    // exists — proving the handler runs the injected command and checks status.
+    let workdir = tempfile::tempdir().unwrap();
+    let conn = db::open_in_memory().unwrap();
+    seed_downloaded(&conn, "https://npr.org/d/open-fail", "Opener Fail Album");
+    let cd = concert_dir(workdir.path(), "Opener Fail Album");
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join("Opener Fail Album.mp4"), b"fake mp4 bytes").unwrap();
+    let app = router(state_with_opener(
+        conn,
+        workdir.path().to_path_buf(),
+        "false",
+    ));
 
     let resp = app
         .oneshot(
