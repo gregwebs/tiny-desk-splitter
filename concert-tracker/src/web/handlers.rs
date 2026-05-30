@@ -89,9 +89,10 @@ struct RowTemplate {
     archive_status: String,
     archive_status_label: String,
     is_in_progress: bool,
-    /// Browser URL for the concert's preview thumbnail, or `None` when metadata
-    /// hasn't been scraped (or the concert has no album).
-    preview_url: Option<String>,
+    /// Browser URL for the card's `card-thumb` image, or `None` when metadata
+    /// hasn't been scraped (or the concert has no album). Listing cards use the
+    /// small thumbnail; the detail-page card uses the full-size preview.
+    card_image_url: Option<String>,
 }
 
 #[derive(Template)]
@@ -104,7 +105,6 @@ struct DetailTemplate {
     concert: Concert,
     card_html: String,
     notes_value: String,
-    preview_url: Option<String>,
     tracks: Vec<TrackInfo>,
     events: Vec<crate::events::EventRow>,
 }
@@ -301,7 +301,24 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
+/// Render a listing card for `c`, using the small listing thumbnail as the
+/// card image.
 fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
+    render_row_inner(c, has_archive_location, c.thumbnail_url_from_db())
+}
+
+/// Render the concert card shown at the top of the detail page. Same card
+/// markup as the listing, but the card image is the full-size preview rather
+/// than the thumbnail (the detail page no longer shows a separate full image).
+fn render_detail_card(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
+    render_row_inner(c, has_archive_location, c.preview_image_url_from_db())
+}
+
+fn render_row_inner(
+    c: &Concert,
+    has_archive_location: bool,
+    card_image_url: Option<String>,
+) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
     let archive_s = c.archive_status();
@@ -368,7 +385,7 @@ fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama:
         archive_status: archive_s.slug().to_string(),
         archive_status_label: archive_s.label().to_string(),
         is_in_progress,
-        preview_url: c.preview_image_url_from_db(),
+        card_image_url,
     }
     .render()
 }
@@ -489,10 +506,9 @@ pub async fn detail(
     };
 
     let has_al = has_archive_location(&state);
-    let card_html =
-        render_row(&concert, has_al).map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let card_html = render_detail_card(&concert, has_al)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
-    let preview_url = concert.preview_image_url_from_db();
     let mut tracks = crate::model::list_all_tracks_from_db(
         &concert.set_list,
         &concert.tracks_present,
@@ -512,7 +528,6 @@ pub async fn detail(
         id: concert.id,
         card_html,
         notes_value,
-        preview_url,
         tracks,
         events,
         concert,
@@ -530,20 +545,26 @@ pub async fn ignore(
     };
     if concert.ignored {
         if let Some(album) = concert.album.as_deref() {
-            let preview = concert_dir(&state.jobs.working_dir, album).join("preview.jpg");
-            if let Err(e) = std::fs::remove_file(&preview) {
-                if e.kind() != std::io::ErrorKind::NotFound {
-                    tracing::warn!(
-                        "failed to delete preview image {}: {}",
-                        preview.display(),
-                        e
-                    );
-                }
-            }
+            remove_file_if_present(
+                &concert_dir(&state.jobs.working_dir, album).join("preview.jpg"),
+            );
+            remove_file_if_present(&crate::scrape::thumbnail_path(
+                &state.jobs.working_dir,
+                album,
+            ));
         }
     }
     render_row(&concert, has_archive_location(&state))
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+/// Delete `path`, ignoring a missing file but warning on any other error.
+fn remove_file_if_present(path: &std::path::Path) {
+    if let Err(e) = std::fs::remove_file(path) {
+        if e.kind() != std::io::ErrorKind::NotFound {
+            tracing::warn!("failed to delete {}: {}", path.display(), e);
+        }
+    }
 }
 
 pub async fn want(
@@ -750,7 +771,10 @@ pub async fn delete_download(
     // the whole card by id.
     let body = render_card(&state, id)?;
     let mut headers = HeaderMap::new();
-    headers.insert("content-type", HeaderValue::from_static("text/html; charset=utf-8"));
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
     headers.insert(
         "HX-Retarget",
         HeaderValue::from_str(&format!("#concert-{id}"))
@@ -788,11 +812,7 @@ pub async fn delete_split(
     // Swap just this card in place (its trash button targets `closest .card`)
     // rather than HX-Refresh, so the persistent JS player keeps playing.
     let body = render_card(&state, id)?;
-    Ok((
-        [("content-type", "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response())
+    Ok(([("content-type", "text/html; charset=utf-8")], body).into_response())
 }
 
 pub async fn listen(
@@ -954,10 +974,8 @@ pub async fn track_media_info(
     let ext = filename.rsplit('.').next().unwrap_or("");
     let sanitized_album = crate::model::sanitize_album(album);
     let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-    let has_next =
-        find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
-    let has_prev =
-        find_prev_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
+    let has_next = find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
+    let has_prev = find_prev_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
     let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
 
     Ok(Json(MediaInfo {
@@ -1490,7 +1508,9 @@ pub async fn settings_page(
     };
     let saved = params.get("saved").map(|v| v == "1").unwrap_or(false);
     Ok(SettingsTemplate {
-        chrome: Chrome { theme: settings.theme },
+        chrome: Chrome {
+            theme: settings.theme,
+        },
         archive_location: settings.archive_location.unwrap_or_default(),
         saved,
     })
@@ -1692,11 +1712,20 @@ mod tests {
         .unwrap();
         let concert = db::get_concert(&conn, id).unwrap();
 
+        // Listing card uses the small thumbnail.
         let html = render_row(&concert, false).unwrap();
         assert!(html.contains("class=\"card-thumb\""), "html: {html}");
+        assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
+
+        // Detail-page card uses the full-size preview image instead.
+        let detail_html = render_detail_card(&concert, false).unwrap();
         assert!(
-            html.contains("/concert-files/Some Album/preview.jpg"),
-            "html: {html}"
+            detail_html.contains("class=\"card-thumb\""),
+            "html: {detail_html}"
+        );
+        assert!(
+            detail_html.contains("/concert-files/Some Album/preview.jpg"),
+            "html: {detail_html}"
         );
     }
 

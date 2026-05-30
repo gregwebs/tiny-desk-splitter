@@ -28,6 +28,7 @@ serde_json = "1"
 chrono = "0.4"
 tiny-desk-scraper = { path = "../scraper" }
 which = "7"
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }

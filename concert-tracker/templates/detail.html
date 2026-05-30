@@ -8,10 +8,6 @@
         hx-on::after-request="this.textContent='Re-scrape'"
         style="margin: 0.5rem 0;">Re-scrape</button>
 
-{% if let Some(url) = preview_url.as_ref() %}
-<img class="preview-image" src="{{ url }}" alt="{{ concert.title }} preview" onerror="this.style.display='none'">
-{% endif %}
-
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 
 {% for para in concert.description_paragraphs() %}<p>{{ para }}</p>{% endfor %}

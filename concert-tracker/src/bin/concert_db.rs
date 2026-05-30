@@ -6,7 +6,7 @@ use concert_tracker::db;
 use concert_tracker::import::import_dir;
 use concert_tracker::model::{sanitize_album, Concert};
 use concert_tracker::scan::scan;
-use concert_tracker::scrape::scrape_url;
+use concert_tracker::scrape::{ensure_thumbnail, scrape_url, ThumbOutcome};
 use concert_tracker::sync::{sync_months, YearMonth};
 
 #[derive(Parser)]
@@ -57,6 +57,8 @@ enum Command {
     InitFromFiles { dir: PathBuf },
     /// Backfill missing teasers by re-scraping concert pages for og:description
     BackfillTeasers,
+    /// Backfill listing thumbnails from existing preview images on disk
+    BackfillThumbnails,
     /// Update concert JSON files on disk to include teasers from the database
     UpdateJsonTeasers,
     /// Backfill the events table from existing concert data
@@ -201,6 +203,42 @@ fn main() -> Result<()> {
                 }
             }
             println!("Backfilled {} teasers ({} failed/missing)", success, failed);
+        }
+
+        Command::BackfillThumbnails => {
+            let concerts = db::list_concerts(&conn)?;
+            let mut created = 0;
+            let mut present = 0;
+            let mut failed = 0;
+            for c in &concerts {
+                if c.metadata_scraped_at.is_none() {
+                    continue;
+                }
+                let Some(album) = c.album.as_deref() else {
+                    continue;
+                };
+                // Disk-only (no network): derive the thumbnail from the existing
+                // preview.jpg. Already-thumbnailed concerts short-circuit before
+                // touching the preview path, so an offline archive is a no-op.
+                match ensure_thumbnail(&cli.workdir, album, None) {
+                    Ok(ThumbOutcome::Created) => {
+                        println!("  [{}] {} — thumbnail created", c.id, c.title);
+                        created += 1;
+                    }
+                    Ok(ThumbOutcome::AlreadyPresent) => present += 1,
+                    Ok(ThumbOutcome::SourceMissing) => {
+                        eprintln!("  [{}] {} — no preview image on disk", c.id, c.title);
+                        failed += 1;
+                    }
+                    Err(e) => {
+                        eprintln!("  [{}] {} — error: {}", c.id, c.title, e);
+                        failed += 1;
+                    }
+                }
+            }
+            println!(
+                "Backfilled {created} thumbnails ({present} already present, {failed} missing/failed)"
+            );
         }
 
         Command::BackfillEvents => {

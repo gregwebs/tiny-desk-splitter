@@ -1131,7 +1131,10 @@ pub mod tests {
         mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         let before = get_concert(&conn, id).unwrap();
-        assert_eq!(DownloadStatus::from_concert(&before), DownloadStatus::Downloaded);
+        assert_eq!(
+            DownloadStatus::from_concert(&before),
+            DownloadStatus::Downloaded
+        );
 
         clear_download_state(&conn, id).unwrap();
 
@@ -1151,7 +1154,13 @@ pub mod tests {
         // An error, then (pre-fix) a delete recorded later that left the error.
         try_mark_download_started(&conn, id).unwrap();
         mark_download_failed(&conn, id, "earlier 403").unwrap();
-        record(&conn, id, Event::DownloadDelete, "2999-01-01T00:00:00Z", None);
+        record(
+            &conn,
+            id,
+            Event::DownloadDelete,
+            "2999-01-01T00:00:00Z",
+            None,
+        );
         assert!(!get_concert(&conn, id).unwrap().download_errors.is_empty());
 
         let n = clear_stale_download_errors(&conn).unwrap();
@@ -1168,7 +1177,13 @@ pub mod tests {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         // An old delete, then a more recent error → the error is current.
-        record(&conn, id, Event::DownloadDelete, "2000-01-01T00:00:00Z", None);
+        record(
+            &conn,
+            id,
+            Event::DownloadDelete,
+            "2000-01-01T00:00:00Z",
+            None,
+        );
         try_mark_download_started(&conn, id).unwrap();
         mark_download_failed(&conn, id, "recent error").unwrap();
 

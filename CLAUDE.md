@@ -23,12 +23,15 @@ See README.md for an overview of the project
     * Have engineering-lead review any new features or non-trivial bug fixes
   * get approval before implementing
 - Changing dada
-  * When making database changes, first create a backup of the existing database
+  * When updating database data, first create a backup of the existing database
 - Coding
   * When deviating from the plan, ask for approval
   * Write tests before writing code and run tests frequently
   * Check the code using `cargo check` as frequently as possible
   * Update documentation
+- Code review
+  * Have engineeering-lead do a code review before verification
+    * Do a follow up review of the changes made during verification
 - Verification
   * verify manually that the changes work as expected in the application
   * start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information

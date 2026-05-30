@@ -21,6 +21,7 @@ pub struct AppState {
 
 pub fn router(state: AppState) -> Router {
     let concerts_dir = state.jobs.working_dir.join("concerts");
+    let thumbnails_dir = state.jobs.working_dir.join("thumbnails");
     Router::new()
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
@@ -78,6 +79,7 @@ pub fn router(state: AppState) -> Router {
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .route("/static/player.js", get(handlers::player_js))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
+        .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
 }

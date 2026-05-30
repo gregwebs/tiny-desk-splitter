@@ -44,7 +44,9 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 #### Concert list
 
 - **Card grid** of all concerts, grouped by month with divider headers
-- **Per-card thumbnail**: small preview image beside the title (once metadata is scraped)
+- **Per-card thumbnail**: small resized preview image (once metadata is scraped), served from
+  the always-local `workdir/thumbnails/` dir so listing images keep working even after a
+  concert is archived to a NAS (the full preview moves with the concert; the thumbnail stays)
 - **Filter chips**: Wanted / Available / Ignored / Downloaded / Tracks
 - **Per-card status badges** with color-coded left borders (blue = wanted, green = split, cyan = downloaded, purple = archived)
 - **Per-card actions**: Want, Ignore, Download, Split, Archive, Delete download/split
@@ -55,7 +57,8 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 
 - **Auto-scrape**: automatically fetches full metadata (artist, description, set list, musicians, preview image) on first view
 - **Re-scrape** button to refresh metadata from NPR
-- **Preview image** display
+- **Preview image** display: the full-size preview is shown in the concert card (the listing
+  uses the smaller thumbnail instead)
 - **Track list** with per-track playback, watch, like (★), and delete buttons
 - **Set list** display for concerts that haven't been split yet
 - **Musicians** listing with instruments
@@ -120,6 +123,9 @@ concert-db list --filter wanted
 concert-db ignore <ID>
 concert-db want <ID>
 
+# Backfill listing thumbnails from existing preview images on disk
+concert-db backfill-thumbnails
+
 # Clear stale in-progress flags after an unclean shutdown
 concert-db reset-in-progress
 
@@ -182,6 +188,6 @@ cargo build --release
 
 ```sh
 cargo test                    # all crates
-cargo test -p concert-tracker # just the tracker (53 tests)
+cargo test -p concert-tracker # just the tracker
 cargo test -p tiny-desk-scraper
 ```

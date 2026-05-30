@@ -404,7 +404,10 @@ async fn delete_download_removes_file_and_clears_state() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("id=\"concert-1\""), "body is the re-rendered card");
+    assert!(
+        html.contains("id=\"concert-1\""),
+        "body is the re-rendered card"
+    );
     assert!(
         html.contains("/concerts/1/download\""),
         "Download button must reappear after the download is cleared"
@@ -766,7 +769,10 @@ async fn delete_split_clears_state() {
         .await
         .unwrap();
     let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("id=\"concert-1\""), "body is the re-rendered card");
+    assert!(
+        html.contains("id=\"concert-1\""),
+        "body is the re-rendered card"
+    );
     assert!(
         html.contains("/concerts/1/split\""),
         "Split button must reappear after split state is cleared"

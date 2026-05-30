@@ -1,5 +1,5 @@
 <div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
-  {% if let Some(url) = preview_url.as_ref() %}
+  {% if let Some(url) = card_image_url.as_ref() %}
   <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
        onerror="this.style.display='none'">
   {% endif %}

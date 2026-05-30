@@ -386,6 +386,18 @@ impl Concert {
         tracing::debug!(album, "preview_image_url_from_db");
         Some(format!("/concert-files/{}/preview.jpg", sanitized))
     }
+
+    /// Browser URL for this concert's listing thumbnail, served from the
+    /// always-local `thumbnails/` dir via the `/thumbnails` ServeDir mount.
+    /// Like [`Self::preview_image_url_from_db`], returns a URL once metadata has
+    /// been scraped (which generates the thumbnail); the browser handles a 404
+    /// if the file is missing.
+    pub fn thumbnail_url_from_db(&self) -> Option<String> {
+        self.metadata_scraped_at.as_ref()?;
+        let album = self.album.as_deref()?;
+        let sanitized = sanitize_album(album);
+        Some(format!("/thumbnails/{}.jpg", sanitized))
+    }
 }
 
 pub fn list_all_tracks_from_db(
@@ -824,6 +836,28 @@ mod tests {
             c.preview_image_url_from_db().as_deref(),
             Some("/concert-files/Some Concert/preview.jpg")
         );
+    }
+
+    #[test]
+    fn thumbnail_url_from_db_returns_url_when_scraped() {
+        let mut c = bare_concert();
+        c.album = Some("Some: Concert".to_string());
+        c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert_eq!(
+            c.thumbnail_url_from_db().as_deref(),
+            Some("/thumbnails/Some Concert.jpg")
+        );
+    }
+
+    #[test]
+    fn thumbnail_url_from_db_returns_none_when_not_scraped_or_no_album() {
+        let mut c = bare_concert();
+        c.album = Some("Foo Album".to_string());
+        assert!(c.thumbnail_url_from_db().is_none());
+
+        let mut c = bare_concert();
+        c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
+        assert!(c.thumbnail_url_from_db().is_none());
     }
 
     #[test]

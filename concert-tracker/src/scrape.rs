@@ -1,4 +1,6 @@
 use anyhow::{Context, Result};
+use image::codecs::jpeg::JpegEncoder;
+use image::imageops::FilterType;
 use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -7,10 +9,30 @@ use tiny_desk_scraper::{
 };
 
 use crate::db::{self, MetadataUpdate, NewListing};
-use crate::model::{concert_dir, Musician};
+use crate::model::{concert_dir, sanitize_album, Musician};
 
-/// Fetch a concert URL, parse metadata, upsert into the database, and save
-/// the preview thumbnail into the concert's directory. Thumbnail download is
+/// Maximum width (px) of a generated listing thumbnail. The source preview is
+/// resized down to this width preserving aspect ratio; smaller sources are left
+/// as-is (no upscaling).
+const THUMBNAIL_MAX_WIDTH: u32 = 480;
+/// JPEG quality (0-100) used when encoding thumbnails.
+const THUMBNAIL_JPEG_QUALITY: u8 = 80;
+
+/// Outcome of [`ensure_thumbnail`], so callers (scrape + backfill CLI) can log
+/// or tally without re-deriving the state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbOutcome {
+    /// A thumbnail was generated and written.
+    Created,
+    /// A thumbnail already existed; nothing was done.
+    AlreadyPresent,
+    /// No source image was available (preview missing on disk and no URL to
+    /// fetch from), so no thumbnail could be made.
+    SourceMissing,
+}
+
+/// Fetch a concert URL, parse metadata, upsert into the database, and ensure
+/// the preview image and its listing thumbnail are saved. Image work is
 /// best-effort: failures are logged but do not fail the overall scrape.
 pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()> {
     let html = fetch_html(url)?;
@@ -18,36 +40,98 @@ pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()
     save_concert_info(&info)?;
     apply_concert_info(conn, &info)?;
 
-    if let Some(image_url) = info.preview_image_url.as_deref() {
-        let dest = preview_image_path(working_dir, &info.album);
-        if dest.exists() {
-            tracing::debug!("preview image already exists, skipping: {}", dest.display());
-        } else if let Err(e) = save_preview_image(image_url, &dest) {
-            tracing::warn!(
-                "failed to save preview image for {} from {}: {}",
-                info.album,
-                image_url,
-                e
-            );
-        } else {
-            tracing::info!("saved preview image to {}", dest.display());
+    match ensure_thumbnail(working_dir, &info.album, info.preview_image_url.as_deref()) {
+        Ok(ThumbOutcome::Created) => {
+            tracing::info!("saved preview image + thumbnail for {}", info.album)
         }
+        Ok(ThumbOutcome::AlreadyPresent) => {
+            tracing::debug!("thumbnail already present for {}", info.album)
+        }
+        Ok(ThumbOutcome::SourceMissing) => {
+            tracing::debug!("no preview image available for {}", info.album)
+        }
+        Err(e) => tracing::warn!("failed to save thumbnail for {}: {}", info.album, e),
     }
 
     Ok(())
 }
 
-/// Path where a concert's preview image lives on disk.
+/// Path where a concert's full-size preview image lives on disk. This lives
+/// inside the concert directory and is moved to the archive location when the
+/// concert is archived.
 pub fn preview_image_path(working_dir: &Path, album: &str) -> PathBuf {
     concert_dir(working_dir, album).join("preview.jpg")
 }
 
-fn save_preview_image(url: &str, dest: &Path) -> Result<()> {
-    if let Some(parent) = dest.parent() {
-        fs::create_dir_all(parent).context("create concert directory")?;
+/// Path where a concert's listing thumbnail lives on disk. Kept in a flat
+/// `thumbnails/` directory *outside* the concert directory so it is never moved
+/// to the archive — the listing keeps working even when the archive (e.g. a
+/// NAS) is offline.
+pub fn thumbnail_path(working_dir: &Path, album: &str) -> PathBuf {
+    working_dir
+        .join("thumbnails")
+        .join(format!("{}.jpg", sanitize_album(album)))
+}
+
+/// Ensure a listing thumbnail exists for `album`, deriving it from the preview
+/// image. The thumbnail check is independent of the preview check:
+///
+/// - thumbnail present                          → [`ThumbOutcome::AlreadyPresent`]
+///   (checked first, so an offline/NAS-down run is a fast no-op).
+/// - preview present on disk                    → re-encode it into a thumbnail.
+/// - preview missing but `image_url` given      → fetch it, write `preview.jpg`,
+///   then make the thumbnail.
+/// - preview missing and no `image_url`         → [`ThumbOutcome::SourceMissing`].
+pub fn ensure_thumbnail(
+    working_dir: &Path,
+    album: &str,
+    image_url: Option<&str>,
+) -> Result<ThumbOutcome> {
+    let thumb_dest = thumbnail_path(working_dir, album);
+    if thumb_dest.exists() {
+        return Ok(ThumbOutcome::AlreadyPresent);
     }
-    let bytes = fetch_bytes(url)?;
-    fs::write(dest, bytes).with_context(|| format!("write preview to {}", dest.display()))?;
+
+    let preview_dest = preview_image_path(working_dir, album);
+    let bytes = if preview_dest.exists() {
+        fs::read(&preview_dest)
+            .with_context(|| format!("read preview {}", preview_dest.display()))?
+    } else if let Some(url) = image_url {
+        let bytes = fetch_bytes(url)?;
+        write_file(&preview_dest, &bytes)
+            .with_context(|| format!("write preview to {}", preview_dest.display()))?;
+        bytes
+    } else {
+        return Ok(ThumbOutcome::SourceMissing);
+    };
+
+    save_thumbnail(&bytes, &thumb_dest)?;
+    Ok(ThumbOutcome::Created)
+}
+
+/// Decode `bytes`, resize down to [`THUMBNAIL_MAX_WIDTH`] preserving aspect
+/// ratio (never upscaling), and write a JPEG to `dest`.
+fn save_thumbnail(bytes: &[u8], dest: &Path) -> Result<()> {
+    let img = image::load_from_memory(bytes).context("decode preview image")?;
+    let resized = if img.width() > THUMBNAIL_MAX_WIDTH {
+        img.resize(THUMBNAIL_MAX_WIDTH, u32::MAX, FilterType::Lanczos3)
+    } else {
+        img
+    };
+    let mut buf = Vec::new();
+    JpegEncoder::new_with_quality(&mut buf, THUMBNAIL_JPEG_QUALITY)
+        .encode_image(&resized)
+        .context("encode thumbnail JPEG")?;
+    write_file(dest, &buf).with_context(|| format!("write thumbnail to {}", dest.display()))?;
+    Ok(())
+}
+
+/// Write `bytes` to `dest`, creating the parent directory if needed.
+fn write_file(dest: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = dest.parent() {
+        fs::create_dir_all(parent).context("create directory")?;
+    }
+    fs::write(dest, bytes)?;
     Ok(())
 }
 
@@ -108,5 +192,84 @@ mod tests {
     fn preview_image_path_handles_plain_album() {
         let p = preview_image_path(Path::new("/wd"), "Plain");
         assert_eq!(p, PathBuf::from("/wd/concerts/Plain/preview.jpg"));
+    }
+
+    #[test]
+    fn thumbnail_path_uses_flat_sanitized_name() {
+        let p = thumbnail_path(Path::new("/wd"), "Some Album: Tiny Desk Concert");
+        assert_eq!(
+            p,
+            PathBuf::from("/wd/thumbnails/Some Album Tiny Desk Concert.jpg")
+        );
+    }
+
+    #[test]
+    fn thumbnail_path_handles_plain_album() {
+        let p = thumbnail_path(Path::new("/wd"), "Plain");
+        assert_eq!(p, PathBuf::from("/wd/thumbnails/Plain.jpg"));
+    }
+
+    /// Encode a solid-color RGB image of the given size to in-memory JPEG bytes.
+    fn make_jpeg(width: u32, height: u32) -> Vec<u8> {
+        let img = image::DynamicImage::new_rgb8(width, height);
+        let mut buf = Vec::new();
+        JpegEncoder::new_with_quality(&mut buf, 90)
+            .encode_image(&img)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn save_thumbnail_resizes_down_preserving_aspect() {
+        let bytes = make_jpeg(1600, 900);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("thumb.jpg");
+        save_thumbnail(&bytes, &dest).unwrap();
+        let out = image::load_from_memory(&fs::read(&dest).unwrap()).unwrap();
+        assert_eq!(out.width(), THUMBNAIL_MAX_WIDTH);
+        assert_eq!(out.height(), 270); // 900 * 480 / 1600, aspect preserved
+    }
+
+    #[test]
+    fn save_thumbnail_does_not_upscale_small_source() {
+        let bytes = make_jpeg(320, 180);
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("thumb.jpg");
+        save_thumbnail(&bytes, &dest).unwrap();
+        let out = image::load_from_memory(&fs::read(&dest).unwrap()).unwrap();
+        assert_eq!(out.width(), 320);
+        assert_eq!(out.height(), 180);
+    }
+
+    #[test]
+    fn ensure_thumbnail_creates_from_existing_preview() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Some Album: Tiny Desk Concert";
+        let preview = preview_image_path(dir.path(), album);
+        write_file(&preview, &make_jpeg(1600, 900)).unwrap();
+
+        let outcome = ensure_thumbnail(dir.path(), album, None).unwrap();
+        assert_eq!(outcome, ThumbOutcome::Created);
+        assert!(thumbnail_path(dir.path(), album).exists());
+    }
+
+    #[test]
+    fn ensure_thumbnail_noop_when_thumbnail_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Plain";
+        // Thumbnail already exists; preview is deliberately absent (NAS-down case).
+        write_file(&thumbnail_path(dir.path(), album), &make_jpeg(480, 270)).unwrap();
+        assert!(!preview_image_path(dir.path(), album).exists());
+
+        let outcome = ensure_thumbnail(dir.path(), album, None).unwrap();
+        assert_eq!(outcome, ThumbOutcome::AlreadyPresent);
+    }
+
+    #[test]
+    fn ensure_thumbnail_source_missing_without_preview_or_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let outcome = ensure_thumbnail(dir.path(), "Plain", None).unwrap();
+        assert_eq!(outcome, ThumbOutcome::SourceMissing);
+        assert!(!thumbnail_path(dir.path(), "Plain").exists());
     }
 }
