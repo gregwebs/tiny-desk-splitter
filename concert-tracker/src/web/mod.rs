@@ -10,6 +10,7 @@ use rusqlite::Connection;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
+use crate::jobs::scrape_queue::ScrapeQueue;
 use crate::jobs::{JobConfig, JobRegistry};
 
 #[derive(Clone)]
@@ -17,6 +18,9 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub registry: Arc<JobRegistry>,
     pub jobs: JobConfig,
+    /// Serial background metadata-scrape worker. `Sync` enqueues unscraped
+    /// concerts here; listing cards poll until their thumbnail is ready.
+    pub scrape_queue: ScrapeQueue,
 }
 
 pub fn router(state: AppState) -> Router {

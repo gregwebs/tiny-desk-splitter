@@ -19,7 +19,7 @@ use crate::model::{
     concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
     SplitStatus, TrackInfo,
 };
-use crate::sync::{sync_month, synced_months_set, YearMonth};
+use crate::sync::{concerts_needing_scrape, sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
 
 // ── Templates ────────────────────────────────────────────────────────────────
@@ -93,6 +93,10 @@ struct RowTemplate {
     /// hasn't been scraped (or the concert has no album). Listing cards use the
     /// small thumbnail; the detail-page card uses the full-size preview.
     card_image_url: Option<String>,
+    /// Whether this concert is queued/in-flight in the background scrape worker.
+    /// Drives the "loading…" placeholder and keeps the row polling until its
+    /// thumbnail is ready.
+    scrape_pending: bool,
 }
 
 #[derive(Template)]
@@ -297,27 +301,44 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    render_row(&concert, has_archive_location(state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(state),
+        scrape_pending(state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 /// Render a listing card for `c`, using the small listing thumbnail as the
-/// card image.
-fn render_row(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
-    render_row_inner(c, has_archive_location, c.thumbnail_url_from_db())
+/// card image. `scrape_pending` is true while the concert is queued/in-flight in
+/// the background scrape worker (shows a "loading…" placeholder + keeps polling).
+fn render_row(
+    c: &Concert,
+    has_archive_location: bool,
+    scrape_pending: bool,
+) -> Result<String, askama::Error> {
+    render_row_inner(
+        c,
+        has_archive_location,
+        c.thumbnail_url_from_db(),
+        scrape_pending,
+    )
 }
 
 /// Render the concert card shown at the top of the detail page. Same card
 /// markup as the listing, but the card image is the full-size preview rather
 /// than the thumbnail (the detail page no longer shows a separate full image).
+/// The detail page isn't part of the background scrape queue, so it never shows
+/// the "loading…" placeholder.
 fn render_detail_card(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
-    render_row_inner(c, has_archive_location, c.preview_image_url_from_db())
+    render_row_inner(c, has_archive_location, c.preview_image_url_from_db(), false)
 }
 
 fn render_row_inner(
     c: &Concert,
     has_archive_location: bool,
     card_image_url: Option<String>,
+    scrape_pending: bool,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
@@ -386,8 +407,14 @@ fn render_row_inner(
         archive_status_label: archive_s.label().to_string(),
         is_in_progress,
         card_image_url,
+        scrape_pending,
     }
     .render()
+}
+
+/// Whether `id` is currently queued/in-flight in the background scrape worker.
+fn scrape_pending(state: &AppState, id: i64) -> bool {
+    state.scrape_queue.is_pending(id)
 }
 
 fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -> Vec<TrackInfo> {
@@ -437,7 +464,7 @@ pub async fn list(
     let mut by_month: HashMap<YearMonth, Vec<String>> = HashMap::new();
     let mut no_date_rows: Vec<String> = Vec::new();
     for c in &filtered {
-        let row = render_row(c, has_archive_location)
+        let row = render_row(c, has_archive_location, scrape_pending(&state, c.id))
             .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
         match c.concert_date.as_deref().and_then(YearMonth::from_date_str) {
             Some(ym) => by_month.entry(ym).or_default().push(row),
@@ -554,8 +581,12 @@ pub async fn ignore(
             ));
         }
     }
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 /// Delete `path`, ignoring a missing file but warning on any other error.
@@ -576,8 +607,12 @@ pub async fn want(
         db::toggle_wanted(&conn, id)?;
         db::get_concert(&conn, id)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn notes(
@@ -591,8 +626,12 @@ pub async fn notes(
         db::set_notes(&conn, id, text)?;
         db::get_concert(&conn, id)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn scrape_concert(
@@ -627,8 +666,12 @@ pub async fn scrape_concert(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn download(
@@ -669,8 +712,12 @@ pub async fn download(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn split(
@@ -688,8 +735,12 @@ pub async fn split(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn delete_download(
@@ -1317,8 +1368,12 @@ pub async fn status_row(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    render_row(&concert, has_archive_location(&state))
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_row(
+        &concert,
+        has_archive_location(&state),
+        scrape_pending(&state, id),
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn jobs_list(
@@ -1630,27 +1685,44 @@ pub async fn sync_month_handler(
 ) -> Result<impl IntoResponse, AppError> {
     tracing::info!("sync started for {}/{:02}", year, month);
 
+    // 1. Fetch the archive page + upsert listings under the lock (one fetch).
     let db = state.db.clone();
     let ym = YearMonth { year, month };
-    let count = tokio::task::spawn_blocking(move || {
+    let synced = tokio::task::spawn_blocking(move || {
         let conn = db.lock().unwrap();
         sync_month(&conn, &ym)
     })
     .await
     .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))??;
+    let synced_count = synced.len();
+
+    // 2. Hand each just-synced concert that still lacks metadata to the serial
+    //    background scrape worker, then return immediately so the listing shows up
+    //    right away. The worker scrapes one concert at a time (no parallel NPR
+    //    requests); each queued card renders a "loading…" placeholder and polls
+    //    /concerts/:id/status until its thumbnail is ready. Enqueue happens BEFORE
+    //    we respond, so the post-HX-Refresh GET / sees these ids as pending.
+    let to_scrape = concerts_needing_scrape(&synced);
+    let mut queued = 0usize;
+    for (id, url) in to_scrape {
+        if state.scrape_queue.enqueue(id, url) {
+            queued += 1;
+        }
+    }
 
     tracing::info!(
-        "sync completed: {} concerts for {}/{:02}",
-        count,
+        "sync completed for {}/{:02}: synced {} listings, queued {} for background scrape",
         year,
-        month
+        month,
+        synced_count,
+        queued
     );
 
     let mut headers = HeaderMap::new();
     headers.insert("HX-Refresh", "true".parse().unwrap());
     Ok((
         headers,
-        format!("Synced {} concerts for {}/{:02}", count, year, month),
+        format!("Synced {} concerts for {}/{:02}", synced_count, year, month),
     ))
 }
 
@@ -1707,7 +1779,7 @@ mod tests {
         let concert = db::get_concert(&conn, id).unwrap();
 
         // Listing card uses the small thumbnail.
-        let html = render_row(&concert, false).unwrap();
+        let html = render_row(&concert, false, false).unwrap();
         assert!(html.contains("class=\"card-thumb\""), "html: {html}");
         assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
 
@@ -1731,7 +1803,7 @@ mod tests {
         let concert = db::get_concert(&conn, id).unwrap();
         assert!(concert.metadata_scraped_at.is_none());
 
-        let html = render_row(&concert, false).unwrap();
+        let html = render_row(&concert, false, false).unwrap();
         assert!(!html.contains("card-thumb"), "html: {html}");
     }
 

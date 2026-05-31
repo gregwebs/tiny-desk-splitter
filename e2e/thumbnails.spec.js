@@ -23,6 +23,15 @@ test.describe("Listing thumbnails vs detail full image", () => {
       if (resp.status() === 200 && Number(resp.headers()["content-length"]) > 0) served++;
     }
     expect(served).toBeGreaterThan(0);
+
+    // …and at least one card image actually *decodes* in the browser
+    // (naturalWidth > 0). A presence- or even 200-only check passes on a
+    // broken/404 image; this proves a real thumbnail is rendered — the
+    // user-visible symptom of the sync-thumbnail bug.
+    const decoded = await page.locator("img.card-thumb").evaluateAll((imgs) =>
+      imgs.filter((i) => i.complete && i.naturalWidth > 0).length
+    );
+    expect(decoded).toBeGreaterThan(0);
   });
 
   test("detail card uses the full preview and shows no duplicate image", async ({ page }) => {

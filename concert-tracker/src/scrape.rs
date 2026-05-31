@@ -35,25 +35,41 @@ pub enum ThumbOutcome {
 /// the preview image and its listing thumbnail are saved. Image work is
 /// best-effort: failures are logged but do not fail the overall scrape.
 pub fn scrape_url(conn: &Connection, url: &str, working_dir: &Path) -> Result<()> {
+    let info = fetch_concert_info(url)?;
+    apply_concert_info(conn, &info)?;
+    ensure_and_log_thumbnail(working_dir, &info.album, info.preview_image_url.as_deref());
+    Ok(())
+}
+
+/// Fetch a concert page, parse its metadata, and persist the info JSON to disk.
+/// Does **no** database or image work, so callers can run this network/disk step
+/// outside any DB lock and apply the result separately (see the sync handler,
+/// which scrapes many concerts without holding the connection mutex across the
+/// network calls).
+pub fn fetch_concert_info(url: &str) -> Result<ConcertInfo> {
     let html = fetch_html(url)?;
     let info = parse_concert_info(&html, url)?;
     save_concert_info(&info)?;
-    apply_concert_info(conn, &info)?;
+    Ok(info)
+}
 
-    match ensure_thumbnail(working_dir, &info.album, info.preview_image_url.as_deref()) {
+/// Ensure the listing thumbnail for `album` exists (deriving it from the preview
+/// image, fetching it if `image_url` is given) and log the outcome. Best-effort:
+/// any failure is logged, never returned — image work must not fail an overall
+/// scrape. Shared by [`scrape_url`] and the sync path.
+pub fn ensure_and_log_thumbnail(working_dir: &Path, album: &str, image_url: Option<&str>) {
+    match ensure_thumbnail(working_dir, album, image_url) {
         Ok(ThumbOutcome::Created) => {
-            tracing::info!("saved preview image + thumbnail for {}", info.album)
+            tracing::info!("saved preview image + thumbnail for {}", album)
         }
         Ok(ThumbOutcome::AlreadyPresent) => {
-            tracing::debug!("thumbnail already present for {}", info.album)
+            tracing::debug!("thumbnail already present for {}", album)
         }
         Ok(ThumbOutcome::SourceMissing) => {
-            tracing::debug!("no preview image available for {}", info.album)
+            tracing::debug!("no preview image available for {}", album)
         }
-        Err(e) => tracing::warn!("failed to save thumbnail for {}: {}", info.album, e),
+        Err(e) => tracing::warn!("failed to save thumbnail for {}: {}", album, e),
     }
-
-    Ok(())
 }
 
 /// Path where a concert's full-size preview image lives on disk. This lives
@@ -270,6 +286,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let outcome = ensure_thumbnail(dir.path(), "Plain", None).unwrap();
         assert_eq!(outcome, ThumbOutcome::SourceMissing);
+        assert!(!thumbnail_path(dir.path(), "Plain").exists());
+    }
+
+    #[test]
+    fn ensure_and_log_thumbnail_source_missing_is_noop() {
+        // No preview on disk and no URL: must return cleanly (best-effort) and
+        // write nothing — no panic, no thumbnail.
+        let dir = tempfile::tempdir().unwrap();
+        ensure_and_log_thumbnail(dir.path(), "Plain", None);
         assert!(!thumbnail_path(dir.path(), "Plain").exists());
     }
 }

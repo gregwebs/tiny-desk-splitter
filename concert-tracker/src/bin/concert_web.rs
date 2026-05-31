@@ -93,10 +93,15 @@ async fn main() -> Result<()> {
     }
     tracing::debug!("dependency check done");
 
+    let db = Arc::new(Mutex::new(conn));
+    let workdir = cli.workdir;
+    let scrape_queue =
+        concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone());
     let state = AppState {
-        db: Arc::new(Mutex::new(conn)),
+        db,
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::production(cli.workdir, splitter_bin, cli.open_cmd),
+        jobs: JobConfig::production(workdir, splitter_bin, cli.open_cmd),
+        scrape_queue,
     };
 
     let app = router(state.clone());

@@ -9,15 +9,132 @@ use tower::ServiceExt;
 
 use concert_tracker::{
     db::{self, MetadataUpdate, NewListing},
-    jobs::{JobConfig, JobRegistry},
+    jobs::{
+        scrape_queue::{ScrapeItemFn, ScrapeQueue},
+        JobConfig, JobRegistry,
+    },
     model::{concert_dir, sanitize_filename},
     web::{router, AppState},
 };
+
+/// An idle background scrape queue for tests that never enqueue. Backed by a
+/// throwaway in-memory DB; the worker stays parked.
+fn idle_scrape_queue() -> ScrapeQueue {
+    ScrapeQueue::start(
+        Arc::new(Mutex::new(db::open_in_memory().unwrap())),
+        PathBuf::from("/tmp"),
+    )
+}
+
+/// Fetch the `/concerts/:id/status` fragment HTML (clones the router so it can be
+/// called more than once).
+async fn get_status_html(app: &axum::Router, id: i64) -> String {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/concerts/{id}/status"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// A queued (not-yet-scraped) concert's card shows the "loading…" placeholder and
+/// polls; once the background worker finishes it shows the thumbnail and stops
+/// polling. Uses an injected stub item (no network), gated on a signal (no sleep).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pending_card_shows_loading_then_thumbnail() {
+    use std::sync::mpsc as std_mpsc;
+    use std::time::Duration;
+
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/pending", "Pending Concert");
+    let db = Arc::new(Mutex::new(conn));
+
+    // Stub item: block until released, then set metadata (marks
+    // metadata_scraped_at + album) so the card flips loading → thumbnail.
+    let (release_tx, release_rx) = std_mpsc::channel::<()>();
+    let release_rx = Arc::new(Mutex::new(release_rx));
+    let (done_tx, done_rx) = std_mpsc::channel::<()>();
+    let db_for_item = db.clone();
+    let item: ScrapeItemFn = Arc::new(move |_db, _wd, req| {
+        let _ = release_rx.lock().unwrap().recv();
+        {
+            let conn = db_for_item.lock().unwrap();
+            db::update_metadata(
+                &conn,
+                req.concert_id,
+                &MetadataUpdate {
+                    artist: "Stub Artist".to_string(),
+                    album: "Stub Album".to_string(),
+                    description: None,
+                    set_list: vec![],
+                    musicians: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let _ = done_tx.send(());
+    });
+
+    let scrape_queue = ScrapeQueue::start_with(db.clone(), PathBuf::from("/tmp"), item);
+    let state = AppState {
+        db: db.clone(),
+        registry: Arc::new(JobRegistry::new()),
+        jobs: JobConfig::test(PathBuf::from("/tmp")),
+        scrape_queue: scrape_queue.clone(),
+    };
+
+    assert!(scrape_queue.enqueue(1, "https://npr.org/c/pending".to_string()));
+    let app = router(state);
+
+    // While pending: polls + loading placeholder, no thumbnail yet.
+    let body = get_status_html(&app, 1).await;
+    assert!(
+        body.contains("hx-trigger=\"every 3s\""),
+        "pending card must poll: {body}"
+    );
+    assert!(
+        body.contains("card-thumb-loading"),
+        "pending card must show loading placeholder: {body}"
+    );
+    assert!(!body.contains("/thumbnails/"), "no thumbnail yet: {body}");
+
+    // Release the stub; wait for completion + the worker to clear pending.
+    release_tx.send(()).unwrap();
+    done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    for _ in 0..200 {
+        if !scrape_queue.is_pending(1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(!scrape_queue.is_pending(1), "pending must clear after scrape");
+
+    // Now scraped: thumbnail shown, polling stopped.
+    let body = get_status_html(&app, 1).await;
+    assert!(
+        body.contains("/thumbnails/"),
+        "scraped card must show thumbnail: {body}"
+    );
+    assert!(
+        !body.contains("hx-trigger=\"every 3s\""),
+        "scraped card must stop polling: {body}"
+    );
+}
 
 fn test_state(conn: rusqlite::Connection) -> AppState {
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(PathBuf::from("/tmp")),
     }
 }
@@ -263,6 +380,7 @@ async fn detail_page_auto_scrape_failure_still_renders() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(PathBuf::from("/tmp")),
     };
     let app = router(state);
@@ -300,6 +418,7 @@ fn state_with_workdir(conn: rusqlite::Connection, workdir: PathBuf) -> AppState 
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(workdir),
     }
 }
@@ -346,6 +465,7 @@ async fn delete_download_removes_file_and_clears_state() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
@@ -426,6 +546,7 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
@@ -669,6 +790,7 @@ async fn delete_download_force_clears_state_when_file_missing() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
@@ -717,6 +839,7 @@ async fn delete_split_clears_state() {
     let state = AppState {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(PathBuf::from("/tmp")),
     };
     let app = router(state);
@@ -842,6 +965,7 @@ async fn ignore_deletes_preview_image() {
     let state = AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs: JobConfig::test(workdir.path().to_path_buf()),
     };
     let app = router(state);
@@ -1185,6 +1309,7 @@ fn state_with_opener(
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
         jobs,
     }
 }

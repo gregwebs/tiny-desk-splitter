@@ -89,28 +89,65 @@ pub fn synced_months_set(conn: &Connection) -> Result<HashSet<YearMonth>> {
         .collect())
 }
 
-/// Fetch and upsert all concert listings for a given month.
-pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<usize> {
-    let listings = fetch_archive_month(ym.year, ym.month, None)
-        .with_context(|| format!("Failed to fetch archive for {}/{:02}", ym.year, ym.month))?;
-    let count = upsert_listings(conn, &listings)?;
-    db::mark_month_synced(conn, ym.year, ym.month)?;
-    Ok(count)
+/// A concert that was just upserted by a sync, carrying the bits the sync
+/// handler needs to decide whether to scrape it: its DB id, its source URL, and
+/// whether its per-concert metadata has already been scraped. Returning this
+/// avoids a second full-table query (and `HashSet` round-trip) in the handler.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncedConcert {
+    pub id: i64,
+    pub source_url: String,
+    pub metadata_scraped_at: Option<String>,
 }
 
-/// Sync a range of months (inclusive on both ends).
+/// Fetch and upsert all concert listings for a given month, returning the
+/// upserted concerts (id + url + scrape state) so the caller can scrape any that
+/// still lack metadata. The single archive page fetch happens under whatever
+/// lock the caller holds; the per-concert metadata scrape must happen outside it.
+pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<Vec<SyncedConcert>> {
+    let listings = fetch_archive_month(ym.year, ym.month, None)
+        .with_context(|| format!("Failed to fetch archive for {}/{:02}", ym.year, ym.month))?;
+    upsert_listings(conn, &listings)?;
+    db::mark_month_synced(conn, ym.year, ym.month)?;
+
+    let mut synced = Vec::with_capacity(listings.len());
+    for listing in &listings {
+        if let Some(c) = db::get_concert_by_url(conn, &listing.url)? {
+            synced.push(SyncedConcert {
+                id: c.id,
+                source_url: c.source_url,
+                metadata_scraped_at: c.metadata_scraped_at,
+            });
+        }
+    }
+    Ok(synced)
+}
+
+/// Sync a range of months (inclusive on both ends). Returns the total number of
+/// listings upserted across the range.
 pub fn sync_months(conn: &Connection, from: YearMonth, to: YearMonth) -> Result<usize> {
     let mut total = 0;
     let mut current = from;
     loop {
-        let count = sync_month(conn, &current)?;
-        total += count;
+        let synced = sync_month(conn, &current)?;
+        total += synced.len();
         if current.year == to.year && current.month == to.month {
             break;
         }
         current = current.next();
     }
     Ok(total)
+}
+
+/// `(id, url)` of just-synced concerts that still need a per-concert metadata
+/// scrape (so their preview image + listing thumbnail get generated). Pure
+/// filter over the sync result — no DB, no network.
+pub fn concerts_needing_scrape(synced: &[SyncedConcert]) -> Vec<(i64, String)> {
+    synced
+        .iter()
+        .filter(|c| c.metadata_scraped_at.is_none())
+        .map(|c| (c.id, c.source_url.clone()))
+        .collect()
 }
 
 pub fn upsert_listings(conn: &Connection, listings: &[ConcertListing]) -> Result<usize> {
@@ -283,6 +320,45 @@ mod tests {
             .unwrap();
         assert!(c.concert_date.is_none());
         assert!(c.teaser.is_none());
+    }
+
+    fn synced(id: i64, url: &str, scraped: bool) -> SyncedConcert {
+        SyncedConcert {
+            id,
+            source_url: url.to_string(),
+            metadata_scraped_at: scraped.then(|| "2026-05-30T00:00:00Z".to_string()),
+        }
+    }
+
+    #[test]
+    fn concerts_needing_scrape_keeps_only_unscraped() {
+        let synced = vec![
+            synced(1, "https://npr.org/c/1", false),
+            synced(2, "https://npr.org/c/2", true),
+            synced(3, "https://npr.org/c/3", false),
+        ];
+        let needing = concerts_needing_scrape(&synced);
+        assert_eq!(
+            needing,
+            vec![
+                (1, "https://npr.org/c/1".to_string()),
+                (3, "https://npr.org/c/3".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn concerts_needing_scrape_empty_when_all_scraped() {
+        let synced = vec![
+            synced(1, "https://npr.org/c/1", true),
+            synced(2, "https://npr.org/c/2", true),
+        ];
+        assert!(concerts_needing_scrape(&synced).is_empty());
+    }
+
+    #[test]
+    fn concerts_needing_scrape_empty_input() {
+        assert!(concerts_needing_scrape(&[]).is_empty());
     }
 
     #[test]

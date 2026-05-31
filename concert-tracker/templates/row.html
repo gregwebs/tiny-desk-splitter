@@ -1,7 +1,9 @@
-<div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
+<div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   {% if let Some(url) = card_image_url.as_ref() %}
   <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
        onerror="this.style.display='none'">
+  {% else if scrape_pending %}
+  <div class="card-thumb card-thumb-loading">loading…</div>
   {% endif %}
   <div class="card-body">
     <div class="card-head">

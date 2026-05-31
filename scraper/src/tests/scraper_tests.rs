@@ -418,7 +418,9 @@ fn save_concert_info_preserves_timestamps() {
         date: Some("2025-01-15".into()),
         album: "Test Artist Tiny Desk Concert".into(),
         description: None,
-        set_list: vec![Song { title: "Song A".into() }],
+        set_list: vec![Song {
+            title: "Song A".into(),
+        }],
         musicians: vec![],
         preview_image_url: None,
         teaser: None,

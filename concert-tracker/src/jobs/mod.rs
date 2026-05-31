@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod download;
+pub mod scrape_queue;
 pub mod split;
 
 use std::collections::HashMap;

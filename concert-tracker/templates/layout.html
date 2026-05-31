@@ -243,6 +243,18 @@
       aspect-ratio: 16 / 9;
       object-fit: cover;
     }
+    /* Placeholder shown while a freshly-synced concert is being scraped in the
+       background. Reuses .card-thumb so it occupies the same footprint and the
+       card doesn't reflow when the real thumbnail swaps in. */
+    .card-thumb-loading {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.8rem;
+      color: var(--text-muted, #888);
+      letter-spacing: 0.02em;
+      background: var(--surface-2, rgba(127,127,127,0.12));
+    }
     .card.tracks-open .card-thumb { display: none; }
 
     .card-title { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; line-height: 1.3; }
