@@ -20,12 +20,11 @@ cargo run --bin concert-web
 
 ## Dependencies
 
+- **Rust** — run the project (`cargo build && cargo run --bin concert-web`)
 - **yt-dlp** — download concert videos
-- **Rust** — build the project (`cargo build --release`)
 Splitting video into tracks
 - **ffmpeg** — frame analysis
 - **leptonica** and **tesseract** — OCR
-- **imagemagick** - create black and white image to help with OCR
 
 ---
 

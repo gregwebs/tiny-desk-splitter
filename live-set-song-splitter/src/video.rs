@@ -20,22 +20,6 @@ pub struct VideoInfo {
     keyframe_indices: Vec<usize>,
 }
 
-pub fn frame_blackness(frame_data: &[u8], threshold: u8) -> f64 {
-    // Check if frame is black by analyzing pixel data
-    // Assumes frame_data is an RGB or grayscale image
-    let pixel_count = frame_data.len();
-    if pixel_count == 0 {
-        return 0.0;
-    }
-
-    // Count dark pixels
-    let dark_pixels = frame_data
-        .iter()
-        .filter(|&&pixel| pixel <= threshold)
-        .count();
-    return dark_pixels as f64 / pixel_count as f64;
-}
-
 impl VideoInfo {
     // ((keyframe, frame), frame, keyframe)
     pub fn nearest_frames_by_time(

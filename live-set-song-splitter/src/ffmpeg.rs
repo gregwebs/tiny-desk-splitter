@@ -5,10 +5,6 @@ use concert_types::ConcertInfo;
 
 use anyhow::{anyhow, Result};
 
-// these ones worked okay
-// pub const BLACK_AND_WHITE: &str = "hue=s=0";
-pub const BLACK_AND_WHITE: &str = "format=gray,maskfun=low=128:high=128:fill=0:sum=128";
-
 #[derive(Debug)]
 pub struct Ffmpeg {
     cmd: Command,

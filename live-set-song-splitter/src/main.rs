@@ -7,6 +7,7 @@ use crate::ocr::{
 };
 mod audio;
 mod ffmpeg;
+mod image;
 mod io;
 mod video;
 use crate::video::VideoInfo;
@@ -482,12 +483,11 @@ fn find_black_frame_end_time(
         let frame_time = search_start + (frame_num as f64 / 30.0); // Approximate timestamp
 
         // Open image and check if it's black
-        match image::open(&frame_path) {
+        match ::image::open(&frame_path) {
             Ok(img) => {
                 // Convert to grayscale and analyze pixels
-                // let gray_img = img.to_luma8();
                 let pixel_data = img.as_rgb8().unwrap().as_raw();
-                let dark_ratio = video::frame_blackness(pixel_data, threshold);
+                let dark_ratio = crate::image::grayscale_darkness(pixel_data, threshold);
 
                 // Check if most pixels are black
                 if dark_ratio > 0.80 {
@@ -984,6 +984,37 @@ fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
         .unwrap_or(0);
 }
 
+/// True for a primary extracted frame (`N.png`), false for anything else,
+/// including the black-and-white variants (`Nbw.png`) some passes also write into
+/// the same directory. Mirrors the filter the detection pass uses (see
+/// `extract_frames`): the `bw` suffix makes the stem unparseable, so those files
+/// must be excluded from a frame listing or they inflate `frames.len()` and break
+/// the index arithmetic in [`refined_match_to_source_frame`].
+fn is_source_frame(path: &std::path::Path) -> bool {
+    path.extension().map_or(false, |ext| ext == "png")
+        && path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .map_or(false, |s| s.parse::<usize>().is_ok())
+}
+
+/// Map a 1-based index into the refined extraction back to a source-video frame
+/// index. `earliest_match` is the matched extraction frame (1..=`frame_count`),
+/// `frame_count` is the number of extracted frames (which aligns with
+/// `end_frame_num`, the source frame at the end of the search window). So the
+/// matched frame sits `frame_count - earliest_match` frames before the end.
+///
+/// `frame_count` MUST be the count of source frames only — counting B/W variants
+/// here over-subtracts and pushes the boundary earlier (this was the cause of a
+/// song boundary landing ~3s before the overlay actually appeared).
+fn refined_match_to_source_frame(
+    end_frame_num: usize,
+    frame_count: usize,
+    earliest_match: usize,
+) -> usize {
+    end_frame_num - (frame_count - earliest_match)
+}
+
 const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/4:0:160";
 
 pub struct Settings {
@@ -1089,6 +1120,66 @@ fn first_song_missing_fallback(songs: &[Song], song_title_matched: &mut HashMap<
             missing, earliest_detected_time
         );
         song_title_matched.insert(missing, 0.0);
+    }
+}
+
+#[cfg(test)]
+mod tests_back_search_offset {
+    use super::*;
+    use std::path::{Path, PathBuf};
+
+    fn fixture_dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("testdata/blue_back_search")
+    }
+
+    fn list_png(dir: &Path) -> Vec<PathBuf> {
+        let mut v: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .filter(|p| p.extension().map_or(false, |e| e == "png"))
+            .collect();
+        v.sort();
+        v
+    }
+
+    #[test]
+    fn is_source_frame_excludes_bw_variants() {
+        // The `bw` suffix makes the stem unparseable; such files must be excluded
+        // from a refined-frames listing or they inflate the frame count.
+        assert!(is_source_frame(Path::new("dir/73.png")));
+        assert!(!is_source_frame(Path::new("dir/73bw.png")));
+        assert!(!is_source_frame(Path::new("dir/notes.txt")));
+        // And the underlying parse quirk that motivates the filter:
+        assert_eq!(
+            frame_number_from_image_filename(&PathBuf::from("dir/73bw.png")),
+            0
+        );
+    }
+
+    #[test]
+    fn refined_listing_filter_drops_bw_variants() {
+        // testdata/blue_back_search mirrors a refined-frames directory: the real
+        // "Bloc Party / Blue" overlay frames 73,74,75 each alongside a `bw` variant.
+        let all_png = list_png(&fixture_dir());
+        assert_eq!(all_png.len(), 6, "fixture has a plain + bw file per frame");
+        let source_count = all_png.iter().filter(|p| is_source_frame(p.as_path())).count();
+        assert_eq!(source_count, 3, "only the three N.png frames are source frames");
+    }
+
+    #[test]
+    fn refined_match_maps_to_source_frame() {
+        // Reproduces the "Blue" boundary: the overlay was matched at frame 73 of 75
+        // source frames, the window ending at source video frame 18381 — so the
+        // start maps to 18379. Feeding the old, B/W-inflated count (150) instead
+        // would over-subtract ~75 frames (~3s), landing on 18304 — the bug that put
+        // the boundary at 762.5s when the overlay only appears at ~765s.
+        assert_eq!(refined_match_to_source_frame(18381, 75, 73), 18379);
+        assert_eq!(
+            refined_match_to_source_frame(18381, 150, 73),
+            18304,
+            "doubling the count via bw variants is what shifted the boundary early"
+        );
     }
 }
 
@@ -1543,24 +1634,8 @@ fn detect_song_boundaries_from_text(
         'convert: for convert in [false, true] {
             if convert {
                 let orig_path = frame_path.clone();
-                // let mut bw_path = frame_path.clone();
                 frame_path.set_file_name(format!("{}bw.png", frame_num));
-                let mut cmd = std::process::Command::new("magick");
-                cmd.arg(orig_path.to_str().unwrap());
-                cmd.args(vec![
-                    "-colorspace",
-                    "gray",
-                    "-channel",
-                    "rgb",
-                    "-threshold",
-                    "55%",
-                    "+channel",
-                ]);
-                cmd.arg(&frame_path);
-                let status = cmd.status()?;
-                if !status.success() {
-                    return Err(anyhow!("Failed to convert to black and white"));
-                }
+                crate::image::write_black_and_white(&orig_path, &frame_path)?;
             }
             let frame_path_str = frame_path.to_str().unwrap();
 
@@ -1912,7 +1987,12 @@ fn refine_song_start_time(
         // Only overwrite directory if not reusing frames or if no frames exist
         io::overwrite_dir(&refined_dir)?;
 
-        // Extract frames at original video framerate for accuracy
+        // Extract frames at original video framerate for accuracy.
+        // Only the primary `N.png` frames are needed: the matching loop below keys
+        // off the frame number parsed from the filename, and a `Nbw.png` variant
+        // parses to 0 (see `is_source_frame`), so it could never be selected as the
+        // earliest match — extracting it was wasted work that also inflated the
+        // frame count used by `refined_match_to_source_frame`.
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
         ffmpeg
             .from_to(start_time, end_timestamp)
@@ -1921,14 +2001,6 @@ fn refine_song_start_time(
             .video_filter(
                 &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
                 vec![&format!("fps={}", fps), CROP_TO_TEXT], // Use original video framerate
-            )
-            .video_filter(
-                &format!("{}/%dbw.png", refined_dir), // Sequential numbering starting from 1
-                vec![
-                    &format!("fps={}", fps), // Use original video framerate
-                    CROP_TO_TEXT,
-                    ffmpeg::BLACK_AND_WHITE,
-                ],
             );
         let status = ffmpeg.cmd().status()?;
 
@@ -1947,8 +2019,8 @@ fn refine_song_start_time(
     // Read the refined frames and analyze them
     let mut frames = fs::read_dir(&refined_dir)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
         .map(|entry| entry.path())
+        .filter(|path| is_source_frame(path))
         .collect::<Vec<_>>();
 
     println!(
@@ -1967,6 +2039,9 @@ fn refine_song_start_time(
             .cmp(&frame_number_from_image_filename(b))
             .reverse()
     });
+    // `frames` now contains only the primary `N.png` source frames (the listing
+    // above filters out B/W variants via `is_source_frame`), so this count is the
+    // source-frame count required by `refined_match_to_source_frame`.
     let frame_count = frames.len();
 
     // Try different PSM options until we find a valid result
@@ -2024,8 +2099,8 @@ fn refine_song_start_time(
     match earliest_match {
         Some(earliest_match) if earliest_match > 0 => {
             println!("earliest match frame {:?}/{}", earliest_match, frame_count);
-            let subtracted_frame_num = frame_count as usize - earliest_match;
-            let earliest_frame_num = end_frame_num - subtracted_frame_num as usize;
+            let earliest_frame_num =
+                refined_match_to_source_frame(end_frame_num, frame_count, earliest_match);
             // We never detect the fade soon enough
             // So go back to the previous keyframe
             // This then allows for video splitting without re-encoding
