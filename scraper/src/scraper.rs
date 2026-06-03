@@ -17,7 +17,8 @@ pub fn fetch_html(url: &str) -> Result<String> {
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     let client = Client::new();
     let response = client.get(url).send().context("Failed to send request")?;
-    let response = response.error_for_status().context("HTTP error status")?;
+    let status = response.status();
+    let response = response.error_for_status().context(format!("HTTP error status {}", status))?;
     let bytes = response.bytes().context("Failed to read response bytes")?;
     Ok(bytes.to_vec())
 }
