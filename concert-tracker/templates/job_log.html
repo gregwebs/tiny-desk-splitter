@@ -1,9 +1,9 @@
 {% extends "layout.html" %}
 {% block content %}
-<p><a href="/jobs" class="back-link">&larr; Back to jobs</a></p>
+<p><a href="/jobs" class="back-link" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">&larr; Back to jobs</a></p>
 <h2>Job Log #{{ job.id }}</h2>
 <p>
-  <a href="/concerts/{{ job.concert_id }}">{{ job.title }}</a> &middot;
+  <a href="/concerts/{{ job.concert_id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ job.title }}</a> &middot;
   <span class="badge badge-download-error">{{ job.name }}</span> &middot;
   Failed {{ job.failed_at }}
 </p>

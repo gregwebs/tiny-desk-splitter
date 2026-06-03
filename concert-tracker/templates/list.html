@@ -2,7 +2,7 @@
 {% block content %}
 <div class="filter-chips">
   {% for (href, label, active_class) in filters %}
-  <a href="{{ href }}" class="{{ active_class }}">{{ label }}</a>
+  <a href="{{ href }}" class="{{ active_class }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ label }}</a>
   {% endfor %}
 </div>
 <div class="card-grid" id="concert-list">

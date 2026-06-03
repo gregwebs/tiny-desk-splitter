@@ -2,5 +2,5 @@
   File not found on disk for this concert. Clear the download record anyway?
   <button class="btn-delete" hx-post="/concerts/{{ id }}/delete-download?force=true"
           hx-target="closest .delete-confirm" hx-swap="outerHTML">Yes, clear record</button>
-  <a href="/concerts/{{ id }}">Cancel</a>
+  <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Cancel</a>
 </span>

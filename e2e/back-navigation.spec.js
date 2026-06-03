@@ -1,16 +1,14 @@
 const { test, expect } = require("./fixtures");
 
-// hx-boost swaps <body> on navigation and the browser Back/Forward button
-// restores a cached page; both detach/re-create #player-audio. These guard that
-// the persistent player (inside the hx-preserve'd #player-container) survives
-// that round trip — the bar stays active and the playing track is retained,
-// rather than the player silently disappearing.
-//
-// Note: with real media, audible playback pauses and the position resets across
-// a boosted Back/Forward; the browser's autoplay policy requires a user gesture
-// to resume audible sound (verified manually). So these assert the durable
-// player *state*, not that audio keeps sounding — the regression worth catching
-// is the player getting wiped, which this covers.
+// In-app navigation (list <-> detail, header/filter links) and the browser
+// Back/Forward button swap only the #content region (per-link hx-target/
+// hx-select="#content", and hx-history-elt="#content" for history restores).
+// The persistent player lives in #player-container, a *sibling* of #content, so
+// its <video id="player-audio"> node is never detached. These guard that the
+// player keeps playing uninterrupted across navigation: the same media node is
+// retained (not re-created) and currentTime keeps advancing — the regression
+// this catches is a return to full-body swaps, which detach/re-create the audio
+// node and force a reload + re-seek (the audible gap we removed).
 
 const CONCERT = 1; // Audio Concert
 
@@ -24,41 +22,83 @@ async function startPlaying(page) {
     const a = document.getElementById("player-audio");
     return a && !a.paused;
   });
+  // Tag the live media node so we can prove the *same* node survives navigation.
+  await page.evaluate(() => {
+    document.getElementById("player-audio").dataset.navMarker = "kept";
+  });
 }
 
-test.describe("Back/forward navigation keeps the player present", () => {
+// Assert the audio node was never re-created and playback advanced past `from`.
+async function expectUninterrupted(page, from) {
+  await expect(page.locator("#player-audio")).toHaveAttribute("data-nav-marker", "kept");
+  await page.waitForFunction(
+    (t) => {
+      const a = document.getElementById("player-audio");
+      return a && !a.paused && a.currentTime > t;
+    },
+    from,
+    { timeout: 5000 }
+  );
+}
+
+function currentTime(page) {
+  return page.evaluate(() => document.getElementById("player-audio").currentTime);
+}
+
+test.describe("Navigation keeps the player playing uninterrupted", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
   });
 
-  test("the player survives the Back button", async ({ page }) => {
+  test("list -> detail keeps the same audio node playing", async ({ page }) => {
     await startPlaying(page);
+    const t0 = await currentTime(page);
 
-    await page.locator('header a[href="/settings"]').click();
-    await page.waitForFunction(() => location.pathname === "/settings");
+    await page.locator(`#concert-${CONCERT} .card-title a`).click();
+    await page.waitForFunction(
+      (id) => location.pathname === `/concerts/${id}`,
+      CONCERT
+    );
 
-    await page.goBack();
-    await page.waitForFunction(() => location.pathname === "/");
-
-    // The player bar and its track context are retained across the boosted swap.
-    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+    await expectUninterrupted(page, t0);
     await expect(page.locator("#player-title")).toHaveText("Limbo");
+    // Exactly one #content region — guards the outerHTML/hx-select nesting bug.
+    await expect(page.locator("#content")).toHaveCount(1);
   });
 
-  test("the player survives Back then Forward", async ({ page }) => {
+  test("Back button keeps the same audio node playing", async ({ page }) => {
+    await startPlaying(page);
+
+    await page.locator(`#concert-${CONCERT} .card-title a`).click();
+    await page.waitForFunction(
+      (id) => location.pathname === `/concerts/${id}`,
+      CONCERT
+    );
+    const t0 = await currentTime(page);
+
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/");
+
+    await expectUninterrupted(page, t0);
+    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+    await expect(page.locator("#player-title")).toHaveText("Limbo");
+    await expect(page.locator("#content")).toHaveCount(1);
+  });
+
+  test("Back then Forward keeps the same audio node playing", async ({ page }) => {
     await startPlaying(page);
 
     await page.locator('header a[href="/settings"]').click();
     await page.waitForFunction(() => location.pathname === "/settings");
     await page.goBack();
     await page.waitForFunction(() => location.pathname === "/");
-    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+    const t0 = await currentTime(page);
 
     await page.goForward();
     await page.waitForFunction(() => location.pathname === "/settings");
 
     // The player persists on the forward page too (it lives in every layout).
-    await expect(page.locator("#player-bar")).toHaveClass(/active/);
+    await expectUninterrupted(page, t0);
     await expect(page.locator("#player-title")).toHaveText("Limbo");
   });
 });
