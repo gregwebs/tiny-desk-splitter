@@ -36,9 +36,13 @@ media node is never touched. `hx-boost` still handles URL push + Back/Forward.
 - The Jobs count `<span>` was a child of the `/jobs` anchor; moved to a sibling
   so it doesn't inherit `hx-select="#content"` (which would break its poll).
 
-`player.js` was left unchanged. With the audio node never detached, its old
-`navState`/`rebind`/`restorePlayback` workaround is inert (`rebind()`
-early-returns while the node stays attached). Removing it is a future tidy-up.
+`player.js` was left unchanged in the first commit. With the audio node never
+detached, its old `navState`/`rebind`/`loadInto`/`unbindAudioEvents` workaround
+and the resume-if-paused branch of `restorePlayback` were inert dead code; a
+follow-up commit removed them and slimmed `restorePlayback` to `reassertPlayerUi`
+(re-asserts the playing-track highlight and like/delete state after in-place
+swaps and history restores). The `hx-preserve` on `#player-container` was also
+dropped (the container is never in a swap target).
 
 ## State: what gets swapped on navigation
 

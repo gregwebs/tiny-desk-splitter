@@ -6,19 +6,6 @@ const Player = (() => {
   let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
   let queue = [];
   let autoAdvanceController = null;
-  // Snapshot of playback taken just before an htmx body swap / history save.
-  // hx-boost navigation (especially the browser Back button restoring a cached
-  // page) detaches and re-creates #player-audio. A detached media element is
-  // paused by the browser and its currentTime can reset, so by the time rebind()
-  // runs the old node is unreliable. We capture src/time/playing while the audio
-  // is still live and restore from that instead.
-  let navState = null;
-
-  function captureNavState() {
-    if (audio && audio.src) {
-      navState = { src: audio.src, time: audio.currentTime, playing: !audio.paused };
-    }
-  }
 
   function onPlay() { setPlayPauseIcon(true); }
   function onPause() { setPlayPauseIcon(false); }
@@ -32,15 +19,6 @@ const Player = (() => {
     audio.addEventListener("pause", onPause);
   }
 
-  function unbindAudioEvents(el) {
-    el.removeEventListener("timeupdate", onTimeUpdate);
-    el.removeEventListener("loadedmetadata", onTimeUpdate);
-    el.removeEventListener("ended", onEnded);
-    el.removeEventListener("error", onError);
-    el.removeEventListener("play", onPlay);
-    el.removeEventListener("pause", onPause);
-  }
-
   function init() {
     audio = document.getElementById("player-audio");
     bar = document.getElementById("player-bar");
@@ -48,14 +26,13 @@ const Player = (() => {
 
     bindAudioEvents();
 
-    // Capture playback state before the DOM swap detaches the audio element.
-    document.body.addEventListener("htmx:beforeSwap", captureNavState);
-    document.body.addEventListener("htmx:beforeHistorySave", captureNavState);
-
-    // Restore after a swap (boosted navigation) or a history (Back/Forward)
-    // restore; the latter does not always fire afterSettle.
-    document.body.addEventListener("htmx:afterSettle", restorePlayback);
-    document.body.addEventListener("htmx:historyRestore", restorePlayback);
+    // Navigation swaps only #content; the player lives outside it and is never
+    // detached, so the audio keeps playing on its own. These handlers only
+    // re-assert the JS-driven UI (playing-track highlight, like/delete state)
+    // after an in-place swap or a Back/Forward history restore re-creates the
+    // listen buttons inside #content. (historyRestore does not fire afterSettle.)
+    document.body.addEventListener("htmx:afterSettle", reassertPlayerUi);
+    document.body.addEventListener("htmx:historyRestore", reassertPlayerUi);
 
     // Reverse like-sync: when a track list re-renders (track-list star toggled,
     // or a track deleted), re-read the liked state of the playing track so the
@@ -83,62 +60,14 @@ const Player = (() => {
     }
   }
 
-  function restorePlayback() {
-    rebind();
-    // Even when hx-preserve keeps the same audio node, detaching/reattaching it
-    // during the swap leaves it paused (position is retained). Resume if we were
-    // playing before the swap so the Back button doesn't silently stop playback.
-    if (audio && navState && navState.playing && audio.src && audio.paused) {
-      showBar();
-      audio.play().catch(() => {});
-    }
+  // After an in-place #content swap or a Back/Forward history restore re-creates
+  // the listen buttons, re-assert the JS-driven player UI: the playing-track
+  // highlight and the #player-like / #player-delete display (the player bar
+  // itself is never swapped, so the audio keeps playing untouched).
+  function reassertPlayerUi() {
     reapplyPlaying();
-    // #player-like / #player-delete live in the preserved container but their
-    // display/text are JS-driven, so re-assert them after Back/Forward and
-    // boosted swaps.
     updateLikeStar();
     updateDeleteButton();
-  }
-
-  // Restore src/position onto the current audio node, seeking once metadata is
-  // available (setting currentTime before then is ignored by the browser).
-  function loadInto(el, src, time, play) {
-    el.src = src;
-    const seek = () => {
-      if (time) {
-        try { el.currentTime = time; } catch (e) { tracing("seek failed", e); }
-      }
-      if (play) {
-        showBar();
-        el.play().catch(() => {});
-      }
-    };
-    if (el.readyState >= 1) seek();
-    else el.addEventListener("loadedmetadata", seek, { once: true });
-  }
-
-  function rebind() {
-    if (!audio) return;
-    if (document.body.contains(audio)) return;
-
-    // The old node was detached by the swap; prefer the pre-swap snapshot since
-    // a detached media element reports paused with a reset currentTime.
-    const wasPlaying = navState ? navState.playing : !audio.paused;
-    const oldSrc = navState ? navState.src : audio.src;
-    const oldTime = navState ? navState.time : audio.currentTime;
-
-    unbindAudioEvents(audio);
-    audio.pause();
-
-    audio = document.getElementById("player-audio");
-    bar = document.getElementById("player-bar");
-    if (!audio || !bar) return;
-
-    bindAudioEvents();
-
-    if (oldSrc) {
-      loadInto(audio, oldSrc, oldTime, wasPlaying);
-    }
   }
 
   function setPlayPauseIcon(playing) {
@@ -454,7 +383,7 @@ const Player = (() => {
   }
 
   async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev) {
-    if (!audio) init(); else rebind();
+    if (!audio) init();
     if (!audio) return;
 
     hideError();

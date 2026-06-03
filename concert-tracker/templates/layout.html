@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-{# hx-boost swaps <body> only, so data-theme survives navigations. Any future swap that targets <html> would lose it. #}
+{# Boosted navigation swaps only #content (never <html>), so data-theme survives navigations. Any future swap that targets <html> would lose it. #}
 <html lang="en"{% if chrome.theme.is_explicit() %} data-theme="{{ chrome.theme.as_str() }}"{% endif %}>
 <head>
   <meta charset="UTF-8">
@@ -556,7 +556,7 @@
     <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">&#9881;</a>
   </header>
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
-  <div id="player-container" hx-preserve="true">
+  <div id="player-container">
     <div id="player-video-panel">
       <video id="player-audio" playsinline webkit-playsinline onclick="Player.togglePause()"></video>
     </div>
