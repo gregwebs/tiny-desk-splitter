@@ -5,6 +5,7 @@
 // of from @playwright/test.
 
 const base = require("@playwright/test");
+const { chromium } = base;
 const { spawn } = require("child_process");
 const fs = require("fs");
 const os = require("os");
@@ -13,6 +14,15 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..");
 const FIXTURE = path.join(__dirname, ".fixture");
 const BIN = path.join(REPO, "target", "debug", "concert-web");
+
+// Args needed to run Chromium inside the Claude Code sandbox.
+// --single-process eliminates multi-process Mach port IPC (blocked by sandbox).
+// --no-proxy-server lets Chromium connect directly to localhost.
+const BROWSER_ARGS = [
+  "--autoplay-policy=no-user-gesture-required",
+  "--no-proxy-server",
+  "--single-process",
+];
 
 // Spawn a concert-web bound to a copy of the fixture; resolve once it's ready.
 async function startServer() {
@@ -100,6 +110,28 @@ function cleanup(server) {
 }
 
 const test = base.test.extend({
+  // Per-test browser. The built-in `browser` fixture is worker-scoped and its
+  // scope can't be changed, so we use a private fixture and override `context`
+  // and `page` to flow through it.  Chromium in --single-process mode can crash
+  // during browserContext cleanup, killing the shared worker browser and
+  // making every subsequent test fail.  Per-test launch isolates crashes.
+  _ownBrowser: [
+    async ({}, use) => {
+      const browser = await chromium.launch({ args: BROWSER_ARGS });
+      await use(browser);
+      await browser.close().catch(() => {});
+    },
+    { scope: "test" },
+  ],
+  context: async ({ _ownBrowser, baseURL }, use) => {
+    const ctx = await _ownBrowser.newContext({ baseURL });
+    await use(ctx);
+    await ctx.close().catch(() => {});
+  },
+  page: async ({ context }, use) => {
+    const page = await context.newPage();
+    await use(page);
+  },
   // Worker/test-scoped server; tears down (and removes the temp dir) even on
   // test failure.
   _server: [

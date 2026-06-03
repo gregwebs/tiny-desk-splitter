@@ -11,6 +11,7 @@ module.exports = defineConfig({
     browserName: "chromium",
     // Real media: let the player start tracks programmatically (auto-advance,
     // back/next) without a user gesture.
-    launchOptions: { args: ["--autoplay-policy=no-user-gesture-required"] },
+    // launchOptions are set per-test in e2e/fixtures.js (needed for sandbox).
+    launchOptions: { args: ["--autoplay-policy=no-user-gesture-required", "--no-proxy-server", "--single-process"] },
   },
 });
