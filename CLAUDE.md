@@ -17,18 +17,27 @@ See README.md for an overview of the project
 # Workflow
 - Planning
   * Create a plan
+    * Describe the changes at different levels of detail
+      * start with the high-level architecture of the changes
+      * end with code implementation details
+    * Create state diagrams for all state changes
+      * This can be done with ascii tables, art, or an html artifact
     * Suggest breaking larger changes into iterative steps
     * Describe the future phases of coding (including tests and documentation) and verification, 
   * get feedback and rework the plan
     * Have engineering-lead review any new features or non-trivial bug fixes
   * get approval before implementing
-- Changing dada
+- Changing data
   * When updating database data, first create a backup of the existing database
 - Coding
   * When deviating from the plan, ask for approval
   * Write tests before writing code and run tests frequently
   * Check the code using `cargo check` as frequently as possible
-  * Update documentation
+  * Documentation
+    * Update technical documentation
+    * Add state change diagrams to documentation
+    * Create any new documentation files that are needed
+    * Put information from this change into a file in ./docs/change
 - Code review
   * Have engineeering-lead do a code review before verification
     * Do a follow up review of the changes made during verification
