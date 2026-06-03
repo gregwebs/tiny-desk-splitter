@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="color-scheme" content="light dark">
   <title>Tiny Desk Concerts</title>
-  <script src="https://unpkg.com/htmx.org@1.9.12"></script>
+  <script src="/static/htmx.min.js"></script>
   <style>
     :root {
       --player-bar-height: 56px;
@@ -357,6 +357,25 @@
     .htmx-request .htmx-indicator,
     .htmx-request.htmx-indicator { opacity: 1; }
 
+    /* Global in-flight feedback: htmx adds .htmx-request to the element issuing a
+       request for the request's duration, removing it on success OR failure (so
+       it self-clears). Dim the button and block clicks so a request can't be
+       double-fired. Scoped to <button> so the status card's `every 3s` poll
+       (an hx-get on a <div>) is not dimmed/disabled on every tick. */
+    button.htmx-request { opacity: 0.6; pointer-events: none; }
+    /* Trash-icon delete buttons swap their glyph for a spinner while in flight.
+       The :has() guard keeps text ✕ delete buttons (which only dim) from also
+       sprouting a spinner. */
+    .btn-delete.htmx-request .icon-trash { display: none; }
+    .btn-delete.htmx-request:has(.icon-trash)::before {
+      content: ""; display: inline-block;
+      width: 1em; height: 1em; vertical-align: -0.125em;
+      border: 2px solid var(--spinner-track);
+      border-top-color: var(--spinner-tip);
+      border-radius: 50%;
+      animation: spin 0.65s linear infinite;
+    }
+
     @keyframes spin { to { transform: rotate(360deg); } }
     .spinner {
       display: inline-block;
@@ -394,6 +413,10 @@
     .track-unavailable { opacity: 0.65; }
     .track-title-unavailable { flex: 1; }
     .error-list { color: var(--error-fg); font-size: 0.85em; }
+    /* Inline error shown next to the control whose request failed (see the global
+       htmx error handler below). flex-basis:100% makes it wrap onto its own line
+       inside flex rows like .track-list li instead of distorting the row. */
+    .req-error { color: var(--error-fg); font-size: 0.85em; flex-basis: 100%; }
     textarea {
       width: 100%; font-family: inherit;
       background: var(--surface); color: var(--fg);
@@ -580,6 +603,68 @@
           if (window.htmx) htmx.process(target);
         });
     }
+
+    // ── Global htmx request feedback ──────────────────────────────────────
+    // htmx fires htmx:sendError on a network failure (e.g. server stopped),
+    // htmx:responseError on an HTTP error status, and htmx:timeout on timeout.
+    // None of these swap content, so the triggering element still exists and we
+    // anchor a small inline error next to it. The in-flight spinner/dim is
+    // handled purely in CSS via the .htmx-request class.
+    (function () {
+      var AUTO_CLEAR_MS = 6000;
+      // Per-element bookkeeping so concurrent failures on different controls
+      // don't clobber each other, and so timers are scoped + cancellable.
+      var errors = new WeakMap(); // elt -> { node, timer }
+
+      function clearInlineError(elt) {
+        if (!elt) return;
+        var rec = errors.get(elt);
+        if (!rec) return;
+        clearTimeout(rec.timer);
+        if (rec.node && rec.node.parentNode) rec.node.remove();
+        errors.delete(elt);
+      }
+
+      function showInlineError(elt, msg) {
+        if (!elt) return;
+        // Don't surface errors for background polling (e.g. the status card's
+        // hx-trigger="every 3s") — those aren't user-initiated requests.
+        var trig = elt.getAttribute && elt.getAttribute("hx-trigger");
+        if (trig && trig.indexOf("every") !== -1) return;
+        clearInlineError(elt); // replace any prior error for this element
+        var node = document.createElement("span");
+        node.className = "req-error";
+        node.setAttribute("role", "alert");
+        node.textContent = msg;
+        elt.insertAdjacentElement("afterend", node);
+        var timer = setTimeout(function () {
+          // The element/error may have been swapped away in the meantime.
+          if (node.isConnected) node.remove();
+          errors.delete(elt);
+        }, AUTO_CLEAR_MS);
+        errors.set(elt, { node: node, timer: timer });
+      }
+
+      function statusMessage(evt) {
+        var xhr = evt.detail && evt.detail.xhr;
+        var status = xhr && xhr.status;
+        return status ? "Request failed (" + status + ")" : "Request failed";
+      }
+
+      document.body.addEventListener("htmx:sendError", function (evt) {
+        showInlineError(evt.detail.elt, "Server unreachable");
+      });
+      document.body.addEventListener("htmx:responseError", function (evt) {
+        showInlineError(evt.detail.elt, statusMessage(evt));
+      });
+      document.body.addEventListener("htmx:timeout", function (evt) {
+        showInlineError(evt.detail.elt, "Request timed out");
+      });
+      // Retrying a control clears its stale error before the new request runs.
+      document.body.addEventListener("htmx:beforeRequest", function (evt) {
+        clearInlineError(evt.detail.elt);
+      });
+    })();
   </script>
   <script src="/static/player.js"></script>
 </body>

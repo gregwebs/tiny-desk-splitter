@@ -251,6 +251,7 @@ const Player = (() => {
       return true;
     } catch (e) {
       if (e.name !== "AbortError") {
+        showError("Couldn't load next track");
         tracing("playNextTrack failed", e);
         setPlayPauseIcon(false);
       }
@@ -292,6 +293,7 @@ const Player = (() => {
       return true;
     } catch (e) {
       if (e.name !== "AbortError") {
+        showError("Couldn't load previous track");
         tracing("playPrevTrack failed", e);
         setPlayPauseIcon(false);
       }
@@ -429,6 +431,7 @@ const Player = (() => {
       if (state.concertId === concertId && state.trackIdx === trackIdx) {
         setLikeState(!next);
       }
+      showError("Like failed");
       tracing("toggleLike failed", e);
     }
   }
@@ -675,6 +678,7 @@ const Player = (() => {
     try {
       await fetch(state.watchUrl, { method: "POST" });
     } catch (e) {
+      showError("Couldn't open externally");
       tracing("openExternal fetch failed", e);
     }
   }

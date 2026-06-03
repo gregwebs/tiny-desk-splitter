@@ -40,7 +40,9 @@
           <button hx-post="/concerts/{{ id }}/archive" hx-target="closest .card" hx-swap="outerHTML"
                   hx-disabled-elt="this"
                   hx-on::before-request="this.textContent='Archiving…'"
-                  hx-on::response-error="this.textContent='Archive'">Archive</button>
+                  hx-on::response-error="this.textContent='Archive'"
+                  hx-on::send-error="this.textContent='Archive'"
+                  hx-on::timeout="this.textContent='Archive'">Archive</button>
         {% endif %}
         {% if can_unarchive %}
           <button class="btn-delete" title="Unarchive"
@@ -48,7 +50,9 @@
                   hx-target="closest .card" hx-swap="outerHTML"
                   hx-disabled-elt="this"
                   hx-on::before-request="this.textContent='Unarchiving…'"
-                  hx-on::response-error="this.textContent='✕'">✕</button>
+                  hx-on::response-error="this.textContent='✕'"
+                  hx-on::send-error="this.textContent='✕'"
+                  hx-on::timeout="this.textContent='✕'">✕</button>
         {% endif %}
       </span>
 
@@ -61,7 +65,9 @@
           <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML"
                   hx-disabled-elt="this"
                   hx-on::before-request="this.textContent='Starting…'"
-                  hx-on::response-error="this.textContent='Download'">Download</button>
+                  hx-on::response-error="this.textContent='Download'"
+                  hx-on::send-error="this.textContent='Download'"
+                  hx-on::timeout="this.textContent='Download'">Download</button>
         {% endif %}
         {% if can_listen %}
           <button class="btn-listen" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">Play</button>
@@ -80,7 +86,9 @@
           <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML"
                   hx-disabled-elt="this"
                   hx-on::before-request="this.textContent='Starting…'"
-                  hx-on::response-error="this.textContent='Split'">Split</button>
+                  hx-on::response-error="this.textContent='Split'"
+                  hx-on::send-error="this.textContent='Split'"
+                  hx-on::timeout="this.textContent='Split'">Split</button>
         {% endif %}
       </span>
 

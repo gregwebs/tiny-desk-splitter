@@ -82,6 +82,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .route("/static/player.js", get(handlers::player_js))
+        .route("/static/htmx.min.js", get(handlers::htmx_js))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
         .layer(TraceLayer::new_for_http())

@@ -1733,6 +1733,16 @@ pub async fn player_js() -> impl IntoResponse {
     )
 }
 
+// Vendored htmx, served locally instead of from a CDN so the UI works offline
+// and isn't subject to a third-party outage. Embedded at compile time like the
+// player script above.
+pub async fn htmx_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/htmx.min.js"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
