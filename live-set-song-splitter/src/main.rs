@@ -88,6 +88,12 @@ struct AudioSegment {
 struct SongSegment {
     pub song: Song,
     pub segment: AudioSegment,
+    /// True when `segment.start_time` came from detecting the title overlay. The
+    /// overlay appears ~`OVERLAY_DELAY_SECONDS` after the song actually starts, so
+    /// these (and only these) starts get the overlay-delay pullback when audio
+    /// silence can't relocate them. Recovered/silence-placed and JSON-loaded starts
+    /// are not overlay estimates and must not be pulled back.
+    pub start_from_overlay: bool,
 }
 
 /// Write the two metadata JSON files into `output_dir`:
@@ -208,7 +214,12 @@ fn main() -> Result<()> {
                 end_time: song_timestamp.end_time,
                 is_song: true,
             };
-            segments.push(SongSegment { song, segment });
+            segments.push(SongSegment {
+                song,
+                segment,
+                // Loaded from JSON, not a fresh overlay estimate.
+                start_from_overlay: false,
+            });
         }
 
         println!(
@@ -226,7 +237,12 @@ fn main() -> Result<()> {
                 end_time: song_timestamp.end_time,
                 is_song: true,
             };
-            segments.push(SongSegment { song, segment });
+            segments.push(SongSegment {
+                song,
+                segment,
+                // Loaded from JSON, not a fresh overlay estimate.
+                start_from_overlay: false,
+            });
         }
         println!("Loaded {} song segments from JSON file", segments.len());
     }
@@ -714,6 +730,8 @@ fn recover_missing_songs_from_silence(
                     end_time: gap_end,
                     is_song: true,
                 },
+                // Recovered at a silence/equal-split point, not an overlay estimate.
+                start_from_overlay: false,
             });
             results[song_idx] = RecoveryResult::Recovered;
         }
@@ -744,6 +762,65 @@ fn find_segment_for_song<'a>(segments: &'a [SongSegment], song: &Song) -> &'a So
         .iter()
         .find(|s| s.song.title.to_lowercase() == song.title.to_lowercase())
         .expect("caller must guarantee the song is present")
+}
+
+/// The title overlay typically appears this many seconds AFTER the song actually
+/// starts, so an overlay-derived start sits ~this late. When audio silence can't
+/// relocate such a start, we pull it back by this amount as a best-effort guess.
+const OVERLAY_DELAY_SECONDS: f64 = 3.0;
+
+/// How far back from a detected start to look for a real silence gap to snap to.
+/// (Distinct from `OVERLAY_DELAY_SECONDS`, which happens to share the value today.)
+const SILENCE_LOOKBACK_SECONDS: f64 = 3.0;
+
+/// Outcome of refining a single song's start time.
+#[derive(Debug, PartialEq)]
+enum StartRefinement {
+    /// Snap back to a real audio silence at this time.
+    Snapped(f64),
+    /// No silence; pull back to this best-effort start to undo the overlay delay.
+    PulledBack(f64),
+    /// Leave the start at the originally detected time.
+    Unchanged,
+}
+
+/// Decide a song's refined start time.
+///
+/// `nearby_silence` are silence midpoints already filtered to the look-back window
+/// `[song_start - SILENCE_LOOKBACK_SECONDS, song_start)`. `prev_song_start` is the
+/// previous song's start (None when the previous segment is a gap or absent); the
+/// pullback is clamped so it can't shrink the previous song below
+/// `audio::MIN_SONG_GAP_SECONDS`. `allow_overlay_pullback` is true only for
+/// overlay-derived starts — recovered/silence-placed starts must not be pulled back.
+fn refine_start(
+    song_start: f64,
+    prev_song_start: Option<f64>,
+    nearby_silence: &[f64],
+    allow_overlay_pullback: bool,
+) -> StartRefinement {
+    // Prefer snapping to the latest real silence in the window. A detected silence
+    // is hard evidence of a real boundary, so — unlike the speculative pullback
+    // below — it is intentionally NOT floor-clamped against the previous song's
+    // length: we trust the audio over the min-length heuristic. (In practice the
+    // window is only SILENCE_LOOKBACK_SECONDS wide, so a snap can't move the start
+    // far anyway.)
+    if let Some(&silence) = nearby_silence.iter().max_by(|a, b| a.total_cmp(b)) {
+        return StartRefinement::Snapped(silence);
+    }
+
+    // No silence to snap to: for an overlay-derived start, pull back by the overlay
+    // delay, but not so far that the previous song drops below the minimum length.
+    if allow_overlay_pullback {
+        let floor = prev_song_start
+            .map(|p| p + audio::MIN_SONG_GAP_SECONDS)
+            .unwrap_or(0.0);
+        let new_start = (song_start - OVERLAY_DELAY_SECONDS).max(floor);
+        if new_start < song_start {
+            return StartRefinement::PulledBack(new_start);
+        }
+    }
+
+    StartRefinement::Unchanged
 }
 
 fn refine_segments_with_audio_analysis(
@@ -777,8 +854,7 @@ fn refine_segments_with_audio_analysis(
     );
 
     // Create refined segments
-    let mut refined_segments = Vec::new();
-    let look_back_seconds = 3.0; // Look back this many seconds from detected start time
+    let mut refined_segments: Vec<SongSegment> = Vec::new();
 
     for (i, segment) in segments.iter().enumerate() {
         if i == 0 || !segment.segment.is_song {
@@ -788,49 +864,61 @@ fn refine_segments_with_audio_analysis(
         }
 
         let song_start = segment.segment.start_time;
-        let search_start = (song_start - look_back_seconds).max(0.0);
+        let search_start = (song_start - SILENCE_LOOKBACK_SECONDS).max(0.0);
 
-        // Find silence points within the look-back window
+        // Silence points within the look-back window, just before the start.
         let nearby_silence: Vec<f64> = silence_timestamps
             .iter()
             .filter(|&&ts| ts >= search_start && ts < song_start)
             .cloned()
             .collect();
 
-        if !nearby_silence.is_empty() {
-            // Find the latest silence point before the current start time
-            let new_start = *nearby_silence
-                .iter()
-                .max_by(|a, b| a.partial_cmp(b).unwrap())
-                .unwrap();
+        // Previous (already-finalized) segment's start, only if it is a song.
+        let prev_song_start = refined_segments
+            .last()
+            .filter(|s| s.segment.is_song)
+            .map(|s| s.segment.start_time);
 
-            println!(
-                "Refined song {} start time from {:.2}s to {:.2}s (-{:.2}s)",
-                i,
-                song_start,
-                new_start,
-                song_start - new_start
-            );
-
-            // Update the previous segment's end time if it exists and is a song
-            if i > 0 && refined_segments[i - 1].segment.is_song {
-                refined_segments[i - 1].segment.end_time = new_start;
+        let mut refined = segment.clone();
+        let new_start = match refine_start(
+            song_start,
+            prev_song_start,
+            &nearby_silence,
+            segment.start_from_overlay,
+        ) {
+            StartRefinement::Snapped(t) => {
+                println!(
+                    "Refined song {} start: snapped to silence, {:.2}s -> {:.2}s (-{:.2}s)",
+                    i,
+                    song_start,
+                    t,
+                    song_start - t
+                );
+                Some(t)
             }
+            StartRefinement::PulledBack(t) => {
+                println!(
+                    "Refined song {} start: no silence, estimated start (overlay -{:.2}s), {:.2}s -> {:.2}s",
+                    i,
+                    song_start - t,
+                    song_start,
+                    t
+                );
+                Some(t)
+            }
+            StartRefinement::Unchanged => None,
+        };
 
-            // Add refined segment
-            let segment_audio = AudioSegment {
-                start_time: new_start,
-                end_time: segment.segment.end_time,
-                is_song: true,
-            };
-            refined_segments.push(SongSegment {
-                song: segment.song.clone(),
-                segment: segment_audio,
-            });
-        } else {
-            // No silence found in the look-back window, keep original
-            refined_segments.push(segment.clone());
+        if let Some(new_start) = new_start {
+            refined.segment.start_time = new_start;
+            // Keep the previous song's end chained to this start.
+            if let Some(prev) = refined_segments.last_mut() {
+                if prev.segment.is_song {
+                    prev.segment.end_time = new_start;
+                }
+            }
         }
+        refined_segments.push(refined);
     }
 
     // Ensure the last segment ends at the total duration
@@ -1184,6 +1272,86 @@ mod tests_back_search_offset {
 }
 
 #[cfg(test)]
+mod tests_refine_start {
+    use super::*;
+
+    #[test]
+    fn snaps_to_latest_silence_in_window() {
+        let r = refine_start(100.0, Some(40.0), &[97.5, 98.9, 98.2], true);
+        assert_eq!(r, StartRefinement::Snapped(98.9));
+    }
+
+    #[test]
+    fn silence_snap_applies_even_to_non_overlay_starts() {
+        // A recovered start still snaps to a real silence if one is present.
+        assert_eq!(
+            refine_start(100.0, Some(40.0), &[98.0], false),
+            StartRefinement::Snapped(98.0)
+        );
+    }
+
+    #[test]
+    fn pulls_back_overlay_start_when_no_silence() {
+        assert_eq!(
+            refine_start(100.0, Some(40.0), &[], true),
+            StartRefinement::PulledBack(97.0)
+        );
+    }
+
+    #[test]
+    fn does_not_pull_back_non_overlay_start() {
+        // Recovered / silence-placed / JSON-loaded starts must not be pulled back.
+        assert_eq!(
+            refine_start(100.0, Some(40.0), &[], false),
+            StartRefinement::Unchanged
+        );
+    }
+
+    #[test]
+    fn snap_is_not_floor_clamped() {
+        // A real silence wins even when it sits below the min-song-length floor:
+        // snapping to detected silence is deliberately NOT clamped (unlike pullback).
+        // Here the pullback floor (prev + gap = 119) is past song_start, so a
+        // pullback would be Unchanged — but the snap still applies.
+        assert_eq!(
+            refine_start(100.0, Some(99.0), &[98.5], true),
+            StartRefinement::Snapped(98.5)
+        );
+    }
+
+    #[test]
+    fn pulls_back_with_no_previous_song() {
+        // No previous song -> floor is 0.0, so the full overlay delay is applied.
+        assert_eq!(
+            refine_start(50.0, None, &[], true),
+            StartRefinement::PulledBack(47.0)
+        );
+    }
+
+    #[test]
+    fn pullback_clamped_to_unchanged_when_prev_song_too_short() {
+        // Previous song starts close enough that a full pullback would leave it
+        // shorter than MIN_SONG_GAP_SECONDS, and even the floor is past song_start.
+        let prev = 100.0 - audio::MIN_SONG_GAP_SECONDS + 1.0; // floor = prev + gap = 101.0
+        assert_eq!(
+            refine_start(100.0, Some(prev), &[], true),
+            StartRefinement::Unchanged
+        );
+    }
+
+    #[test]
+    fn pullback_partial_to_floor_when_min_length_allows_some() {
+        // floor = prev + gap sits between song_start-3 and song_start, so we pull
+        // back only as far as the floor keeps the previous song long enough.
+        let prev = 100.0 - audio::MIN_SONG_GAP_SECONDS - 1.0; // floor = 99.0
+        assert_eq!(
+            refine_start(100.0, Some(prev), &[], true),
+            StartRefinement::PulledBack(99.0)
+        );
+    }
+}
+
+#[cfg(test)]
 mod tests_first_song_fallback {
     use super::*;
 
@@ -1317,6 +1485,7 @@ mod tests_recover_missing_songs {
                 end_time: start,
                 is_song: true,
             },
+            start_from_overlay: false,
         }
     }
 
@@ -1344,6 +1513,49 @@ mod tests_recover_missing_songs {
             t += seconds;
         }
         samples
+    }
+
+    fn overlay_segment(title: &str, start: f64, end: f64) -> SongSegment {
+        SongSegment {
+            song: Song {
+                title: title.to_string(),
+            },
+            segment: AudioSegment {
+                start_time: start,
+                end_time: end,
+                is_song: true,
+            },
+            start_from_overlay: true,
+        }
+    }
+
+    #[test]
+    fn overlay_pullback_chains_previous_end() {
+        // All-loud audio -> no silence spans, so the second (overlay) song's start
+        // is pulled back by the overlay delay and the first song's end is chained to
+        // it. The first song (i == 0) is never pulled back.
+        let audio = synth_audio(&[(60.0, false)]);
+        let segments = vec![
+            overlay_segment("a", 0.0, 30.0),
+            overlay_segment("b", 30.0, 60.0),
+        ];
+
+        let refined = refine_segments_with_audio_analysis(&segments, &audio, 60.0).unwrap();
+
+        assert_eq!(refined[0].segment.start_time, 0.0, "first song untouched");
+        assert_eq!(
+            refined[1].segment.start_time,
+            30.0 - OVERLAY_DELAY_SECONDS,
+            "second song pulled back by the overlay delay"
+        );
+        assert_eq!(
+            refined[0].segment.end_time, refined[1].segment.start_time,
+            "previous end chained to the new start (no gap/overlap)"
+        );
+        assert_eq!(
+            refined[1].segment.end_time, 60.0,
+            "last song extends to total duration"
+        );
     }
 
     #[test]
@@ -1777,6 +1989,8 @@ fn detect_song_boundaries_from_text(
         segments.push(SongSegment {
             song: song_obj,
             segment,
+            // Start came from the title overlay (~OVERLAY_DELAY_SECONDS late).
+            start_from_overlay: true,
         });
     }
 
