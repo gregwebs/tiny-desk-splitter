@@ -30,7 +30,21 @@ impl OcrEngine for SubprocessOcr {
     }
 }
 
-#[cfg(feature = "leptess-ocr")]
+// Engine selection by feature, in priority order: paddle-ocr > leptess-ocr > subprocess.
+// `paddle-ocr` wins even when the default `leptess-ocr` is also enabled, so callers can
+// opt in with just `--features paddle-ocr`. To build without linking tesseract at all,
+// use `--no-default-features --features paddle-ocr`.
+
+#[cfg(feature = "paddle-ocr")]
+pub fn create_ocr_engines(_psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
+    // PaddleOCR detects text regions itself; tesseract PSM modes have no equivalent,
+    // so the per-PSM fan-out collapses to a single engine.
+    let engine: Box<dyn OcrEngine> =
+        Box::new(crate::ocr_paddle::PaddleOcr::new().expect("Failed to create PaddleOCR engine"));
+    vec![engine]
+}
+
+#[cfg(all(feature = "leptess-ocr", not(feature = "paddle-ocr")))]
 pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
     psm_modes
         .iter()
@@ -44,7 +58,7 @@ pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>>
         .collect()
 }
 
-#[cfg(not(feature = "leptess-ocr"))]
+#[cfg(all(not(feature = "leptess-ocr"), not(feature = "paddle-ocr")))]
 pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
     psm_modes
         .iter()
@@ -350,7 +364,7 @@ mod tests {
 
 /// Normalize text by removing punctuation and spaces, keeping only alphanumeric characters.
 /// Also converts all characters to lowercase for case-insensitive comparison.
-fn normalize_text(text: &str) -> String {
+pub fn normalize_text(text: &str) -> String {
     text.chars()
         .filter(|c| c.is_alphanumeric())
         .collect::<String>()
@@ -519,7 +533,7 @@ pub fn matches_song_title_weighted(
             return Some(result);
         }
         if let Some(stripped_song) = strip_movement_prefix(song_title) {
-            println!("movement stripped: {}", &stripped_song);
+            log::debug!("movement stripped: {}", &stripped_song);
             if let Some(result) = check_line_match(line, &stripped_song, is_overlay, weights) {
                 return Some(result);
             }

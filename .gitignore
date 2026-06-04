@@ -9,6 +9,9 @@
 /analysis/
 /videos/
 
+# PaddleOCR model binaries (~24MB, re-downloadable; see docs/change/2026-06-04-paddle-ocr-evaluation.md)
+/live-set-song-splitter/models/
+
 concerts.db
 concerts.db-wal
 concerts.db-shm

@@ -1,6 +1,8 @@
 pub mod ocr;
 #[cfg(feature = "leptess-ocr")]
 pub mod ocr_leptess;
+#[cfg(feature = "paddle-ocr")]
+pub mod ocr_paddle;
 use crate::ocr::{
     matches_song_title, matches_song_title_weighted, weights_for_greedy_extractor,
     weights_for_stingy_extractor,
@@ -75,6 +77,11 @@ struct Cli {
     /// Reuse previously extracted frames if they exist
     #[arg(long)]
     reuse_frames: bool,
+
+    /// Keep the extracted temp_frames/ directory after the run instead of deleting it.
+    /// Useful for building OCR test data (frames + the --analyze_images matches).
+    #[arg(long)]
+    keep_frames: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -381,7 +388,9 @@ fn main() -> Result<()> {
         OutputFormat::Both => println!("Video and audio extraction complete!"),
     }
 
-    if std::path::Path::new(&temp_dir).exists() {
+    if cli.keep_frames {
+        println!("Keeping temporary frames folder (--keep-frames): {}", temp_dir);
+    } else if std::path::Path::new(&temp_dir).exists() {
         println!("Cleaning up temporary folder: {}", temp_dir);
         match fs::remove_dir_all(&temp_dir) {
             Ok(_) => println!("Successfully removed temporary album folder"),

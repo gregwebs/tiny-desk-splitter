@@ -33,15 +33,26 @@ ffmpeg-next = "8.1.0"
 # File system operations
 tempfile = "3.8"        # For better temporary file handling
 stringmetrics = "2.2.2"
-image = "0.24"         # Image processing library
+# Only PNG/JPEG are needed (frames are PNG). default-features=false avoids dragging
+# in avif(rav1e)/exr/webp and the image `rayon` feature, keeping the normal build lean
+# and matching concert-tracker's minimal image config.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = "1.0.97"
 concert-types = { path = "../concert-types" }
 unidecode = "0.3.0"
 leptess = { version = "0.14", optional = true }
 
+# PaddleOCR engine (optional), git-only because it links MNN. Pinned to the `next`
+# branch (package `ocr-rs`), whose build.rs downloads a *prebuilt* MNN for supported
+# platforms (incl. macOS) instead of compiling it from source with cmake — this
+# avoids the cmake-4.x breakage when building Alibaba's MNN. Its lib is `ocr_rs`
+# (no clash with our `crate::ocr`) and it shares our `image` 0.25.
+ocr_rs = { package = "ocr-rs", git = "https://github.com/zibo-chen/rust-paddle-ocr.git", branch = "next", optional = true }
+
 [features]
 default = ["leptess-ocr"]
 leptess-ocr = ["leptess"]
+paddle-ocr = ["ocr_rs"]
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -49,6 +60,18 @@ criterion = { version = "0.5", features = ["html_reports"] }
 [[bench]]
 name = "ocr_benchmark"
 harness = false
+
+[[example]]
+name = "paddle_smoke"
+required-features = ["paddle-ocr"]
+
+[[example]]
+name = "ab_ocr"
+required-features = ["leptess-ocr", "paddle-ocr"]
+
+[[example]]
+name = "ocr_bench"
+required-features = ["leptess-ocr", "paddle-ocr"]
 
 # Optional: for more advanced audio processing
 # Note: these are optional and can be added if needed
