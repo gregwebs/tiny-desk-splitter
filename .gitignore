@@ -12,6 +12,11 @@
 # PaddleOCR model binaries (~24MB, re-downloadable; see docs/change/2026-06-04-paddle-ocr-evaluation.md)
 /live-set-song-splitter/models/
 
+# Vendored ocr-rs build cache: prebuilt MNN downloaded by its build.rs at build time (~22MB)
+/vendor/ocr-rs/3rd_party/
+/vendor/ocr-rs/models/
+/vendor/ocr-rs/target/
+
 concerts.db
 concerts.db-wal
 concerts.db-shm

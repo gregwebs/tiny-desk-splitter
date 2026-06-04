@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["scraper", "live-set-song-splitter", "concert-tracker", "concert-types"]
+# vendor/ocr-rs is a vendored fork used as a path dependency, not a workspace member.
+exclude = ["vendor"]
 
 [profile.release]
 opt-level = 3           # Maximum optimization

@@ -42,12 +42,12 @@ concert-types = { path = "../concert-types" }
 unidecode = "0.3.0"
 leptess = { version = "0.14", optional = true }
 
-# PaddleOCR engine (optional), git-only because it links MNN. Pinned to the `next`
-# branch (package `ocr-rs`), whose build.rs downloads a *prebuilt* MNN for supported
-# platforms (incl. macOS) instead of compiling it from source with cmake — this
-# avoids the cmake-4.x breakage when building Alibaba's MNN. Its lib is `ocr_rs`
-# (no clash with our `crate::ocr`) and it shares our `image` 0.25.
-ocr_rs = { package = "ocr-rs", git = "https://github.com/zibo-chen/rust-paddle-ocr.git", branch = "next", optional = true }
+# PaddleOCR engine (optional). Vendored fork of `ocr-rs` (upstream:
+# github.com/zibo-chen/rust-paddle-ocr, `next` branch) under vendor/ocr-rs — vendored to
+# pin the version and to set its `image` dep to default-features=false (drops the
+# avif/rav1e/exr/tiff/gif codec bloat). Its build.rs downloads a prebuilt MNN (no cmake).
+# Lib is `ocr_rs` (no clash with our `crate::ocr`).
+ocr_rs = { package = "ocr-rs", path = "../vendor/ocr-rs", optional = true }
 
 [features]
 default = ["leptess-ocr"]
