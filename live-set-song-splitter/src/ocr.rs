@@ -362,10 +362,13 @@ mod tests {
     }
 }
 
-/// Normalize text by removing punctuation and spaces, keeping only alphanumeric characters.
-/// Also converts all characters to lowercase for case-insensitive comparison.
+/// Normalize text by folding diacritics to ASCII (so a title like "Frédéric" matches
+/// OCR that reads "Frederic"), then removing non-alphanumeric characters and lowercasing.
+/// Folding matters because OCR rarely reproduces accents and the weighted Levenshtein
+/// misbehaves on the resulting non-ASCII mismatch; `fuzzy_match_artist` already unidecodes.
 pub fn normalize_text(text: &str) -> String {
-    text.chars()
+    unidecode(text)
+        .chars()
         .filter(|c| c.is_alphanumeric())
         .collect::<String>()
         .to_lowercase()
@@ -453,8 +456,6 @@ fn check_line_match(
         levenshtein_limit + 10 + title_count as u32,
         &weights,
     );
-    // println!("normalized title/line:\n{}\n{}", title_normalized_for_matching, line_normalized);
-    // println!("levenshtein distance: {}/{}. {}. {}", lev, levenshtein_limit, song_title, line);
     if lev <= levenshtein_limit {
         return Some((
             MatchReason::Levenshtein(lev),

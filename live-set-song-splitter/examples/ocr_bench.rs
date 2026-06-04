@@ -66,6 +66,7 @@ struct Tally {
 /// Per-song "did ANY frame of this song …" flags, per variant.
 #[derive(Default)]
 struct SongRec {
+    title: String,      // display title (first seen)
     song: [bool; NV],   // any frame matched the song title
     artist: [bool; NV], // any frame detected the artist overlay (known-artist songs only)
     known_artist: bool,
@@ -193,6 +194,9 @@ fn run_positives(
 
         let song_key = format!("{}|{}", parse_artist, key);
         let seen = song_seen.entry(song_key).or_default();
+        if seen.title.is_empty() {
+            seen.title = match_song.clone();
+        }
         seen.known_artist |= artist.is_some();
         for i in 0..NV {
             seen.song[i] |= song_hit[i];
@@ -244,6 +248,13 @@ fn run_positives(
     for i in 0..NV {
         println!("    {}   {:>4}/{:<4}  ({:.0}%)", LABELS[i], per_song[i], total_songs, pct(per_song[i], total_songs));
     }
+    // Songs missed entirely (0 frames matched) by the key paddle configs.
+    let mut miss_clr: Vec<&str> = song_seen.values().filter(|r| !r.song[2]).map(|r| r.title.as_str()).collect();
+    let mut miss_cb: Vec<&str> = song_seen.values().filter(|r| !r.song[4]).map(|r| r.title.as_str()).collect();
+    miss_clr.sort();
+    miss_cb.sort();
+    println!("  PER-SONG MISSES paddle(clr): {:?}", miss_clr);
+    println!("  PER-SONG MISSES paddle(c+b): {:?}", miss_cb);
     println!();
     println!("  PER-SONG ARTIST-overlay recall (>=1 frame found the overlay) over {} known-artist songs:", known_songs);
     println!("  [the anchor for refinement: if we find the overlay we can refine to read the title]");
