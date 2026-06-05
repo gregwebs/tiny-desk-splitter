@@ -12,83 +12,9 @@ pub trait OcrEngine {
     fn ocr_text(&mut self, image_path: &str) -> Result<String>;
 }
 
-pub struct SubprocessOcr {
-    psm: Option<String>,
-}
-
-impl SubprocessOcr {
-    pub fn new(psm: Option<&str>) -> Self {
-        Self {
-            psm: psm.map(|s| s.to_string()),
-        }
-    }
-}
-
-impl OcrEngine for SubprocessOcr {
-    fn ocr_text(&mut self, image_path: &str) -> Result<String> {
-        run_tesseract_ocr(image_path, self.psm.as_deref())
-    }
-}
-
-// Engine selection by feature, in priority order: paddle-ocr > leptess-ocr > subprocess.
-// `paddle-ocr` wins even when the default `leptess-ocr` is also enabled, so callers can
-// opt in with just `--features paddle-ocr`. To build without linking tesseract at all,
-// use `--no-default-features --features paddle-ocr`.
-
-#[cfg(feature = "paddle-ocr")]
-pub fn create_ocr_engines(_psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
-    // PaddleOCR detects text regions itself; tesseract PSM modes have no equivalent,
-    // so the per-PSM fan-out collapses to a single engine.
-    let engine: Box<dyn OcrEngine> =
-        Box::new(crate::ocr_paddle::PaddleOcr::new().expect("Failed to create PaddleOCR engine"));
-    vec![engine]
-}
-
-#[cfg(all(feature = "leptess-ocr", not(feature = "paddle-ocr")))]
-pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
-    psm_modes
-        .iter()
-        .map(|psm| {
-            let engine: Box<dyn OcrEngine> = Box::new(
-                crate::ocr_leptess::LeptessOcr::new(*psm)
-                    .expect("Failed to create leptess OCR engine"),
-            );
-            engine
-        })
-        .collect()
-}
-
-#[cfg(all(not(feature = "leptess-ocr"), not(feature = "paddle-ocr")))]
-pub fn create_ocr_engines(psm_modes: &[Option<&str>]) -> Vec<Box<dyn OcrEngine>> {
-    psm_modes
-        .iter()
-        .map(|psm| {
-            let engine: Box<dyn OcrEngine> = Box::new(SubprocessOcr::new(*psm));
-            engine
-        })
-        .collect()
-}
-
-pub fn run_ocr_parse(
-    engine: &mut dyn OcrEngine,
-    image_path: &str,
-    artist_cmp: &str,
-) -> Result<Option<OcrParse>> {
-    let text = engine.ocr_text(image_path)?;
-    Ok(parse_tesseract_output(&text, artist_cmp))
-}
-
-pub fn run_tesseract_ocr_parse(
-    image_path: &str,
-    artist_cmp: &str,
-    psm: Option<&str>,
-) -> Result<Option<OcrParse>> {
-    let text = run_tesseract_ocr(image_path, psm)?;
-    return match parse_tesseract_output(&text, &artist_cmp) {
-        Some(result) => Ok(Some(result)),
-        None => Ok(None),
-    };
-}
+// OCR backend selection now lives in `ocr_backend.rs` (`OcrBackend` + `create_ocr_backend`).
+// The low-level `run_tesseract_ocr` subprocess helper below is retained only for the
+// criterion benchmark (`benches/ocr_benchmark.rs`).
 
 pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> {
     let mut output_path = image_path.to_string();

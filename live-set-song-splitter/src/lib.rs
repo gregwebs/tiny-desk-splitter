@@ -1,5 +1,6 @@
 pub mod image;
 pub mod ocr;
+pub mod ocr_backend;
 #[cfg(feature = "leptess-ocr")]
 pub mod ocr_leptess;
 #[cfg(feature = "paddle-ocr")]

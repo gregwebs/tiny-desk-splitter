@@ -4,7 +4,8 @@
 //! Unlike tesseract, PaddleOCR runs a *detection* model that finds text regions
 //! and a *recognition* model that reads each region. There is no page-segmentation
 //! mode (PSM) concept, so the per-PSM fan-out used for tesseract collapses to a
-//! single engine here (see `create_ocr_engines` in `ocr.rs`).
+//! single pass here. `PaddleBackend` (bottom of this file) is the [`OcrBackend`]
+//! production wrapper; `PaddleOcr` is the low-level engine it builds on.
 //!
 //! Models are loaded from a directory given by the `PADDLE_OCR_MODEL_DIR`
 //! environment variable, defaulting to `models/` relative to the working
@@ -18,7 +19,10 @@
 use anyhow::{Context, Result};
 use ocr_rs::{DetModel, RecModel};
 
-use crate::ocr::OcrEngine;
+use crate::ocr::{
+    parse_tesseract_output, weights_for_greedy_extractor, weights_for_stingy_extractor, OcrEngine,
+};
+use crate::ocr_backend::{OcrBackend, OcrBackendOptions, OcrCandidate, OcrPhase};
 
 const DEFAULT_MODEL_DIR: &str = "models";
 const DET_MODEL: &str = "PP-OCRv5_mobile_det.mnn";
@@ -44,14 +48,12 @@ const DEFAULT_KEYS_FILE: &str = "ppocr_keys_v5.txt";
 pub struct PaddleOcr {
     det: DetModel,
     rec: RecModel,
-    /// EXPERIMENTAL (`PADDLE_OCR_TITLE_CROP=1`, off by default). After the normal pass,
-    /// crop below the lowest detected box and re-detect, to recover a low-contrast title
-    /// line that the bold artist line suppresses. FINDING: only partially works — a
-    /// MANUAL fixed-fraction crop of the fixed-geometry refined crops reads such titles
-    /// in full, but deriving the crop line from Paddle's OWN boxes fails because the
-    /// detector's box geometry is unreliable on these low-contrast frames (boxes bleed
-    /// into the title, so we recover only fragments). The simpler color+B/W union
-    /// already recovers most of these cases — prefer that.
+    /// Title-crop second pass (ON by default; disable with `PADDLE_OCR_TITLE_CROP=0`).
+    /// After the normal pass, crop below the artist line (`min_box_top + frac*height` —
+    /// the box TOP is reliable while the bottom bleeds into the title) and re-detect, to
+    /// recover a low-contrast title line that the bold artist line otherwise suppresses.
+    /// This took paddle to 100% per-song recall on the eval set; `PADDLE_OCR_TITLE_CROP_FRAC`
+    /// tunes the fraction (default 0.26). See docs/change/2026-06-04-paddle-ocr-evaluation.md.
     title_crop: bool,
 }
 
@@ -75,9 +77,10 @@ impl PaddleOcr {
             anyhow::anyhow!("loading paddle recognition model {}: {}", path(&rec_model), e)
         })?;
 
+        // Title-crop is ON by default (the 100%-recall config); opt out with =0/false/no.
         let title_crop = std::env::var("PADDLE_OCR_TITLE_CROP")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "yes"))
-            .unwrap_or(false);
+            .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
+            .unwrap_or(true);
 
         Ok(Self { det, rec, title_crop })
     }
@@ -163,5 +166,58 @@ impl OcrEngine for PaddleOcr {
             .collect();
 
         Ok(lines.join("\n"))
+    }
+}
+
+/// PaddleOCR [`OcrBackend`]: a single detection+recognition pass per frame (no PSM
+/// fan-out, no B/W). For refinement the one parse is offered with both the stingy and
+/// greedy match-leniencies (the analog of tesseract's per-PSM weight sweep); detection
+/// uses a single candidate.
+pub struct PaddleBackend {
+    ocr: PaddleOcr,
+    phase: OcrPhase,
+}
+
+impl PaddleBackend {
+    pub fn new(phase: OcrPhase) -> Result<Self> {
+        Ok(Self {
+            ocr: PaddleOcr::new()?,
+            phase,
+        })
+    }
+}
+
+impl OcrBackend for PaddleBackend {
+    fn ocr_image_path(&mut self, image_path: &str, artist: &str) -> Vec<Result<OcrCandidate>> {
+        let text = match self.ocr.ocr_text(image_path) {
+            Ok(text) => text,
+            Err(e) => return vec![Err(e)],
+        };
+        let Some(parse) = parse_tesseract_output(&text, artist) else {
+            return Vec::new(); // empty/too-short: no candidate
+        };
+        match self.phase {
+            OcrPhase::Detection => vec![Ok(OcrCandidate {
+                parse,
+                weights: weights_for_stingy_extractor(),
+            })],
+            // Refine: try the single parse under both leniencies.
+            OcrPhase::Refine => vec![
+                Ok(OcrCandidate {
+                    parse: parse.clone(),
+                    weights: weights_for_stingy_extractor(),
+                }),
+                Ok(OcrCandidate {
+                    parse,
+                    weights: weights_for_greedy_extractor(),
+                }),
+            ],
+        }
+    }
+
+    fn options(&self) -> OcrBackendOptions {
+        OcrBackendOptions {
+            black_and_white: false,
+        }
     }
 }

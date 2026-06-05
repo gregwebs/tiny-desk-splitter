@@ -24,7 +24,10 @@ cargo run --bin concert-web
 - **yt-dlp** — download concert videos
 Splitting video into tracks
 - **ffmpeg** — frame analysis
-- **leptonica** and **tesseract** — OCR
+- **leptonica** and **tesseract** — OCR (default backend)
+- *(optional)* a C/C++ toolchain — only to build the **PaddleOCR** backend (`--features paddle-ocr`),
+  a more accurate OCR option selectable at runtime with `--ocr-engine paddle`. See
+  [docs/change/2026-06-04-adopt-paddle-ocr.md](docs/change/2026-06-04-adopt-paddle-ocr.md).
 
 ---
 
@@ -159,6 +162,9 @@ Splits a downloaded concert MP4 into individual tracks.
 
 ```sh
 cargo run --bin live-set-splitter -- <json_file> [output_dir]
+
+# Optional: choose the OCR backend (default tesseract; paddle needs --features paddle-ocr)
+cargo run --features paddle-ocr --bin live-set-splitter -- <json_file> --ocr-engine paddle
 ```
 
 The JSON file uses the same format produced by the `scraper` crate.

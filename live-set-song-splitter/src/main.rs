@@ -1,12 +1,11 @@
 pub mod ocr;
+pub mod ocr_backend;
 #[cfg(feature = "leptess-ocr")]
 pub mod ocr_leptess;
 #[cfg(feature = "paddle-ocr")]
 pub mod ocr_paddle;
-use crate::ocr::{
-    matches_song_title, matches_song_title_weighted, weights_for_greedy_extractor,
-    weights_for_stingy_extractor,
-};
+use crate::ocr::{matches_song_title, matches_song_title_weighted};
+use crate::ocr_backend::{create_ocr_backend, default_ocr_choice, OcrChoice, OcrPhase};
 mod audio;
 mod ffmpeg;
 mod image;
@@ -82,6 +81,12 @@ struct Cli {
     /// Useful for building OCR test data (frames + the --analyze_images matches).
     #[arg(long)]
     keep_frames: bool,
+
+    /// OCR backend: `tesseract` or `paddle`. Defaults to paddle when built with
+    /// `--features paddle-ocr`, otherwise tesseract. Choosing a backend that wasn't
+    /// compiled in is an error.
+    #[arg(long, value_enum)]
+    ocr_engine: Option<OcrChoice>,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +144,11 @@ struct Timestamps {
 fn main() -> Result<()> {
     // Parse command line arguments using clap
     let cli = Cli::parse();
+
+    // Fail fast if an explicitly-chosen OCR backend wasn't compiled into this build.
+    if let Some(choice) = cli.ocr_engine {
+        crate::ocr_backend::ensure_ocr_choice_available(choice)?;
+    }
 
     let cli_input_file = &cli.input_file;
     let concert_path = &cli.concert_file;
@@ -262,6 +272,7 @@ fn main() -> Result<()> {
         let settings = Settings {
             analyze_images: cli.analyze_images,
             reuse_frames: cli.reuse_frames,
+            ocr_choice: cli.ocr_engine.unwrap_or_else(default_ocr_choice),
         };
 
         // First try to detect song boundaries using text overlays
@@ -1117,6 +1128,7 @@ const CROP_TO_TEXT: &str = "scale=400:200,crop=iw/1.5:ih/4:0:160";
 pub struct Settings {
     analyze_images: bool,
     reuse_frames: bool,
+    ocr_choice: OcrChoice,
 }
 
 fn extract_frames(
@@ -1822,7 +1834,10 @@ fn detect_song_boundaries_from_text(
         frame_number_from_image_filename(a).cmp(&frame_number_from_image_filename(b))
     });
 
-    let mut ocr_engines = ocr::create_ocr_engines(&[Some("11"), None, Some("6")]);
+    let mut backend = create_ocr_backend(settings.ocr_choice, OcrPhase::Detection)?;
+    // Whether to try a binarized fallback pass when the color pass finds no overlay
+    // (tesseract: yes; paddle: no).
+    let do_bw = backend.options().black_and_white;
 
     let mut last_song_start_time: Option<f64> = None;
     for mut frame_path in frames {
@@ -1850,9 +1865,14 @@ fn detect_song_boundaries_from_text(
             .cloned()
             .collect::<Vec<_>>();
 
+        // Candidates accumulate ACROSS the color and (optional) B/W passes so that, when
+        // the color pass finds no overlay, the union is matched with the B/W-derived
+        // overlay flag (a color-pass line can match with the overlay bonus). The backend
+        // owns the OCR fan-out; the pipeline only decides whether to run the B/W pass.
         let mut all_ocr_results: Vec<ocr::OcrParse> = Vec::new();
 
-        'convert: for convert in [false, true] {
+        let passes: &[bool] = if do_bw { &[false, true] } else { &[false] };
+        'convert: for &convert in passes {
             if convert {
                 let orig_path = frame_path.clone();
                 frame_path.set_file_name(format!("{}bw.png", frame_num));
@@ -1860,24 +1880,21 @@ fn detect_song_boundaries_from_text(
             }
             let frame_path_str = frame_path.to_str().unwrap();
 
-            // Collect all OCR results from different PSM options
-            for engine in ocr_engines.iter_mut() {
-                let parsed = ocr::run_ocr_parse(engine.as_mut(), frame_path_str, &artist_cmp)?;
-                if let Some(lo) = parsed {
-                    all_ocr_results.push(lo);
-                }
-            }
+            // OCR this pass (backend fans out internally); propagate the first error.
+            let candidates = backend
+                .ocr_image_path(frame_path_str, &artist_cmp)
+                .into_iter()
+                .collect::<Result<Vec<_>>>()?;
+            all_ocr_results.extend(candidates.into_iter().map(|c| c.parse));
 
             // Check if any OCR result contains the artist name (indicates overlay)
             let has_artist_overlay = all_ocr_results.iter().any(|(_, overlay)| *overlay);
 
-            // If we haven't found the overlay, first
-            // do the bw conversion and look for it
-            if !has_artist_overlay && !convert {
+            // If we haven't found the overlay, first do the B/W conversion and look for it.
+            if !has_artist_overlay && !convert && do_bw {
                 continue;
             }
-            let ocr_results = all_ocr_results;
-            all_ocr_results = Vec::new();
+            let ocr_results = std::mem::take(&mut all_ocr_results);
 
             for ocr_result in &ocr_results {
                 // Create a modified OCR result that indicates overlay presence
@@ -2267,16 +2284,9 @@ fn refine_song_start_time(
     // source-frame count required by `refined_match_to_source_frame`.
     let frame_count = frames.len();
 
-    // Try different PSM options until we find a valid result
-    let weights_list = [
-        weights_for_stingy_extractor(),
-        weights_for_stingy_extractor(),
-        weights_for_greedy_extractor(),
-        weights_for_greedy_extractor(),
-        weights_for_greedy_extractor(),
-    ];
-    let mut refine_engines =
-        ocr::create_ocr_engines(&[Some("11"), None, Some("6"), Some("12"), Some("10")]);
+    // The backend fans out internally; each candidate carries the match-leniency to use
+    // for it (tesseract: per-PSM stingy/greedy; paddle: its single parse under both).
+    let mut backend = create_ocr_backend(settings.ocr_choice, OcrPhase::Refine)?;
 
     // Process each refined frame
     for frame_path in frames {
@@ -2285,27 +2295,25 @@ fn refine_song_start_time(
         let frame_num = frame_number_from_image_filename(&frame_path);
 
         let mut earliest_match_found = false;
-        for (engine, weights) in refine_engines.iter_mut().zip(weights_list.iter()) {
-            let result = ocr::run_ocr_parse(engine.as_mut(), frame_file, artist)?;
-            match result {
-                None => continue,
-                Some(parsed) => {
-                    let (lines, overlay) = parsed;
-                    // If we see the artist overlay that's good enough.
-                    // On the initial fade in we might be able to see the artist name but not the song title.
-                    let matched = overlay
-                        || matches_song_title_weighted(&lines, song_title, overlay, &weights)
-                            .is_some();
-                    if matched {
-                        if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
-                            earliest_match = Some(frame_num);
-                            earliest_match_found = true;
+        let candidates = backend
+            .ocr_image_path(frame_file, artist)
+            .into_iter()
+            .collect::<Result<Vec<_>>>()?;
+        for candidate in &candidates {
+            let (lines, overlay) = &candidate.parse;
+            // If we see the artist overlay that's good enough.
+            // On the initial fade in we might be able to see the artist name but not the song title.
+            let matched = *overlay
+                || matches_song_title_weighted(lines, song_title, *overlay, &candidate.weights)
+                    .is_some();
+            if matched {
+                if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
+                    earliest_match = Some(frame_num);
+                    earliest_match_found = true;
 
-                            // If analyze_images flag is enabled, save the matched image
-                            if settings.analyze_images {
-                                save_matched_image(&frame_path, song_title, frame_num, "refined")?;
-                            }
-                        }
+                    // If analyze_images flag is enabled, save the matched image
+                    if settings.analyze_images {
+                        save_matched_image(&frame_path, song_title, frame_num, "refined")?;
                     }
                 }
             }
