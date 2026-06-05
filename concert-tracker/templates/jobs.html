@@ -37,6 +37,7 @@
   <a href="/jobs"{% if failed_filter.is_empty() %} class="active"{% endif %} hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">All</a>
   <a href="/jobs?failed_filter=download"{% if failed_filter == "download" %} class="active"{% endif %} hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Download</a>
   <a href="/jobs?failed_filter=split"{% if failed_filter == "split" %} class="active"{% endif %} hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Split</a>
+  <a href="/jobs?failed_filter=scrape"{% if failed_filter == "scrape" %} class="active"{% endif %} hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Scrape</a>
 </div>
 {% if failed_jobs.is_empty() %}
 <p>No failed jobs.</p>

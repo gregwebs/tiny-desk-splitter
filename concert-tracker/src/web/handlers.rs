@@ -1433,6 +1433,7 @@ pub async fn jobs_list(
             "download" => j.name == "download",
             "split" => j.name == "split",
             "archive" => j.name == "archive",
+            "scrape" => j.name == "scrape",
             _ => true,
         })
         .map(|j| {
@@ -1440,6 +1441,7 @@ pub async fn jobs_list(
                 "download" => "Download",
                 "split" => "Split",
                 "archive" => "Archive",
+                "scrape" => "Scrape",
                 other => other,
             }
             .to_string();

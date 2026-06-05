@@ -34,6 +34,23 @@ pub type ScrapeItemFn = Arc<dyn Fn(&Arc<Mutex<Connection>>, &Path, &ScrapeReques
 
 const LOG_TARGET: &str = "concert_tracker::jobs::scrape";
 
+/// `jobs.name` value used for background metadata-scrape failures. Shared with the
+/// Jobs page filter/label so the literal does not drift across files.
+pub const SCRAPE_JOB_NAME: &str = "scrape";
+
+/// Append a failed-job row for a scrape failure so it shows up on the Jobs page.
+/// Best-effort: a failed insert is logged, never propagated — it must not mask
+/// the original scrape error. Caller must hold the DB lock (`conn`).
+fn record_scrape_failure(conn: &Connection, concert_id: i64, err: &anyhow::Error) {
+    if let Err(e) = db::insert_failed_job(conn, concert_id, SCRAPE_JOB_NAME, &format!("{:#}", err)) {
+        tracing::warn!(
+            target: LOG_TARGET,
+            "failed to record scrape failure for concert {}: {}",
+            concert_id, e
+        );
+    }
+}
+
 /// Handle to the serial scrape worker. Cloneable; all clones share the same
 /// channel and `pending` set.
 #[derive(Clone)]
@@ -144,6 +161,7 @@ fn scrape_item(db: &Arc<Mutex<Connection>>, working_dir: &Path, req: &ScrapeRequ
             Ok(_) => {}
             Err(e) => {
                 tracing::warn!(target: LOG_TARGET, "scrape skip-check failed for concert {}: {}", req.concert_id, e);
+                record_scrape_failure(&conn, req.concert_id, &e);
                 return;
             }
         }
@@ -158,6 +176,8 @@ fn scrape_item(db: &Arc<Mutex<Connection>>, working_dir: &Path, req: &ScrapeRequ
                 "background scrape fetch failed for concert {} ({}): {}",
                 req.concert_id, req.source_url, e
             );
+            // Re-acquire the lock just to record the failure (none held here).
+            record_scrape_failure(&db.lock().unwrap(), req.concert_id, &e);
             return;
         }
     };
@@ -167,6 +187,7 @@ fn scrape_item(db: &Arc<Mutex<Connection>>, working_dir: &Path, req: &ScrapeRequ
         let conn = db.lock().unwrap();
         if let Err(e) = scrape::apply_concert_info(&conn, &info) {
             tracing::warn!(target: LOG_TARGET, "background scrape apply failed for concert {}: {}", req.concert_id, e);
+            record_scrape_failure(&conn, req.concert_id, &e);
             return;
         }
     }
@@ -248,5 +269,64 @@ mod tests {
 
         // Pending cleared for both (panicked one included).
         wait_until(|| !q.is_pending(1) && !q.is_pending(2)).await;
+    }
+
+    #[test]
+    fn record_scrape_failure_appends_a_row_per_call() {
+        let db = dummy_db();
+        let conn = db.lock().unwrap();
+        record_scrape_failure(&conn, 42, &anyhow::anyhow!("Failed to write JSON file foo"));
+        record_scrape_failure(&conn, 42, &anyhow::anyhow!("second failure"));
+
+        let failed = db::list_failed_jobs(&conn, 100).unwrap();
+        assert_eq!(failed.len(), 2, "each failure appends its own row");
+        assert!(failed.iter().all(|j| j.name == SCRAPE_JOB_NAME));
+        assert!(failed
+            .iter()
+            .any(|j| j.failure_message.contains("Failed to write JSON file foo")));
+    }
+
+    #[test]
+    fn scrape_item_skips_already_scraped_without_recording_failure() {
+        let db = dummy_db();
+        let url = "https://npr.org/c/already-scraped";
+        let id = {
+            let conn = db.lock().unwrap();
+            db::upsert_listing(
+                &conn,
+                &db::NewListing {
+                    source_url: url.to_string(),
+                    title: "X".to_string(),
+                    concert_date: Some("2026-05-01".to_string()),
+                    teaser: None,
+                },
+            )
+            .unwrap();
+            let c = db::get_concert_by_url(&conn, url).unwrap().unwrap();
+            db::update_metadata(
+                &conn,
+                c.id,
+                &db::MetadataUpdate {
+                    artist: "Artist".to_string(),
+                    album: "Album".to_string(),
+                    description: None,
+                    set_list: vec![],
+                    musicians: vec![],
+                },
+            )
+            .unwrap();
+            c.id
+        };
+
+        // The already-scraped guard returns before any network/disk work, so this
+        // is deterministic and offline. It must NOT record a failure.
+        let req = ScrapeRequest {
+            concert_id: id,
+            source_url: url.to_string(),
+        };
+        scrape_item(&db, Path::new("/tmp"), &req);
+
+        let conn = db.lock().unwrap();
+        assert!(db::list_failed_jobs(&conn, 100).unwrap().is_empty());
     }
 }
