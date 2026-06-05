@@ -12,7 +12,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use live_set_splitter::image::write_black_and_white;
-use live_set_splitter::ocr::{matches_song_title, parse_tesseract_output, OcrEngine};
+use live_set_splitter::ocr::{
+    matches_song_title, parse_tesseract_output, song_title_candidate_lines, OcrEngine,
+};
 use live_set_splitter::ocr_leptess::LeptessOcr;
 use live_set_splitter::ocr_paddle::PaddleOcr;
 
@@ -32,12 +34,18 @@ pub struct Engines {
 impl Engines {
     /// Build the tesseract PSM engines + the PaddleOCR engine, and ensure the B/W
     /// scratch dir exists. `scratch_dir` should live under `target/` (gitignored).
-    pub fn new(scratch_dir: &str) -> Result<Self> {
-        let tess = TESS_PSMS
-            .iter()
-            .map(|psm| LeptessOcr::new(*psm))
-            .collect::<Result<_>>()
-            .context("creating tesseract engines (is tesseract installed?)")?;
+    /// When `paddle_only`, the tesseract engines are skipped entirely so `tesseract_runs`
+    /// is a fast no-op (returns no runs) — used by the harnesses' `--paddle-only` mode.
+    pub fn new(scratch_dir: &str, paddle_only: bool) -> Result<Self> {
+        let tess = if paddle_only {
+            Vec::new()
+        } else {
+            TESS_PSMS
+                .iter()
+                .map(|psm| LeptessOcr::new(*psm))
+                .collect::<Result<_>>()
+                .context("creating tesseract engines (is tesseract installed?)")?
+        };
         let paddle = PaddleOcr::new().context("creating PaddleOCR engine")?;
         std::fs::create_dir_all(scratch_dir)
             .with_context(|| format!("creating scratch dir {}", scratch_dir))?;
@@ -99,10 +107,13 @@ pub fn overlay_detected(runs: &Runs) -> bool {
     runs.iter().any(|(_, o)| *o)
 }
 
-/// Does any run match `song`? `is_overlay` controls the overlay tolerance bonus.
+/// Does any run match `song`? `is_overlay` controls the overlay tolerance bonus; each
+/// run's own overlay flag drives artist-line exclusion (mirrors the production detection
+/// path — `song_title_candidate_lines` drops line 0 when that run detected the artist).
 pub fn song_matched(runs: &Runs, song: &str, is_overlay: bool) -> bool {
-    runs.iter()
-        .any(|(lines, _)| matches_song_title(lines, song, is_overlay).is_some())
+    runs.iter().any(|run| {
+        matches_song_title(song_title_candidate_lines(run), song, is_overlay).is_some()
+    })
 }
 
 /// Production-semantics score: overlay derived from the runs, then song matched using

@@ -36,20 +36,36 @@ struct Case {
     song: String,
 }
 
+/// Variant indices into `labels`/`agg`: 0 tess(color), 1 tess(full), 2 paddle.
+const PADDLE: usize = 2;
+
 fn main() -> Result<()> {
     env_logger::init();
 
-    let cases_path = std::env::args().nth(1).unwrap_or_else(|| DEFAULT_CASES.to_string());
+    // `--paddle-only` skips the tesseract variants (engine + scoring); the one optional
+    // positional arg is the cases file.
+    let mut paddle_only = false;
+    let mut cases_path = DEFAULT_CASES.to_string();
+    for arg in std::env::args().skip(1) {
+        if arg == "--paddle-only" {
+            paddle_only = true;
+        } else {
+            cases_path = arg;
+        }
+    }
+
     let raw = std::fs::read_to_string(&cases_path)
         .with_context(|| format!("reading cases file {}", cases_path))?;
     let cases: Vec<Case> =
         serde_json::from_str(&raw).with_context(|| format!("parsing cases file {}", cases_path))?;
 
-    let mut engines = Engines::new(SCRATCH_DIR)?;
+    let mut engines = Engines::new(SCRATCH_DIR, paddle_only)?;
 
     // Aggregate (overlay_hits, song_hits) per variant: [tess_color, tess_full, paddle].
     let mut agg = [(0u32, 0u32); 3];
     let labels = ["tess(color)", "tess(full) ", "paddle     "];
+    // Which variants to compute/report. Paddle-only collapses to just paddle.
+    let shown: &[usize] = if paddle_only { &[PADDLE] } else { &[0, 1, PADDLE] };
     let n = cases.len() as u32;
 
     for case in &cases {
@@ -58,23 +74,27 @@ fn main() -> Result<()> {
             eprintln!("! missing frame, skipping: {}", color.display());
             continue;
         }
-        let bw = engines.make_bw(&color)?;
 
-        let (color_runs, color_text) = engines.tesseract_runs(&[color.as_path()], &case.artist)?;
-        let (c_overlay, c_song) = score(&color_runs, &case.song);
+        // (overlay, song, text) per variant index; None for variants we skip.
+        let mut outcomes: [Option<(bool, bool, String)>; 3] = [None, None, None];
 
-        let (full_runs, full_text) =
-            engines.tesseract_runs(&[color.as_path(), bw.as_path()], &case.artist)?;
-        let (f_overlay, f_song) = score(&full_runs, &case.song);
+        if !paddle_only {
+            let bw = engines.make_bw(&color)?;
+            let (color_runs, color_text) =
+                engines.tesseract_runs(&[color.as_path()], &case.artist)?;
+            let (c_overlay, c_song) = score(&color_runs, &case.song);
+            outcomes[0] = Some((c_overlay, c_song, color_text));
+
+            let (full_runs, full_text) =
+                engines.tesseract_runs(&[color.as_path(), bw.as_path()], &case.artist)?;
+            let (f_overlay, f_song) = score(&full_runs, &case.song);
+            outcomes[1] = Some((f_overlay, f_song, full_text));
+            let _ = std::fs::remove_file(&bw);
+        }
 
         let (paddle_runs, paddle_text) = engines.paddle_runs(&color, &case.artist)?;
         let (p_overlay, p_song) = score(&paddle_runs, &case.song);
-
-        let outcomes = [
-            (c_overlay, c_song, color_text),
-            (f_overlay, f_song, full_text),
-            (p_overlay, p_song, compact(&paddle_text)),
-        ];
+        outcomes[PADDLE] = Some((p_overlay, p_song, compact(&paddle_text)));
 
         println!(
             "{} — {} / \"{}\"",
@@ -82,7 +102,8 @@ fn main() -> Result<()> {
             case.artist,
             case.song
         );
-        for (i, (overlay, song, text)) in outcomes.iter().enumerate() {
+        for &i in shown {
+            let (overlay, song, text) = outcomes[i].as_ref().expect("shown variant computed");
             println!("  {}  artist={} song={}  | {}", labels[i], yn(*overlay), yn(*song), text);
             if *overlay {
                 agg[i].0 += 1;
@@ -91,14 +112,13 @@ fn main() -> Result<()> {
                 agg[i].1 += 1;
             }
         }
-        let _ = std::fs::remove_file(&bw);
         println!();
     }
 
     println!("SUMMARY  (N = {} frames)", n);
     println!("  variant        artist-overlay   song-matched");
-    for (i, label) in labels.iter().enumerate() {
-        println!("  {}    {:>3}/{:<3}          {:>3}/{:<3}", label, agg[i].0, n, agg[i].1, n);
+    for &i in shown {
+        println!("  {}    {:>3}/{:<3}          {:>3}/{:<3}", labels[i], agg[i].0, n, agg[i].1, n);
     }
     Ok(())
 }

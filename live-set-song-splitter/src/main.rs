@@ -4,7 +4,7 @@ pub mod ocr_backend;
 pub mod ocr_leptess;
 #[cfg(feature = "paddle-ocr")]
 pub mod ocr_paddle;
-use crate::ocr::{matches_song_title, matches_song_title_weighted};
+use crate::ocr::{matches_song_title, matches_song_title_weighted, song_title_candidate_lines};
 use crate::ocr_backend::{create_ocr_backend, default_ocr_choice, OcrChoice, OcrPhase};
 mod audio;
 mod ffmpeg;
@@ -2064,8 +2064,14 @@ fn match_song_titles(
     // Store all matches, not just the best one
     let mut all_matches: Vec<(String, (ocr::MatchReason, String, u32))> = Vec::new();
 
+    // For an overlay, line 0 is the artist; exclude it so the artist name can't win as a
+    // song-title match (e.g. artist "Floetry" is Levenshtein-2 from the song "Floetic",
+    // which would steal that song's slot). See
+    // docs/change/2026-06-05-artist-line-song-match-fix.md.
+    let candidate_lines = song_title_candidate_lines(ocr_parse);
+
     for song_title in song_titles_to_match {
-        if let Some(matched) = matches_song_title(&lines, song_title, *overlay) {
+        if let Some(matched) = matches_song_title(candidate_lines, song_title, *overlay) {
             all_matches.push((song_title.to_string(), matched));
         }
     }

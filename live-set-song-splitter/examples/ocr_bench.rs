@@ -93,7 +93,7 @@ fn main() -> Result<()> {
         artist_songs.entry(c.artist.clone()).or_default().extend(c.songs.iter().cloned());
     }
 
-    let mut engines = Engines::new(SCRATCH_DIR)?;
+    let mut engines = Engines::new(SCRATCH_DIR, opts.paddle_only)?;
     run_positives(&mut engines, &song_index, &opts)?;
     println!();
     run_negatives(&mut engines, &artist_songs, &opts)?;
@@ -205,11 +205,14 @@ fn run_positives(
             }
         }
 
-        if song_hit[1] && !song_hit[4] && regressions.len() < LIST_CAP {
-            regressions.push((name.to_string(), match_song.clone()));
-        }
-        if song_hit[4] && !song_hit[1] && paddle_only.len() < LIST_CAP {
-            paddle_only.push((name.to_string(), match_song.clone()));
+        // These compare tess(full)=1 vs paddle(c+b)=4; meaningless without tesseract.
+        if !opts.paddle_only {
+            if song_hit[1] && !song_hit[4] && regressions.len() < LIST_CAP {
+                regressions.push((name.to_string(), match_song.clone()));
+            }
+            if song_hit[4] && !song_hit[1] && paddle_only.len() < LIST_CAP {
+                paddle_only.push((name.to_string(), match_song.clone()));
+            }
         }
         n_scored += 1;
     }
@@ -236,7 +239,12 @@ fn run_positives(
         }
     }
 
-    println!("=== POSITIVES (analysis/images): AGREEMENT / REGRESSION vs tesseract ===");
+    let shown = shown_variants(opts.paddle_only);
+    if opts.paddle_only {
+        println!("=== POSITIVES (analysis/images): PADDLE-ONLY recall ===");
+    } else {
+        println!("=== POSITIVES (analysis/images): AGREEMENT / REGRESSION vs tesseract ===");
+    }
     println!("  CAVEAT: positive frames were discovered by a prior tesseract run, so tesseract");
     println!("  'recall' here is ~100% by construction; absolute recall is NOT measured.");
     println!(
@@ -245,7 +253,7 @@ fn run_positives(
     );
     println!();
     println!("  PER-SONG SONG recall (>=1 frame matched the title) over {} songs:", total_songs);
-    for i in 0..NV {
+    for &i in shown {
         println!("    {}   {:>4}/{:<4}  ({:.0}%)", LABELS[i], per_song[i], total_songs, pct(per_song[i], total_songs));
     }
     // Songs missed entirely (0 frames matched) by the key paddle configs.
@@ -258,7 +266,7 @@ fn run_positives(
     println!();
     println!("  PER-SONG ARTIST-overlay recall (>=1 frame found the overlay) over {} known-artist songs:", known_songs);
     println!("  [the anchor for refinement: if we find the overlay we can refine to read the title]");
-    for i in 0..NV {
+    for &i in shown {
         println!(
             "    {}   {:>4}/{:<4}  ({:.0}%)   [overlay-found-but-title-unread: {}]",
             LABELS[i], per_song_artist[i], known_songs, pct(per_song_artist[i], known_songs), artist_not_song[i]
@@ -266,7 +274,7 @@ fn run_positives(
     }
     println!();
     println!("  PER-FRAME song-match (matched / scored):   all          initial      refined");
-    for i in 0..NV {
+    for &i in shown {
         println!(
             "    {}   {:>4}/{:<4}   {:>3}/{:<3}     {:>4}/{:<4}",
             LABELS[i], song_all[i].song, song_all[i].n,
@@ -275,23 +283,26 @@ fn run_positives(
     }
     println!();
     println!("  artist-overlay detected (over {} frames with known artist):", artist_tally[0].n);
-    for i in 0..NV {
+    for &i in shown {
         println!("    {}   {:>4}/{:<4}  ({:.0}%)", LABELS[i], artist_tally[i].artist, artist_tally[i].n, pct(artist_tally[i].artist, artist_tally[i].n));
     }
-    println!();
-    println!("  RESIDUAL REGRESSIONS — tess(full) matched, paddle(c+b) did NOT (up to {}):", LIST_CAP);
-    if regressions.is_empty() {
-        println!("    (none in this sample)");
-    }
-    for (frame, song) in &regressions {
-        println!("    {}  ->  {}", frame, song);
-    }
-    println!("  PADDLE-ONLY — paddle(c+b) matched, tess(full) did NOT (up to {}):", LIST_CAP);
-    if paddle_only.is_empty() {
-        println!("    (none in this sample)");
-    }
-    for (frame, song) in &paddle_only {
-        println!("    {}  ->  {}", frame, song);
+    // Tesseract-vs-paddle residual comparisons are meaningless without tesseract.
+    if !opts.paddle_only {
+        println!();
+        println!("  RESIDUAL REGRESSIONS — tess(full) matched, paddle(c+b) did NOT (up to {}):", LIST_CAP);
+        if regressions.is_empty() {
+            println!("    (none in this sample)");
+        }
+        for (frame, song) in &regressions {
+            println!("    {}  ->  {}", frame, song);
+        }
+        println!("  PADDLE-ONLY — paddle(c+b) matched, tess(full) did NOT (up to {}):", LIST_CAP);
+        if paddle_only.is_empty() {
+            println!("    (none in this sample)");
+        }
+        for (frame, song) in &paddle_only {
+            println!("    {}  ->  {}", frame, song);
+        }
     }
     Ok(())
 }
@@ -303,13 +314,15 @@ fn run_negatives(
     artist_songs: &HashMap<String, Vec<String>>,
     opts: &Opts,
 ) -> Result<()> {
+    let shown = shown_variants(opts.paddle_only);
     let analysis_hashes = hash_dir(Path::new(ANALYSIS_DIR))?;
     let mut totals = [Tally::default(); NV];
     let mut excluded_overlap = 0u32;
     let mut paddle_candidates: Vec<(String, String)> = Vec::new();
 
+    let shown_labels: Vec<&str> = shown.iter().map(|&i| LABELS[i].trim()).collect();
     println!("=== NEGATIVES (temp_frames sample): FALSE POSITIVES ===");
-    println!("  per concert: frames | artist-FP/song-FP for [tess(color) tess(full) paddle(clr) paddle(bw) paddle(c+b)]");
+    println!("  per concert: frames | artist-FP/song-FP for [{}]", shown_labels.join(" "));
 
     let mut concert_dirs = list_subdirs(Path::new(TEMP_FRAMES_DIR))?;
     concert_dirs.sort();
@@ -362,7 +375,7 @@ fn run_negatives(
         }
 
         print!("  [{}] {} frames |", artist, t[0].n);
-        for i in 0..NV {
+        for &i in shown {
             print!(" {}/{}", t[i].artist, t[i].song);
         }
         println!();
@@ -375,7 +388,7 @@ fn run_negatives(
 
     println!("  TOTALS (excluded {} frames that md5-match analysis overlays):", excluded_overlap);
     println!("    variant       frames   artist-FP   song-FP");
-    for i in 0..NV {
+    for &i in shown {
         println!("    {}   {:>5}    {:>4}       {:>4}", LABELS[i], totals[i].n, totals[i].artist, totals[i].song);
     }
     println!("  PADDLE-ONLY CANDIDATES — paddle(c+b) flagged overlay/song on a frame tesseract did");
@@ -402,12 +415,16 @@ fn pct(num: u32, den: u32) -> f64 {
 struct Opts {
     limit: Option<usize>,
     neg_per_concert: Option<usize>,
+    /// Skip the tesseract variants (engine + scoring + tess-vs-paddle comparisons) and
+    /// report only the paddle variants — for verifying the production (paddle) path.
+    paddle_only: bool,
 }
 
 impl Opts {
     fn parse() -> Self {
         let mut limit = None;
         let mut neg_per_concert = Some(100);
+        let mut paddle_only = false;
         let args: Vec<String> = std::env::args().skip(1).collect();
         let mut i = 0;
         while i < args.len() {
@@ -420,11 +437,21 @@ impl Opts {
                     neg_per_concert = args.get(i + 1).and_then(|v| v.parse().ok());
                     i += 1;
                 }
+                "--paddle-only" => paddle_only = true,
                 other => eprintln!("ignoring unknown arg: {}", other),
             }
             i += 1;
         }
-        Opts { limit, neg_per_concert }
+        Opts { limit, neg_per_concert, paddle_only }
+    }
+}
+
+/// Variant indices to compute/report. Paddle-only drops tess(color)=0, tess(full)=1.
+fn shown_variants(paddle_only: bool) -> &'static [usize] {
+    if paddle_only {
+        &[2, 3, 4]
+    } else {
+        &[0, 1, 2, 3, 4]
     }
 }
 

@@ -8,6 +8,20 @@ use unidecode::unidecode;
 
 pub type OcrParse = (Vec<String>, bool);
 
+/// The OCR lines eligible to match a *song title*. In an overlay, line 0 is the artist
+/// by construction (`parse_tesseract_output` sets `is_overlay = fuzzy_match_artist(lines[0],
+/// artist)`), so exclude it — otherwise an artist name close to a song title (e.g. artist
+/// "Floetry" is Levenshtein-2 from the song "Floetic") wins that song's slot. Non-overlay
+/// parses have no identified artist line, so all lines stay eligible.
+pub fn song_title_candidate_lines(parse: &OcrParse) -> &[String] {
+    let (lines, is_overlay) = parse;
+    if *is_overlay && !lines.is_empty() {
+        &lines[1..]
+    } else {
+        &lines[..]
+    }
+}
+
 pub trait OcrEngine {
     fn ocr_text(&mut self, image_path: &str) -> Result<String>;
 }
@@ -624,6 +638,49 @@ mod tests_matches_song_title {
         assert!(stripped == Some("Omnyama".to_string()), "{:?}", stripped);
         let lines = vec!["Omnyama".to_string()];
         assert!(matches_song_title(&lines, "Movement Two: \"Omnyama\"", true).is_some());
+    }
+
+    #[test]
+    fn test_song_title_candidate_lines_excludes_artist() {
+        // Regression: Floetry concert. Artist "Floetry" is Levenshtein-2 from the song
+        // "Floetic"; on the *Big Ben* overlay (artist on line 0, song on line 1) the
+        // artist line previously stole "Floetic"'s slot. Excluding line 0 fixes it.
+        let parse = (vec!["Floetry".to_string(), "Big".to_string()], true);
+        let candidates = song_title_candidate_lines(&parse);
+        assert_eq!(candidates, &["Big".to_string()][..]);
+        // The artist line is gone, so "Floetic" no longer matches...
+        assert!(matches_song_title(candidates, "Floetic", true).is_none());
+        // ...while the real song on its own line still does.
+        assert!(matches_song_title(candidates, "Big Ben", true).is_some());
+    }
+
+    #[test]
+    fn test_song_title_candidate_lines_keeps_all_when_not_overlay() {
+        // No identified artist line when it's not an overlay: keep every line.
+        let parse = (vec!["Floetic".to_string(), "Floetry".to_string()], false);
+        assert_eq!(
+            song_title_candidate_lines(&parse),
+            &["Floetic".to_string(), "Floetry".to_string()][..]
+        );
+    }
+
+    #[test]
+    fn test_song_title_candidate_lines_empty_is_safe() {
+        let parse = (Vec::<String>::new(), true);
+        assert!(song_title_candidate_lines(&parse).is_empty());
+    }
+
+    #[test]
+    fn test_song_title_candidate_lines_merged_artist_title_is_dropped() {
+        // Documented tradeoff: if OCR merges the artist and title onto ONE physical line
+        // (is_overlay still true because the line starts with the artist), excluding line 0
+        // drops the only line carrying the title. This pins that *deliberate* loss so a
+        // future reader sees it's intentional, not an accident. Rare for NPR's two-line
+        // overlays, and title-crop keeps the lines separate.
+        let parse = (vec!["Floetry Floetic".to_string()], true);
+        let candidates = song_title_candidate_lines(&parse);
+        assert!(candidates.is_empty());
+        assert!(matches_song_title(candidates, "Floetic", true).is_none());
     }
 
     fn print_match_result(result: &(MatchReason, String, u32)) {
