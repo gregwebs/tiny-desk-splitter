@@ -7,14 +7,18 @@
 //! single pass here. `PaddleBackend` (bottom of this file) is the [`OcrBackend`]
 //! production wrapper; `PaddleOcr` is the low-level engine it builds on.
 //!
-//! Models are loaded from a directory given by the `PADDLE_OCR_MODEL_DIR`
-//! environment variable, defaulting to `models/` relative to the working
-//! directory. The three required files are vendored in `live-set-song-splitter/models/`.
+//! The model directory is resolved (see `resolve_model_dir`) in priority order:
+//! `$PADDLE_OCR_MODEL_DIR`, then `models/` beside the running executable (survives
+//! `cargo install` / a spawned binary with a different cwd), then the crate's source
+//! `models/` (dev fallback). The build script downloads the default models into the
+//! source `models/` dir; for an installed binary, place `models/` next to it.
 //!
 //! NOTE on the `image` crate: this module decodes frames with the same `image`
 //! crate (0.25) that `ocr-rs` uses, so the `DynamicImage` we hand to the models is
 //! the type they expect. We reach it as `::image` because the binary also has a
 //! local `crate::image` module that would otherwise shadow the name.
+
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use ocr_rs::{DetModel, RecModel};
@@ -24,7 +28,7 @@ use crate::ocr::{
 };
 use crate::ocr_backend::{OcrBackend, OcrBackendOptions, OcrCandidate, OcrPhase};
 
-const DEFAULT_MODEL_DIR: &str = "models";
+const MODELS_SUBDIR: &str = "models";
 const DET_MODEL: &str = "PP-OCRv5_mobile_det.mnn";
 // Recognition model + charset. Default is the general multilingual v5 model: the
 // A/B harness showed it reads our overlays fully ("Blue") where the smaller
@@ -35,6 +39,49 @@ const DET_MODEL: &str = "PP-OCRv5_mobile_det.mnn";
 // The charset MUST match the rec model, hence two separate vars.
 const DEFAULT_REC_MODEL: &str = "PP-OCRv5_mobile_rec.mnn";
 const DEFAULT_KEYS_FILE: &str = "ppocr_keys_v5.txt";
+
+/// Candidate model directories, highest priority first (see module docs). A candidate
+/// is only used if it actually contains the detection model.
+fn model_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(d) = std::env::var("PADDLE_OCR_MODEL_DIR") {
+        dirs.push(PathBuf::from(d));
+    }
+    // `models/` beside the running executable: works when the splitter is spawned from
+    // another cwd (e.g. by concert-tracker) and after `cargo install` / moving the binary.
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            dirs.push(parent.join(MODELS_SUBDIR));
+        }
+    }
+    // Dev fallback: the crate's source `models/` (present for `cargo run`/`cargo build`,
+    // and where the build script downloads the models).
+    dirs.push(Path::new(env!("CARGO_MANIFEST_DIR")).join(MODELS_SUBDIR));
+    dirs
+}
+
+/// Pick the first candidate dir that contains the detection model. Pure (testable) over
+/// the candidate list and the "does this dir have the model" predicate.
+fn pick_model_dir(candidates: &[PathBuf], has_det_model: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    candidates.iter().find(|d| has_det_model(d)).cloned()
+}
+
+/// Resolve the model directory, or a clear error listing every path tried.
+fn resolve_model_dir() -> Result<PathBuf> {
+    let candidates = model_dir_candidates();
+    if let Some(dir) = pick_model_dir(&candidates, |d| d.join(DET_MODEL).exists()) {
+        return Ok(dir);
+    }
+    let tried = candidates
+        .iter()
+        .map(|d| format!("  {}", d.display()))
+        .collect::<Vec<_>>()
+        .join("\n");
+    anyhow::bail!(
+        "PaddleOCR models not found (no {DET_MODEL} in any candidate dir). Set \
+         PADDLE_OCR_MODEL_DIR, or place a `models/` dir next to the binary. Tried:\n{tried}"
+    )
+}
 
 // NOTE on detection tuning: we use the library's default DetOptions on purpose.
 // A tuning sweep over `DetOptions::with_box_border` (5/10/12/20/100) on the
@@ -59,22 +106,24 @@ pub struct PaddleOcr {
 
 impl PaddleOcr {
     pub fn new() -> Result<Self> {
-        let dir =
-            std::env::var("PADDLE_OCR_MODEL_DIR").unwrap_or_else(|_| DEFAULT_MODEL_DIR.to_string());
-        let path = |file: &str| format!("{}/{}", dir, file);
+        let dir = resolve_model_dir()?;
 
         let rec_model =
             std::env::var("PADDLE_OCR_REC_MODEL").unwrap_or_else(|_| DEFAULT_REC_MODEL.to_string());
         let keys_file =
             std::env::var("PADDLE_OCR_KEYS").unwrap_or_else(|_| DEFAULT_KEYS_FILE.to_string());
 
+        let det_path = dir.join(DET_MODEL);
+        let rec_path = dir.join(&rec_model);
+        let keys_path = dir.join(&keys_file);
+
         // `None` config = library defaults (CPU backend, default thread count, and
         // default DetOptions — see the tuning note above).
-        let det = DetModel::from_file(&path(DET_MODEL), None).map_err(|e| {
-            anyhow::anyhow!("loading paddle detection model {}: {}", path(DET_MODEL), e)
+        let det = DetModel::from_file(&det_path, None).map_err(|e| {
+            anyhow::anyhow!("loading paddle detection model {}: {}", det_path.display(), e)
         })?;
-        let rec = RecModel::from_file(&path(&rec_model), &path(&keys_file), None).map_err(|e| {
-            anyhow::anyhow!("loading paddle recognition model {}: {}", path(&rec_model), e)
+        let rec = RecModel::from_file(&rec_path, &keys_path, None).map_err(|e| {
+            anyhow::anyhow!("loading paddle recognition model {}: {}", rec_path.display(), e)
         })?;
 
         // Title-crop is ON by default (the 100%-recall config); opt out with =0/false/no.
@@ -219,5 +268,38 @@ impl OcrBackend for PaddleBackend {
         OcrBackendOptions {
             black_and_white: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn first_candidate_with_model_wins() {
+        // Highest-priority (e.g. $PADDLE_OCR_MODEL_DIR) is chosen when it has the model.
+        let cands = vec![
+            PathBuf::from("/env"),
+            PathBuf::from("/exe"),
+            PathBuf::from("/src"),
+        ];
+        assert_eq!(pick_model_dir(&cands, |_| true), Some(PathBuf::from("/env")));
+    }
+
+    #[test]
+    fn falls_through_to_first_dir_that_has_the_model() {
+        let cands = vec![
+            PathBuf::from("/env"),
+            PathBuf::from("/exe"),
+            PathBuf::from("/src"),
+        ];
+        let got = pick_model_dir(&cands, |d| d == Path::new("/src"));
+        assert_eq!(got, Some(PathBuf::from("/src")));
+    }
+
+    #[test]
+    fn none_when_no_candidate_has_the_model() {
+        let cands = vec![PathBuf::from("/a"), PathBuf::from("/b")];
+        assert_eq!(pick_model_dir(&cands, |_| false), None);
     }
 }
