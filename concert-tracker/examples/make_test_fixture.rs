@@ -124,6 +124,16 @@ fn main() -> Result<()> {
         build_concert(&conn, &workdir, &fc, expected_id)?;
     }
 
+    // A representative failed background metadata scrape (e.g. an archived-NAS
+    // write failure) so the Jobs page has a "Scrape" failed-job row for e2e to
+    // assert on.
+    db::insert_failed_job(
+        &conn,
+        1,
+        concert_tracker::jobs::scrape_queue::SCRAPE_JOB_NAME,
+        "Failed to write JSON file concerts/Fixture Artist Tiny Desk Concert/concert.json",
+    )?;
+
     println!(
         "fixture built: {} ({} concerts)",
         db_path.display(),
