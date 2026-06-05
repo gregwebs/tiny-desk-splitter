@@ -14,8 +14,11 @@ Silence analysis is used
 ## Requirements
 - Rust (with Cargo)
 - FFmpeg (for audio analysis)
-- tesseract/leptonica
-- magick (generate black and white images to help with OCR detection)
+- OCR Engine
+  - *(default)* a C/C++ toolchain — only to build the **PaddleOCR** backend (`--features paddle-ocr`),
+    a more accurate OCR option selectable at runtime with `--ocr-engine paddle`. See
+    [docs/change/2026-06-04-adopt-paddle-ocr.md](docs/change/2026-06-04-adopt-paddle-ocr.md).
+  - *(alternative)* **leptonica** and **tesseract** — (`--features leptess-ocr`)
 
 ## Usage
 ```bash

@@ -50,7 +50,7 @@ leptess = { version = "0.14", optional = true }
 ocr_rs = { package = "ocr-rs", path = "../vendor/ocr-rs", optional = true }
 
 [features]
-default = ["leptess-ocr"]
+default = ["paddle-ocr"]
 leptess-ocr = ["leptess"]
 paddle-ocr = ["ocr_rs"]
 

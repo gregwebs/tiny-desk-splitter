@@ -24,10 +24,11 @@ cargo run --bin concert-web
 - **yt-dlp** — download concert videos
 Splitting video into tracks
 - **ffmpeg** — frame analysis
-- **leptonica** and **tesseract** — OCR (default backend)
-- *(optional)* a C/C++ toolchain — only to build the **PaddleOCR** backend (`--features paddle-ocr`),
-  a more accurate OCR option selectable at runtime with `--ocr-engine paddle`. See
-  [docs/change/2026-06-04-adopt-paddle-ocr.md](docs/change/2026-06-04-adopt-paddle-ocr.md).
+- OCR Engine
+  - *(default)* a C/C++ toolchain — only to build the **PaddleOCR** backend (`--features paddle-ocr`),
+    a more accurate OCR option selectable at runtime with `--ocr-engine paddle`. See
+    [docs/change/2026-06-04-adopt-paddle-ocr.md](docs/change/2026-06-04-adopt-paddle-ocr.md).
+  - *(alternative)* **leptonica** and **tesseract** — (`--features leptess-ocr`)
 
 ---
 
