@@ -30,7 +30,9 @@ three default model files into the source `models/` dir if missing — so a fres
 provisioned without committing ~24MB of binaries (`models/` stays gitignored). Mirrors the vendored
 `ocr-rs` build.rs MNN download.
 - **Downloader**: tries curl, then wget (works around a curl with broken TLS), then PowerShell on
-  Windows; panics with guidance if all are unavailable.
+  Windows; panics with guidance if all are unavailable. The "downloading …" line is an `eprintln!`
+  (build-script log, `-vv`), NOT a `cargo:warning=` — cargo replays cached build warnings on every
+  build, which would otherwise show a stale "downloading" message long after the one real download.
 - **Atomic**: fetches to `<file>.part`, renames on success → a truncated transfer never looks complete.
 - **Pinned**: URLs use commit `b7141e7` (same as the vendored crate), not the moving `next` branch, so
   the tuned rec model can't change silently.

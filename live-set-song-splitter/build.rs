@@ -45,7 +45,11 @@ fn main() {
             continue;
         }
         let url = format!("{MODELS_BASE_URL}/{file}");
-        println!("cargo:warning=downloading PaddleOCR model {file}");
+        // NOTE: use eprintln!, not `cargo:warning=` — cargo caches and REPLAYS build-script
+        // warnings on every build even when the script doesn't re-run, which made this
+        // one-time message appear on every build. eprintln! goes to the build-script log
+        // (visible with `cargo build -vv` / when the script actually runs) and isn't replayed.
+        eprintln!("downloading PaddleOCR model {file} from {url}");
         download_atomic(&url, &dest);
     }
 }
