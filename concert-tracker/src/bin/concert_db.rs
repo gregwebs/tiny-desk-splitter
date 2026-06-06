@@ -19,6 +19,19 @@ struct Cli {
     #[arg(long, default_value = ".")]
     workdir: PathBuf,
 
+    /// Build HTTP clients with no proxy (direct egress). Skips reqwest's macOS
+    /// SystemConfiguration proxy lookup, which is blocked (and panics) in some
+    /// sandboxes. Defaults to using the system proxy.
+    #[arg(long, default_value_t = false)]
+    no_proxy: bool,
+
+    /// Build HTTP clients using the proxy from the environment
+    /// (`HTTPS_PROXY`/`HTTP_PROXY`/`ALL_PROXY`) while skipping the macOS
+    /// SystemConfiguration lookup. For sandboxes that require an egress proxy but
+    /// block that lookup. Mutually exclusive with `--no-proxy`.
+    #[arg(long, default_value_t = false, conflicts_with = "no_proxy")]
+    proxy_from_env: bool,
+
     #[command(subcommand)]
     command: Command,
 }
@@ -83,6 +96,11 @@ enum Command {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+    // Apply the proxy setting before any scrape builds an HTTP client.
+    tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::proxy_mode_from_flags(
+        cli.no_proxy,
+        cli.proxy_from_env,
+    ));
     let conn = db::open(&cli.db)?;
 
     match cli.command {

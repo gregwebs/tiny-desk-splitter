@@ -1,9 +1,8 @@
 use anyhow::{Context, Result};
-use reqwest::blocking::Client;
 use std::env;
 use std::fs;
 use std::path::Path;
-use tiny_desk_scraper::parse_concert_info;
+use tiny_desk_scraper::{http_client, parse_concert_info};
 
 fn main() -> Result<()> {
     // Get URL from command line arguments
@@ -21,7 +20,7 @@ fn main() -> Result<()> {
     println!("Fetching HTML from {}...", url);
 
     // Create HTTP client
-    let client = Client::new();
+    let client = http_client();
 
     // Fetch the page
     let response = client.get(url).send().context("Failed to send request")?;

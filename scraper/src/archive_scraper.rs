@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use chrono::{Datelike, NaiveDate};
-use reqwest::blocking::Client;
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
 
@@ -77,7 +76,7 @@ pub fn fetch_archive_month(year: i32, month: u32, day: Option<u32>) -> Result<Ve
         month, day_value, year
     );
 
-    let client = Client::new();
+    let client = crate::http_client();
     let response = client.get(&url).send().context("Failed to send request")?;
     let html = response.text().context("Failed to get response text")?;
 

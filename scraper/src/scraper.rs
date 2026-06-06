@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use regex::Regex;
-use reqwest::blocking::Client;
 use scraper::{ElementRef, Html, Selector};
 use std::fs;
 use std::sync::OnceLock;
@@ -8,14 +7,14 @@ use std::sync::OnceLock;
 pub use concert_types::{ConcertInfo, Musician, Song};
 
 pub fn fetch_html(url: &str) -> Result<String> {
-    let client = Client::new();
+    let client = crate::http_client();
     let response = client.get(url).send().context("Failed to send request")?;
     response.text().context("Failed to get response text")
 }
 
 /// Fetch a URL as raw bytes (e.g. for images).
 pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
-    let client = Client::new();
+    let client = crate::http_client();
     let response = client.get(url).send().context("Failed to send request")?;
     let status = response.status();
     let response = response.error_for_status().context(format!("HTTP error status {}", status))?;
