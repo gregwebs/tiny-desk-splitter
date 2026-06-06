@@ -3,6 +3,9 @@ pub mod handlers;
 use std::sync::{Arc, Mutex};
 
 use axum::{
+    extract::Request,
+    middleware::{self, Next},
+    response::Response,
     routing::{get, post},
     Router,
 };
@@ -85,6 +88,23 @@ pub fn router(state: AppState) -> Router {
         .route("/static/htmx.min.js", get(handlers::htmx_js))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
+        .layer(middleware::from_fn(log_error_responses))
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Log any response with a 4xx/5xx status at info level or above so that
+/// failing requests (e.g. a button hitting a missing route) are visible in the
+/// default `info` logs. The `TraceLayer` only logs responses at debug level.
+async fn log_error_responses(req: Request, next: Next) -> Response {
+    let method = req.method().clone();
+    let uri = req.uri().clone();
+    let response = next.run(req).await;
+    let status = response.status();
+    if status.is_server_error() {
+        tracing::error!(%method, %uri, status = status.as_u16(), "request failed");
+    } else if status.is_client_error() {
+        tracing::warn!(%method, %uri, status = status.as_u16(), "request failed");
+    }
+    response
 }
