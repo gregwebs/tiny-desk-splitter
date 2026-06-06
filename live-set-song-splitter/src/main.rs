@@ -40,6 +40,29 @@ impl Default for OutputFormat {
     }
 }
 
+/// How to cut the video stream for each track. Both modes keep audio and video in
+/// sync; they trade cut precision against speed/quality.
+#[derive(Parser, Debug, Clone, Copy, ValueEnum, PartialEq)]
+#[clap(rename_all = "lowercase")]
+enum VideoCutMode {
+    /// Stream-copy (fast, lossless). Snaps each cut back to the nearest preceding
+    /// keyframe, so a track may start up to one GOP (a few seconds) early.
+    Copy,
+    /// Re-encode the video so each cut is frame-accurate at the detected start
+    /// (slower, slight quality change).
+    Reencode,
+}
+
+impl Default for VideoCutMode {
+    fn default() -> Self {
+        VideoCutMode::Copy
+    }
+}
+
+/// x264 encoding parameters used by [`VideoCutMode::Reencode`].
+const REENCODE_PRESET: &str = "veryfast";
+const REENCODE_CRF: &str = "18";
+
 /// Tool for splitting live music recordings into individual songs
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -64,6 +87,12 @@ struct Cli {
     /// Output format: video, audio, or both
     #[arg(long, value_enum, default_value_t = OutputFormat::Both)]
     output_format: OutputFormat,
+
+    /// How to cut the video stream: `copy` (fast, lossless; snaps each cut back to
+    /// the nearest preceding keyframe) or `reencode` (frame-accurate at the detected
+    /// start, but slower and re-encodes the video). Both keep audio/video in sync.
+    #[arg(long, value_enum, default_value_t = VideoCutMode::Copy)]
+    video_cut_mode: VideoCutMode,
 
     /// Custom output directory for generated audio/video files
     #[arg(long)]
@@ -389,6 +418,7 @@ fn main() -> Result<()> {
             concert,
             &output_dir,
             cli.output_format,
+            cli.video_cut_mode,
         )?;
     }
 
@@ -988,6 +1018,7 @@ fn process_segments(
     concert: ConcertInfo,
     output_dir: &str,
     output_format: OutputFormat,
+    video_cut_mode: VideoCutMode,
 ) -> Result<()> {
     let songs = &concert.set_list;
     println!("Processing {} segments...", segments.len());
@@ -1051,6 +1082,7 @@ fn process_segments(
                     &output_file,
                     segment.segment.start_time,
                     segment.segment.end_time,
+                    video_cut_mode,
                     Some(song_title),
                     &concert,
                     Some(song_counter), // Add song number as track metadata
@@ -2371,25 +2403,71 @@ fn refine_song_start_time(
     }
 }
 
-// This is really slow because it re-encodes
-// If we just want audio we should be able to avoid re-encoding
-// For video we can't do precision splitting without re-encoding.
-// It may be possible, but the video will stutter at least before and after the first and last keyframes if we don't re-encode.
-// It is possible to only re-encode just the portion outside the keyframes and stitch it back together.
-// https://superuser.com/questions/1850814/how-to-cut-a-video-with-ffmpeg-with-no-or-minimal-re-encoding
+/// Build the ffmpeg seek/codec arguments for cutting `input_file` to `[start, end]`
+/// under the chosen [`VideoCutMode`]. These slot in after the ffmpeg base flags and
+/// before the per-track metadata and output path.
+///
+/// Both modes use input-side seeking (`-ss` before `-i`) so audio and video start
+/// together. The previous command placed `-ss` *after* `-i` with `-c copy`, which
+/// left the video starting at the first keyframe *after* the cut while the audio
+/// started exactly at the cut — desyncing every track not cut on a keyframe by up to
+/// one GOP (e.g. ~1.7s on a 4s-keyframe source). See
+/// https://superuser.com/questions/1850814/how-to-cut-a-video-with-ffmpeg-with-no-or-minimal-re-encoding
+fn build_cut_args(mode: VideoCutMode, input_file: &str, start: f64, end: f64) -> Vec<String> {
+    match mode {
+        // Stream copy. Input seeking snaps the start back to the preceding keyframe;
+        // `-copyts` keeps the original timeline so `-to` still ends at the true `end`,
+        // and `avoid_negative_ts make_zero` shifts the first packet to ~0 so both
+        // streams begin together.
+        VideoCutMode::Copy => vec![
+            "-ss".into(),
+            format!("{:.3}", start),
+            "-i".into(),
+            input_file.into(),
+            "-to".into(),
+            format!("{:.3}", end),
+            "-c".into(),
+            "copy".into(),
+            "-copyts".into(),
+            "-avoid_negative_ts".into(),
+            "make_zero".into(),
+        ],
+        // Re-encode the video for a frame-accurate cut. Input seeking lands on the
+        // preceding keyframe (fast); ffmpeg then decodes and discards up to `start`,
+        // so the encoded output begins exactly at the detected cut. `-t duration` is
+        // used (not `-to`) because the accurate seek resets output timestamps to 0.
+        // Audio is still stream-copied (no keyframe constraint, stays in sync).
+        VideoCutMode::Reencode => vec![
+            "-ss".into(),
+            format!("{:.3}", start),
+            "-i".into(),
+            input_file.into(),
+            "-t".into(),
+            format!("{:.3}", end - start),
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            REENCODE_PRESET.into(),
+            "-crf".into(),
+            REENCODE_CRF.into(),
+            "-c:a".into(),
+            "copy".into(),
+        ],
+    }
+}
+
 fn extract_segment(
     input_file: &str,
     output_file: &str,
     start_time: f64,
     end_time: f64,
+    cut_mode: VideoCutMode,
     song_title: Option<&str>,
     concertdata: &ConcertInfo,
     track_number: Option<usize>,
 ) -> Result<()> {
     let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg
-        .args(&["-i", input_file, "-c", "copy"])
-        .from_to(start_time, end_time);
+    ffmpeg.args(build_cut_args(cut_mode, input_file, start_time, end_time));
     let mut cmd = ffmpeg.cmd();
 
     // Add metadata
@@ -2407,6 +2485,68 @@ fn extract_segment(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests_cut_args {
+    use super::*;
+
+    // Helper: find the value following `flag` in the arg list, if present.
+    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter()
+            .position(|a| a == flag)
+            .and_then(|i| args.get(i + 1))
+            .map(|s| s.as_str())
+    }
+
+    fn index_of(args: &[String], item: &str) -> Option<usize> {
+        args.iter().position(|a| a == item)
+    }
+
+    // Both modes must seek on the *input* side (`-ss` before `-i`); placing `-ss`
+    // after `-i` with `-c copy` was the original desync bug.
+    #[test]
+    fn seek_is_input_side_in_both_modes() {
+        for mode in [VideoCutMode::Copy, VideoCutMode::Reencode] {
+            let args = build_cut_args(mode, "in.mp4", 10.0, 20.0);
+            let ss = index_of(&args, "-ss").expect("-ss present");
+            let i = index_of(&args, "-i").expect("-i present");
+            assert!(ss < i, "{:?}: -ss must precede -i (got ss={ss}, i={i})", mode);
+            assert_eq!(value_after(&args, "-ss"), Some("10.000"));
+        }
+    }
+
+    // Copy mode stream-copies and preserves the true end via -copyts + -to.
+    #[test]
+    fn copy_mode_uses_stream_copy_and_true_end() {
+        let args = build_cut_args(VideoCutMode::Copy, "in.mp4", 434.337, 770.921);
+        assert_eq!(value_after(&args, "-c"), Some("copy"));
+        assert!(args.iter().any(|a| a == "-copyts"));
+        assert_eq!(value_after(&args, "-avoid_negative_ts"), Some("make_zero"));
+        // `-to` is the absolute end on the original timeline, not a duration.
+        assert_eq!(value_after(&args, "-to"), Some("770.921"));
+        // Copy mode must not re-encode.
+        assert!(!args.iter().any(|a| a == "libx264"));
+    }
+
+    // Reencode mode re-encodes video, copies audio, and trims by duration because
+    // the accurate input seek resets output timestamps to 0.
+    #[test]
+    fn reencode_mode_uses_duration_and_x264() {
+        let args = build_cut_args(VideoCutMode::Reencode, "in.mp4", 434.337, 770.921);
+        assert_eq!(value_after(&args, "-c:v"), Some("libx264"));
+        assert_eq!(value_after(&args, "-c:a"), Some("copy"));
+        assert_eq!(value_after(&args, "-preset"), Some(REENCODE_PRESET));
+        assert_eq!(value_after(&args, "-crf"), Some(REENCODE_CRF));
+        // `-t` is a duration (end - start), and `-to` is not used.
+        assert_eq!(value_after(&args, "-t"), Some("336.584"));
+        assert!(!args.iter().any(|a| a == "-to"));
+    }
+
+    #[test]
+    fn copy_is_the_default_mode() {
+        assert_eq!(VideoCutMode::default(), VideoCutMode::Copy);
+    }
 }
 
 /// Save a matched image to the analysis directory

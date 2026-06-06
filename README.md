@@ -166,9 +166,28 @@ cargo run --bin live-set-splitter -- <json_file> [output_dir]
 
 # Optional: choose the OCR backend (default tesseract; paddle needs --features paddle-ocr)
 cargo run --features paddle-ocr --bin live-set-splitter -- <json_file> --ocr-engine paddle
+
+# Optional: frame-accurate video cuts (slower, re-encodes video). Default is `copy`.
+cargo run --bin live-set-splitter -- <json_file> --video-cut-mode reencode
 ```
 
 The JSON file uses the same format produced by the `scraper` crate.
+
+### Video cut mode
+
+`--video-cut-mode` controls how each track's video is cut from the source. Both modes
+keep audio and video in sync:
+
+| Mode | Speed | Cut precision | Notes |
+|---|---|---|---|
+| `copy` *(default)* | Fast, lossless | Snaps the start back to the nearest preceding keyframe (up to one GOP — a few seconds — early) | Stream copy; no re-encode |
+| `reencode` | Slow | Frame-accurate at the detected start | Re-encodes video with x264; audio is still copied |
+
+Both modes seek on the **input** side (`-ss` before `-i`). An earlier version placed
+`-ss` *after* `-i` with `-c copy`, which let the video start at the first keyframe
+*after* the cut while the audio started exactly at the cut — desyncing every track not
+cut on a keyframe by up to one GOP. See
+[docs/change/2026-06-06-video-audio-sync-fix.md](docs/change/2026-06-06-video-audio-sync-fix.md).
 
 ---
 
