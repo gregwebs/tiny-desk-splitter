@@ -480,6 +480,22 @@
       max-height: calc(100vh - var(--player-bar-height));
       object-fit: contain; margin: 0 auto; background: #000;
     }
+    /* Minimize button for the case where the video fills the viewport and there is
+       no empty space above the panel to click. Hidden until JS reveals it on mouse
+       movement (controls-visible class) or it takes keyboard focus; clipped to nothing
+       while the panel is folded (panel max-height: 0; overflow: hidden). */
+    #player-video-close {
+      position: absolute; top: 8px; left: 8px; z-index: 1001;
+      width: 2em; height: 2em; border: none; border-radius: 50%;
+      background: rgba(0,0,0,0.55); color: #fff; font-size: 1.2em; line-height: 1;
+      cursor: pointer;
+      opacity: 0; pointer-events: none; transition: opacity 0.2s ease;
+    }
+    #player-video-close:hover { background: rgba(0,0,0,0.8); }
+    #player-video-panel.controls-visible #player-video-close,
+    #player-video-close:focus {
+      opacity: 1; pointer-events: auto;
+    }
     #player-play-pause {
       background: none; border: none; color: #fff; font-size: 1.4em;
       cursor: pointer; padding: 0.2rem 0.4rem; min-width: 2em; text-align: center;
@@ -559,6 +575,7 @@
   <div id="player-container">
     <div id="player-video-panel">
       <video id="player-audio" playsinline webkit-playsinline onclick="Player.togglePause()"></video>
+      <button id="player-video-close" onclick="Player.watch()" title="Minimize video" aria-label="Minimize video">&#10005;</button>
     </div>
     <div id="player-bar">
       <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>

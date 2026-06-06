@@ -26,6 +26,14 @@ const Player = (() => {
 
     bindAudioEvents();
 
+    // Reveal the video minimize button on pointer activity over the panel (touchstart
+    // too, since touch devices fire no mousemove).
+    const videoPanel = document.getElementById("player-video-panel");
+    if (videoPanel) {
+      videoPanel.addEventListener("mousemove", showVideoControls);
+      videoPanel.addEventListener("touchstart", showVideoControls, { passive: true });
+    }
+
     // Navigation swaps only #content; the player lives outside it and is never
     // detached, so the audio keeps playing on its own. These handlers only
     // re-assert the JS-driven UI (playing-track highlight, like/delete state)
@@ -282,11 +290,55 @@ const Player = (() => {
     if (open) open.style.display = display;
   }
 
+  // How long the minimize button stays visible after the last mouse movement.
+  const VIDEO_CONTROLS_IDLE_MS = 2500;
+  let videoControlsTimer = null;
+
+  // Reveal the minimize button on mouse movement (or a touch) while watching, then
+  // fade it back out once the pointer goes idle.
+  function showVideoControls() {
+    const panel = document.getElementById("player-video-panel");
+    if (!panel || !panel.classList.contains("open")) return;
+    panel.classList.add("controls-visible");
+    clearTimeout(videoControlsTimer);
+    videoControlsTimer = setTimeout(
+      () => panel.classList.remove("controls-visible"), VIDEO_CONTROLS_IDLE_MS);
+  }
+
+  // A click on an interactive element is the user trying to *do* that thing (navigate,
+  // play, queue, like, …), not dismiss the video — so those clicks perform their action
+  // and leave the panel open. Only clicks on "dead space" fold the video.
+  // Recognizes native controls and inline onclick handlers (the project's convention); a
+  // future control bound only via addEventListener would need adding here to be exempted.
+  const INTERACTIVE_SELECTOR =
+    'a, button, input, select, textarea, label, [role="button"], [onclick]';
+
+  // Pure: does a click on `target` fall on dead space outside the player, and so
+  // dismiss the video? (false for clicks inside the player or on any interactive control)
+  function clickShouldDismiss(target, container) {
+    if (!container || !target || container.contains(target)) return false;
+    if (target.closest && target.closest(INTERACTIVE_SELECTOR)) return false;
+    return true;
+  }
+
+  // While the video panel is open, a click on the empty page area above it folds it
+  // back down, like clicking Watch.
+  function onOutsideVideoClick(e) {
+    const container = document.getElementById("player-container");
+    if (!clickShouldDismiss(e.target, container)) return;
+    tracing("outsideClick dismiss video", { tag: e.target && e.target.tagName });
+    hideVideoPanel();
+  }
+
   function showVideoPanel() {
     const panel = document.getElementById("player-video-panel");
-    if (!panel) return;
+    if (!panel || panel.classList.contains("open")) return;
     tracing("showVideoPanel", {});
     panel.classList.add("open");
+    // Defer attaching the outside-click listener to the next tick: watchTrackDirect()
+    // opens the panel from a track-list button that lives outside #player-container, so
+    // attaching synchronously would let that very click bubble up and re-close it.
+    setTimeout(() => document.addEventListener("click", onOutsideVideoClick), 0);
   }
 
   function hideVideoPanel() {
@@ -294,6 +346,9 @@ const Player = (() => {
     if (!panel || !panel.classList.contains("open")) return;
     tracing("hideVideoPanel", {});
     panel.classList.remove("open");
+    panel.classList.remove("controls-visible");
+    clearTimeout(videoControlsTimer);
+    document.removeEventListener("click", onOutsideVideoClick);
   }
 
   // Player-bar Watch button: fold the inline video panel up or down. The video

@@ -454,6 +454,96 @@ test.describe("Inline video", () => {
 
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
+
+  test("clicking dead space outside the player folds the video (audio keeps playing)", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    // A click on the empty page background above the panel dismisses the video, like
+    // clicking Watch. (Dispatched on #content, the same pattern simulateTrackEnd uses.)
+    await page.evaluate(() =>
+      document
+        .getElementById("content")
+        .dispatchEvent(new MouseEvent("click", { bubbles: true }))
+    );
+
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("clicking an interactive control outside the player does not fold the video", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    // Expanding another concert's tracks is a real control click: it does its action
+    // and leaves the video open (only dead-space clicks dismiss).
+    await page.locator(`#concert-${AUDIO} button[onclick*="toggleTracks"]`).click();
+    await page.waitForSelector(`[data-concert-id="${AUDIO}"][data-track-idx="0"]`);
+
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("the minimize button (revealed on mouse movement) folds the video", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    const panel = page.locator("#player-video-panel");
+    await expect(panel).toHaveClass(/open/);
+
+    // Hidden while the pointer is idle; mouse movement over the panel reveals it.
+    await expect(panel).not.toHaveClass(/controls-visible/);
+    await panel.dispatchEvent("mousemove");
+    await expect(panel).toHaveClass(/controls-visible/);
+
+    await page.locator("#player-video-close").click();
+    await expect(panel).not.toHaveClass(/open/);
+    expect(
+      await page.evaluate(() => document.getElementById("player-audio").paused)
+    ).toBe(false);
+  });
+
+  test("the minimize button fades back out once the pointer goes idle", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    const panel = page.locator("#player-video-panel");
+
+    await panel.dispatchEvent("mousemove");
+    await expect(panel).toHaveClass(/controls-visible/);
+    await expect(panel).not.toHaveClass(/controls-visible/, { timeout: 4000 });
+  });
+
+  test("opening the panel from a Watch control outside the player keeps it open", async ({
+    page,
+  }) => {
+    // The track-list Watch button (tracks.html) lives outside #player-container and opens
+    // the panel via watchTrackDirect. Its own click must not be treated as an outside
+    // dismiss — the dismiss listener attaches deferred, after the opening click. Mirror
+    // that button here with a real, clickable element (the fixture's tracks don't render
+    // the inline Watch button, which is gated on a template is_video flag).
+    await page.evaluate(() => {
+      const b = document.createElement("button");
+      b.id = "e2e-watch-direct";
+      b.textContent = "Watch";
+      b.setAttribute("onclick", "Player.watchTrackDirect(this, 3, 0)");
+      document.getElementById("content").appendChild(b);
+    });
+
+    await page.locator("#e2e-watch-direct").click();
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
 });
 
 test.describe("Player like star", () => {
