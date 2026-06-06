@@ -550,6 +550,39 @@ const Player = (() => {
     await startTrack(btn, concertId, trackIdx);
   }
 
+  // Resolve the first playable track index for a concert: track 0 normally, or
+  // the next playable track after it when track 0 has been deleted/removed.
+  // Reuses the server's next-media-info skip-deleted logic (the same one that
+  // drives auto-advance) so the two stay in sync. Returns null when the concert
+  // has no playable track.
+  async function firstAvailableTrackIndex(concertId) {
+    try {
+      // In the common case (track 0 present) startTrack re-fetches this same
+      // media-info; the extra GET on a single button click is intentional — not
+      // worth threading a prefetched body through the shared startTrack path.
+      const head = await fetch(`/concerts/${concertId}/tracks/0/media-info`);
+      if (head.ok) return 0;
+      const next = await fetch(`/concerts/${concertId}/tracks/0/next-media-info`);
+      if (next.ok) return (await next.json()).track_index;
+    } catch (e) {
+      tracing("firstAvailableTrackIndex failed", e);
+    }
+    return null;
+  }
+
+  // Album "Play" button next to the track count: play the split tracks starting
+  // from the first one that still exists (track 0 may have been deleted).
+  async function playTracks(btn, concertId) {
+    const trackIdx = await firstAvailableTrackIndex(concertId);
+    if (trackIdx == null) {
+      btn.classList.add("btn-listen-error");
+      btn.textContent = "Error";
+      tracing("playTracks: no playable track", { concertId });
+      return;
+    }
+    await playTrack(btn, concertId, trackIdx);
+  }
+
   function togglePause() {
     if (!audio) return;
     if (audio.paused) {
@@ -769,6 +802,6 @@ const Player = (() => {
     init();
   }
 
-  return { playAlbum, playTrack, startAlbum, startTrack, togglePause, seek, skipToNext,
-    skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
+  return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
+    skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
 })();

@@ -3,7 +3,7 @@
 //!
 //! Usage: `cargo run --example make_test_fixture -- <workdir> <db_path>`
 //!
-//! Produces a fresh SQLite DB whose concerts get autoincrement ids 1..=4 (in
+//! Produces a fresh SQLite DB whose concerts get autoincrement ids 1..=5 (in
 //! insertion order) plus tiny, genuinely-playable media generated with ffmpeg,
 //! laid out exactly where the server looks them up (`concert_dir` +
 //! `sanitize_filename`). Requires `ffmpeg` on PATH.
@@ -22,9 +22,15 @@ use concert_tracker::scrape::{ensure_thumbnail, preview_image_path};
 /// Playwright's Chromium can actually decode them (it lacks H.264/AAC): wav =
 /// audio playable, webm (VP8, video-only) = video playable, mkv = found-but-not
 /// browser-playable (the "non-playable" case, never decoded).
+///
+/// `present: false` models a deleted track: it stays in the set list but its
+/// media file is never written and a `track_delete` event is recorded, so the
+/// media endpoints 404 on it (exactly the production state after delete_track
+/// removes an m4a/mp4). Used to exercise "skip the deleted first track".
 struct Track {
     title: &'static str,
     ext: &'static str,
+    present: bool,
 }
 
 struct FixtureConcert {
@@ -37,10 +43,28 @@ struct FixtureConcert {
 }
 
 fn audio(title: &'static str) -> Track {
-    Track { title, ext: "wav" }
+    Track {
+        title,
+        ext: "wav",
+        present: true,
+    }
 }
 fn video(title: &'static str) -> Track {
-    Track { title, ext: "webm" }
+    Track {
+        title,
+        ext: "webm",
+        present: true,
+    }
+}
+/// A track that has been deleted: still in the set list, but no file on disk.
+/// Note: a concert with *every* track deleted would, in production, also have
+/// its split state cleared (see `delete_track`); model that too if needed.
+fn deleted_audio(title: &'static str) -> Track {
+    Track {
+        title,
+        ext: "wav",
+        present: false,
+    }
 }
 
 fn fixtures() -> Vec<FixtureConcert> {
@@ -83,6 +107,7 @@ fn fixtures() -> Vec<FixtureConcert> {
                 Track {
                     title: "Raw Take",
                     ext: "mkv",
+                    present: true,
                 },
             ],
             liked: vec![false, false, false, false, false],
@@ -95,6 +120,20 @@ fn fixtures() -> Vec<FixtureConcert> {
             artist: "Liked Artist",
             tracks: vec![audio("Liked Song")],
             liked: vec![true],
+        },
+        // id=5: first track deleted (no file on disk) — the tracks-row "Play" must
+        // skip it and start the first track that still exists.
+        FixtureConcert {
+            url: "https://npr.org/fixture/deleted-first",
+            title: "Deleted-First Concert",
+            album: "Deleted-First Concert",
+            artist: "Deleted-First Artist",
+            tracks: vec![
+                deleted_audio("Gone Opener"),
+                audio("Survivor One"),
+                audio("Survivor Two"),
+            ],
+            liked: vec![false, false, false],
         },
     ]
 }
@@ -159,7 +198,7 @@ fn build_concert(
     )?;
     let concert = db::get_concert_by_url(conn, fc.url)?
         .with_context(|| format!("concert {} missing after upsert", fc.url))?;
-    // Deterministic ids are load-bearing: the specs reference #concert-1..4.
+    // Deterministic ids are load-bearing: the specs reference #concert-1..5.
     if concert.id != expected_id {
         bail!(
             "fixture concert {} got id {} (expected {}); was the DB not empty?",
@@ -186,8 +225,23 @@ fn build_concert(
     db::mark_download_succeeded(conn, id, "wav")?;
     db::try_mark_split_started(conn, id)?;
     db::mark_split_succeeded(conn, id)?;
-    db::set_tracks_present(conn, id, &vec![true; fc.tracks.len()])?;
+    let tracks_present: Vec<bool> = fc.tracks.iter().map(|t| t.present).collect();
+    db::set_tracks_present(conn, id, &tracks_present)?;
     db::set_tracks_liked(conn, id, &fc.liked)?;
+    // Record a delete event for each absent track so the track list shows it
+    // unavailable, mirroring the post-delete_track state in production.
+    for (idx, t) in fc.tracks.iter().enumerate() {
+        if !t.present {
+            let json =
+                serde_json::json!({"track_index": idx, "track_title": t.title}).to_string();
+            concert_tracker::events::record_now(
+                conn,
+                id,
+                concert_tracker::events::Event::TrackDelete,
+                Some(&json),
+            );
+        }
+    }
 
     let dir = concert_dir(workdir, fc.album);
     std::fs::create_dir_all(&dir).context("create concert dir")?;
@@ -195,8 +249,12 @@ fn build_concert(
     // Full-concert file (album playback) — found by stem == sanitize_album(album).
     gen_audio(&dir.join(format!("{}.wav", sanitize_album(fc.album))))?;
 
-    // Per-track split files.
+    // Per-track split files. Absent (deleted) tracks get no file, so the media
+    // endpoints 404 on them.
     for t in &fc.tracks {
+        if !t.present {
+            continue;
+        }
         let path = dir.join(format!("{}.{}", sanitize_filename(t.title), t.ext));
         match t.ext {
             "wav" => gen_audio(&path)?,

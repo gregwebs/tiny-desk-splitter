@@ -96,7 +96,7 @@
     {% if can_delete_split %}
     <div class="card-tracks-row">
       <button class="btn-tracks badge badge-{{ split_status }}" onclick="toggleTracks(this, {{ id }})">{{ split_status_label }} ({% if track_count == track_total %}{{ track_count }}{% else %}{{ track_count }}/{{ track_total }}{% endif %})</button>
-      <button class="btn-listen" onclick="Player.playTrack(this, {{ id }}, 0)">Play</button>
+      <button class="btn-listen" onclick="Player.playTracks(this, {{ id }})">Play</button>
       <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
     </div>
     {% endif %}

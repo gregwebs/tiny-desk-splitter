@@ -6,11 +6,14 @@ const { test, expect } = require("./fixtures");
 //   3 "Video Concert"  — Clip One(webm), Audio Song(wav), Clip Two(webm),
 //                        Clip Three(webm), Raw Take(mkv, non-playable)
 //   4 "Liked Concert"  — Liked Song (wav, liked in the DB)
+//   5 "Deleted-First Concert" — Gone Opener (deleted, no file), Survivor One,
+//                        Survivor Two (wav)
 // Media is generated in Chromium-playable codecs (wav / VP8+Vorbis webm).
 const AUDIO = 1;
 const SECOND = 2;
 const VIDEO = 3;
 const LIKED = 4;
+const DELETED_FIRST = 5;
 
 function trackButton(page, concertId, trackIdx) {
   return page.locator(
@@ -109,6 +112,21 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
     await expect(page.locator("#player-title")).toHaveText("Celular");
     await expect(page.locator("#player-track")).toHaveText("#1");
+  });
+
+  test("the tracks-row Play button skips a deleted first track and plays the next", async ({
+    page,
+  }) => {
+    // Deleted-First Concert's track 0 ("Gone Opener") has no file on disk, so
+    // tracks/0/media-info 404s. Play must start the first surviving track
+    // ("Survivor One", #2) rather than show "Error".
+    await page
+      .locator(`#concert-${DELETED_FIRST} .card-tracks-row button.btn-listen`)
+      .click();
+
+    await waitForPlaying(page);
+    await expect(page.locator("#player-title")).toHaveText("Survivor One");
+    await expect(page.locator("#player-track")).toHaveText("#2");
   });
 
   test("Next button is disabled when nothing is next to play", async ({
