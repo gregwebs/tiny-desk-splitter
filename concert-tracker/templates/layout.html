@@ -574,7 +574,7 @@
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
     <div id="player-video-panel">
-      <video id="player-audio" playsinline webkit-playsinline onclick="Player.togglePause()"></video>
+      <video id="player-audio" playsinline webkit-playsinline tabindex="0" onclick="Player.togglePause()"></video>
       <button id="player-video-close" onclick="Player.watch()" title="Minimize video" aria-label="Minimize video">&#10005;</button>
     </div>
     <div id="player-bar">

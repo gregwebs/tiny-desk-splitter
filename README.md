@@ -77,6 +77,7 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 - **Track playback**: play individual split tracks, with auto-advance to the next track
 - **Back / Next buttons** to step to the previous or next playable track (each disables itself when there is nothing to go to)
 - **Seek bar** and time display
+- **Spacebar play/pause**: pressing Space toggles active playback when focus is outside ordinary page controls
 - **Watch button**: plays video files inline in the player — a panel folds up from the player bar showing the video (a separate button opens the file in the system player, macOS `open`)
 - **Like star** before the track title to like/unlike the currently-playing track, kept in sync with the track-list star
 - **Delete button** (trash icon) removes the currently-playing track's files and advances to the next track (stops if nothing is next)

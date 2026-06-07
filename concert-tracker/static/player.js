@@ -6,6 +6,7 @@ const Player = (() => {
   let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
   let queue = [];
   let autoAdvanceController = null;
+  let keyboardShortcutsBound = false;
 
   function onPlay() { setPlayPauseIcon(true); }
   function onPause() { setPlayPauseIcon(false); }
@@ -25,6 +26,7 @@ const Player = (() => {
     if (!audio || !bar) return;
 
     bindAudioEvents();
+    bindKeyboardShortcuts();
 
     // Reveal the video minimize button on pointer activity over the panel (touchstart
     // too, since touch devices fire no mousemove).
@@ -47,6 +49,59 @@ const Player = (() => {
     // player star matches. findTrackButton only matches the current DOM, so this
     // is a no-op when the playing track's row isn't on the page (cross-concert).
     document.body.addEventListener("htmx:afterSwap", syncLikeFromTrackList);
+  }
+
+  function bindKeyboardShortcuts() {
+    if (keyboardShortcutsBound) return;
+    document.addEventListener("keydown", onGlobalKeydown);
+    keyboardShortcutsBound = true;
+  }
+
+  function isPlainSpaceKey(e) {
+    return (
+      (e.code === "Space" || e.key === " " || e.key === "Spacebar") &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.shiftKey
+    );
+  }
+
+  function isPlayerPlaybackShortcutTarget(target) {
+    return target && (target === audio || target.id === "player-watch");
+  }
+
+  function isKeyboardShortcutIgnoredTarget(target) {
+    if (!target) return false;
+    if (isPlayerPlaybackShortcutTarget(target)) return false;
+    if (target.isContentEditable) return true;
+    if (!target.closest) return false;
+
+    const editable = target.closest("[contenteditable]");
+    if (editable && editable.isContentEditable) return true;
+
+    return !!target.closest(INTERACTIVE_SELECTOR);
+  }
+
+  function hasActiveMedia() {
+    return audio && !!(audio.currentSrc || audio.getAttribute("src"));
+  }
+
+  function isMediaPlaying() {
+    return hasActiveMedia() && !audio.paused && !audio.ended;
+  }
+
+  function onGlobalKeydown(e) {
+    if (e.defaultPrevented) return;
+    if (!isPlainSpaceKey(e)) return;
+    if (isKeyboardShortcutIgnoredTarget(e.target)) return;
+    if (!hasActiveMedia()) return;
+
+    e.preventDefault();
+    if (e.repeat) return;
+
+    tracing(audio.paused ? "spacebar play" : "spacebar pause", {});
+    togglePause();
   }
 
   // Locate the .btn-like in the same row as the playing track's listen button.
@@ -543,7 +598,7 @@ const Player = (() => {
       togglePause();
       return;
     }
-    if (audio && !audio.paused && !audio.ended) {
+    if (isMediaPlaying()) {
       enqueue(concertId, trackIdx, btn.textContent.trim());
       return;
     }
@@ -586,7 +641,10 @@ const Player = (() => {
   function togglePause() {
     if (!audio) return;
     if (audio.paused) {
-      audio.play();
+      audio.play().catch((e) => {
+        showError("Playback blocked");
+        tracing("togglePause play rejected", e);
+      });
     } else {
       audio.pause();
     }

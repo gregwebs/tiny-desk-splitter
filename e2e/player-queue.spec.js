@@ -40,6 +40,14 @@ async function waitForPlaying(page) {
   });
 }
 
+async function focusPageBody(page) {
+  await page.evaluate(() => {
+    document.activeElement && document.activeElement.blur();
+    document.body.tabIndex = -1;
+    document.body.focus();
+  });
+}
+
 // Expand a concert's tracks and start the given track playing.
 async function playTrack(page, concertId, trackIdx) {
   await expandTracks(page, concertId);
@@ -289,6 +297,173 @@ test.describe("Player Queue", () => {
     const title = await badge.getAttribute("title");
     expect(title).toBeTruthy();
     expect(title.split("\n")).toHaveLength(2);
+  });
+});
+
+test.describe("Player keyboard shortcuts", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+  });
+
+  test("body-focused Space pauses an audio track and updates the play button", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-play-pause")).toHaveText("▶");
+  });
+
+  test("body-focused Space pauses inline video without folding the panel", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("body-focused Space resumes paused media", async ({ page }) => {
+    await playTrack(page, AUDIO, 0);
+    await focusPageBody(page);
+    await page.keyboard.press("Space");
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+    await expect(page.locator("#player-play-pause")).toHaveText("⏸");
+  });
+
+  test("Space pauses after the Watch button opens inline video", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await expect(page.locator("#player-play-pause")).toHaveText("▶");
+  });
+
+  test("video-focused Space toggles playback", async ({ page }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await page.locator("#player-audio").focus();
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Space in an interactive control does not trigger the global pause shortcut", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-seek").focus();
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Space in contenteditable text does not trigger the global pause shortcut", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => {
+      const editor = document.createElement("div");
+      editor.id = "e2e-contenteditable";
+      editor.contentEditable = "true";
+      editor.textContent = "notes";
+      document.getElementById("content").appendChild(editor);
+      editor.focus();
+    });
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("modified Space does not trigger the global pause shortcut", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Shift+Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("repeated Space keydown does not toggle playback again", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await focusPageBody(page);
+
+    const prevented = await page.evaluate(() => {
+      const event = new KeyboardEvent("keydown", {
+        bubbles: true,
+        cancelable: true,
+        code: "Space",
+        key: " ",
+        repeat: true,
+      });
+      document.dispatchEvent(event);
+      return event.defaultPrevented;
+    });
+
+    expect(prevented).toBe(true);
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("body-focused Space before media is loaded does not activate the player", async ({
+    page,
+  }) => {
+    await focusPageBody(page);
+
+    await page.keyboard.press("Space");
+
+    await expect(page.locator("#player-bar")).not.toHaveClass(/active/);
   });
 });
 
