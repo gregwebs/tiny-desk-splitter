@@ -67,18 +67,36 @@ const Player = (() => {
     );
   }
 
+  function isPlainEscapeKey(e) {
+    return (
+      (e.code === "Escape" || e.key === "Escape" || e.key === "Esc") &&
+      !e.ctrlKey &&
+      !e.metaKey &&
+      !e.altKey &&
+      !e.shiftKey
+    );
+  }
+
   function isPlayerPlaybackShortcutTarget(target) {
     return target && (target === audio || target.id === "player-watch");
+  }
+
+  // True for text-entry targets where native key behavior (typing a space,
+  // clearing/blurring on Escape) must win over the global player shortcuts.
+  function isEditableTarget(target) {
+    if (!target) return false;
+    if (target.isContentEditable) return true;
+    if (target.matches && target.matches("input, textarea, select")) return true;
+    if (!target.closest) return false;
+    const editable = target.closest("[contenteditable]");
+    return !!(editable && editable.isContentEditable);
   }
 
   function isKeyboardShortcutIgnoredTarget(target) {
     if (!target) return false;
     if (isPlayerPlaybackShortcutTarget(target)) return false;
-    if (target.isContentEditable) return true;
+    if (isEditableTarget(target)) return true;
     if (!target.closest) return false;
-
-    const editable = target.closest("[contenteditable]");
-    if (editable && editable.isContentEditable) return true;
 
     return !!target.closest(INTERACTIVE_SELECTOR);
   }
@@ -93,6 +111,20 @@ const Player = (() => {
 
   function onGlobalKeydown(e) {
     if (e.defaultPrevented) return;
+
+    // Escape folds the inline video panel, like clicking Watch or dead space.
+    // It must work even when a control inside the panel (e.g. the close button)
+    // is focused, so it skips the interactive-target filter and only defers to
+    // text fields, where native Escape (clear/blur) should win.
+    if (isPlainEscapeKey(e)) {
+      if (isEditableTarget(e.target)) return;
+      if (!isVideoPanelOpen()) return;
+      e.preventDefault();
+      tracing("escape close video", {});
+      hideVideoPanel();
+      return;
+    }
+
     if (!isPlainSpaceKey(e)) return;
     if (isKeyboardShortcutIgnoredTarget(e.target)) return;
     if (!hasActiveMedia()) return;
@@ -351,6 +383,11 @@ const Player = (() => {
 
   // Reveal the minimize button on mouse movement (or a touch) while watching, then
   // fade it back out once the pointer goes idle.
+  function isVideoPanelOpen() {
+    const panel = document.getElementById("player-video-panel");
+    return !!panel && panel.classList.contains("open");
+  }
+
   function showVideoControls() {
     const panel = document.getElementById("player-video-panel");
     if (!panel || !panel.classList.contains("open")) return;
@@ -409,9 +446,7 @@ const Player = (() => {
   // Player-bar Watch button: fold the inline video panel up or down. The video
   // is the already-playing #player-audio element, so revealing it needs no resync.
   function watch() {
-    const panel = document.getElementById("player-video-panel");
-    if (!panel) return;
-    if (panel.classList.contains("open")) hideVideoPanel();
+    if (isVideoPanelOpen()) hideVideoPanel();
     else showVideoPanel();
   }
 

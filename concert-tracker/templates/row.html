@@ -1,7 +1,9 @@
 <div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   {% if let Some(url) = card_image_url.as_ref() %}
-  <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
-       onerror="this.style.display='none'">
+  <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">
+    <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
+        onerror="this.style.display='none'">
+  </a>
   {% else if scrape_pending %}
   <div class="card-thumb card-thumb-loading">loading…</div>
   {% endif %}
@@ -12,7 +14,13 @@
         <div class="card-meta">
           {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
         </div>
-        {% if !teaser.is_empty() %}<p class="card-teaser">{{ teaser }}</p>{% endif %}
+        {% if !teaser.is_empty() %}
+          <p class="card-teaser">
+            <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
+              {{ teaser }}
+            </a>
+          </p>
+        {% endif %}
       </div>
     </div>
     <div class="card-actions">

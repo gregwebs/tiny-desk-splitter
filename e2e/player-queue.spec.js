@@ -465,6 +465,79 @@ test.describe("Player keyboard shortcuts", () => {
 
     await expect(page.locator("#player-bar")).not.toHaveClass(/active/);
   });
+
+  test("Escape folds an open video panel while playback continues", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Escape from a control inside the player still folds the panel", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await page.locator("#player-watch").focus();
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+  });
+
+  test("Escape with the panel closed is a no-op", async ({ page }) => {
+    await playTrack(page, VIDEO, 0);
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("#player-video-panel")).not.toHaveClass(/open/);
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Escape in contenteditable text does not fold the panel", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await page.evaluate(() => {
+      const editor = document.createElement("div");
+      editor.id = "e2e-contenteditable";
+      editor.contentEditable = "true";
+      editor.textContent = "notes";
+      document.getElementById("content").appendChild(editor);
+      editor.focus();
+    });
+
+    await page.keyboard.press("Escape");
+
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("modified Escape does not fold the panel", async ({ page }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await focusPageBody(page);
+
+    await page.keyboard.press("Shift+Escape");
+
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
 });
 
 test.describe("Inline video", () => {
