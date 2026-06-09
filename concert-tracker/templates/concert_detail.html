@@ -10,6 +10,8 @@
 
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 
+{% if let Some(date) = concert.display_date() %}<p><strong>Date:</strong> {{ date }}</p>{% endif %}
+
 {% for para in concert.description_paragraphs() %}<p>{{ para }}</p>{% endfor %}
 
 {% if !tracks.is_empty() %}

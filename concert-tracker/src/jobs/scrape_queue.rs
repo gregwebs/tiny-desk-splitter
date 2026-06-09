@@ -6,7 +6,7 @@
 //! a single long-lived consumer task. Serializing is deliberate: it avoids
 //! hammering NPR / getting IP-blocked. Listing cards for queued concerts render a
 //! "loading…" placeholder and poll `/concerts/:id/status` until their thumbnail
-//! is ready (see `web::handlers` + `templates/row.html`).
+//! is ready (see `web::handlers` + `templates/concert_card.html`).
 //!
 //! The `pending` set is the source of truth for "is this card still loading"; it
 //! is in-memory, so a restart loses it (a re-sync re-enqueues — see the plan).

@@ -56,11 +56,10 @@ struct ListTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "row.html")]
+#[template(path = "concert_card.html")]
 struct RowTemplate {
     id: i64,
     title: String,
-    concert_date: String,
     teaser: String,
     download_status: String,
     download_status_label: String,
@@ -100,7 +99,7 @@ struct RowTemplate {
 }
 
 #[derive(Template)]
-#[template(path = "detail.html")]
+#[template(path = "concert_detail.html")]
 struct DetailTemplate {
     chrome: Chrome,
     /// Concert id, mirrored out of `concert` so the shared `tracks.html` partial
@@ -381,7 +380,6 @@ fn render_row_inner(
     RowTemplate {
         id: c.id,
         title: c.title.trim_end_matches(": Tiny Desk Concert").to_string(),
-        concert_date: c.display_date().unwrap_or_default(),
         teaser: c.teaser.clone().unwrap_or_default(),
         download_status: ds.slug().to_string(),
         download_status_label: ds.label().to_string(),
