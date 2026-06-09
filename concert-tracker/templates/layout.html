@@ -503,11 +503,13 @@
     }
     #player-prev:hover, #player-next:hover { color: #ccc; }
     #player-prev:disabled, #player-next:disabled { color: #555; cursor: default; }
+    /* The badge always occupies its slot (visibility, not display) so enqueuing a
+       track doesn't shift the rest of the player bar to the right. */
     #player-queue-badge {
       background: #e63946; color: #fff; font-size: 0.7em; font-weight: 700;
       min-width: 1.3em; height: 1.3em; border-radius: 50%;
-      display: none; align-items: center; justify-content: center;
-      padding: 0.1em;
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 0.1em; visibility: hidden;
     }
     #player-watch, #player-open {
       background: none; border: 1px solid #666; color: #fff; font-size: 0.85em;
@@ -536,7 +538,8 @@
       flex: 1; font-weight: 600; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
     }
-    #player-artist { display: block; font-size: 0.85em; color: #aaa; }
+    #player-artist { display: block; font-size: 0.85em; color: #aaa; cursor: pointer; text-decoration: none; }
+    #player-artist:hover { color: #fff; text-decoration: underline; }
     #player-seek { flex: 2; accent-color: #fff; }
     #player-time { font-variant-numeric: tabular-nums; min-width: 8.5em; text-align: right; }
     #player-error { color: #ff6b6b; font-size: 0.85em; display: none; }
@@ -583,11 +586,13 @@
       <button id="player-delete" onclick="Player.deleteTrack()" title="Delete this track" aria-label="Delete this track"><span class="icon-trash"></span></button>
       <div id="player-info">
         <span class="player-title-line">
-          <span id="player-track"></span>
           <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
+          <span id="player-track"></span>
           <span id="player-title"></span>
         </span>
-        <span id="player-artist"></span>
+        <a id="player-artist" hx-boost="false" onclick="Player.openConcert(event)"
+           hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top"
+           hx-push-url="true" title="View concert"></a>
       </div>
       <span id="player-error"></span>
       <input id="player-seek" type="range" min="0" max="100" value="0"

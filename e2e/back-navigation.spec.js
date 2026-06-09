@@ -85,6 +85,30 @@ test.describe("Navigation keeps the player playing uninterrupted", () => {
     await expect(page.locator("#content")).toHaveCount(1);
   });
 
+  test("player-bar artist link -> detail keeps the same audio node playing", async ({ page }) => {
+    await startPlaying(page);
+    const t0 = await currentTime(page);
+
+    // The artist is a link to the playing concert's detail page. A plain click
+    // must do an htmx partial swap of #content (not a full-page nav, which would
+    // reload the page and stop playback).
+    await expect(page.locator("#player-artist")).toHaveText("Audio Artist");
+    await page.locator("#player-artist").click();
+    await page.waitForFunction(
+      (id) => location.pathname === `/concerts/${id}`,
+      CONCERT
+    );
+
+    await expectUninterrupted(page, t0);
+    await expect(page.locator("#player-title")).toHaveText("Limbo");
+    await expect(page.locator("#content")).toHaveCount(1);
+
+    // History was pushed (hx-push-url), so Back returns to the list.
+    await page.goBack();
+    await page.waitForFunction(() => location.pathname === "/");
+    await expect(page.locator("#content")).toHaveCount(1);
+  });
+
   test("Back then Forward keeps the same audio node playing", async ({ page }) => {
     await startPlaying(page);
 

@@ -188,12 +188,19 @@ const Player = (() => {
     }
   }
 
-  function updateInfo(title, artist, trackIdx) {
+  function updateInfo(title, artist, trackIdx, concertId) {
     const t = document.getElementById("player-title");
     const a = document.getElementById("player-artist");
     const n = document.getElementById("player-track");
     if (t) t.textContent = title;
-    if (a) a.textContent = artist;
+    if (a) {
+      a.textContent = artist;
+      // Point the artist link at the concert detail page. This href is only the
+      // native fallback (middle-click / Cmd-click "open in new tab"); a plain
+      // click is handled by openConcert(), which does an htmx partial swap so
+      // playback continues.
+      if (concertId != null) a.setAttribute("href", `/concerts/${concertId}`);
+    }
     if (n) {
       // track_index is the 0-based set-list position; null for whole-album playback.
       if (trackIdx != null) {
@@ -533,7 +540,7 @@ const Player = (() => {
 
     hideError();
     showBar();
-    updateInfo(title, artist, trackIdx);
+    updateInfo(title, artist, trackIdx, concertId);
     markPlaying(btn);
 
     state.concertId = concertId;
@@ -767,11 +774,11 @@ const Player = (() => {
     if (!badge) return;
     if (queue.length > 0) {
       badge.textContent = queue.length;
-      badge.style.display = "inline-flex";
+      badge.style.visibility = "visible";
       badge.title = queue.map(q => q.title).join("\n");
     } else {
       badge.textContent = "";
-      badge.style.display = "none";
+      badge.style.visibility = "hidden";
       badge.title = "";
     }
   }
@@ -791,6 +798,21 @@ const Player = (() => {
       showError("Couldn't open externally");
       tracing("openExternal fetch failed", e);
     }
+  }
+
+  // Player-bar artist link: navigate to the playing concert's detail page via an
+  // htmx partial swap of #content so the player keeps playing (a full-page nav
+  // would reload the page and stop playback). Modifier-clicks fall through to the
+  // native href so "open in new tab" still works, matching htmx boost's behavior.
+  // htmx reads hx-target/hx-select/hx-swap/hx-push-url from the source element.
+  function openConcert(e) {
+    if (e && (e.metaKey || e.ctrlKey || e.shiftKey)) return;
+    if (e) e.preventDefault();
+    if (state.concertId == null || !window.htmx) {
+      tracing("openConcert skipped", { concertId: state.concertId, htmx: !!window.htmx });
+      return;
+    }
+    window.htmx.ajax("GET", `/concerts/${state.concertId}`, { source: e.currentTarget });
   }
 
   // Track-list/detail Watch button: start this track playing inline and fold up
@@ -896,5 +918,6 @@ const Player = (() => {
   }
 
   return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
-    skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack };
+    skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
+    openConcert };
 })();
