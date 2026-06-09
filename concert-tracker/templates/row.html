@@ -11,9 +11,6 @@
     <div class="card-head">
       <div class="card-head-text">
         <h3 class="card-title"><a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ title }}</a></h3>
-        <div class="card-meta">
-          {% if !concert_date.is_empty() %}<span class="card-date">{{ concert_date }}</span>{% endif %}
-        </div>
         {% if !teaser.is_empty() %}
           <p class="card-teaser">
             <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
