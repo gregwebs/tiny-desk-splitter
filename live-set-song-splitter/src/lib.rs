@@ -1,3 +1,5 @@
+pub mod cut;
+pub mod ffmpeg;
 pub mod image;
 pub mod ocr;
 pub mod ocr_backend;

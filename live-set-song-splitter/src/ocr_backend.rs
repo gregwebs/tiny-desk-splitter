@@ -81,7 +81,9 @@ pub fn ensure_ocr_choice_available(choice: OcrChoice) -> Result<()> {
             }
             #[cfg(not(feature = "leptess-ocr"))]
             {
-                anyhow::bail!("--ocr-engine tesseract requires building with --features leptess-ocr")
+                anyhow::bail!(
+                    "--ocr-engine tesseract requires building with --features leptess-ocr"
+                )
             }
         }
         OcrChoice::Paddle => {
@@ -109,7 +111,9 @@ pub fn create_ocr_backend(choice: OcrChoice, phase: OcrPhase) -> Result<Box<dyn 
             #[cfg(not(feature = "leptess-ocr"))]
             {
                 let _ = phase;
-                anyhow::bail!("--ocr-engine tesseract requires building with --features leptess-ocr")
+                anyhow::bail!(
+                    "--ocr-engine tesseract requires building with --features leptess-ocr"
+                )
             }
         }
         OcrChoice::Paddle => {

@@ -62,7 +62,10 @@ fn model_dir_candidates() -> Vec<PathBuf> {
 
 /// Pick the first candidate dir that contains the detection model. Pure (testable) over
 /// the candidate list and the "does this dir have the model" predicate.
-fn pick_model_dir(candidates: &[PathBuf], has_det_model: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+fn pick_model_dir(
+    candidates: &[PathBuf],
+    has_det_model: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
     candidates.iter().find(|d| has_det_model(d)).cloned()
 }
 
@@ -120,10 +123,18 @@ impl PaddleOcr {
         // `None` config = library defaults (CPU backend, default thread count, and
         // default DetOptions — see the tuning note above).
         let det = DetModel::from_file(&det_path, None).map_err(|e| {
-            anyhow::anyhow!("loading paddle detection model {}: {}", det_path.display(), e)
+            anyhow::anyhow!(
+                "loading paddle detection model {}: {}",
+                det_path.display(),
+                e
+            )
         })?;
         let rec = RecModel::from_file(&rec_path, &keys_path, None).map_err(|e| {
-            anyhow::anyhow!("loading paddle recognition model {}: {}", rec_path.display(), e)
+            anyhow::anyhow!(
+                "loading paddle recognition model {}: {}",
+                rec_path.display(),
+                e
+            )
         })?;
 
         // Title-crop is ON by default (the 100%-recall config); opt out with =0/false/no.
@@ -131,12 +142,19 @@ impl PaddleOcr {
             .map(|v| !matches!(v.as_str(), "0" | "false" | "no"))
             .unwrap_or(true);
 
-        Ok(Self { det, rec, title_crop })
+        Ok(Self {
+            det,
+            rec,
+            title_crop,
+        })
     }
 
     /// Detect + recognize every text region in `img`. Returns (top, left, bottom, text)
     /// per non-empty region, in no particular order.
-    fn detect_recognize(&mut self, img: &::image::DynamicImage) -> Result<Vec<(i32, i32, i32, String)>> {
+    fn detect_recognize(
+        &mut self,
+        img: &::image::DynamicImage,
+    ) -> Result<Vec<(i32, i32, i32, String)>> {
         let dets = self
             .det
             .detect_and_crop(img)
@@ -283,7 +301,10 @@ mod tests {
             PathBuf::from("/exe"),
             PathBuf::from("/src"),
         ];
-        assert_eq!(pick_model_dir(&cands, |_| true), Some(PathBuf::from("/env")));
+        assert_eq!(
+            pick_model_dir(&cands, |_| true),
+            Some(PathBuf::from("/env"))
+        );
     }
 
     #[test]

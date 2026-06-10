@@ -1,5 +1,9 @@
 # Fix video/audio desync in split tracks
 
+> **Update 2026-06-10:** a third mode, `smart`, is now the default — it removes
+> copy mode's keyframe lead-in at near-copy speed. See
+> `2026-06-10-smart-video-cut-mode.md`.
+
 ## Symptom
 
 When playing split tracks in concert-web, the **video lagged the audio**. The first

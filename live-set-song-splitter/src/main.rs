@@ -7,10 +7,12 @@ pub mod ocr_paddle;
 use crate::ocr::{matches_song_title, matches_song_title_weighted, song_title_candidate_lines};
 use crate::ocr_backend::{create_ocr_backend, default_ocr_choice, OcrChoice, OcrPhase};
 mod audio;
+mod cut;
 mod ffmpeg;
 mod image;
 mod io;
 mod video;
+use crate::cut::VideoCutMode;
 use crate::video::VideoInfo;
 use concert_types::{ConcertInfo, Song, SongTimestamp};
 
@@ -40,29 +42,6 @@ impl Default for OutputFormat {
     }
 }
 
-/// How to cut the video stream for each track. Both modes keep audio and video in
-/// sync; they trade cut precision against speed/quality.
-#[derive(Parser, Debug, Clone, Copy, ValueEnum, PartialEq)]
-#[clap(rename_all = "lowercase")]
-enum VideoCutMode {
-    /// Stream-copy (fast, lossless). Snaps each cut back to the nearest preceding
-    /// keyframe, so a track may start up to one GOP (a few seconds) early.
-    Copy,
-    /// Re-encode the video so each cut is frame-accurate at the detected start
-    /// (slower, slight quality change).
-    Reencode,
-}
-
-impl Default for VideoCutMode {
-    fn default() -> Self {
-        VideoCutMode::Copy
-    }
-}
-
-/// x264 encoding parameters used by [`VideoCutMode::Reencode`].
-const REENCODE_PRESET: &str = "veryfast";
-const REENCODE_CRF: &str = "18";
-
 /// Tool for splitting live music recordings into individual songs
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -88,10 +67,13 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = OutputFormat::Both)]
     output_format: OutputFormat,
 
-    /// How to cut the video stream: `copy` (fast, lossless; snaps each cut back to
-    /// the nearest preceding keyframe) or `reencode` (frame-accurate at the detected
-    /// start, but slower and re-encodes the video). Both keep audio/video in sync.
-    #[arg(long, value_enum, default_value_t = VideoCutMode::Copy)]
+    /// How to cut the video stream: `smart` (frame-accurate at the detected start,
+    /// near-copy speed; re-encodes only up to the first keyframe of each track),
+    /// `copy` (fastest, lossless; snaps each cut back to the nearest preceding
+    /// keyframe so a track can start a few seconds early), or `reencode`
+    /// (frame-accurate, re-encodes the whole video, much slower). All keep
+    /// audio/video in sync.
+    #[arg(long, value_enum, default_value_t = VideoCutMode::Smart)]
     video_cut_mode: VideoCutMode,
 
     /// Custom output directory for generated audio/video files
@@ -141,7 +123,11 @@ struct SongSegment {
 ///   - `concert.json` — a verbatim copy of the input metadata, only if not
 ///     already present.
 ///   - `timestamps.json` — the timestamps-augmented concert struct.
-fn write_concert_json_outputs(output_dir: &str, input_path: &str, concert: &ConcertInfo) -> Result<()> {
+fn write_concert_json_outputs(
+    output_dir: &str,
+    input_path: &str,
+    concert: &ConcertInfo,
+) -> Result<()> {
     let canonical_path = format!("{}/concert.json", output_dir);
     if !Path::new(&canonical_path).exists() {
         fs::copy(input_path, &canonical_path)
@@ -365,8 +351,9 @@ fn main() -> Result<()> {
             Some(w) => w,
             None => {
                 println!("Extracting audio waveform for refinement...");
-                audio::extract_audio_waveform(&input_file)
-                    .with_context(|| format!("Failed to extract audio waveform from {}", input_file))?
+                audio::extract_audio_waveform(&input_file).with_context(|| {
+                    format!("Failed to extract audio waveform from {}", input_file)
+                })?
             }
         };
 
@@ -430,7 +417,10 @@ fn main() -> Result<()> {
     }
 
     if cli.keep_frames {
-        println!("Keeping temporary frames folder (--keep-frames): {}", temp_dir);
+        println!(
+            "Keeping temporary frames folder (--keep-frames): {}",
+            temp_dir
+        );
     } else if std::path::Path::new(&temp_dir).exists() {
         println!("Cleaning up temporary folder: {}", temp_dir);
         match fs::remove_dir_all(&temp_dir) {
@@ -642,15 +632,17 @@ fn recover_missing_songs_from_silence(
         }
 
         // Find prev anchor (last AlreadyFound or Recovered before i).
-        let prev_idx = (0..i).rev().find(|&j| results[j] != RecoveryResult::StillMissing);
+        let prev_idx = (0..i)
+            .rev()
+            .find(|&j| results[j] != RecoveryResult::StillMissing);
         // Find run of missing songs starting at i.
         let mut run_end = i;
         while run_end + 1 < set_list.len() && results[run_end + 1] == RecoveryResult::StillMissing {
             run_end += 1;
         }
         // Find next anchor after run_end.
-        let next_idx = ((run_end + 1)..set_list.len())
-            .find(|&j| results[j] != RecoveryResult::StillMissing);
+        let next_idx =
+            ((run_end + 1)..set_list.len()).find(|&j| results[j] != RecoveryResult::StillMissing);
 
         let (prev_idx, next_idx) = match (prev_idx, next_idx) {
             (Some(p), Some(n)) => (p, n),
@@ -698,7 +690,8 @@ fn recover_missing_songs_from_silence(
             if candidates.is_empty() {
                 break;
             }
-            let expected = gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64);
+            let expected =
+                gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64);
             // Pick the candidate closest to `expected`.
             let (best_i, &best_mid) = candidates
                 .iter()
@@ -893,10 +886,7 @@ fn refine_segments_with_audio_analysis(
     println!("Using energy threshold for refinement: {:.6}", threshold);
 
     let silence_spans = audio::find_silence_spans(&energy_profile, threshold);
-    let silence_timestamps: Vec<f64> = silence_spans
-        .iter()
-        .map(|s| s.midpoint_seconds)
-        .collect();
+    let silence_timestamps: Vec<f64> = silence_spans.iter().map(|s| s.midpoint_seconds).collect();
 
     println!(
         "Found {} potential silence points for refinement",
@@ -1030,6 +1020,15 @@ fn process_segments(
         ));
     }
 
+    // Smart cutting matches the head re-encode to the source's stream properties;
+    // probe them once for the whole run.
+    let source_params = match (output_format, video_cut_mode) {
+        (OutputFormat::Video | OutputFormat::Both, VideoCutMode::Smart) => {
+            Some(cut::probe_source_video_params(input_file)?)
+        }
+        _ => None,
+    };
+
     let mut song_counter = 0;
     let mut gap_counter = 0;
 
@@ -1077,16 +1076,28 @@ fn process_segments(
             OutputFormat::Video | OutputFormat::Both => {
                 let output_file = format!("{}/{}.mp4", output_dir, safe_title);
 
-                extract_segment(
-                    input_file,
-                    &output_file,
-                    segment.segment.start_time,
-                    segment.segment.end_time,
-                    video_cut_mode,
-                    Some(song_title),
-                    &concert,
-                    Some(song_counter), // Add song number as track metadata
-                )?;
+                match &source_params {
+                    Some(params) => cut::extract_segment_smart(
+                        input_file,
+                        &output_file,
+                        segment.segment.start_time,
+                        segment.segment.end_time,
+                        params,
+                        Some(song_title),
+                        &concert,
+                        Some(song_counter), // Add song number as track metadata
+                    )?,
+                    None => cut::extract_segment(
+                        input_file,
+                        &output_file,
+                        segment.segment.start_time,
+                        segment.segment.end_time,
+                        video_cut_mode,
+                        Some(song_title),
+                        &concert,
+                        Some(song_counter), // Add song number as track metadata
+                    )?,
+                }
             }
             _ => {}
         }
@@ -1304,8 +1315,14 @@ mod tests_back_search_offset {
         // "Bloc Party / Blue" overlay frames 73,74,75 each alongside a `bw` variant.
         let all_png = list_png(&fixture_dir());
         assert_eq!(all_png.len(), 6, "fixture has a plain + bw file per frame");
-        let source_count = all_png.iter().filter(|p| is_source_frame(p.as_path())).count();
-        assert_eq!(source_count, 3, "only the three N.png frames are source frames");
+        let source_count = all_png
+            .iter()
+            .filter(|p| is_source_frame(p.as_path()))
+            .count();
+        assert_eq!(
+            source_count, 3,
+            "only the three N.png frames are source frames"
+        );
     }
 
     #[test]
@@ -1660,9 +1677,9 @@ mod tests_recover_missing_songs {
         // detected song.
         let audio = synth_audio(&[
             (25.0, false),
-            (6.0, true),  // longest silence; midpoint ~28s, far from midpoint=50
+            (6.0, true), // longest silence; midpoint ~28s, far from midpoint=50
             (15.0, false),
-            (4.0, true),  // shorter; midpoint ~48s, close to midpoint=50
+            (4.0, true), // shorter; midpoint ~48s, close to midpoint=50
             (50.0, false),
         ]);
         // gap_start=0, gap_end=100, expected midpoint=50.
@@ -1683,11 +1700,11 @@ mod tests_recover_missing_songs {
         // Three qualifying silences: 7s long at ~33s, 6s at ~62s, 5s at ~92s.
         let audio = synth_audio(&[
             (30.0, false),
-            (7.0, true),  // longest, mid ~33.5s
+            (7.0, true), // longest, mid ~33.5s
             (20.0, false),
-            (6.0, true),  // mid ~62.5s
+            (6.0, true), // mid ~62.5s
             (20.0, false),
-            (5.0, true),  // mid ~92s
+            (5.0, true), // mid ~92s
             (15.0, false),
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
@@ -1714,9 +1731,9 @@ mod tests_recover_missing_songs {
         // Two silences only ~4s apart inside a 200s gap.
         let audio = synth_audio(&[
             (90.0, false),
-            (3.0, true),  // mid ~91.5s
+            (3.0, true), // mid ~91.5s
             (1.0, false),
-            (3.0, true),  // mid ~96s (only ~4.5s after first)
+            (3.0, true), // mid ~96s (only ~4.5s after first)
             (103.0, false),
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
@@ -1759,7 +1776,11 @@ mod tests_recover_missing_songs {
         let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
         assert_eq!(results[0], RecoveryResult::StillMissing);
         assert_eq!(results[1], RecoveryResult::AlreadyFound);
-        assert_eq!(segments.len(), 1, "no segment should have been inserted for A");
+        assert_eq!(
+            segments.len(),
+            1,
+            "no segment should have been inserted for A"
+        );
     }
 
     #[test]
@@ -1789,18 +1810,19 @@ mod tests_recover_missing_songs {
 
     #[test]
     fn end_times_chain_through_inserted_segments() {
-        let audio = synth_audio(&[
-            (10.0, false),
-            (5.0, true),
-            (15.0, false),
-        ]);
+        let audio = synth_audio(&[(10.0, false), (5.0, true), (15.0, false)]);
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 30.0)];
         let _ = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
 
         // After recovery, segments should be sorted by start_time and chained:
         // A.end == B.start, B.end == C.start.
-        segments.sort_by(|a, b| a.segment.start_time.partial_cmp(&b.segment.start_time).unwrap());
+        segments.sort_by(|a, b| {
+            a.segment
+                .start_time
+                .partial_cmp(&b.segment.start_time)
+                .unwrap()
+        });
         let a = &segments[0];
         let b = &segments[1];
         let c = &segments[2];
@@ -1813,11 +1835,7 @@ mod tests_recover_missing_songs {
     /// energy-smoothing window swallowing short silences in fixture data.
     #[test]
     fn synth_audio_produces_detectable_silence() {
-        let audio = synth_audio(&[
-            (10.0, false),
-            (5.0, true),
-            (10.0, false),
-        ]);
+        let audio = synth_audio(&[(10.0, false), (5.0, true), (10.0, false)]);
         let profile = audio::calculate_energy_profile(&audio);
         let threshold = adaptive_silence_threshold(&profile);
         let spans = audio::find_silence_spans(&profile, threshold);
@@ -2400,152 +2418,6 @@ fn refine_song_start_time(
             );
             return Ok(0.0);
         }
-    }
-}
-
-/// Build the ffmpeg seek/codec arguments for cutting `input_file` to `[start, end]`
-/// under the chosen [`VideoCutMode`]. These slot in after the ffmpeg base flags and
-/// before the per-track metadata and output path.
-///
-/// Both modes use input-side seeking (`-ss` before `-i`) so audio and video start
-/// together. The previous command placed `-ss` *after* `-i` with `-c copy`, which
-/// left the video starting at the first keyframe *after* the cut while the audio
-/// started exactly at the cut — desyncing every track not cut on a keyframe by up to
-/// one GOP (e.g. ~1.7s on a 4s-keyframe source). See
-/// https://superuser.com/questions/1850814/how-to-cut-a-video-with-ffmpeg-with-no-or-minimal-re-encoding
-fn build_cut_args(mode: VideoCutMode, input_file: &str, start: f64, end: f64) -> Vec<String> {
-    match mode {
-        // Stream copy. Input seeking snaps the start back to the preceding keyframe;
-        // `-copyts` keeps the original timeline so `-to` still ends at the true `end`,
-        // and `avoid_negative_ts make_zero` shifts the first packet to ~0 so both
-        // streams begin together.
-        VideoCutMode::Copy => vec![
-            "-ss".into(),
-            format!("{:.3}", start),
-            "-i".into(),
-            input_file.into(),
-            "-to".into(),
-            format!("{:.3}", end),
-            "-c".into(),
-            "copy".into(),
-            "-copyts".into(),
-            "-avoid_negative_ts".into(),
-            "make_zero".into(),
-        ],
-        // Re-encode the video for a frame-accurate cut. Input seeking lands on the
-        // preceding keyframe (fast); ffmpeg then decodes and discards up to `start`,
-        // so the encoded output begins exactly at the detected cut. `-t duration` is
-        // used (not `-to`) because the accurate seek resets output timestamps to 0.
-        // Audio is still stream-copied (no keyframe constraint, stays in sync).
-        VideoCutMode::Reencode => vec![
-            "-ss".into(),
-            format!("{:.3}", start),
-            "-i".into(),
-            input_file.into(),
-            "-t".into(),
-            format!("{:.3}", end - start),
-            "-c:v".into(),
-            "libx264".into(),
-            "-preset".into(),
-            REENCODE_PRESET.into(),
-            "-crf".into(),
-            REENCODE_CRF.into(),
-            "-c:a".into(),
-            "copy".into(),
-        ],
-    }
-}
-
-fn extract_segment(
-    input_file: &str,
-    output_file: &str,
-    start_time: f64,
-    end_time: f64,
-    cut_mode: VideoCutMode,
-    song_title: Option<&str>,
-    concertdata: &ConcertInfo,
-    track_number: Option<usize>,
-) -> Result<()> {
-    let mut ffmpeg = ffmpeg::create_ffmpeg_command();
-    ffmpeg.args(build_cut_args(cut_mode, input_file, start_time, end_time));
-    let mut cmd = ffmpeg.cmd();
-
-    // Add metadata
-    ffmpeg::add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
-
-    cmd.args(&[
-        "-y", // Overwrite output file
-        output_file,
-    ]);
-
-    let status = cmd.status()?;
-
-    if !status.success() {
-        return Err(anyhow!("Failed to extract segment to {}", output_file));
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests_cut_args {
-    use super::*;
-
-    // Helper: find the value following `flag` in the arg list, if present.
-    fn value_after<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
-        args.iter()
-            .position(|a| a == flag)
-            .and_then(|i| args.get(i + 1))
-            .map(|s| s.as_str())
-    }
-
-    fn index_of(args: &[String], item: &str) -> Option<usize> {
-        args.iter().position(|a| a == item)
-    }
-
-    // Both modes must seek on the *input* side (`-ss` before `-i`); placing `-ss`
-    // after `-i` with `-c copy` was the original desync bug.
-    #[test]
-    fn seek_is_input_side_in_both_modes() {
-        for mode in [VideoCutMode::Copy, VideoCutMode::Reencode] {
-            let args = build_cut_args(mode, "in.mp4", 10.0, 20.0);
-            let ss = index_of(&args, "-ss").expect("-ss present");
-            let i = index_of(&args, "-i").expect("-i present");
-            assert!(ss < i, "{:?}: -ss must precede -i (got ss={ss}, i={i})", mode);
-            assert_eq!(value_after(&args, "-ss"), Some("10.000"));
-        }
-    }
-
-    // Copy mode stream-copies and preserves the true end via -copyts + -to.
-    #[test]
-    fn copy_mode_uses_stream_copy_and_true_end() {
-        let args = build_cut_args(VideoCutMode::Copy, "in.mp4", 434.337, 770.921);
-        assert_eq!(value_after(&args, "-c"), Some("copy"));
-        assert!(args.iter().any(|a| a == "-copyts"));
-        assert_eq!(value_after(&args, "-avoid_negative_ts"), Some("make_zero"));
-        // `-to` is the absolute end on the original timeline, not a duration.
-        assert_eq!(value_after(&args, "-to"), Some("770.921"));
-        // Copy mode must not re-encode.
-        assert!(!args.iter().any(|a| a == "libx264"));
-    }
-
-    // Reencode mode re-encodes video, copies audio, and trims by duration because
-    // the accurate input seek resets output timestamps to 0.
-    #[test]
-    fn reencode_mode_uses_duration_and_x264() {
-        let args = build_cut_args(VideoCutMode::Reencode, "in.mp4", 434.337, 770.921);
-        assert_eq!(value_after(&args, "-c:v"), Some("libx264"));
-        assert_eq!(value_after(&args, "-c:a"), Some("copy"));
-        assert_eq!(value_after(&args, "-preset"), Some(REENCODE_PRESET));
-        assert_eq!(value_after(&args, "-crf"), Some(REENCODE_CRF));
-        // `-t` is a duration (end - start), and `-to` is not used.
-        assert_eq!(value_after(&args, "-t"), Some("336.584"));
-        assert!(!args.iter().any(|a| a == "-to"));
-    }
-
-    #[test]
-    fn copy_is_the_default_mode() {
-        assert_eq!(VideoCutMode::default(), VideoCutMode::Copy);
     }
 }
 
