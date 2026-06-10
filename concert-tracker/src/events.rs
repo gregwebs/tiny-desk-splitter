@@ -122,7 +122,7 @@ pub fn backfill(conn: &Connection) -> anyhow::Result<usize> {
             continue;
         }
 
-        record(conn, c.id, Event::Import, &c.first_seen_at, None);
+        record(conn, c.id, Event::Import, &c.inserted_at, None);
         count += 1;
 
         if let Some(ref at) = c.metadata_scraped_at {
@@ -170,11 +170,11 @@ pub fn backfill(conn: &Connection) -> anyhow::Result<usize> {
         }
 
         if c.wanted {
-            record(conn, c.id, Event::Wanted, &c.first_seen_at, None);
+            record(conn, c.id, Event::Wanted, &c.inserted_at, None);
             count += 1;
         }
         if c.ignored {
-            record(conn, c.id, Event::Ignored, &c.first_seen_at, None);
+            record(conn, c.id, Event::Ignored, &c.inserted_at, None);
             count += 1;
         }
     }

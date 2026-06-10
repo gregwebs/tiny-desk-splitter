@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS concerts (
     split_started_at TEXT,
     split_at TEXT,
     split_errors_json TEXT NOT NULL DEFAULT '[]',
-    first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+    inserted_at TEXT NOT NULL DEFAULT (datetime('now')),
     metadata_scraped_at TEXT
 );
 
