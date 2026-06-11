@@ -255,7 +255,14 @@
       letter-spacing: 0.02em;
       background: var(--surface-2, rgba(127,127,127,0.12));
     }
-    .card.tracks-open .card-thumb { display: none; }
+    /* Listing cards swap picture → track list on hover (the track HTML is
+       fetched once on first hover and kept in the DOM as a cache). Scoped to
+       #concert-list so the detail-page card shows picture and tracks together,
+       always. */
+    #concert-list .card-tracks-box { display: none; }
+    #concert-list .card:hover .card-thumb,
+    #concert-list .card:hover .card-thumb-loading { display: none; }
+    #concert-list .card:hover .card-tracks-box { display: block; }
 
     .card-title { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; line-height: 1.3; }
     .card-title a { text-decoration: none; }
@@ -408,6 +415,12 @@
     .track-list li:has(.btn-like.liked) .btn-delete { display: none; }
     .track-unavailable { opacity: 0.65; }
     .track-title-unavailable { flex: 1; }
+    /* Track whose prepare (download/split) chain is in flight, waiting to
+       auto-play. The mark is reasserted by the player after card swaps. */
+    .btn-track-listen.preparing { opacity: 0.6; font-style: italic; }
+    .btn-track-listen:disabled, .btn-tracks:disabled {
+      opacity: 0.5; cursor: default; text-decoration: none;
+    }
     .error-list { color: var(--error-fg); font-size: 0.85em; }
     /* Inline error shown next to the control whose request failed (see the global
        htmx error handler below). flex-basis:100% makes it wrap onto its own line
@@ -543,6 +556,9 @@
     #player-seek { flex: 2; accent-color: #fff; }
     #player-time { font-variant-numeric: tabular-nums; min-width: 8.5em; text-align: right; }
     #player-error { color: #ff6b6b; font-size: 0.85em; display: none; }
+    /* Prepare-flow progress ("Preparing… (downloading)") while a clicked
+       track's download/split chain runs; cleared when playback starts. */
+    #player-status { color: var(--fg-muted); font-size: 0.85em; font-style: italic; display: none; }
 
     @media (max-width: 480px) {
       #player-time { display: none; }
@@ -595,32 +611,37 @@
            hx-push-url="true" title="View concert"></a>
       </div>
       <span id="player-error"></span>
+      <span id="player-status"></span>
       <input id="player-seek" type="range" min="0" max="100" value="0"
         oninput="Player.seek(this.value)">
       <span id="player-time">0:00 / 0:00</span>
     </div>
   </div>
   <script>
-    function toggleTracks(btn, concertId) {
-      var target = document.getElementById("tracks-" + concertId);
-      if (!target) return;
-      var card = target.closest(".card");
-      if (target.children.length > 0) {
-        target.innerHTML = "";
-        if (card) card.classList.remove("tracks-open");
-        return;
-      }
-      if (card) card.classList.add("tracks-open");
+    // Fill a listing card's track list on first hover. Visibility is pure CSS
+    // (#concert-list .card:hover); this only fetches the list HTML once and
+    // leaves it in the DOM as a cache. Single-card htmx swaps (status polling,
+    // want/ignore, deletes) arrive with the tracks already embedded, so the
+    // hover never refetches stale content.
+    document.addEventListener("mouseover", function (e) {
+      if (!e.target.closest) return;
+      var card = e.target.closest("#concert-list .card");
+      if (!card) return;
+      var box = card.querySelector(".card-tracks-box");
+      if (!box || box.children.length > 0 || box.dataset.loading) return;
+      var concertId = card.id.replace("concert-", "");
+      box.dataset.loading = "1";
       fetch("/concerts/" + concertId + "/tracks")
         .then(function(r) { return r.text(); })
         .then(function(html) {
-          target.innerHTML = html;
+          box.innerHTML = html;
           // Wire up hx-* attributes on the just-injected tracks list (the
           // delete ✕ button uses hx-post). innerHTML bypasses htmx so we have
           // to process it manually; htmx auto-processes its own swap responses.
-          if (window.htmx) htmx.process(target);
-        });
-    }
+          if (window.htmx) htmx.process(box);
+        })
+        .finally(function() { delete box.dataset.loading; });
+    });
 
     // ── Global htmx request feedback ──────────────────────────────────────
     // htmx fires htmx:sendError on a network failure (e.g. server stopped),

@@ -14,19 +14,6 @@
 
 {% for para in concert.description_paragraphs() %}<p>{{ para }}</p>{% endfor %}
 
-{% if !tracks.is_empty() %}
-<h3>Tracks</h3>
-{% let show_delete = false %}
-{% include "tracks.html" %}
-{% else if !concert.set_list.is_empty() %}
-<h3>Set List</h3>
-<ol class="set-list">
-  {% for song in concert.set_list.iter() %}
-  <li>{{ song }}</li>
-  {% endfor %}
-</ol>
-{% endif %}
-
 {% if !concert.musicians.is_empty() %}
 <h3>Musicians</h3>
 <ul>

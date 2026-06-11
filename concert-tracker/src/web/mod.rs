@@ -41,7 +41,16 @@ pub fn router(state: AppState) -> Router {
             "/concerts/:id/delete-download",
             post(handlers::delete_download),
         )
+        // /split and /delete-split have no UI buttons anymore (splitting is
+        // automated via /prepare; tracks are deleted one by one). Both stay
+        // routed deliberately, as curl-able escape hatches for manual
+        // recovery/administration.
         .route("/concerts/:id/split", post(handlers::split))
+        .route("/concerts/:id/prepare", post(handlers::prepare_concert))
+        .route(
+            "/concerts/:id/prepare-status",
+            get(handlers::prepare_status),
+        )
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/watch", post(handlers::watch))

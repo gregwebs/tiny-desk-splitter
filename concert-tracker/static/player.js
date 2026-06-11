@@ -163,6 +163,13 @@ const Player = (() => {
     reapplyPlaying();
     updateLikeStar();
     updateDeleteButton();
+    // A card swap replaces the buttons of a concert whose prepare chain is in
+    // flight; re-apply the pending mark and the disabled state (the server
+    // also renders them disabled once its job state catches up).
+    if (pendingPlay) {
+      disableCardTracks(pendingPlay.concertId);
+      markPreparing();
+    }
   }
 
   function setPlayPauseIcon(playing) {
@@ -245,6 +252,169 @@ const Player = (() => {
     if (autoAdvanceController) {
       autoAdvanceController.abort();
       autoAdvanceController = null;
+    }
+  }
+
+  // ── Prepare flow: play a track that doesn't exist on disk yet ────────────
+  // Clicking a missing track POSTs /prepare (which chains download → split as
+  // needed), then polls /prepare-status until the track file appears and
+  // auto-plays it. Lives in Player state (outside #content) so it survives
+  // the htmx card swaps driven by the card's own status polling.
+
+  let pendingPlay = null; // { concertId, trackIdx, timer, deadline }
+  const PREPARE_POLL_MS = 2000;
+  // Downloads can take many minutes; give the whole chain a generous cap so
+  // an abandoned poll loop can't run forever.
+  const PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
+
+  function setStatus(msg) {
+    const el = document.getElementById("player-status");
+    if (!el) return;
+    el.textContent = msg || "";
+    el.style.display = msg ? "inline" : "none";
+  }
+
+  // Best-effort visual mark on the pending track's button; re-applied by
+  // reassertPlayerUi after card swaps replace the button element.
+  function markPreparing() {
+    if (!pendingPlay) return;
+    const btn = findTrackButton(pendingPlay.concertId, pendingPlay.trackIdx);
+    if (btn) btn.classList.add("preparing");
+  }
+
+  function clearPreparing() {
+    document.querySelectorAll(".btn-track-listen.preparing").forEach(function (b) {
+      b.classList.remove("preparing");
+    });
+  }
+
+  // Disable the card's tracks button and track buttons immediately on click;
+  // subsequent card swaps render them disabled server-side (tracks_busy).
+  function disableCardTracks(concertId) {
+    const card = document.getElementById("concert-" + concertId);
+    if (!card) return;
+    card.querySelectorAll(".btn-tracks, .btn-track-listen").forEach(function (b) {
+      b.disabled = true;
+    });
+  }
+
+  function cancelPendingPlay() {
+    if (!pendingPlay) return;
+    if (pendingPlay.timer) clearTimeout(pendingPlay.timer);
+    pendingPlay = null;
+    clearPreparing();
+    setStatus("");
+  }
+
+  function failPendingPlay(msg) {
+    tracing("preparePlay failed", { msg });
+    cancelPendingPlay();
+    showError(msg);
+  }
+
+  async function preparePlay(btn, concertId, trackIdx) {
+    if (!audio) init();
+    cancelPendingPlay();
+    let resp;
+    try {
+      resp = await fetch(`/concerts/${concertId}/prepare`, { method: "POST" });
+    } catch (e) {
+      showError("Prepare failed");
+      tracing("preparePlay fetch failed", e);
+      return;
+    }
+    if (!resp.ok) {
+      showError("Prepare failed");
+      tracing("preparePlay non-ok", { status: resp.status });
+      return;
+    }
+    hideError();
+    pendingPlay = {
+      concertId,
+      trackIdx,
+      timer: null,
+      deadline: Date.now() + PREPARE_TIMEOUT_MS,
+    };
+    tracing("preparePlay started", { concertId, trackIdx });
+    if (bar) showBar();
+    const title = btn && btn.textContent ? btn.textContent.trim() : "track";
+    setStatus(`Preparing “${title}”…`);
+    disableCardTracks(concertId);
+    markPreparing();
+    // The card only self-polls when it was rendered with a job in progress;
+    // this job just started, so refresh the card once to kick off its status
+    // polling (downloading/splitting badges, disabled buttons, final state).
+    const card = document.getElementById("concert-" + concertId);
+    if (card && window.htmx) {
+      htmx.ajax("GET", `/concerts/${concertId}/status`, {
+        target: `#concert-${concertId}`,
+        swap: "outerHTML",
+      });
+    }
+    // POST /prepare returns the same JSON as prepare-status, so seed the
+    // first status from it instead of waiting a full poll interval.
+    const status = await resp.json().catch(() => null);
+    if (status) {
+      await applyPrepareStatus(status);
+    } else if (pendingPlay) {
+      pendingPlay.timer = setTimeout(pollPrepare, PREPARE_POLL_MS);
+    }
+  }
+
+  // Act on one prepare-status payload: play when the pending track's file
+  // exists, stop on job error or timeout, otherwise show progress and re-arm
+  // the poll timer.
+  async function applyPrepareStatus(s) {
+    if (!pendingPlay) return;
+    const { concertId, trackIdx } = pendingPlay;
+    if (s.tracks_present && s.tracks_present[trackIdx]) {
+      const p = pendingPlay;
+      cancelPendingPlay();
+      tracing("preparePlay ready, playing", { concertId, trackIdx });
+      await playTrack(findTrackButton(p.concertId, p.trackIdx), p.concertId, p.trackIdx);
+      return;
+    }
+    if (s.download === "download-error" || s.split === "split-error") {
+      failPendingPlay("Preparing tracks failed");
+      return;
+    }
+    if (Date.now() > pendingPlay.deadline) {
+      failPendingPlay("Preparing tracks timed out");
+      return;
+    }
+    setStatus(s.split === "splitting" ? "Preparing… (splitting)" : "Preparing… (downloading)");
+    pendingPlay.timer = setTimeout(pollPrepare, PREPARE_POLL_MS);
+  }
+
+  async function pollPrepare() {
+    if (!pendingPlay) return;
+    const { concertId } = pendingPlay;
+    let s;
+    try {
+      const resp = await fetch(`/concerts/${concertId}/prepare-status`);
+      if (!resp.ok) throw new Error("status " + resp.status);
+      s = await resp.json();
+    } catch (e) {
+      // Transient (server restart, network blip): keep polling until the cap.
+      tracing("pollPrepare fetch failed", e);
+      if (Date.now() > pendingPlay.deadline) {
+        failPendingPlay("Preparing tracks timed out");
+        return;
+      }
+      pendingPlay.timer = setTimeout(pollPrepare, PREPARE_POLL_MS);
+      return;
+    }
+    await applyPrepareStatus(s);
+  }
+
+  // Whether the track's file exists right now (media-info 404s when missing).
+  async function trackAvailable(concertId, trackIdx) {
+    try {
+      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
+      return resp.ok;
+    } catch (e) {
+      tracing("trackAvailable fetch failed", e);
+      return false;
     }
   }
 
@@ -434,10 +604,11 @@ const Player = (() => {
     if (!panel || panel.classList.contains("open")) return;
     tracing("showVideoPanel", {});
     panel.classList.add("open");
-    // Defer attaching the outside-click listener to the next tick: watchTrackDirect()
-    // opens the panel from a track-list button that lives outside #player-container, so
-    // attaching synchronously would let that very click bubble up and re-close it.
-    setTimeout(() => document.addEventListener("click", onOutsideVideoClick), 0);
+    // Attached synchronously: the click that opened the panel always comes
+    // from a button (#player-watch or a track-list Watch button), which
+    // clickShouldDismiss already exempts as an interactive control — so the
+    // opening click can't bubble up and immediately re-close the panel.
+    document.addEventListener("click", onOutsideVideoClick);
   }
 
   function hideVideoPanel() {
@@ -539,6 +710,7 @@ const Player = (() => {
     if (!audio) return;
 
     hideError();
+    setStatus("");
     showBar();
     updateInfo(title, artist, trackIdx, concertId);
     markPlaying(btn);
@@ -614,8 +786,9 @@ const Player = (() => {
     try {
       const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
       if (!resp.ok) {
-        btn.classList.add("btn-listen-error");
-        btn.textContent = "Error";
+        // Track file missing (not split yet, or deleted): enter the prepare
+        // flow — download/split as needed and auto-play when it appears.
+        await preparePlay(btn, concertId, trackIdx);
         return false;
       }
       const info = await resp.json();
@@ -641,6 +814,13 @@ const Player = (() => {
       return;
     }
     if (isMediaPlaying()) {
+      // A missing track must still enter the prepare flow while something
+      // else is playing; it gets enqueued once its file appears (pollPrepare
+      // re-enters playTrack, which then lands in the enqueue branch).
+      if (!(await trackAvailable(concertId, trackIdx))) {
+        await preparePlay(btn, concertId, trackIdx);
+        return;
+      }
       enqueue(concertId, trackIdx, btn.textContent.trim());
       return;
     }
@@ -667,14 +847,15 @@ const Player = (() => {
     return null;
   }
 
-  // Album "Play" button next to the track count: play the split tracks starting
-  // from the first one that still exists (track 0 may have been deleted).
+  // Tracks button on the card: play the split tracks starting from the first
+  // one that still exists (track 0 may have been deleted). When no track is
+  // playable at all (not split yet, or everything deleted), enter the prepare
+  // flow via track 0 — it downloads/splits and auto-plays when ready.
   async function playTracks(btn, concertId) {
     const trackIdx = await firstAvailableTrackIndex(concertId);
     if (trackIdx == null) {
-      btn.classList.add("btn-listen-error");
-      btn.textContent = "Error";
-      tracing("playTracks: no playable track", { concertId });
+      tracing("playTracks: no playable track, preparing", { concertId });
+      await playTrack(btn, concertId, 0);
       return;
     }
     await playTrack(btn, concertId, trackIdx);
@@ -879,25 +1060,16 @@ const Player = (() => {
 
     // The response is the concert's full card (same as the track-list trash
     // button's htmx swap), so the tracks-button count and split badge refresh
-    // along with the list. Swap it in if the card is on the current page —
-    // no-op otherwise (cross-concert safe). The server renders the card with
-    // the track list expanded; preserve this page's expanded/collapsed state.
+    // along with the embedded list. Swap it in if the card is on the current
+    // page — no-op otherwise (cross-concert safe). List visibility is pure
+    // CSS (hover), so no open/closed state needs preserving.
     const card = document.getElementById("concert-" + concertId);
     if (card) {
-      const tracksBox = document.getElementById("tracks-" + concertId);
-      const wasOpen = !!(tracksBox && tracksBox.children.length > 0);
       card.outerHTML = html;
       const fresh = document.getElementById("concert-" + concertId);
-      if (fresh) {
-        if (!wasOpen) {
-          const freshBox = document.getElementById("tracks-" + concertId);
-          if (freshBox) freshBox.innerHTML = "";
-          fresh.classList.remove("tracks-open");
-        }
-        // Wire up hx-* attributes on the swapped-in card (its buttons use
-        // hx-post). outerHTML bypasses htmx so we have to process it manually.
-        if (window.htmx) window.htmx.process(fresh);
-      }
+      // Wire up hx-* attributes on the swapped-in card (its buttons use
+      // hx-post). outerHTML bypasses htmx so we have to process it manually.
+      if (fresh && window.htmx) window.htmx.process(fresh);
     }
 
     // The delete succeeded server-side, but if playback moved on while the POST

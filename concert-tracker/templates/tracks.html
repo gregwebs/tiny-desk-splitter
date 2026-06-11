@@ -3,13 +3,15 @@
   <li{% if !t.available %} class="track-unavailable"{% endif %}>
     {% let index = t.index %}{% let liked = t.liked %}{% include "like_button.html" %}
     {% if t.available %}
-    <button class="btn-track-listen" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})">{{ t.title }}</button>
+    <button class="btn-track-listen" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})"{% if tracks_busy %} disabled{% endif %}>{{ t.title }}</button>
     {% if t.is_video %}<button class="btn-watch" onclick="Player.watchTrackDirect(this, {{ id }}, {{ t.index }})">Watch</button>{% endif %}
     {% if show_delete %}
     <button class="btn-delete" title="Delete track files" hx-post="/concerts/{{ id }}/tracks/{{ t.index }}/delete" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
     {% endif %}
     {% else %}
-    <span class="track-title-unavailable">{{ t.title }}</span>
+    {# Missing track file: still playable — clicking prepares the concert
+       (download and/or split) and auto-plays the track when it appears. #}
+    <button class="btn-track-listen track-title-unavailable" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})"{% if tracks_busy %} disabled{% endif %}>{{ t.title }}</button>
     {% endif %}
   </li>
   {% endfor %}

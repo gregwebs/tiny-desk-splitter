@@ -1,5 +1,6 @@
 pub mod archive;
 pub mod download;
+pub mod prepare;
 pub mod scrape_queue;
 pub mod split;
 
@@ -31,12 +32,19 @@ pub struct JobKey {
 
 pub struct JobRegistry {
     running: Mutex<HashMap<JobKey, JoinHandle<()>>>,
+    /// dependents[upstream] = jobs to start when `upstream` completes
+    /// successfully. The reverse view (dependent → upstream) is the
+    /// dependent's `depends_on`; a queued dependent has no spawned task
+    /// until its upstream succeeds. On upstream failure or cancellation the
+    /// queued dependents are dropped (they never run).
+    dependents: Mutex<HashMap<JobKey, Vec<JobKey>>>,
 }
 
 impl JobRegistry {
     pub fn new() -> Self {
         JobRegistry {
             running: Mutex::new(HashMap::new()),
+            dependents: Mutex::new(HashMap::new()),
         }
     }
 
@@ -49,9 +57,59 @@ impl JobRegistry {
         self.running.lock().unwrap().insert(key, handle);
     }
 
-    /// Abort the task for `key` if it exists and is still running.
-    /// Returns `true` if a running task was aborted.
+    /// Register `dependent` to start when `upstream` completes successfully.
+    /// Deduplicated; returns `true` when newly added.
+    pub fn add_dependent(&self, upstream: JobKey, dependent: JobKey) -> bool {
+        let mut map = self.dependents.lock().unwrap();
+        let deps = map.entry(upstream).or_default();
+        if deps.contains(&dependent) {
+            return false;
+        }
+        tracing::debug!(?dependent, "queued dependent job");
+        deps.push(dependent);
+        true
+    }
+
+    /// Remove and return all queued dependents of `upstream`. Called when
+    /// `upstream` finishes: on success the caller starts them, on failure
+    /// the caller drops them.
+    pub fn take_dependents(&self, upstream: &JobKey) -> Vec<JobKey> {
+        self.dependents
+            .lock()
+            .unwrap()
+            .remove(upstream)
+            .unwrap_or_default()
+    }
+
+    /// Whether `dependent` is queued to run after `upstream`.
+    pub fn has_dependent(&self, upstream: &JobKey, dependent: &JobKey) -> bool {
+        self.dependents
+            .lock()
+            .unwrap()
+            .get(upstream)
+            .map(|deps| deps.contains(dependent))
+            .unwrap_or(false)
+    }
+
+    /// Drop every dependency edge touching `key`: jobs queued behind it, and
+    /// its own queued entry under any upstream. Called when `key` fails or is
+    /// cancelled so queued dependents never run.
+    pub fn drop_dependency_edges(&self, key: &JobKey) {
+        let mut map = self.dependents.lock().unwrap();
+        if let Some(dropped) = map.remove(key) {
+            tracing::info!(?key, ?dropped, "dropped queued dependents");
+        }
+        for deps in map.values_mut() {
+            deps.retain(|d| d != key);
+        }
+        map.retain(|_, deps| !deps.is_empty());
+    }
+
+    /// Abort the task for `key` if it exists and is still running, dropping
+    /// any dependency edges involving it. Returns `true` if a running task
+    /// was aborted.
     pub fn cancel(&self, key: &JobKey) -> bool {
+        self.drop_dependency_edges(key);
         let mut map = self.running.lock().unwrap();
         if let Some(handle) = map.remove(key) {
             if !handle.is_finished() {
@@ -62,8 +120,10 @@ impl JobRegistry {
         false
     }
 
-    /// Abort all running tasks. Returns the number of tasks aborted.
+    /// Abort all running tasks and drop all queued dependents. Returns the
+    /// number of tasks aborted.
     pub fn cancel_all(&self) -> usize {
+        self.dependents.lock().unwrap().clear();
         let mut map = self.running.lock().unwrap();
         let mut count = 0;
         for (_, handle) in map.drain() {
@@ -73,6 +133,41 @@ impl JobRegistry {
             }
         }
         count
+    }
+}
+
+/// Start every job queued behind `upstream`, which has just completed
+/// successfully. Synchronous on purpose: each dependent start runs in its own
+/// spawned task, so the `run_download`/`run_split` future types never contain
+/// each other.
+pub fn spawn_dependents(
+    db: Arc<Mutex<rusqlite::Connection>>,
+    registry: Arc<JobRegistry>,
+    config: JobConfig,
+    upstream: &JobKey,
+) {
+    for dep in registry.take_dependents(upstream) {
+        tracing::info!(?upstream, ?dep, "starting dependent job");
+        let db = db.clone();
+        let registry = registry.clone();
+        let config = config.clone();
+        tokio::spawn(async move {
+            let result = match dep.kind {
+                JobKind::Download => download::start_download(db, registry, config, dep.concert_id)
+                    .await
+                    .map(|_| ()),
+                JobKind::Split => split::start_split(db, registry, config, dep.concert_id)
+                    .await
+                    .map(|_| ()),
+                JobKind::Archive => {
+                    tracing::warn!(?dep, "archive jobs cannot be chained; skipping");
+                    Ok(())
+                }
+            };
+            if let Err(e) = result {
+                tracing::warn!(?dep, "dependent job failed to start: {}", e);
+            }
+        });
     }
 }
 
@@ -513,6 +608,76 @@ mod tests {
 
         assert!(registry.cancel(&key));
         assert!(!registry.is_running(&key));
+    }
+
+    fn dl_key(concert_id: i64) -> JobKey {
+        JobKey {
+            concert_id,
+            kind: JobKind::Download,
+        }
+    }
+
+    fn split_key(concert_id: i64) -> JobKey {
+        JobKey {
+            concert_id,
+            kind: JobKind::Split,
+        }
+    }
+
+    #[test]
+    fn add_dependent_deduplicates() {
+        let registry = JobRegistry::new();
+        assert!(registry.add_dependent(dl_key(1), split_key(1)));
+        assert!(!registry.add_dependent(dl_key(1), split_key(1)));
+        assert!(registry.has_dependent(&dl_key(1), &split_key(1)));
+        assert_eq!(registry.take_dependents(&dl_key(1)), vec![split_key(1)]);
+    }
+
+    #[test]
+    fn take_dependents_empties_the_queue() {
+        let registry = JobRegistry::new();
+        registry.add_dependent(dl_key(1), split_key(1));
+        assert_eq!(registry.take_dependents(&dl_key(1)), vec![split_key(1)]);
+        assert!(registry.take_dependents(&dl_key(1)).is_empty());
+        assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
+    }
+
+    #[test]
+    fn take_dependents_returns_empty_for_unknown_upstream() {
+        let registry = JobRegistry::new();
+        assert!(registry.take_dependents(&dl_key(42)).is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancel_drops_queued_dependents_of_the_cancelled_job() {
+        let registry = JobRegistry::new();
+        registry.add_dependent(dl_key(1), split_key(1));
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        registry.insert(dl_key(1), handle);
+
+        assert!(registry.cancel(&dl_key(1)));
+        assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
+    }
+
+    #[test]
+    fn cancel_removes_the_key_from_other_upstreams_queues() {
+        let registry = JobRegistry::new();
+        registry.add_dependent(dl_key(1), split_key(1));
+        // Cancelling the queued (not yet running) split removes its edge.
+        registry.cancel(&split_key(1));
+        assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
+    }
+
+    #[test]
+    fn cancel_all_clears_all_dependents() {
+        let registry = JobRegistry::new();
+        registry.add_dependent(dl_key(1), split_key(1));
+        registry.add_dependent(dl_key(2), split_key(2));
+        registry.cancel_all();
+        assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
+        assert!(!registry.has_dependent(&dl_key(2), &split_key(2)));
     }
 
     #[test]

@@ -17,7 +17,9 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
     let client = crate::http_client();
     let response = client.get(url).send().context("Failed to send request")?;
     let status = response.status();
-    let response = response.error_for_status().context(format!("HTTP error status {}", status))?;
+    let response = response
+        .error_for_status()
+        .context(format!("HTTP error status {}", status))?;
     let bytes = response.bytes().context("Failed to read response bytes")?;
     Ok(bytes.to_vec())
 }

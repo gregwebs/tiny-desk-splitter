@@ -171,11 +171,14 @@ pub enum DownloadStatus {
 }
 
 impl DownloadStatus {
+    /// `download_started_at` outranks `downloaded_at`: a re-download (source
+    /// file deleted out-of-band) runs with `downloaded_at` still set, and must
+    /// surface as Downloading so the card shows it and keeps polling.
     pub fn from_concert(c: &Concert) -> Self {
-        if c.downloaded_at.is_some() {
-            DownloadStatus::Downloaded
-        } else if c.download_started_at.is_some() {
+        if c.download_started_at.is_some() {
             DownloadStatus::Downloading
+        } else if c.downloaded_at.is_some() {
+            DownloadStatus::Downloaded
         } else if !c.download_errors.is_empty() {
             DownloadStatus::DownloadError
         } else {
@@ -206,11 +209,16 @@ pub enum SplitStatus {
 }
 
 impl SplitStatus {
+    /// `split_started_at` outranks `split_at`: a re-split (deleted track
+    /// played) runs with `split_at` still set, and must surface as Splitting
+    /// so the card disables the track buttons and keeps polling. If the
+    /// re-split fails, `split_started_at` is cleared and the status falls
+    /// back to Split — the surviving track files are still usable.
     pub fn from_concert(c: &Concert) -> Self {
-        if c.split_at.is_some() {
-            SplitStatus::Split
-        } else if c.split_started_at.is_some() {
+        if c.split_started_at.is_some() {
             SplitStatus::Splitting
+        } else if c.split_at.is_some() {
+            SplitStatus::Split
         } else if !c.split_errors.is_empty() {
             SplitStatus::SplitError
         } else {
@@ -598,12 +606,26 @@ mod tests {
     }
 
     #[test]
-    fn download_status_downloaded_beats_in_progress_and_errors() {
+    fn download_status_in_progress_beats_downloaded() {
+        // A re-download (source file deleted out-of-band) runs with
+        // downloaded_at still set: it must report Downloading so the card
+        // shows the job and keeps polling.
         let mut c = bare_concert();
         c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
         c.download_started_at = Some("2024-01-01T00:00:00Z".to_string());
         c.download_errors = vec![err("earlier")];
-        assert_eq!(c.download_status(), DownloadStatus::Downloaded);
+        assert_eq!(c.download_status(), DownloadStatus::Downloading);
+    }
+
+    #[test]
+    fn split_status_in_progress_beats_split() {
+        // A re-split (deleted track played) runs with split_at still set: it
+        // must report Splitting so the card disables tracks and keeps polling.
+        let mut c = bare_concert();
+        c.downloaded_at = Some("2024-01-01T01:00:00Z".to_string());
+        c.split_at = Some("2024-01-01T02:00:00Z".to_string());
+        c.split_started_at = Some("2024-01-01T03:00:00Z".to_string());
+        assert_eq!(c.split_status(), SplitStatus::Splitting);
     }
 
     #[test]

@@ -41,6 +41,11 @@ async function startServer() {
       // No-op opener so the watch/Open buttons never launch a real player.
       "--open-cmd",
       "true",
+      // Stub splitter (real executable, no mock): "splits" by copying the
+      // full-concert file to one playable file per set-list song, so the
+      // automated split-on-play flow is testable end to end.
+      "--splitter-bin",
+      path.join(__dirname, "stub-splitter.js"),
     ],
     { stdio: ["ignore", "pipe", "pipe"] }
   );
@@ -157,5 +162,16 @@ const test = base.test.extend({
   },
 });
 
+// Reveal a listing card's track list: visibility is pure CSS (:hover on the
+// card) and the list HTML is fetched on first hover. Hover near the top-left
+// corner so the pointer stays inside the card when the thumbnail collapses
+// into the (possibly shorter) track list.
+async function openTracks(page, concertId) {
+  await page.hover(`#concert-${concertId}`, { position: { x: 20, y: 20 } });
+  await page.waitForSelector(
+    `#concert-${concertId} .card-tracks-box ol.track-list`
+  );
+}
+
 const expect = base.expect;
-module.exports = { test, expect };
+module.exports = { test, expect, openTracks };

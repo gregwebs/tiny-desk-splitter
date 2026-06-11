@@ -3,7 +3,7 @@
 //!
 //! Usage: `cargo run --example make_test_fixture -- <workdir> <db_path>`
 //!
-//! Produces a fresh SQLite DB whose concerts get autoincrement ids 1..=5 (in
+//! Produces a fresh SQLite DB whose concerts get autoincrement ids 1..=6 (in
 //! insertion order) plus tiny, genuinely-playable media generated with ffmpeg,
 //! laid out exactly where the server looks them up (`concert_dir` +
 //! `sanitize_filename`). Requires `ffmpeg` on PATH.
@@ -40,6 +40,10 @@ struct FixtureConcert {
     artist: &'static str,
     tracks: Vec<Track>,
     liked: Vec<bool>,
+    /// When false the concert is downloaded but never split: no split state in
+    /// the DB and no per-track files on disk — only the full-concert file.
+    /// Exercises the automated prepare (split-on-play) flow.
+    split: bool,
 }
 
 fn audio(title: &'static str) -> Track {
@@ -82,6 +86,7 @@ fn fixtures() -> Vec<FixtureConcert> {
                 audio("Dando Vueltas"),
             ],
             liked: vec![false, false, false, false],
+            split: true,
         },
         // id=2: second audio concert — cross-concert enqueue / auto-advance / delete-another.
         FixtureConcert {
@@ -91,6 +96,7 @@ fn fixtures() -> Vec<FixtureConcert> {
             artist: "Second Artist",
             tracks: vec![audio("Song One"), audio("Song Two"), audio("Song Three")],
             liked: vec![false, false, false],
+            split: true,
         },
         // id=3: video concert — inline video. 0=video,1=audio (video->audio advance),
         // 2=video,3=video (video->video advance), 4=mkv (non-playable).
@@ -111,6 +117,7 @@ fn fixtures() -> Vec<FixtureConcert> {
                 },
             ],
             liked: vec![false, false, false, false, false],
+            split: true,
         },
         // id=4: a concert whose only track is already liked — "already-starred hides delete".
         FixtureConcert {
@@ -120,6 +127,7 @@ fn fixtures() -> Vec<FixtureConcert> {
             artist: "Liked Artist",
             tracks: vec![audio("Liked Song")],
             liked: vec![true],
+            split: true,
         },
         // id=5: first track deleted (no file on disk) — the tracks-row "Play" must
         // skip it and start the first track that still exists.
@@ -134,6 +142,18 @@ fn fixtures() -> Vec<FixtureConcert> {
                 audio("Survivor Two"),
             ],
             liked: vec![false, false, false],
+            split: true,
+        },
+        // id=6: downloaded but never split — clicking a track (or the tracks
+        // button) must run the automated split via /prepare and auto-play.
+        FixtureConcert {
+            url: "https://npr.org/fixture/unsplit",
+            title: "Unsplit Concert",
+            album: "Unsplit Concert",
+            artist: "Unsplit Artist",
+            tracks: vec![audio("First Song"), audio("Second Song")],
+            liked: vec![false, false],
+            split: false,
         },
     ]
 }
@@ -223,17 +243,18 @@ fn build_concert(
     )?;
     db::try_mark_download_started(conn, id)?;
     db::mark_download_succeeded(conn, id, "wav")?;
-    db::try_mark_split_started(conn, id)?;
-    db::mark_split_succeeded(conn, id)?;
-    let tracks_present: Vec<bool> = fc.tracks.iter().map(|t| t.present).collect();
-    db::set_tracks_present(conn, id, &tracks_present)?;
+    if fc.split {
+        db::try_mark_split_started(conn, id)?;
+        db::mark_split_succeeded(conn, id)?;
+        let tracks_present: Vec<bool> = fc.tracks.iter().map(|t| t.present).collect();
+        db::set_tracks_present(conn, id, &tracks_present)?;
+    }
     db::set_tracks_liked(conn, id, &fc.liked)?;
     // Record a delete event for each absent track so the track list shows it
     // unavailable, mirroring the post-delete_track state in production.
     for (idx, t) in fc.tracks.iter().enumerate() {
         if !t.present {
-            let json =
-                serde_json::json!({"track_index": idx, "track_title": t.title}).to_string();
+            let json = serde_json::json!({"track_index": idx, "track_title": t.title}).to_string();
             concert_tracker::events::record_now(
                 conn,
                 id,
@@ -250,9 +271,10 @@ fn build_concert(
     gen_audio(&dir.join(format!("{}.wav", sanitize_album(fc.album))))?;
 
     // Per-track split files. Absent (deleted) tracks get no file, so the media
-    // endpoints 404 on them.
+    // endpoints 404 on them. Unsplit concerts get no track files at all — the
+    // automated split (stub splitter in e2e) creates them on demand.
     for t in &fc.tracks {
-        if !t.present {
+        if !t.present || !fc.split {
             continue;
         }
         let path = dir.join(format!("{}.{}", sanitize_filename(t.title), t.ext));
@@ -288,9 +310,10 @@ fn gen_audio(dest: &Path) -> Result<()> {
     ])
 }
 
-/// ~10s tiny VP8 WebM (video-only — avoids depending on a webm audio encoder).
+/// ~30s tiny VP8 WebM (video-only — avoids depending on a webm audio encoder).
 /// Chromium plays VP8/WebM; it cannot decode mp4/H.264. Long enough that
-/// timing-sensitive video tests don't hit a real `ended` before dispatching one.
+/// timing-sensitive video tests don't hit a real `ended` before dispatching
+/// one, even with the hover-reveal interactions slowing the flow down.
 fn gen_video(dest: &Path) -> Result<()> {
     ffmpeg(&[
         "-f",
@@ -298,7 +321,7 @@ fn gen_video(dest: &Path) -> Result<()> {
         "-i",
         "color=c=black:s=128x72:r=10",
         "-t",
-        "10",
+        "30",
         "-c:v",
         "libvpx",
         &dest.to_string_lossy(),

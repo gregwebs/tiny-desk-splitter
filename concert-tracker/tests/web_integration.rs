@@ -116,7 +116,10 @@ async fn pending_card_shows_loading_then_thumbnail() {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(!scrape_queue.is_pending(1), "pending must clear after scrape");
+    assert!(
+        !scrape_queue.is_pending(1),
+        "pending must clear after scrape"
+    );
 
     // Now scraped: thumbnail shown, polling stopped.
     let body = get_status_html(&app, 1).await;
@@ -677,8 +680,21 @@ async fn play_button_visible_after_successful_split() {
     // so this also guards that there is no separate album Watch button.)
     let conn = db::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/split-listen", "Some Album");
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "X".to_string(),
+            album: "Some Album".to_string(),
+            description: None,
+            set_list: vec!["Song A".to_string(), "Song B".to_string()],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
     db::try_mark_split_started(&conn, 1).unwrap();
     db::mark_split_succeeded(&conn, 1).unwrap();
+    db::set_tracks_present(&conn, 1, &[true, true]).unwrap();
     let app = router(test_state(conn));
 
     let response = app
@@ -712,34 +728,34 @@ async fn play_button_visible_after_successful_split() {
         "no separate album Watch button (even for a video download); got: {}",
         html
     );
-    // The tracks row also has a Play button that plays the split tracks.
+    // The tracks button plays the split tracks, and the embedded track list
+    // has per-track play buttons.
     assert!(
-        html.contains("Player.playTrack(this, 1, 0)"),
-        "tracks row must have a Play button; got: {}",
+        html.contains("Player.playTracks(this, 1)"),
+        "tracks button must play the tracks; got: {}",
         html
     );
-    // In both rows the Play button comes before the delete trash.
+    assert!(
+        html.contains("Player.playTrack(this, 1, 0)"),
+        "embedded track list must have per-track play buttons; got: {}",
+        html
+    );
+    // The download-slot Play button comes before the delete-download trash.
     assert!(
         html.find("Player.playAlbum").unwrap() < html.find("/concerts/1/delete-download").unwrap(),
         "download-slot Play must come before the delete-download trash; got: {}",
         html
     );
-    assert!(
-        html.find("Player.playTrack(this, 1, 0)").unwrap()
-            < html.find("/concerts/1/delete-split").unwrap(),
-        "tracks-row Play must come before the delete-split trash; got: {}",
-        html
-    );
-    // Split action button should be gone (already split), but delete-split X
-    // should be present.
+    // The Split and delete-split buttons are gone: splitting is automated via
+    // track play, and tracks are deleted one by one.
     assert!(
         !html.contains("/concerts/1/split\""),
-        "Split action button must NOT appear once already split; got: {}",
+        "Split action button must NOT appear; got: {}",
         html
     );
     assert!(
-        html.contains("/concerts/1/delete-split"),
-        "Delete-tracks button must appear after split; got: {}",
+        !html.contains("/concerts/1/delete-split"),
+        "delete-split button must NOT appear; got: {}",
         html
     );
 }
@@ -869,8 +885,8 @@ async fn delete_split_clears_state() {
         "body is the re-rendered card"
     );
     assert!(
-        html.contains("/concerts/1/split\""),
-        "Split button must reappear after split state is cleared"
+        !html.contains("/concerts/1/split\""),
+        "no Split button: splitting is automated via track play"
     );
     let c = {
         let conn = db_arc.lock().unwrap();
@@ -1630,4 +1646,172 @@ async fn like_track_out_of_range_returns_404() {
         .unwrap();
 
     assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+}
+
+// ── prepare endpoints ────────────────────────────────────────────────────────
+
+/// Seed a scraped concert (id=1) with the given album and set list.
+fn seed_scraped(conn: &rusqlite::Connection, album: &str, set_list: Vec<String>) {
+    seeded_concert(conn, "https://npr.org/c/prepare", "Prepare Concert");
+    db::update_metadata(
+        conn,
+        1,
+        &MetadataUpdate {
+            artist: "Artist".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list,
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+}
+
+async fn post_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+async fn get_json(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+/// Full automated chain through the HTTP API: POST /prepare on a concert with
+/// no source file runs download → split (real stub shell commands, no mocks)
+/// and prepare-status converges on every track present.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn prepare_endpoint_runs_download_then_split_chain() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Chain Album";
+    let cd = concert_dir(workdir.path(), album);
+    let source = cd.join(format!("{}.mp4", album));
+    let fetch = format!(
+        "mkdir -p '{}' && touch '{}'",
+        cd.display(),
+        source.display()
+    );
+    let touch = format!(
+        "touch '{}' '{}'",
+        cd.join("Song A.m4a").display(),
+        cd.join("Song B.m4a").display()
+    );
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(
+        &conn,
+        album,
+        vec!["Song A".to_string(), "Song B".to_string()],
+    );
+    let state = AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig {
+            working_dir: workdir.path().to_path_buf(),
+            download_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(fetch.clone());
+                cmd
+            }),
+            split_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(touch.clone());
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    // Two POSTs back to back: the second must be a no-op, not a second chain.
+    let (s1, j1) = post_json(&app, "/concerts/1/prepare").await;
+    let (s2, _) = post_json(&app, "/concerts/1/prepare").await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+    assert_eq!(j1["tracks_present"], serde_json::json!([false, false]));
+
+    // Poll prepare-status until the chain finishes.
+    let mut done = false;
+    for _ in 0..100 {
+        let (status, j) = get_json(&app, "/concerts/1/prepare-status").await;
+        assert_eq!(status, StatusCode::OK);
+        if j["tracks_present"] == serde_json::json!([true, true]) {
+            assert_eq!(j["download"], "downloaded");
+            assert_eq!(j["split"], "split");
+            assert_eq!(j["split_queued"], false);
+            done = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(done, "chain never completed");
+}
+
+#[tokio::test]
+async fn prepare_status_reports_filesystem_track_state() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Status Album";
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    // Only the second track exists on disk.
+    std::fs::write(cd.join("Song B.m4a"), b"audio").unwrap();
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(
+        &conn,
+        album,
+        vec!["Song A".to_string(), "Song B".to_string()],
+    );
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let (status, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(j["tracks_present"], serde_json::json!([false, true]));
+    assert_eq!(j["download"], "not-downloaded");
+    assert_eq!(j["split"], "not-split");
+    assert_eq!(j["split_queued"], false);
+}
+
+#[tokio::test]
+async fn prepare_returns_422_without_set_list() {
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, "Empty Album", vec![]);
+    let app = router(test_state(conn));
+
+    let (status, _) = post_json(&app, "/concerts/1/prepare").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn prepare_returns_404_for_unknown_concert() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+
+    let (status, _) = post_json(&app, "/concerts/99/prepare").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }

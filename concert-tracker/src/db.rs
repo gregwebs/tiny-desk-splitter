@@ -705,6 +705,15 @@ pub fn clear_archive_state(conn: &Connection, id: i64) -> Result<bool> {
     Ok(rows > 0)
 }
 
+/// Current UTC time in the `datetime('now')` space format
+/// (`2026-06-09 20:33:05`) that the concerts-table timestamp columns use.
+/// Prefer this over ad-hoc chrono formatting: the codebase already suffers a
+/// two-format hazard (see `backfill_audit_timestamps`), so Rust-side writers
+/// of concerts columns should match the SQL default format.
+pub fn now_string() -> String {
+    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
 /// Set downloaded_at from filesystem mtime if not already set (for scan/recovery).
 pub fn set_downloaded_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<()> {
     conn.execute(

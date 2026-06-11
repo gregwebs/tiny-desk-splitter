@@ -73,9 +73,13 @@ struct RowTemplate {
     wanted: bool,
     can_download: bool,
     can_delete_download: bool,
-    can_split: bool,
-    can_delete_split: bool,
     can_listen: bool,
+    /// Whether the concert has a scraped set list: gates the tracks row (the
+    /// tracks button + track list render even before the concert is split).
+    has_set_list: bool,
+    /// True while a split is running or queued behind a download — the tracks
+    /// button and individual track buttons render disabled until it finishes.
+    tracks_busy: bool,
     track_count: usize,
     track_total: usize,
     can_archive: bool,
@@ -83,7 +87,6 @@ struct RowTemplate {
     /// Whether to show the download badge alongside slot contents.
     /// False only for the NotDownloaded "fresh" state.
     show_download_badge: bool,
-    show_split_badge: bool,
     show_archive_badge: bool,
     archive_status: String,
     archive_status_label: String,
@@ -107,13 +110,9 @@ struct RowTemplate {
 #[template(path = "concert_detail.html")]
 struct DetailTemplate {
     chrome: Chrome,
-    /// Concert id, mirrored out of `concert` so the shared `tracks.html` partial
-    /// (included by this template) can reference `id` like `TracksTemplate` does.
-    id: i64,
     concert: Concert,
     card_html: String,
     notes_value: String,
-    tracks: Vec<TrackInfo>,
     events: Vec<crate::events::EventRow>,
 }
 
@@ -133,6 +132,9 @@ struct TracksTemplate {
     /// for the read-mostly list on the detail page; deletion there happens via
     /// the concert card's expandable list instead.
     show_delete: bool,
+    /// True while a split is running or queued behind a download: every track
+    /// button renders disabled until the job finishes.
+    tracks_busy: bool,
 }
 
 #[derive(Template)]
@@ -308,33 +310,50 @@ fn has_archive_location(state: &AppState) -> bool {
         .unwrap_or(false)
 }
 
-/// Re-render a single concert card (its `<div class="card" id="concert-{id}">`).
-/// Used by handlers that mutate a concert and want to swap just that card in
-/// place — instead of `HX-Refresh: true`, which would reload the whole page and
-/// tear down the persistent (hx-preserve'd) JS player. Mirrors `status_row`.
-fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
-    render_card_with_tracks(state, id, vec![])
+/// True while a split is running or queued behind an in-flight download: the
+/// tracks button and individual track buttons render disabled until it ends.
+fn tracks_busy(c: &Concert, split_queued: bool) -> bool {
+    matches!(c.split_status(), SplitStatus::Splitting)
+        || (matches!(c.download_status(), DownloadStatus::Downloading) && split_queued)
 }
 
-/// Like `render_card`, but renders `tracks` expanded inside the card's
-/// `#tracks-{id}` container. Used by `delete_track` so the htmx card swap
-/// keeps the track list open while refreshing the tracks-button count.
-/// Must stay on the `render_row` path so the swapped card keeps its archive
-/// and scrape-pending context.
-fn render_card_with_tracks(
-    state: &AppState,
-    id: i64,
-    tracks: Vec<TrackInfo>,
-) -> Result<String, AppError> {
+/// Whether a split job is queued to start when this concert's download
+/// finishes (the in-memory dependency edge created by `prepare`).
+fn split_queued(state: &AppState, id: i64) -> bool {
+    state.registry.has_dependent(
+        &JobKey {
+            concert_id: id,
+            kind: JobKind::Download,
+        },
+        &JobKey {
+            concert_id: id,
+            kind: JobKind::Split,
+        },
+    )
+}
+
+/// Re-render a single concert card (its `<div class="card" id="concert-{id}">`)
+/// with its full track list embedded. Used by handlers that mutate a concert
+/// and want to swap just that card in place — instead of `HX-Refresh: true`,
+/// which would reload the whole page and tear down the persistent
+/// (hx-preserve'd) JS player. Embedding the tracks keeps a hover-visible track
+/// list populated across the swap. Mirrors `status_row`.
+fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
+    let tracks = crate::model::list_all_tracks_from_db(
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
     render_row_inner(
         &concert,
         has_archive_location(state),
         concert.thumbnail_url_from_db(),
         scrape_pending(state, id),
+        split_queued(state, id),
         tracks,
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
@@ -343,32 +362,44 @@ fn render_card_with_tracks(
 /// Render a listing card for `c`, using the small listing thumbnail as the
 /// card image. `scrape_pending` is true while the concert is queued/in-flight in
 /// the background scrape worker (shows a "loading…" placeholder + keeps polling).
+/// The bulk listing leaves the track list empty (it is fetched on first hover);
+/// single-card swaps go through `render_card`, which embeds it.
 fn render_row(
     c: &Concert,
     has_archive_location: bool,
     scrape_pending: bool,
+    split_queued: bool,
 ) -> Result<String, askama::Error> {
     render_row_inner(
         c,
         has_archive_location,
         c.thumbnail_url_from_db(),
         scrape_pending,
+        split_queued,
         vec![],
     )
 }
 
 /// Render the concert card shown at the top of the detail page. Same card
 /// markup as the listing, but the card image is the full-size preview rather
-/// than the thumbnail (the detail page no longer shows a separate full image).
-/// The detail page isn't part of the background scrape queue, so it never shows
-/// the "loading…" placeholder.
-fn render_detail_card(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
+/// than the thumbnail, and the embedded track list is always visible (the
+/// hover-reveal CSS is scoped to the listing): the detail page shows picture
+/// and tracks together. The detail page isn't part of the background scrape
+/// queue, so it never shows the "loading…" placeholder.
+fn render_detail_card(
+    c: &Concert,
+    has_archive_location: bool,
+    split_queued: bool,
+) -> Result<String, askama::Error> {
+    let tracks =
+        crate::model::list_all_tracks_from_db(&c.set_list, &c.tracks_present, &c.tracks_liked);
     render_row_inner(
         c,
         has_archive_location,
         c.preview_image_url_from_db(),
         false,
-        vec![],
+        split_queued,
+        tracks,
     )
 }
 
@@ -377,6 +408,7 @@ fn render_row_inner(
     has_archive_location: bool,
     card_image_url: Option<String>,
     scrape_pending: bool,
+    split_queued: bool,
     tracks: Vec<TrackInfo>,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
@@ -387,12 +419,11 @@ fn render_row_inner(
         DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
     );
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
-    let can_split = matches!(&ds, DownloadStatus::Downloaded)
-        && matches!(&ss, SplitStatus::NotSplit | SplitStatus::SplitError);
-    let can_delete_split = matches!(&ss, SplitStatus::Split);
     let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let track_count = c.track_count();
     let track_total = c.track_total();
+    let has_set_list = track_total > 0;
+    let tracks_busy = tracks_busy(c, split_queued);
     let can_archive = has_archive_location
         && (c.downloaded_at.is_some() || c.split_at.is_some())
         && matches!(
@@ -401,7 +432,6 @@ fn render_row_inner(
         );
     let can_unarchive = matches!(&archive_s, ArchiveStatus::Archived);
     let show_download_badge = !matches!(&ds, DownloadStatus::NotDownloaded);
-    let show_split_badge = !matches!(&ss, SplitStatus::NotSplit);
     let show_archive_badge = !matches!(&archive_s, ArchiveStatus::NotArchived);
     let is_in_progress = matches!(&ds, DownloadStatus::Downloading)
         || matches!(&ss, SplitStatus::Splitting)
@@ -431,15 +461,14 @@ fn render_row_inner(
         wanted: c.wanted,
         can_download,
         can_delete_download,
-        can_split,
-        can_delete_split,
         can_listen,
+        has_set_list,
+        tracks_busy,
         track_count,
         track_total,
         can_archive,
         can_unarchive,
         show_download_badge,
-        show_split_badge,
         show_archive_badge,
         archive_status: archive_s.slug().to_string(),
         archive_status_label: archive_s.label().to_string(),
@@ -503,8 +532,13 @@ pub async fn list(
     let mut by_month: HashMap<YearMonth, Vec<String>> = HashMap::new();
     let mut no_date_rows: Vec<String> = Vec::new();
     for c in &filtered {
-        let row = render_row(c, has_archive_location, scrape_pending(&state, c.id))
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        let row = render_row(
+            c,
+            has_archive_location,
+            scrape_pending(&state, c.id),
+            split_queued(&state, c.id),
+        )
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
         match c.concert_date.as_deref().and_then(YearMonth::from_date_str) {
             Some(ym) => by_month.entry(ym).or_default().push(row),
             None => no_date_rows.push(row),
@@ -572,29 +606,21 @@ pub async fn detail(
     };
 
     let has_al = has_archive_location(&state);
-    let card_html = render_detail_card(&concert, has_al)
+    let queued = split_queued(&state, id);
+    // The card embeds the track list (always visible on the detail page), so
+    // there is no separate tracks section to populate.
+    let card_html = render_detail_card(&concert, has_al, queued)
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
-    let mut tracks = crate::model::list_all_tracks_from_db(
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
     let events = {
         let conn = state.db.lock().unwrap();
         crate::events::list_for_concert(&conn, id)
     };
 
-    if tracks.is_empty() && concert.archived_at.is_some() && !concert.set_list.is_empty() {
-        tracks = tracks_from_events(&concert.set_list, &events);
-    }
-
     Ok(DetailTemplate {
         chrome: Chrome::from_state(&state),
-        id: concert.id,
         card_html,
         notes_value,
-        tracks,
         events,
         concert,
     })
@@ -620,12 +646,7 @@ pub async fn ignore(
             ));
         }
     }
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_card(&state, id)
 }
 
 /// Delete `path`, ignoring a missing file but warning on any other error.
@@ -641,17 +662,11 @@ pub async fn want(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
+    {
         let conn = state.db.lock().unwrap();
         db::toggle_wanted(&conn, id)?;
-        db::get_concert(&conn, id)?
-    };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    }
+    render_card(&state, id)
 }
 
 pub async fn notes(
@@ -660,17 +675,11 @@ pub async fn notes(
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, AppError> {
     let text = form.get("notes").map(|s| s.as_str()).unwrap_or("");
-    let concert = {
+    {
         let conn = state.db.lock().unwrap();
         db::set_notes(&conn, id, text)?;
-        db::get_concert(&conn, id)?
-    };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    }
+    render_card(&state, id)
 }
 
 pub async fn scrape_concert(
@@ -701,44 +710,39 @@ pub async fn scrape_concert(
     }
     scrape_result?;
 
-    let concert = {
+    render_card(&state, id)
+}
+
+/// Ensure metadata is scraped before downloading/preparing so we have artist,
+/// album, set_list, preview image, etc. Runs the scrape in a blocking task and
+/// waits for it; scrape failures are logged and tolerated by `ensure_scraped`.
+async fn ensure_scraped_blocking(state: &AppState, id: i64) -> Result<(), AppError> {
+    let needs_scrape = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)?
+        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        c.metadata_scraped_at.is_none()
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    if needs_scrape {
+        let db = state.db.clone();
+        let working_dir = state.jobs.working_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let conn = db.lock().unwrap();
+            let c = db::get_concert(&conn, id)?;
+            ensure_scraped(&conn, c, |conn, url| {
+                crate::scrape::scrape_url(conn, url, &working_dir)
+            });
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+    }
+    Ok(())
 }
 
 pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    // Ensure metadata is scraped before downloading so we have artist, album,
-    // set_list, preview image, etc.
-    {
-        let needs_scrape = {
-            let conn = state.db.lock().unwrap();
-            let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-            c.metadata_scraped_at.is_none()
-        };
-        if needs_scrape {
-            let db = state.db.clone();
-            let working_dir = state.jobs.working_dir.clone();
-            let _ = tokio::task::spawn_blocking(move || {
-                let conn = db.lock().unwrap();
-                let c = db::get_concert(&conn, id)?;
-                ensure_scraped(&conn, c, |conn, url| {
-                    crate::scrape::scrape_url(conn, url, &working_dir)
-                });
-                Ok::<_, anyhow::Error>(())
-            })
-            .await;
-        }
-    }
+    ensure_scraped_blocking(&state, id).await?;
 
     start_download(
         state.db.clone(),
@@ -747,16 +751,95 @@ pub async fn download(
         id,
     )
     .await?;
+    render_card(&state, id)
+}
+
+/// JSON shape returned by `POST /concerts/:id/prepare` and polled via
+/// `GET /concerts/:id/prepare-status` while the player waits for a track.
+#[derive(serde::Serialize)]
+pub struct PrepareStatus {
+    /// `DownloadStatus` slug, e.g. "downloading" / "download-error".
+    download: String,
+    /// `SplitStatus` slug, e.g. "splitting" / "split-error".
+    split: String,
+    /// Whether a split job is queued to start when the download succeeds.
+    split_queued: bool,
+    /// Per-set_list-index file existence, checked against the filesystem (the
+    /// same source of truth media-info uses), not the DB column.
+    tracks_present: Vec<bool>,
+}
+
+fn prepare_status_payload(state: &AppState, id: i64) -> Result<PrepareStatus, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)?
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
+    let tracks_present = match concert.album.as_deref() {
+        Some(album) => concert
+            .set_list
+            .iter()
+            .map(|title| {
+                crate::model::find_track_file(&state.jobs.working_dir, album, title).is_some()
+            })
+            .collect(),
+        None => vec![false; concert.set_list.len()],
+    };
+    Ok(PrepareStatus {
+        download: concert.download_status().slug().to_string(),
+        split: concert.split_status().slug().to_string(),
+        split_queued: state.registry.has_dependent(
+            &JobKey {
+                concert_id: id,
+                kind: JobKind::Download,
+            },
+            &JobKey {
+                concert_id: id,
+                kind: JobKind::Split,
+            },
+        ),
+        tracks_present,
+    })
+}
+
+/// Idempotent "make every track playable": scrape if needed, then ensure the
+/// download → split chain is running. Returns the same JSON as
+/// `prepare_status` so the client can start polling from the response.
+pub async fn prepare_concert(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    // 404 before scraping so an unknown id doesn't trigger a scrape attempt.
+    {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+    }
+    ensure_scraped_blocking(&state, id).await?;
+
+    if let Err(e) = crate::jobs::prepare::prepare(
+        state.db.clone(),
+        state.registry.clone(),
+        state.jobs.clone(),
+        id,
     )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    .await
+    {
+        // No set list is user-correctable (scrape metadata first) — 422, not 500.
+        if e.downcast_ref::<crate::jobs::prepare::NoSetList>()
+            .is_some()
+        {
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response());
+        }
+        return Err(AppError::Internal(e));
+    }
+
+    Ok(Json(prepare_status_payload(&state, id)?).into_response())
+}
+
+pub async fn prepare_status(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<PrepareStatus>, AppError> {
+    Ok(Json(prepare_status_payload(&state, id)?))
 }
 
 pub async fn split(
@@ -770,16 +853,7 @@ pub async fn split(
         id,
     )
     .await?;
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)?
-    };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_card(&state, id)
 }
 
 pub async fn delete_download(
@@ -1261,6 +1335,7 @@ pub async fn tracks(
         id,
         tracks,
         show_delete: true,
+        tracks_busy: tracks_busy(&concert, split_queued(&state, id)),
     }
     .render()
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
@@ -1363,25 +1438,10 @@ pub async fn delete_track(
     }
 
     // Respond with the whole card so the swap refreshes everything derived
-    // from the track state: the tracks-button count, the split badge, and —
-    // when the last track was deleted — the not-split card (no tracks row,
-    // Split button back). While the split survives, the list is embedded
-    // expanded so the open track list stays open across the swap.
-    let tracks = if split_cleared {
-        vec![]
-    } else {
-        let concert = {
-            let conn = state.db.lock().unwrap();
-            db::get_concert(&conn, id)?
-        };
-        crate::model::list_all_tracks_from_db(
-            &concert.set_list,
-            &concert.tracks_present,
-            &concert.tracks_liked,
-        )
-    };
-
-    Ok(render_card_with_tracks(&state, id, tracks)?.into_response())
+    // from the track state: the tracks-button count, the split badge, and the
+    // embedded track list (deleted tracks now render as playable-unavailable
+    // buttons that trigger a re-split).
+    Ok(render_card(&state, id)?.into_response())
 }
 
 pub async fn like_track(
@@ -1416,16 +1476,7 @@ pub async fn status_row(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-    render_row(
-        &concert,
-        has_archive_location(&state),
-        scrape_pending(&state, id),
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    render_card(&state, id)
 }
 
 pub async fn jobs_list(
@@ -1843,12 +1894,12 @@ mod tests {
         let concert = db::get_concert(&conn, id).unwrap();
 
         // Listing card uses the small thumbnail.
-        let html = render_row(&concert, false, false).unwrap();
+        let html = render_row(&concert, false, false, false).unwrap();
         assert!(html.contains("class=\"card-thumb\""), "html: {html}");
         assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
 
         // Detail-page card uses the full-size preview image instead.
-        let detail_html = render_detail_card(&concert, false).unwrap();
+        let detail_html = render_detail_card(&concert, false, false).unwrap();
         assert!(
             detail_html.contains("class=\"card-thumb\""),
             "html: {detail_html}"
@@ -1867,7 +1918,7 @@ mod tests {
         let concert = db::get_concert(&conn, id).unwrap();
         assert!(concert.metadata_scraped_at.is_none());
 
-        let html = render_row(&concert, false, false).unwrap();
+        let html = render_row(&concert, false, false, false).unwrap();
         assert!(!html.contains("card-thumb"), "html: {html}");
     }
 
@@ -1911,13 +1962,19 @@ mod tests {
 
         // has_archive_location = true: the delete-path card render must keep
         // the archive context (Archive button) alongside the embedded list.
-        let html = render_row_inner(&concert, true, None, false, tracks).unwrap();
-        assert!(html.contains("tracks-open"), "html: {html}");
+        let html = render_row_inner(&concert, true, None, false, false, tracks).unwrap();
+        assert!(html.contains("card-tracks-box"), "html: {html}");
         assert!(html.contains("track-list"), "html: {html}");
         assert!(html.contains("(3/4)"), "html: {html}");
         // The card-embedded list keeps its delete buttons (show_delete=true).
         assert!(html.contains("/tracks/0/delete"), "html: {html}");
         assert!(html.contains(">Archive<"), "html: {html}");
+        // The deleted track is rendered as a playable-unavailable button that
+        // triggers a re-split via the prepare flow.
+        assert!(
+            html.contains("track-title-unavailable") && html.contains("Song C"),
+            "html: {html}"
+        );
     }
 
     #[test]
@@ -1925,11 +1982,55 @@ mod tests {
         let conn = db::open_in_memory().unwrap();
         let concert = split_concert(&conn, "https://example.org/split-collapsed");
 
-        let html = render_row(&concert, false, false).unwrap();
-        assert!(!html.contains("tracks-open"), "html: {html}");
+        let html = render_row(&concert, false, false, false).unwrap();
         assert!(!html.contains("track-list"), "html: {html}");
         // The tracks-button count renders regardless of expansion.
         assert!(html.contains("(3/4)"), "html: {html}");
+    }
+
+    #[test]
+    fn render_row_shows_tracks_row_before_split_without_action_buttons() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_listing(&conn, "https://example.org/unsplit");
+        db::update_metadata(
+            &conn,
+            id,
+            &MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Some Album".to_string(),
+                description: None,
+                set_list: vec!["Song A".to_string(), "Song B".to_string()],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        let concert = db::get_concert(&conn, id).unwrap();
+
+        let html = render_row(&concert, true, false, false).unwrap();
+        // Tracks row renders pre-split with the not-split status and 0/N count.
+        assert!(html.contains("not-split (0/2)"), "html: {html}");
+        assert!(html.contains("Player.playTracks"), "html: {html}");
+        // The Split button, tracks-row Play button, and delete-split button
+        // are gone.
+        assert!(!html.contains("/concerts/1/split"), "html: {html}");
+        assert!(!html.contains(">Split<"), "html: {html}");
+        assert!(!html.contains("/delete-split"), "html: {html}");
+        assert!(
+            !html.contains("btn-listen\" onclick=\"Player.playTracks"),
+            "html: {html}"
+        );
+    }
+
+    #[test]
+    fn render_row_disables_tracks_button_while_busy() {
+        let conn = db::open_in_memory().unwrap();
+        let mut concert = split_concert(&conn, "https://example.org/busy");
+        concert.split_at = None;
+        concert.split_started_at = Some("2026-01-01T00:00:00Z".to_string());
+
+        let html = render_row(&concert, false, false, false).unwrap();
+        assert!(html.contains("disabled"), "html: {html}");
+        assert!(html.contains("splitting"), "html: {html}");
     }
 
     fn one_track(available: bool) -> Vec<TrackInfo> {
@@ -1948,6 +2049,7 @@ mod tests {
             id: 1,
             tracks: one_track(true),
             show_delete: true,
+            tracks_busy: false,
         }
         .render()
         .unwrap();
@@ -1959,6 +2061,7 @@ mod tests {
             id: 1,
             tracks: one_track(true),
             show_delete: false,
+            tracks_busy: false,
         }
         .render()
         .unwrap();

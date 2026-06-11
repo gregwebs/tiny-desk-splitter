@@ -1,4 +1,4 @@
-const { test, expect } = require("./fixtures");
+const { test, expect, openTracks } = require("./fixtures");
 
 // Exercises the global htmx request-failure feedback added for the track-list
 // trash button (and every other hx-* control): a failed request must surface an
@@ -16,9 +16,7 @@ const deleteBtn = (idx) =>
 const reqError = `#concert-${CONCERT_ID} ol.track-list .req-error`;
 
 async function expandTracks(page) {
-  await page
-    .locator(`#concert-${CONCERT_ID} button[onclick*="toggleTracks"]`)
-    .click();
+  await openTracks(page, CONCERT_ID);
   await page.waitForSelector(
     `#concert-${CONCERT_ID} ol.track-list li button.btn-delete`
   );
@@ -81,9 +79,9 @@ test.describe("Failed request feedback", () => {
     await page.unroute("**/tracks/0/delete");
     await page.locator(deleteBtn(0)).click();
 
-    // The stale error is gone and the track was actually deleted.
+    // The stale error is gone and the track was actually deleted (it renders
+    // as an unavailable — but still clickable — button now).
     await expect(page.locator(reqError)).toHaveCount(0);
-    await expect(page.locator(listenBtn(0))).toHaveCount(0);
     await expect(
       page.locator(`#concert-${CONCERT_ID} ol.track-list .track-title-unavailable`)
     ).toHaveText("Celular");

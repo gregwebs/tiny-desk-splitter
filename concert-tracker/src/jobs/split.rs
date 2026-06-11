@@ -168,11 +168,16 @@ pub async fn start_split(
                 concert_id,
                 title
             );
+            // The split is effectively complete, so anything queued behind it
+            // should run now.
+            crate::jobs::spawn_dependents(db.clone(), registry.clone(), config, &key);
             return Ok(StartOutcome::AlreadySplit);
         }
         Err(e) => {
             // Setup failed after we marked the split as started — clear the flag
-            // so the user can retry, and surface the error.
+            // so the user can retry, drop anything queued behind this split,
+            // and surface the error.
+            registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &e.to_string());
             return Err(e);
@@ -188,14 +193,23 @@ pub async fn start_split(
     };
 
     tracing::info!("split started for concert {} ({})", concert_id, title);
-    let handle = tokio::task::spawn(run_split(db.clone(), config, job));
+    let handle = tokio::task::spawn(run_split(db.clone(), registry.clone(), config, job));
     registry.insert(key, handle);
 
     Ok(StartOutcome::Spawned)
 }
 
-async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob) {
+async fn run_split(
+    db: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    config: JobConfig,
+    job: SplitJob,
+) {
     let concert_id = job.concert_id;
+    let key = JobKey {
+        concert_id,
+        kind: JobKind::Split,
+    };
     let cmd = (config.split_cmd)(&job);
 
     let log_dir = config.log_dir();
@@ -214,26 +228,30 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
         Ok((status, _)) if status.success() => {
             tracing::info!("split completed for concert {}", concert_id);
             drop(temp_file);
-            let conn = db.lock().unwrap();
-            let _ = db::mark_split_succeeded(&conn, concert_id);
-            let concert = db::get_concert(&conn, concert_id);
-            if let Ok(c) = concert {
-                if let Some(album) = c.album.as_deref() {
-                    let present: Vec<bool> = c
-                        .set_list
-                        .iter()
-                        .map(|title| {
-                            crate::model::find_track_file(&config.working_dir, album, title)
-                                .is_some()
-                        })
-                        .collect();
-                    let _ = db::set_tracks_present(&conn, concert_id, &present);
+            {
+                let conn = db.lock().unwrap();
+                let _ = db::mark_split_succeeded(&conn, concert_id);
+                let concert = db::get_concert(&conn, concert_id);
+                if let Ok(c) = concert {
+                    if let Some(album) = c.album.as_deref() {
+                        let present: Vec<bool> = c
+                            .set_list
+                            .iter()
+                            .map(|title| {
+                                crate::model::find_track_file(&config.working_dir, album, title)
+                                    .is_some()
+                            })
+                            .collect();
+                        let _ = db::set_tracks_present(&conn, concert_id, &present);
+                    }
                 }
             }
+            crate::jobs::spawn_dependents(db, registry, config, &key);
         }
         Ok((status, stderr_tail)) => {
             let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
+            registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
@@ -246,6 +264,7 @@ async fn run_split(db: Arc<Mutex<Connection>>, config: JobConfig, job: SplitJob)
             };
             let error = format!("spawn error: {}{}", e, hint);
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
+            registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
             let _ = db::mark_split_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);

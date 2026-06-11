@@ -46,14 +46,23 @@ pub async fn start_download(
     };
 
     tracing::info!("download started for concert {} ({})", concert_id, title);
-    let handle = tokio::task::spawn(run_download(db.clone(), config, job));
+    let handle = tokio::task::spawn(run_download(db.clone(), registry.clone(), config, job));
     registry.insert(key, handle);
 
     Ok(StartOutcome::Spawned)
 }
 
-async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: DownloadJob) {
+async fn run_download(
+    db: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    config: JobConfig,
+    job: DownloadJob,
+) {
     let concert_id = job.concert_id;
+    let key = JobKey {
+        concert_id,
+        kind: JobKind::Download,
+    };
     let cmd = (config.download_cmd)(&job);
 
     let log_dir = config.log_dir();
@@ -79,12 +88,16 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "mp4".to_string());
-            let conn = db.lock().unwrap();
-            let _ = db::mark_download_succeeded(&conn, concert_id, &ext);
+            {
+                let conn = db.lock().unwrap();
+                let _ = db::mark_download_succeeded(&conn, concert_id, &ext);
+            }
+            crate::jobs::spawn_dependents(db, registry, config, &key);
         }
         Ok((status, stderr_tail)) => {
             let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
+            registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
@@ -97,6 +110,7 @@ async fn run_download(db: Arc<Mutex<Connection>>, config: JobConfig, job: Downlo
             };
             let error = format!("spawn error: {}{}", e, hint);
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
+            registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
             let _ = db::mark_download_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
@@ -135,7 +149,7 @@ mod tests {
         }
     }
 
-    fn seeded_db() -> Arc<Mutex<Connection>> {
+    fn seeded_db_with_set_list(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
         let conn = db::open_in_memory().unwrap();
         db::upsert_listing(
             &conn,
@@ -154,12 +168,31 @@ mod tests {
                 artist: "Test Artist".to_string(),
                 album: "Test Album".to_string(),
                 description: None,
-                set_list: vec![],
+                set_list,
                 musicians: vec![],
             },
         )
         .unwrap();
         Arc::new(Mutex::new(conn))
+    }
+
+    fn seeded_db() -> Arc<Mutex<Connection>> {
+        seeded_db_with_set_list(vec![])
+    }
+
+    /// Poll `check` every 50ms until it returns true or ~5s elapse.
+    async fn wait_for(db: &Arc<Mutex<Connection>>, check: impl Fn(&crate::model::Concert) -> bool) {
+        for _ in 0..100 {
+            {
+                let conn = db.lock().unwrap();
+                if let Ok(c) = db::get_concert(&conn, 1) {
+                    if check(&c) {
+                        return;
+                    }
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
 
     #[tokio::test]
@@ -188,6 +221,86 @@ mod tests {
         let concert = db::get_concert(&conn, 1).unwrap();
         assert!(concert.downloaded_at.is_none());
         assert!(!concert.download_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_success_starts_dependent_split() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = seeded_db_with_set_list(vec!["Song A".to_string(), "Song B".to_string()]);
+        // The no-op download command creates no file, so place the "downloaded"
+        // source file where find_downloaded_file expects it.
+        let cd = crate::model::concert_dir(tmp.path(), "Test Album");
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("Test Album.mp4"), b"video").unwrap();
+
+        let config = JobConfig {
+            working_dir: tmp.path().to_path_buf(),
+            download_cmd: Arc::new(|_| Command::new("true")),
+            // Real command (no mock): the "splitter" creates the per-song
+            // files the rescan expects.
+            split_cmd: Arc::new(|job: &crate::jobs::SplitJob| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(format!(
+                    "touch '{0}/Song A.m4a' '{0}/Song B.m4a'",
+                    job.output_dir.display()
+                ));
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        };
+
+        let registry = Arc::new(JobRegistry::new());
+        let download_key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Download,
+        };
+        let split_key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Split,
+        };
+        registry.add_dependent(download_key, split_key);
+
+        start_download(db.clone(), registry.clone(), config, 1)
+            .await
+            .unwrap();
+        wait_for(&db, |c| c.split_at.is_some()).await;
+
+        let conn = db.lock().unwrap();
+        let c = db::get_concert(&conn, 1).unwrap();
+        assert!(c.downloaded_at.is_some(), "download should have succeeded");
+        assert!(c.split_at.is_some(), "dependent split should have run");
+        assert_eq!(c.tracks_present, vec![true, true]);
+        assert!(c.split_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn download_failure_drops_dependent_split() {
+        let db = seeded_db_with_set_list(vec!["Song A".to_string()]);
+        let registry = Arc::new(JobRegistry::new());
+        let download_key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Download,
+        };
+        let split_key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Split,
+        };
+        registry.add_dependent(download_key.clone(), split_key.clone());
+
+        start_download(db.clone(), registry.clone(), config_failure(), 1)
+            .await
+            .unwrap();
+        wait_for(&db, |c| !c.download_errors.is_empty()).await;
+
+        let conn = db.lock().unwrap();
+        let c = db::get_concert(&conn, 1).unwrap();
+        assert!(!c.download_errors.is_empty());
+        assert!(c.split_started_at.is_none(), "split must never start");
+        assert!(c.split_at.is_none());
+        assert!(
+            !registry.has_dependent(&download_key, &split_key),
+            "queued split should be dropped on download failure"
+        );
     }
 
     #[tokio::test]

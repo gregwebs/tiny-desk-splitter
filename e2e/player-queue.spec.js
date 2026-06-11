@@ -1,4 +1,4 @@
-const { test, expect } = require("./fixtures");
+const { test, expect, openTracks } = require("./fixtures");
 
 // Drives the real player against the isolated fixture (no mocks). Fixture concerts:
 //   1 "Audio Concert"  — Celular, Limbo, Track Three, Dando Vueltas   (wav, audio)
@@ -21,16 +21,13 @@ function trackButton(page, concertId, trackIdx) {
   );
 }
 
+// Reveal the card's track list (hover on the listing; already visible on the
+// detail page) and wait for the track buttons to exist.
 async function expandTracks(page, concertId) {
-  const toggle = page.locator(
-    `#concert-${concertId} button[onclick*="toggleTracks"]`
+  await openTracks(page, concertId);
+  await page.waitForSelector(
+    `[data-concert-id="${concertId}"][data-track-idx="0"]`
   );
-  if (await toggle.count()) {
-    await toggle.click();
-    await page.waitForSelector(
-      `[data-concert-id="${concertId}"][data-track-idx="0"]`
-    );
-  }
 }
 
 async function waitForPlaying(page) {
@@ -109,12 +106,12 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-queue-badge")).toBeHidden();
   });
 
-  test("the card's tracks-row Play button plays the split tracks", async ({
+  test("the card's tracks button plays the split tracks", async ({
     page,
   }) => {
-    await page
-      .locator(`#concert-${AUDIO} .card-tracks-row button.btn-listen`)
-      .click();
+    // Hover first so the card's hover layout swap settles before the click.
+    await openTracks(page, AUDIO);
+    await page.locator(`#concert-${AUDIO} button.btn-tracks`).click();
 
     await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
@@ -122,15 +119,14 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-track")).toHaveText("#1");
   });
 
-  test("the tracks-row Play button skips a deleted first track and plays the next", async ({
+  test("the tracks button skips a deleted first track and plays the next", async ({
     page,
   }) => {
     // Deleted-First Concert's track 0 ("Gone Opener") has no file on disk, so
     // tracks/0/media-info 404s. Play must start the first surviving track
     // ("Survivor One", #2) rather than show "Error".
-    await page
-      .locator(`#concert-${DELETED_FIRST} .card-tracks-row button.btn-listen`)
-      .click();
+    await openTracks(page, DELETED_FIRST);
+    await page.locator(`#concert-${DELETED_FIRST} button.btn-tracks`).click();
 
     await waitForPlaying(page);
     await expect(page.locator("#player-title")).toHaveText("Survivor One");
@@ -745,14 +741,19 @@ test.describe("Inline video", () => {
   test("clicking an interactive control outside the player does not fold the video", async ({
     page,
   }) => {
+    // Reveal (and cache) the AUDIO card's track list up front: doing it after
+    // the video starts risks the 10s clip ending — and auto-advance folding
+    // the panel — before the click under test happens.
+    await openTracks(page, AUDIO);
+
     await playTrack(page, VIDEO, 0);
     await page.locator("#player-watch").click();
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
-    // Expanding another concert's tracks is a real control click: it does its action
-    // and leaves the video open (only dead-space clicks dismiss).
-    await page.locator(`#concert-${AUDIO} button[onclick*="toggleTracks"]`).click();
-    await page.waitForSelector(`[data-concert-id="${AUDIO}"][data-track-idx="0"]`);
+    // Clicking another concert's tracks button is a real control click: it does
+    // its action (enqueues, since media is playing) and leaves the video open
+    // (only dead-space clicks dismiss).
+    await page.locator(`#concert-${AUDIO} button.btn-tracks`).click();
 
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
@@ -952,8 +953,11 @@ test.describe("Player delete", () => {
     expect(
       await page.evaluate(() => document.getElementById("player-audio").paused)
     ).toBe(false);
-    // The deleted track is now unavailable on the page.
-    await expect(trackButton(page, AUDIO, 0)).toHaveCount(0);
+    // The deleted track is now unavailable on the page (but still clickable —
+    // clicking it would trigger the automated re-split).
+    await expect(trackButton(page, AUDIO, 0)).toHaveClass(
+      /track-title-unavailable/
+    );
   });
 
   test("deleting the last track stops playback", async ({ page }) => {
@@ -994,9 +998,10 @@ test.describe("Player delete", () => {
 
     await page.locator("#player-delete").click();
 
-    await expect(trackButton(page, AUDIO, 0)).toHaveCount(0);
-    await expect(trackButton(page, AUDIO, 1)).toBeVisible();
-    // The card swap refreshes the tracks-button count and keeps the list open.
+    await expect(trackButton(page, AUDIO, 0)).toHaveClass(
+      /track-title-unavailable/
+    );
+    // The card swap refreshes the tracks-button count and keeps the list.
     await expect(
       page.locator(`#concert-${AUDIO} button.btn-tracks`)
     ).toHaveText("tracks (3/4)");
@@ -1005,12 +1010,12 @@ test.describe("Player delete", () => {
     ).toHaveCount(4);
   });
 
-  test("player-bar delete on the detail page updates the collapsed card's count", async ({
+  test("player-bar delete on the detail page updates the card's count", async ({
     page,
   }) => {
-    // On the detail page the card's expandable list starts collapsed; playback
-    // starts from the bottom track list. The delete must refresh the card's
-    // count without popping its list open.
+    // On the detail page the card's track list is always visible; playback
+    // starts from it. The delete must refresh the card's count and keep the
+    // list shown, with the deleted track now unavailable.
     await page.goto(`/concerts/${AUDIO}`);
     await trackButton(page, AUDIO, 0).click();
     await waitForPlaying(page);
@@ -1021,12 +1026,12 @@ test.describe("Player delete", () => {
     await page.locator("#player-delete").click();
 
     await expect(tracksBtn).toHaveText("tracks (3/4)");
-    await expect(page.locator(`#concert-${AUDIO}`)).not.toHaveClass(
-      /tracks-open/
-    );
     await expect(
-      page.locator(`#concert-${AUDIO} ol.track-list`)
-    ).toHaveCount(0);
+      page.locator(`#concert-${AUDIO} ol.track-list li`)
+    ).toHaveCount(4);
+    await expect(
+      page.locator(`#concert-${AUDIO} ol.track-list .track-title-unavailable`)
+    ).toHaveCount(1);
   });
 });
 
@@ -1065,13 +1070,18 @@ test.describe("Starred tracks hide the delete button", () => {
   }) => {
     await playTrack(page, AUDIO, 0);
     const rowDelete = trackListDeleteButton(page, AUDIO, 0);
+    // The row lives in the hover-revealed tracks box, so assert the star/delete
+    // relation via computed style (own display rule) rather than visibility,
+    // which would be confounded by where the mouse happens to be.
+    const rowDeleteDisplay = () =>
+      rowDelete.evaluate((el) => getComputedStyle(el).display);
 
     await page.locator("#player-like").click();
-    await expect(rowDelete).toBeHidden();
+    await expect.poll(rowDeleteDisplay).toBe("none");
     await expect(page.locator("#player-delete")).toBeHidden();
 
     await page.locator("#player-like").click();
-    await expect(rowDelete).toBeVisible();
+    await expect.poll(rowDeleteDisplay).not.toBe("none");
     await expect(page.locator("#player-delete")).toBeVisible();
   });
 
@@ -1125,15 +1135,22 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     return page.evaluate(() => document.getElementById("player-audio").currentTime);
   }
 
-  test("deleting another concert's tracks (delete-split) does not stop playback", async ({
+  test("deleting another concert's track does not stop playback", async ({
     page,
   }) => {
     const t0 = await playAndMark(page, AUDIO, 0);
-    await page.locator(`#concert-${SECOND} button[title="Clear split record"]`).click();
+    // Per-track delete swaps the whole SECOND card (hx-target="closest .card").
+    await openTracks(page, SECOND);
+    await page
+      .locator(
+        `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/0/delete"]`
+      )
+      .click();
 
-    // Real delete-split clears the split: the card loses its tracks row.
     await expect(
-      page.locator(`#concert-${SECOND} button[title="Clear split record"]`)
+      page.locator(
+        `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/0/delete"]`
+      )
     ).toHaveCount(0);
     await expectPlayerStillPlaying(page, t0);
   });
@@ -1152,14 +1169,22 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     await expectPlayerStillPlaying(page, t0);
   });
 
-  test("deleting the currently-playing concert's own card keeps playback going", async ({
+  test("deleting a track on the currently-playing concert's own card keeps playback going", async ({
     page,
   }) => {
     const t0 = await playAndMark(page, SECOND, 0);
-    await page.locator(`#concert-${SECOND} button[title="Clear split record"]`).click();
+    // Delete a *different* track of the playing concert: the whole card swaps
+    // while its track 0 keeps playing in the persistent player.
+    await page
+      .locator(
+        `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/1/delete"]`
+      )
+      .click();
 
     await expect(
-      page.locator(`#concert-${SECOND} button[title="Clear split record"]`)
+      page.locator(
+        `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/1/delete"]`
+      )
     ).toHaveCount(0);
     await expectPlayerStillPlaying(page, t0);
   });

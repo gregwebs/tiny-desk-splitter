@@ -46,7 +46,10 @@ test.describe("Listing thumbnails vs detail full image", () => {
       const src = await card.locator("img.card-thumb").getAttribute("src");
       const resp = await page.request.get(src);
       if (resp.status() === 200) {
-        await card.locator("a").first().click();
+        // Click the title link: hovering the card to click hides the
+        // thumbnail (the hover swaps picture → track list), so the image
+        // link itself is unclickable on the listing.
+        await card.locator(".card-title a").click();
         opened = true;
         break;
       }

@@ -1,4 +1,4 @@
-const { test, expect } = require("./fixtures");
+const { test, expect, openTracks } = require("./fixtures");
 
 // In-app navigation (list <-> detail, header/filter links) and the browser
 // Back/Forward button swap only the #content region (per-link hx-target/
@@ -13,8 +13,7 @@ const { test, expect } = require("./fixtures");
 const CONCERT = 1; // Audio Concert
 
 async function startPlaying(page) {
-  await page.locator(`#concert-${CONCERT} button[onclick*="toggleTracks"]`).click();
-  await page.waitForSelector(`[data-concert-id="${CONCERT}"][data-track-idx="1"]`);
+  await openTracks(page, CONCERT);
   await page.locator(`[data-concert-id="${CONCERT}"][data-track-idx="1"]`).click();
   // Limbo (track 1) is now the active player track.
   await expect(page.locator("#player-title")).toHaveText("Limbo");

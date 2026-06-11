@@ -1,4 +1,4 @@
-<div class="card status-{{ card_accent }}{% if !tracks.is_empty() %} tracks-open{% endif %}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
+<div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   {% if let Some(url) = card_image_url.as_ref() %}
   <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">
     <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
@@ -82,29 +82,15 @@
         {% endif %}
       </span>
 
-      {# Split slot: NotSplit + Downloaded shows Split button; Splitting shows badge; SplitError shows badge + retry #}
-      <span class="card-slot card-slot-split">
-        {% if show_split_badge && !can_delete_split %}
-          <span class="badge badge-{{ split_status }}">{{ split_status_label }}</span>
-        {% endif %}
-        {% if can_split %}
-          <button hx-post="/concerts/{{ id }}/split" hx-target="closest .card" hx-swap="outerHTML"
-                  hx-disabled-elt="this"
-                  hx-on::before-request="this.textContent='Starting…'"
-                  hx-on::response-error="this.textContent='Split'"
-                  hx-on::send-error="this.textContent='Split'"
-                  hx-on::timeout="this.textContent='Split'">Split</button>
-        {% endif %}
-      </span>
-
     </div>
-    {% if can_delete_split %}
+    {% if has_set_list %}
+    {# Tracks row: the button carries the split status (badge class + label)
+       and plays the tracks — preparing (download+split) them first if needed.
+       Disabled while a split runs or is queued behind a download. #}
     <div class="card-tracks-row">
-      <button class="btn-tracks badge badge-{{ split_status }}" onclick="toggleTracks(this, {{ id }})">{{ split_status_label }} ({% if track_count == track_total %}{{ track_count }}{% else %}{{ track_count }}/{{ track_total }}{% endif %})</button>
-      <button class="btn-listen" onclick="Player.playTracks(this, {{ id }})">Play</button>
-      <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
+      <button class="btn-tracks badge badge-{{ split_status }}" onclick="Player.playTracks(this, {{ id }})"{% if tracks_busy %} disabled{% endif %}>{{ split_status_label }} ({% if track_count == track_total %}{{ track_count }}{% else %}{{ track_count }}/{{ track_total }}{% endif %})</button>
     </div>
     {% endif %}
-    <div id="tracks-{{ id }}">{% if !tracks.is_empty() %}{% let show_delete = true %}{% include "tracks.html" %}{% endif %}</div>
+    <div class="card-tracks-box" id="tracks-{{ id }}">{% if !tracks.is_empty() %}{% let show_delete = true %}{% include "tracks.html" %}{% endif %}</div>
   </div>
 </div>
