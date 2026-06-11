@@ -96,6 +96,11 @@ struct RowTemplate {
     /// Drives the "loading…" placeholder and keeps the row polling until its
     /// thumbnail is ready.
     scrape_pending: bool,
+    /// Track list rendered expanded inside `#tracks-{id}` (with the
+    /// `tracks-open` card class). Empty renders the container collapsed, as
+    /// `toggleTracks()` expects; non-empty is used by `delete_track` so the
+    /// card swap keeps the list open and the tracks-button count fresh.
+    tracks: Vec<TrackInfo>,
 }
 
 #[derive(Template)]
@@ -124,6 +129,18 @@ struct ListenButtonTemplate {
 struct TracksTemplate {
     id: i64,
     tracks: Vec<TrackInfo>,
+    /// Whether each available track row gets a delete (trash) button. False
+    /// for the read-mostly list on the detail page; deletion there happens via
+    /// the concert card's expandable list instead.
+    show_delete: bool,
+}
+
+#[derive(Template)]
+#[template(path = "like_button.html")]
+struct LikeButtonTemplate {
+    id: i64,
+    index: usize,
+    liked: bool,
 }
 
 #[derive(Template)]
@@ -296,14 +313,29 @@ fn has_archive_location(state: &AppState) -> bool {
 /// place — instead of `HX-Refresh: true`, which would reload the whole page and
 /// tear down the persistent (hx-preserve'd) JS player. Mirrors `status_row`.
 fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
+    render_card_with_tracks(state, id, vec![])
+}
+
+/// Like `render_card`, but renders `tracks` expanded inside the card's
+/// `#tracks-{id}` container. Used by `delete_track` so the htmx card swap
+/// keeps the track list open while refreshing the tracks-button count.
+/// Must stay on the `render_row` path so the swapped card keeps its archive
+/// and scrape-pending context.
+fn render_card_with_tracks(
+    state: &AppState,
+    id: i64,
+    tracks: Vec<TrackInfo>,
+) -> Result<String, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    render_row(
+    render_row_inner(
         &concert,
         has_archive_location(state),
+        concert.thumbnail_url_from_db(),
         scrape_pending(state, id),
+        tracks,
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
@@ -321,6 +353,7 @@ fn render_row(
         has_archive_location,
         c.thumbnail_url_from_db(),
         scrape_pending,
+        vec![],
     )
 }
 
@@ -330,7 +363,13 @@ fn render_row(
 /// The detail page isn't part of the background scrape queue, so it never shows
 /// the "loading…" placeholder.
 fn render_detail_card(c: &Concert, has_archive_location: bool) -> Result<String, askama::Error> {
-    render_row_inner(c, has_archive_location, c.preview_image_url_from_db(), false)
+    render_row_inner(
+        c,
+        has_archive_location,
+        c.preview_image_url_from_db(),
+        false,
+        vec![],
+    )
 }
 
 fn render_row_inner(
@@ -338,6 +377,7 @@ fn render_row_inner(
     has_archive_location: bool,
     card_image_url: Option<String>,
     scrape_pending: bool,
+    tracks: Vec<TrackInfo>,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
@@ -406,6 +446,7 @@ fn render_row_inner(
         is_in_progress,
         card_image_url,
         scrape_pending,
+        tracks,
     }
     .render()
 }
@@ -1216,9 +1257,13 @@ pub async fn tracks(
         tracks = tracks_from_events(&concert.set_list, &events);
     }
 
-    TracksTemplate { id, tracks }
-        .render()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    TracksTemplate {
+        id,
+        tracks,
+        show_delete: true,
+    }
+    .render()
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn listen_track(
@@ -1304,7 +1349,8 @@ pub async fn delete_track(
         tracks_present[idx] = false;
     }
 
-    if tracks_present.iter().all(|&p| !p) {
+    let split_cleared = tracks_present.iter().all(|&p| !p);
+    if split_cleared {
         let conn = state.db.lock().unwrap();
         db::clear_split_state(&conn, id)?;
         tracing::info!(
@@ -1316,21 +1362,26 @@ pub async fn delete_track(
         db::set_tracks_present(&conn, id, &tracks_present)?;
     }
 
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id)?
+    // Respond with the whole card so the swap refreshes everything derived
+    // from the track state: the tracks-button count, the split badge, and —
+    // when the last track was deleted — the not-split card (no tracks row,
+    // Split button back). While the split survives, the list is embedded
+    // expanded so the open track list stays open across the swap.
+    let tracks = if split_cleared {
+        vec![]
+    } else {
+        let concert = {
+            let conn = state.db.lock().unwrap();
+            db::get_concert(&conn, id)?
+        };
+        crate::model::list_all_tracks_from_db(
+            &concert.set_list,
+            &concert.tracks_present,
+            &concert.tracks_liked,
+        )
     };
 
-    let tracks = crate::model::list_all_tracks_from_db(
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
-
-    Ok(TracksTemplate { id, tracks }
-        .render()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?
-        .into_response())
+    Ok(render_card_with_tracks(&state, id, tracks)?.into_response())
 }
 
 pub async fn like_track(
@@ -1347,15 +1398,18 @@ pub async fn like_track(
         db::get_concert(&conn, id)?
     };
 
-    let tracks = crate::model::list_all_tracks_from_db(
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
-
-    TracksTemplate { id, tracks }
-        .render()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+    // Swap only the star itself: the response is rendered into the clicked
+    // button (hx-target="this"), so it works identically in every track-list
+    // context. Row side effects (the liked row hiding its delete button) are
+    // pure CSS via `li:has(.btn-like.liked)`.
+    let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
+    LikeButtonTemplate {
+        id,
+        index: idx,
+        liked,
+    }
+    .render()
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
 pub async fn status_row(
@@ -1815,6 +1869,136 @@ mod tests {
 
         let html = render_row(&concert, false, false).unwrap();
         assert!(!html.contains("card-thumb"), "html: {html}");
+    }
+
+    /// A downloaded+split concert with 4 set-list tracks, one already deleted
+    /// (3 of 4 present).
+    fn split_concert(conn: &Connection, url: &str) -> Concert {
+        let id = seed_listing(conn, url);
+        db::update_metadata(
+            conn,
+            id,
+            &MetadataUpdate {
+                artist: "Artist".to_string(),
+                album: "Some Album".to_string(),
+                description: None,
+                set_list: vec![
+                    "Song A".to_string(),
+                    "Song B".to_string(),
+                    "Song C".to_string(),
+                    "Song D".to_string(),
+                ],
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        let mut concert = db::get_concert(&conn, id).unwrap();
+        concert.downloaded_at = Some("2026-01-01T00:00:00Z".to_string());
+        concert.split_at = Some("2026-01-01T01:00:00Z".to_string());
+        concert.tracks_present = vec![true, true, false, true];
+        concert
+    }
+
+    #[test]
+    fn render_row_with_tracks_embeds_expanded_list_with_fresh_count() {
+        let conn = db::open_in_memory().unwrap();
+        let concert = split_concert(&conn, "https://example.org/split");
+        let tracks = crate::model::list_all_tracks_from_db(
+            &concert.set_list,
+            &concert.tracks_present,
+            &concert.tracks_liked,
+        );
+
+        // has_archive_location = true: the delete-path card render must keep
+        // the archive context (Archive button) alongside the embedded list.
+        let html = render_row_inner(&concert, true, None, false, tracks).unwrap();
+        assert!(html.contains("tracks-open"), "html: {html}");
+        assert!(html.contains("track-list"), "html: {html}");
+        assert!(html.contains("(3/4)"), "html: {html}");
+        // The card-embedded list keeps its delete buttons (show_delete=true).
+        assert!(html.contains("/tracks/0/delete"), "html: {html}");
+        assert!(html.contains(">Archive<"), "html: {html}");
+    }
+
+    #[test]
+    fn render_row_without_tracks_renders_collapsed_card() {
+        let conn = db::open_in_memory().unwrap();
+        let concert = split_concert(&conn, "https://example.org/split-collapsed");
+
+        let html = render_row(&concert, false, false).unwrap();
+        assert!(!html.contains("tracks-open"), "html: {html}");
+        assert!(!html.contains("track-list"), "html: {html}");
+        // The tracks-button count renders regardless of expansion.
+        assert!(html.contains("(3/4)"), "html: {html}");
+    }
+
+    fn one_track(available: bool) -> Vec<TrackInfo> {
+        vec![TrackInfo {
+            index: 0,
+            title: "Song A".to_string(),
+            available,
+            is_video: false,
+            liked: false,
+        }]
+    }
+
+    #[test]
+    fn tracks_template_show_delete_controls_trash_buttons() {
+        let with_delete = TracksTemplate {
+            id: 1,
+            tracks: one_track(true),
+            show_delete: true,
+        }
+        .render()
+        .unwrap();
+        assert!(with_delete.contains("/tracks/0/delete"), "{with_delete}");
+
+        // The detail-page bottom list renders without trash icons but keeps
+        // the listen and like controls.
+        let without_delete = TracksTemplate {
+            id: 1,
+            tracks: one_track(true),
+            show_delete: false,
+        }
+        .render()
+        .unwrap();
+        assert!(
+            !without_delete.contains("/tracks/0/delete"),
+            "{without_delete}"
+        );
+        assert!(
+            without_delete.contains("Player.playTrack"),
+            "{without_delete}"
+        );
+        assert!(
+            without_delete.contains("/tracks/0/like"),
+            "{without_delete}"
+        );
+    }
+
+    #[test]
+    fn like_button_renders_star_state_and_self_swap() {
+        let liked = LikeButtonTemplate {
+            id: 2,
+            index: 1,
+            liked: true,
+        }
+        .render()
+        .unwrap();
+        assert!(liked.contains("★"), "{liked}");
+        assert!(liked.contains("liked"), "{liked}");
+        assert!(liked.contains("hx-target=\"this\""), "{liked}");
+        assert!(liked.contains("/concerts/2/tracks/1/like"), "{liked}");
+
+        let unliked = LikeButtonTemplate {
+            id: 2,
+            index: 1,
+            liked: false,
+        }
+        .render()
+        .unwrap();
+        assert!(unliked.contains("☆"), "{unliked}");
+        assert!(!unliked.contains("liked"), "{unliked}");
     }
 
     #[test]

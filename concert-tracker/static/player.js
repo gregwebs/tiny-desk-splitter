@@ -855,8 +855,8 @@ const Player = (() => {
   }
 
   // Player-bar Delete button: delete the currently-playing track's files (no
-  // confirmation, matching the track-list button), refresh the on-page track
-  // list, then advance to the next track — or stop if nothing is next.
+  // confirmation, matching the track-list button), refresh the concert's
+  // on-page card, then advance to the next track — or stop if nothing is next.
   async function deleteTrack() {
     if (state.trackIdx == null) return;
     const concertId = state.concertId;
@@ -877,19 +877,27 @@ const Player = (() => {
     }
     const html = await resp.text();
 
-    // Refresh the on-page track list (if the deleted row is present) so it shows
-    // the track as unavailable. No-op when playing a track whose row isn't on the
-    // current page (cross-concert safe).
-    const onPage = findTrackButton(concertId, trackIdx);
-    const list = onPage && onPage.closest(".track-list");
-    if (list) {
-      // outerHTML detaches the old node; capture the parent first so we can
-      // re-query the fresh list and let htmx process its hx-* attributes (each
-      // concert's list lives in its own container, so one .track-list per parent).
-      const parent = list.parentNode;
-      list.outerHTML = html;
-      const fresh = parent && parent.querySelector(".track-list");
-      if (fresh && window.htmx) window.htmx.process(fresh);
+    // The response is the concert's full card (same as the track-list trash
+    // button's htmx swap), so the tracks-button count and split badge refresh
+    // along with the list. Swap it in if the card is on the current page —
+    // no-op otherwise (cross-concert safe). The server renders the card with
+    // the track list expanded; preserve this page's expanded/collapsed state.
+    const card = document.getElementById("concert-" + concertId);
+    if (card) {
+      const tracksBox = document.getElementById("tracks-" + concertId);
+      const wasOpen = !!(tracksBox && tracksBox.children.length > 0);
+      card.outerHTML = html;
+      const fresh = document.getElementById("concert-" + concertId);
+      if (fresh) {
+        if (!wasOpen) {
+          const freshBox = document.getElementById("tracks-" + concertId);
+          if (freshBox) freshBox.innerHTML = "";
+          fresh.classList.remove("tracks-open");
+        }
+        // Wire up hx-* attributes on the swapped-in card (its buttons use
+        // hx-post). outerHTML bypasses htmx so we have to process it manually.
+        if (window.htmx) window.htmx.process(fresh);
+      }
     }
 
     // The delete succeeded server-side, but if playback moved on while the POST

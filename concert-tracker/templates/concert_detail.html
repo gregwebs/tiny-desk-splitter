@@ -16,6 +16,7 @@
 
 {% if !tracks.is_empty() %}
 <h3>Tracks</h3>
+{% let show_delete = false %}
 {% include "tracks.html" %}
 {% else if !concert.set_list.is_empty() %}
 <h3>Set List</h3>

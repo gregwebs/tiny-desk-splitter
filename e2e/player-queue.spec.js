@@ -996,6 +996,37 @@ test.describe("Player delete", () => {
 
     await expect(trackButton(page, AUDIO, 0)).toHaveCount(0);
     await expect(trackButton(page, AUDIO, 1)).toBeVisible();
+    // The card swap refreshes the tracks-button count and keeps the list open.
+    await expect(
+      page.locator(`#concert-${AUDIO} button.btn-tracks`)
+    ).toHaveText("tracks (3/4)");
+    await expect(
+      page.locator(`#concert-${AUDIO} ol.track-list li`)
+    ).toHaveCount(4);
+  });
+
+  test("player-bar delete on the detail page updates the collapsed card's count", async ({
+    page,
+  }) => {
+    // On the detail page the card's expandable list starts collapsed; playback
+    // starts from the bottom track list. The delete must refresh the card's
+    // count without popping its list open.
+    await page.goto(`/concerts/${AUDIO}`);
+    await trackButton(page, AUDIO, 0).click();
+    await waitForPlaying(page);
+
+    const tracksBtn = page.locator(`#concert-${AUDIO} button.btn-tracks`);
+    await expect(tracksBtn).toHaveText("tracks (4)");
+
+    await page.locator("#player-delete").click();
+
+    await expect(tracksBtn).toHaveText("tracks (3/4)");
+    await expect(page.locator(`#concert-${AUDIO}`)).not.toHaveClass(
+      /tracks-open/
+    );
+    await expect(
+      page.locator(`#concert-${AUDIO} ol.track-list`)
+    ).toHaveCount(0);
   });
 });
 
@@ -1044,7 +1075,7 @@ test.describe("Starred tracks hide the delete button", () => {
     await expect(page.locator("#player-delete")).toBeVisible();
   });
 
-  test("track list: a row's delete visibility tracks its own star (htmx re-render)", async ({
+  test("track list: a row's delete visibility tracks its own star (htmx button swap)", async ({
     page,
   }) => {
     await expandTracks(page, AUDIO);

@@ -1,4 +1,4 @@
-<div class="card status-{{ card_accent }}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
+<div class="card status-{{ card_accent }}{% if !tracks.is_empty() %} tracks-open{% endif %}" id="concert-{{ id }}"{% if is_in_progress || scrape_pending %} hx-get="/concerts/{{ id }}/status" hx-trigger="every 3s" hx-swap="outerHTML" hx-target="this"{% endif %}>
   {% if let Some(url) = card_image_url.as_ref() %}
   <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">
     <img class="card-thumb" src="{{ url }}" alt="" loading="lazy"
@@ -105,6 +105,6 @@
       <button class="btn-delete" title="Clear split record" hx-post="/concerts/{{ id }}/delete-split" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
     </div>
     {% endif %}
-    <div id="tracks-{{ id }}"></div>
+    <div id="tracks-{{ id }}">{% if !tracks.is_empty() %}{% let show_delete = true %}{% include "tracks.html" %}{% endif %}</div>
   </div>
 </div>

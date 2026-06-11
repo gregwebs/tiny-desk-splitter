@@ -1,0 +1,1 @@
+<button class="btn-like{% if liked %} liked{% endif %}" title="Like" hx-post="/concerts/{{ id }}/tracks/{{ index }}/like" hx-target="this" hx-swap="outerHTML">{% if liked %}★{% else %}☆{% endif %}</button>
