@@ -80,6 +80,13 @@ named constant and/or unit test in `live-set-song-splitter/src/cut.rs`:
    probed properties (`-profile:v`, `-level`, `-pix_fmt`, `-video_track_timescale`;
    `probe_source_video_params`, run once per input). ffprobe reports the integer
    `level_idc` (e.g. `40`), which x264 accepts directly.
+7. **Concat list entries resolve against the list file's directory**, not the
+   process working directory. Writing output-dir-relative paths (e.g.
+   `./concerts/<album>/<track>.mp4.work/tail.mp4`) doubled the path and failed
+   when concert-web invoked the splitter with a relative `--output-dir` — but
+   worked, coincidentally, in CLI testing with an absolute one. Entries are now
+   bare filenames (`head.mp4`, `tail.mp4`), which always resolve next to
+   `concat.txt` inside the work dir regardless of how the output dir is spelled.
 
 ## Known limitations
 

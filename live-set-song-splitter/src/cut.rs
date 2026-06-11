@@ -84,6 +84,17 @@ const KEYFRAME_MATCH_EPS: f64 = 0.001;
 /// quarter-frame trim cannot drop one.
 const HEAD_END_GUARD_FRAME_FRACTION: f64 = 0.25;
 
+/// File names of the splice parts inside a track's private work directory. The
+/// concat list must reference the video parts by these bare names because the
+/// concat demuxer resolves relative entries against the *list file's* directory
+/// (see [`concat_list_entry`]); the same constants build the full paths the parts
+/// are written to, so the two spellings cannot drift apart. Parallel extraction
+/// stays safe: every track gets its own `<output>.mp4.work/` directory.
+const HEAD_FILE_NAME: &str = "head.mp4";
+const TAIL_FILE_NAME: &str = "tail.mp4";
+const AUDIO_FILE_NAME: &str = "audio.m4a";
+const CONCAT_LIST_FILE_NAME: &str = "concat.txt";
+
 /// Video stream properties of the source file, probed once per input. The smart-cut
 /// head segment is encoded with matching properties so the concat demuxer can splice
 /// it onto the stream-copied tail.
@@ -349,14 +360,18 @@ fn build_smart_concat_args(list_file: &str, audio_file: &str) -> Vec<String> {
     ]
 }
 
-/// One `file` line for an ffmpeg concat list. Paths go inside single quotes, where
-/// the only character needing escape is the single quote itself (close, escape,
-/// reopen: `'\''`) — song titles like "Don't Stop" reach the work file names.
+/// One `file` line for an ffmpeg concat list. The concat demuxer resolves relative
+/// entries against the *list file's* directory, not the process working directory,
+/// so entries must be bare filenames of the parts sitting next to the list (an
+/// output-dir-relative path would be resolved against the work dir and double up).
+/// Paths go inside single quotes, where the only character needing escape is the
+/// single quote itself (close, escape, reopen: `'\''`).
 fn concat_list_entry(path: &str) -> String {
     format!("file '{}'\n", path.replace('\'', r"'\''"))
 }
 
-/// The full concat list for the splice. The head entry carries an explicit
+/// The full concat list for the splice; entries are filenames relative to the list
+/// file's directory (see [`concat_list_entry`]). The head entry carries an explicit
 /// `duration` directive so the tail is offset by exactly the head's share of the
 /// track (`keyframe - start`): the head's own container duration can come out
 /// short (its last frame may carry a truncated duration), which would slide the
@@ -654,10 +669,10 @@ fn splice_segment(
     concertdata: &ConcertInfo,
     track_number: Option<usize>,
 ) -> Result<()> {
-    let head_file = format!("{}/head.mp4", work_dir);
-    let tail_file = format!("{}/tail.mp4", work_dir);
-    let audio_file = format!("{}/audio.m4a", work_dir);
-    let list_file = format!("{}/concat.txt", work_dir);
+    let head_file = format!("{}/{}", work_dir, HEAD_FILE_NAME);
+    let tail_file = format!("{}/{}", work_dir, TAIL_FILE_NAME);
+    let audio_file = format!("{}/{}", work_dir, AUDIO_FILE_NAME);
+    let list_file = format!("{}/{}", work_dir, CONCAT_LIST_FILE_NAME);
 
     run_ffmpeg(
         &build_smart_head_args(input_file, start_time, keyframe, params),
@@ -690,12 +705,12 @@ fn splice_segment(
     // first frame) yields an empty head: splice the tail alone.
     let head_frames = probe_video_frame_count(&head_file)?;
     let head = if head_frames > 0 {
-        Some((head_file.as_str(), keyframe - start_time))
+        Some((HEAD_FILE_NAME, keyframe - start_time))
     } else {
         println!("Smart cut head is empty (cut on first frame); using tail only");
         None
     };
-    fs::write(&list_file, build_concat_list(head, &tail_file))
+    fs::write(&list_file, build_concat_list(head, TAIL_FILE_NAME))
         .with_context(|| format!("writing {}", list_file))?;
 
     let mut ffmpeg_cmd = ffmpeg::create_ffmpeg_command();
@@ -954,17 +969,16 @@ mod tests_smart_cut {
     }
 
     // The head entry must pin its duration so the tail lands exactly at the
-    // keyframe; an empty head leaves only the tail.
+    // keyframe; an empty head leaves only the tail. Entries are bare filenames
+    // resolved against the list file's directory (an output-dir-relative path
+    // would be resolved against the work dir and double up).
     #[test]
     fn concat_list_pins_head_duration() {
         assert_eq!(
-            build_concat_list(Some(("/w/head.mp4", 1.708)), "/w/tail.mp4"),
-            "file '/w/head.mp4'\nduration 1.708000\nfile '/w/tail.mp4'\n"
+            build_concat_list(Some(("head.mp4", 1.708)), "tail.mp4"),
+            "file 'head.mp4'\nduration 1.708000\nfile 'tail.mp4'\n"
         );
-        assert_eq!(
-            build_concat_list(None, "/w/tail.mp4"),
-            "file '/w/tail.mp4'\n"
-        );
+        assert_eq!(build_concat_list(None, "tail.mp4"), "file 'tail.mp4'\n");
     }
 
     // ffprobe emits a trailing comma on frame lines carrying side data; the parser
