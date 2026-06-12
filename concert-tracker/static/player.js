@@ -79,7 +79,11 @@ const Player = (() => {
   }
 
   function isPlayerPlaybackShortcutTarget(target) {
-    return target && (target === audio || target.id === "player-watch");
+    if (!target) return false;
+    if (target === audio) return true;
+    if (isEditableTarget(target)) return false;
+    if (!target.closest) return false;
+    return !!target.closest("#player-bar, #player-video-panel");
   }
 
   // True for text-entry targets where native key behavior (typing a space,

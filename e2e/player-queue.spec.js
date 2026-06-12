@@ -534,6 +534,116 @@ test.describe("Player keyboard shortcuts", () => {
 
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
+
+  test("Space after clicking queue toggle pauses playback without re-toggling the sidebar", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-queue-toggle").click();
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+    await expect(page.locator("#player-play-pause")).toHaveText("▶");
+  });
+
+  test("Space after clicking queue toggle (sidebar closed) pauses without re-opening sidebar", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-queue-toggle").click();
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+    await page.locator("#player-queue-toggle").click();
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+  });
+
+  test("Space with focus on player-title pauses without toggling the sidebar", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-title").focus();
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+  });
+
+  test("Enter on focused player-title still toggles the sidebar", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-title").focus();
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(false);
+  });
+
+  test("Space on focused play-pause button toggles exactly once", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await page.locator("#player-play-pause").focus();
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-play-pause")).toHaveText("▶");
+  });
+
+  test("Space on focused video-close button pauses without re-opening the video panel", async ({
+    page,
+  }) => {
+    await playTrack(page, VIDEO, 0);
+    await page.locator("#player-watch").click();
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+    await page.locator("#player-video-close").focus();
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
+  });
+
+  test("Space on focused Next button pauses without skipping again", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+    await expect(page.locator("#player-next")).not.toBeDisabled();
+    await page.locator("#player-next").click();
+    await waitForPlaying(page);
+    const titleAfterSkip = await page.locator("#player-title").textContent();
+
+    await page.keyboard.press("Space");
+
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+    await expect(page.locator("#player-title")).toHaveText(titleAfterSkip);
+  });
 });
 
 test.describe("Inline video", () => {

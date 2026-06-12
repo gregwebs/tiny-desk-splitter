@@ -688,8 +688,8 @@
       <div id="player-info">
         <span class="player-title-line">
           <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
-          <span id="player-track" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Player.toggleSidebar();}"></span>
-          <span id="player-title" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Player.toggleSidebar();}"></span>
+          <span id="player-track" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
+          <span id="player-title" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
         </span>
         <a id="player-artist" hx-boost="false" onclick="Player.openConcert(event)"
            hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top"
