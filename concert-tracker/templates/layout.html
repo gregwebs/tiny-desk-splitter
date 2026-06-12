@@ -255,14 +255,34 @@
       letter-spacing: 0.02em;
       background: var(--surface-2, rgba(127,127,127,0.12));
     }
-    /* Listing cards swap picture → track list on hover (the track HTML is
-       fetched once on first hover and kept in the DOM as a cache). Scoped to
-       #concert-list so the detail-page card shows picture and tracks together,
-       always. */
+    /* Listing cards reveal the track list on hover (the track HTML is fetched
+       once on first hover and kept in the DOM as a cache). The media area
+       keeps the image's 16:9 footprint at all times, so hovering never
+       changes the card height: the picture shrinks to a banner strip and the
+       track list fills the remaining space, scrolling when long. Scoped to
+       #concert-list so the detail-page card shows full picture and tracks
+       together, always. */
+    .card-media { display: flex; flex-direction: column; }
+    .card-thumb-link { display: block; }
+    .card-tracks-box { padding: 0.25rem 1rem; }
+    /* The loading placeholder carries .card-thumb too, so it reserves the
+       same footprint. Cards with no image at all get no fixed footprint. */
+    #concert-list .card-media:has(.card-thumb) { aspect-ratio: 16 / 9 }
     #concert-list .card-tracks-box { display: none; }
+    /* #concert-list .card:hover .card-media { height: 0; } */
     #concert-list .card:hover .card-thumb,
-    #concert-list .card:hover .card-thumb-loading { display: none; }
-    #concert-list .card:hover .card-tracks-box { display: block; }
+    #concert-list .card:hover .card-thumb-loading {
+      /* height: 56px; banner strip; object-fit: cover keeps a sensible crop */
+      aspect-ratio: auto;
+    }
+    #concert-list .card:hover .card-tracks-box {
+      display: block;
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+    }
+    #concert-list .card:hover .card-tracks-row { display: none; }
+    #concert-list .card:hover .card-teaser { display: none; }
 
     .card-title { margin: 0 0 0.4rem; font-size: 0.95rem; font-weight: 600; line-height: 1.3; }
     .card-title a { text-decoration: none; }

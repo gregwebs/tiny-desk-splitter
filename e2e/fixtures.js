@@ -164,8 +164,8 @@ const test = base.test.extend({
 
 // Reveal a listing card's track list: visibility is pure CSS (:hover on the
 // card) and the list HTML is fetched on first hover. Hover near the top-left
-// corner so the pointer stays inside the card when the thumbnail collapses
-// into the (possibly shorter) track list.
+// corner so the pointer stays inside the card while the picture shrinks to
+// its banner strip (the card height itself never changes).
 async function openTracks(page, concertId) {
   await page.hover(`#concert-${concertId}`, { position: { x: 20, y: 20 } });
   await page.waitForSelector(

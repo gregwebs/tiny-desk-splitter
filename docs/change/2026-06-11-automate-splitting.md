@@ -76,9 +76,13 @@ remain usable.
 
 - Listing cards: track list visibility is pure CSS
   (`#concert-list .card:hover`); the list HTML is fetched once on first hover
-  and kept in the DOM as a cache. Mouseleave restores the picture. Single-card
-  htmx swaps embed the track list so an open list never blanks; only the bulk
-  listing render leaves it empty.
+  and kept in the DOM as a cache. The card's media area (`.card-media`, which
+  wraps the picture and the track list) keeps the image's 16:9 footprint at
+  all times, so hovering never changes the card height: the picture shrinks
+  to a 56px banner strip (not removed) and the track list fills the remaining
+  space, scrolling when long. Mouseleave restores the full picture.
+  Single-card htmx swaps embed the track list so an open list never blanks;
+  only the bulk listing render leaves it empty.
 - Detail page: the card embeds its track list, always visible alongside the
   picture (the separate bottom "Tracks" section was removed); per-track
   delete buttons live here too.
@@ -132,9 +136,9 @@ deleted · **SE** split error · **+q** split queued as dependent of download.
 
 | Trigger | Current UI | New UI | Effects |
 |---|---|---|---|
-| Mouse enters card, tracks box empty | Picture | Tracks shown, picture hidden | One fetch of `/tracks`, injected (DOM is the cache) |
-| Mouse enters card, cached | Picture | Tracks shown | Pure CSS `:hover`, no fetch |
-| Mouse leaves card | Tracks | Picture | CSS only; cache kept |
+| Mouse enters card, tracks box empty | Full picture | Picture shrinks to banner strip; tracks fill the rest (card height unchanged) | One fetch of `/tracks`, injected (DOM is the cache) |
+| Mouse enters card, cached | Full picture | Banner strip + tracks | Pure CSS `:hover`, no fetch |
+| Mouse leaves card | Banner strip + tracks | Full picture | CSS only; cache kept |
 | 3 s HTMX status swap | any | refreshed | Card arrives with tracks embedded; player JS re-applies pending mark |
 | Detail page | — | Picture + tracks always | Hover CSS scoped to `#concert-list` |
 

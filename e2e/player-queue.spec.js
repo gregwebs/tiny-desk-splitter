@@ -717,11 +717,24 @@ test.describe("Inline video", () => {
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });
 
+  // The two dismiss-logic tests below run on looped *audio* playback with the
+  // panel opened via Player.watch(): they test the outside-click handler's
+  // dismiss/exempt rules, which are independent of what's decoding. Driving
+  // them with real video (or a finite track) made them flaky — under sandbox
+  // load the track ends (or the VP8 decode stalls) mid-test, auto-advance
+  // plays the next audio track, and play() legitimately folds the panel.
+  // Looping the element makes `ended` impossible while the test runs.
+  const loopPlayback = (page) =>
+    page.evaluate(() => {
+      document.getElementById("player-audio").loop = true;
+    });
+
   test("clicking dead space outside the player folds the video (audio keeps playing)", async ({
     page,
   }) => {
-    await playTrack(page, VIDEO, 0);
-    await page.locator("#player-watch").click();
+    await playTrack(page, AUDIO, 0);
+    await loopPlayback(page);
+    await page.evaluate(() => Player.watch());
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
     // A click on the empty page background above the panel dismisses the video, like
@@ -741,19 +754,22 @@ test.describe("Inline video", () => {
   test("clicking an interactive control outside the player does not fold the video", async ({
     page,
   }) => {
-    // Reveal (and cache) the AUDIO card's track list up front: doing it after
-    // the video starts risks the 10s clip ending — and auto-advance folding
-    // the panel — before the click under test happens.
-    await openTracks(page, AUDIO);
-
-    await playTrack(page, VIDEO, 0);
-    await page.locator("#player-watch").click();
+    await playTrack(page, AUDIO, 0);
+    await loopPlayback(page);
+    await page.evaluate(() => Player.watch());
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
 
-    // Clicking another concert's tracks button is a real control click: it does
-    // its action (enqueues, since media is playing) and leaves the video open
-    // (only dead-space clicks dismiss).
-    await page.locator(`#concert-${AUDIO} button.btn-tracks`).click();
+    // Clicking another concert's tracks button is a real control click: it
+    // does its action (enqueues, since media is playing) and leaves the video
+    // open (only dead-space clicks dismiss). Dispatched programmatically —
+    // mirroring the dead-space test above — because the click event bubbling
+    // to the document handler is what's under test, and driving the pointer
+    // across cards (hover fetch + DOM injection mid-move) can crash the
+    // sandbox's --single-process Chromium.
+    await page
+      .locator(`#concert-${SECOND} button.btn-tracks`)
+      .evaluate((el) => el.click());
+    await expect(page.locator("#player-queue-badge")).toBeVisible();
 
     await expect(page.locator("#player-video-panel")).toHaveClass(/open/);
   });

@@ -30,7 +30,7 @@ async function waitForPlaying(page) {
 }
 
 test.describe("Hover reveals tracks on listing cards", () => {
-  test("hover hides the picture and shows the tracks; mouseleave reverts; no refetch on second hover", async ({
+  test("hover shrinks the picture and shows the tracks; mouseleave reverts; no refetch on second hover", async ({
     page,
   }) => {
     let tracksFetches = 0;
@@ -40,21 +40,33 @@ test.describe("Hover reveals tracks on listing cards", () => {
       }
     });
 
+    const cardHeight = () =>
+      page.locator(`#concert-${AUDIO}`).evaluate((el) => el.offsetHeight);
+    const thumbHeight = () =>
+      page.locator(thumb(AUDIO)).evaluate((el) => el.offsetHeight);
+
     await page.goto("/");
     await expect(page.locator(thumb(AUDIO))).toBeVisible();
     await expect(page.locator(tracksBox(AUDIO))).toBeHidden();
+    const cardBefore = await cardHeight();
+    const thumbBefore = await thumbHeight();
 
     await openTracks(page, AUDIO);
-    await expect(page.locator(thumb(AUDIO))).toBeHidden();
+    // The picture stays visible but shrinks to a banner strip; the track list
+    // fills the freed space and the card height does not change.
+    await expect(page.locator(thumb(AUDIO))).toBeVisible();
+    expect(await thumbHeight()).toBeLessThan(thumbBefore);
     await expect(page.locator(tracksBox(AUDIO))).toBeVisible();
     await expect(
       page.locator(`${tracksBox(AUDIO)} ol.track-list li`)
     ).toHaveCount(4);
+    expect(Math.abs((await cardHeight()) - cardBefore)).toBeLessThanOrEqual(1);
 
-    // Mouse leaves the card: picture returns, list hides but stays in the DOM
-    // as a cache.
+    // Mouse leaves the card: picture returns to full size, list hides but
+    // stays in the DOM as a cache.
     await page.hover("header");
     await expect(page.locator(thumb(AUDIO))).toBeVisible();
+    expect(await thumbHeight()).toBe(thumbBefore);
     await expect(page.locator(tracksBox(AUDIO))).toBeHidden();
 
     // Second hover shows the cached list without another fetch.
