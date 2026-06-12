@@ -748,13 +748,68 @@ pub async fn download(
 ) -> Result<impl IntoResponse, AppError> {
     ensure_scraped_blocking(&state, id).await?;
 
-    start_download(
-        state.db.clone(),
-        state.registry.clone(),
-        state.jobs.clone(),
-        id,
-    )
-    .await?;
+    // Reload after scrape — metadata may have just been populated.
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+
+    let should_auto_split = concert.album.is_some()
+        && !concert.set_list.is_empty()
+        && matches!(
+            concert.split_status(),
+            SplitStatus::NotSplit | SplitStatus::SplitError
+        );
+
+    if should_auto_split {
+        match crate::jobs::prepare::prepare(
+            state.db.clone(),
+            state.registry.clone(),
+            state.jobs.clone(),
+            id,
+        )
+        .await
+        {
+            Ok(crate::jobs::prepare::PrepareOutcome::Ready) => {
+                // All track files exist but the source is missing (manual copies).
+                // Force a download anyway so the user gets the source video.
+                let album = concert.album.as_deref().expect("checked above");
+                if find_downloaded_file(&state.jobs.working_dir, album).is_none() {
+                    start_download(
+                        state.db.clone(),
+                        state.registry.clone(),
+                        state.jobs.clone(),
+                        id,
+                    )
+                    .await?;
+                }
+                // else: source already on disk; reconcile happened in prepare —
+                // downloaded_at is now set so the Download button will disappear.
+            }
+            Ok(_) => {}
+            Err(e) if e.downcast_ref::<crate::jobs::prepare::NoSetList>().is_some() => {
+                // TOCTOU: metadata cleared between our check and prepare's re-read.
+                // Fall back to a plain download rather than a 500.
+                start_download(
+                    state.db.clone(),
+                    state.registry.clone(),
+                    state.jobs.clone(),
+                    id,
+                )
+                .await?;
+            }
+            Err(e) => return Err(AppError::Internal(e)),
+        }
+    } else {
+        start_download(
+            state.db.clone(),
+            state.registry.clone(),
+            state.jobs.clone(),
+            id,
+        )
+        .await?;
+    }
+
     render_card(&state, id)
 }
 

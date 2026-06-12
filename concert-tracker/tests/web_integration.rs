@@ -1815,3 +1815,275 @@ async fn prepare_returns_404_for_unknown_concert() {
     let (status, _) = post_json(&app, "/concerts/99/prepare").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+// ── Download auto-split tests ─────────────────────────────────────────────────
+
+/// Helper: build an AppState backed by real shell commands. The download "fetches"
+/// the source file by touching it; the splitter creates the per-song files.
+fn state_with_chain(
+    conn: rusqlite::Connection,
+    workdir: &std::path::Path,
+    album: &str,
+    songs: &[&str],
+) -> AppState {
+    let wd = workdir.to_path_buf();
+    let cd = concert_dir(&wd, album);
+    let source = cd.join(format!("{}.mp4", album));
+    let fetch = format!(
+        "mkdir -p '{}' && touch '{}'",
+        cd.display(),
+        source.display()
+    );
+    let song_files: Vec<String> = songs
+        .iter()
+        .map(|s| format!("'{}'", cd.join(format!("{}.m4a", s)).display()))
+        .collect();
+    let touch_songs = format!("touch {}", song_files.join(" "));
+    AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig {
+            working_dir: wd,
+            download_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(fetch.clone());
+                cmd
+            }),
+            split_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(touch_songs.clone());
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        },
+    }
+}
+
+async fn wait_for_split(app: &axum::Router, id: i64, tracks: usize) {
+    for _ in 0..200 {
+        let (_, j) = get_json(app, &format!("/concerts/{id}/prepare-status")).await;
+        let present: Vec<bool> = serde_json::from_value(j["tracks_present"].clone())
+            .unwrap_or_default();
+        if present.len() == tracks && present.iter().all(|&p| p) {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("chain never completed: tracks not all present after 10s");
+}
+
+/// POST /download on a not-downloaded concert with a set list runs the full
+/// download → split chain without any track click.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_auto_split_runs_full_chain() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Auto Split Album";
+    let songs = ["Song A", "Song B"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+    let app = router(state_with_chain(conn, workdir.path(), album, &songs));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    wait_for_split(&app, 1, 2).await;
+    let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(j["download"], "downloaded");
+    assert_eq!(j["split"], "split");
+    assert_eq!(j["split_queued"], false);
+}
+
+/// Source file exists on disk but downloaded_at is NULL (manual copy). POST
+/// /download should reconcile downloaded_at and start a split, not silently
+/// no-op. Regression test for the rejected "extract chaining block" design.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_auto_split_reconciles_source_present_downloaded_at_null() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Reconcile Album";
+    let songs = ["Track 1"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+
+    // Manually place the source file without setting downloaded_at.
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join(format!("{}.mp4", album)), b"video").unwrap();
+
+    let app = router(state_with_chain(conn, workdir.path(), album, &songs));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // A split should start (not a no-op), resulting in the track file.
+    wait_for_split(&app, 1, 1).await;
+    let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(j["split"], "split");
+}
+
+/// Concert with recorded split errors (SplitError state) should have the chain
+/// re-triggered on Download click, just like it would on a play-track click.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_auto_split_retries_on_split_error() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Split Error Album";
+    let songs = ["Song X"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+    // Record a split failure (split_at stays NULL, split_started_at = NULL).
+    db::mark_split_failed(&conn, 1, "previous split failed").unwrap();
+
+    let app = router(state_with_chain(conn, workdir.path(), album, &songs));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    wait_for_split(&app, 1, 1).await;
+    let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(j["split"], "split");
+}
+
+/// A concert with no set list should still download (plain download, no split
+/// queued). Behavior unchanged from before this feature.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_no_set_list_plain_download_no_split_queued() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "No Setlist Album";
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, vec![]);
+
+    let app = router(state_with_chain(conn, workdir.path(), album, &[]));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // No split should be queued.
+    let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(j["split_queued"], false);
+    assert_ne!(j["download"], "not-downloaded", "download should have started");
+}
+
+/// Re-downloading a concert that is already split (e.g. source file deleted
+/// out-of-band while tracks exist) should NOT re-split. Surviving track file
+/// contents must be untouched.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_does_not_resplit_already_split_concert() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Already Split Album";
+    let songs = ["Keep Track"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+
+    // Set up a concert that is split (split_at set) with surviving track files.
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join("Keep Track.m4a"), b"original-audio").unwrap();
+    db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+    {
+        let started = db::try_mark_split_started(&conn, 1).unwrap();
+        assert!(started);
+        db::mark_split_succeeded(&conn, 1).unwrap();
+        db::set_tracks_present(&conn, 1, &[true]).unwrap();
+    }
+    // Simulate source file deleted (downloaded_at still set).
+    // (The source file is not on disk — workdir has only the track file.)
+
+    let app = router(state_with_chain(conn, workdir.path(), album, &songs));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Wait a little for the download to run, then confirm no split was queued.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    let content = std::fs::read(cd.join("Keep Track.m4a")).unwrap();
+    assert_eq!(content, b"original-audio", "track file must not be overwritten");
+}
+
+/// A second POST /download while one is already running must not drop the queued
+/// split edge. After the download finishes, exactly one split should run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_double_click_does_not_drop_split_edge() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Double Click Album";
+    let songs = ["Song 1"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+
+    // Slow download so the second POST arrives mid-job.
+    let cd = concert_dir(workdir.path(), album);
+    let source = cd.join(format!("{}.mp4", album));
+    let fetch = format!(
+        "sleep 0.2 && mkdir -p '{}' && touch '{}'",
+        cd.display(),
+        source.display()
+    );
+    let touch = format!("touch '{}'", cd.join("Song 1.m4a").display());
+    let state = AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig {
+            working_dir: workdir.path().to_path_buf(),
+            download_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(fetch.clone());
+                cmd
+            }),
+            split_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(touch.clone());
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    let (s1, _) = post_json(&app, "/concerts/1/download").await;
+    let (s2, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(s1, StatusCode::OK);
+    assert_eq!(s2, StatusCode::OK);
+
+    wait_for_split(&app, 1, 1).await;
+    let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
+    assert_eq!(j["split"], "split");
+    assert_eq!(j["split_queued"], false);
+}
+
+/// All track files exist on disk but the source video is missing and
+/// downloaded_at is NULL (manual track-file copies, no source). The Download
+/// button must still start a download so the user gets the source video.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn download_force_starts_when_tracks_present_but_source_missing() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Tracks Present Album";
+    let songs = ["Existing Track"];
+
+    let conn = db::open_in_memory().unwrap();
+    seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
+
+    // Track files exist on disk but no source video.
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join("Existing Track.m4a"), b"audio").unwrap();
+
+    let app = router(state_with_chain(conn, workdir.path(), album, &songs));
+
+    let (status, _) = post_json(&app, "/concerts/1/download").await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The source file should eventually exist (download ran).
+    for _ in 0..100 {
+        if cd.join(format!("{}.mp4", album)).exists() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("source file never created by forced download");
+}
