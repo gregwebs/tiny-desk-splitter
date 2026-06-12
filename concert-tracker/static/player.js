@@ -1052,21 +1052,10 @@ const Player = (() => {
       return;
     }
     if (empty) empty.style.display = "none";
-    queue.forEach((entry, i) => {
+    for (let i = queue.length - 1; i >= 0; i--) {
+      const entry = queue[i];
       const li = document.createElement("li");
       li.className = "queue-item";
-
-      const star = document.createElement("button");
-      star.className = "btn-like" + (entry.liked ? " liked" : "");
-      star.title = "Like";
-      star.setAttribute("hx-post", `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/like`);
-      star.setAttribute("hx-target", "this");
-      star.setAttribute("hx-swap", "outerHTML");
-      star.textContent = entry.liked ? "★" : "☆";
-
-      const titleSpan = document.createElement("span");
-      titleSpan.className = "queue-title";
-      titleSpan.textContent = entry.title;
 
       const playBtn = document.createElement("button");
       playBtn.className = "btn-queue-play";
@@ -1080,10 +1069,24 @@ const Player = (() => {
       removeBtn.textContent = "✕";
       removeBtn.onclick = () => dequeue(i);
 
-      li.append(star, titleSpan, playBtn, removeBtn);
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "queue-title";
+      titleSpan.textContent = entry.title;
+
+      const star = document.createElement("button");
+      star.className = "btn-like" + (entry.liked ? " liked" : "");
+      star.title = "Like";
+      star.setAttribute("hx-post", `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/like`);
+      star.setAttribute("hx-target", "this");
+      star.setAttribute("hx-swap", "outerHTML");
+      star.textContent = entry.liked ? "★" : "☆";
+
+      li.append(playBtn, removeBtn, titleSpan, star);
       list.appendChild(li);
-    });
+    }
     if (window.htmx) window.htmx.process(list);
+    const queueSection = document.getElementById("sidebar-queue-section");
+    if (queueSection) queueSection.scrollTop = queueSection.scrollHeight;
   }
 
   function dequeue(pos) {

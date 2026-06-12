@@ -592,7 +592,7 @@
       width: var(--sidebar-width); z-index: 1000;
       background: var(--surface); border-right: 1px solid var(--border);
       transform: translateX(-100%); transition: transform 0.2s ease;
-      display: flex; flex-direction: column; overflow-y: auto;
+      display: flex; flex-direction: column; overflow: hidden;
     }
     body.sidebar-open #player-sidebar { transform: none; }
     /* Shrink the page content to make room for the sidebar. body is the
@@ -610,10 +610,15 @@
          and its close button (z-index 1001). */
       #player-sidebar { width: min(var(--sidebar-width), 85vw); box-shadow: 4px 0 12px var(--shadow-card-hover); z-index: 1002; }
     }
-    #sidebar-queue-section, #sidebar-concert-section {
+    .sidebar-top-spacer { flex: 1 1 0; }
+    #sidebar-queue-section {
+      flex: 0 1 auto; min-height: 0; overflow-y: auto; max-height: 60%;
+      padding: 0.75rem 1rem; border-bottom: 1px solid var(--border);
+    }
+    #sidebar-concert-section {
+      flex: 0 0 auto; overflow-y: auto; max-height: 50%;
       padding: 0.75rem 1rem;
     }
-    #sidebar-queue-section { border-bottom: 1px solid var(--border); }
     #sidebar-queue-section h2, #sidebar-concert-section h2 {
       font-size: 0.75em; font-weight: 700; text-transform: uppercase;
       letter-spacing: 0.06em; color: var(--fg-muted); margin: 0 0 0.5rem;
@@ -663,6 +668,7 @@
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
     <aside id="player-sidebar" aria-label="Queue and concert tracks">
+      <div class="sidebar-top-spacer"></div>
       <section id="sidebar-queue-section">
         <h2>Queue</h2>
         <ol id="sidebar-queue-list" class="track-list"></ol>
