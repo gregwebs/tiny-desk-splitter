@@ -10,6 +10,7 @@
   <style>
     :root {
       --player-bar-height: 56px;
+      --sidebar-width: 320px;
       --bg: #f7f7f7;
       --fg: #1a1a1a;
       --fg-muted: #555;
@@ -496,7 +497,7 @@
       position: fixed; left: 0; right: 0; bottom: var(--player-bar-height);
       background: #000; z-index: 1000;
       max-height: 0; overflow: hidden;
-      transition: max-height 0.2s ease;
+      transition: max-height 0.2s ease, left 0.2s ease;
       box-shadow: 0 -2px 8px rgba(0,0,0,0.3);
     }
     #player-video-panel.open { max-height: calc(100vh - var(--player-bar-height)); }
@@ -536,8 +537,8 @@
     }
     #player-prev:hover, #player-next:hover { color: #ccc; }
     #player-prev:disabled, #player-next:disabled { color: #555; cursor: default; }
-    /* The badge always occupies its slot (visibility, not display) so enqueuing a
-       track doesn't shift the rest of the player bar to the right. */
+    /* Badge inside #player-queue-toggle. Always occupies its slot (visibility,
+       not display) so enqueuing a track doesn't shift the bar layout. */
     #player-queue-badge {
       background: #e63946; color: #fff; font-size: 0.7em; font-weight: 700;
       min-width: 1.3em; height: 1.3em; border-radius: 50%;
@@ -585,6 +586,59 @@
       #player-seek { flex: 1; }
     }
 
+    /* ── Sidebar ── */
+    #player-sidebar {
+      position: fixed; top: 0; bottom: var(--player-bar-height); left: 0;
+      width: var(--sidebar-width); z-index: 1000;
+      background: var(--surface); border-right: 1px solid var(--border);
+      transform: translateX(-100%); transition: transform 0.2s ease;
+      display: flex; flex-direction: column; overflow-y: auto;
+    }
+    body.sidebar-open #player-sidebar { transform: none; }
+    /* Shrink the page content to make room for the sidebar. body is the
+       centered max-width block; pushing its left margin reflows the card grid. */
+    body { transition: margin-left 0.2s ease; }
+    body.sidebar-open { margin-left: var(--sidebar-width); margin-right: auto; }
+    /* Fixed elements ignore body margin — offset the video panel explicitly. */
+    body.sidebar-open #player-video-panel { left: var(--sidebar-width); }
+    /* Narrow screens: overlay instead of shrink (a 300px-min card grid cannot
+       fit beside a 320px sidebar). */
+    @media (max-width: 700px) {
+      body.sidebar-open { margin-left: auto; }
+      body.sidebar-open #player-video-panel { left: 0; }
+      /* Overlay mode: sidebar must appear above the video panel (z-index 1000)
+         and its close button (z-index 1001). */
+      #player-sidebar { width: min(var(--sidebar-width), 85vw); box-shadow: 4px 0 12px var(--shadow-card-hover); z-index: 1002; }
+    }
+    #sidebar-queue-section, #sidebar-concert-section {
+      padding: 0.75rem 1rem;
+    }
+    #sidebar-queue-section { border-bottom: 1px solid var(--border); }
+    #sidebar-queue-section h2, #sidebar-concert-section h2 {
+      font-size: 0.75em; font-weight: 700; text-transform: uppercase;
+      letter-spacing: 0.06em; color: var(--fg-muted); margin: 0 0 0.5rem;
+    }
+    #sidebar-queue-empty { font-size: 0.82em; color: var(--fg-fainter); margin: 0; }
+    /* Queue item row */
+    .queue-item { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; }
+    .queue-title { flex: 1; font-size: 0.82em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .btn-queue-play, .btn-queue-remove {
+      background: none; border: 1px solid #666; color: var(--fg); border-radius: 3px;
+      padding: 0.1rem 0.35rem; font-size: 0.75em; cursor: pointer; flex: none;
+    }
+    .btn-queue-play:hover { border-color: var(--btn-success); color: var(--btn-success); }
+    .btn-queue-remove:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+    /* Queue-toggle button in the player bar */
+    #player-queue-toggle {
+      background: none; border: 1px solid #666; color: #fff; border-radius: 3px;
+      padding: 0.15rem 0.5rem; cursor: pointer; position: relative;
+      display: flex; align-items: center; gap: 0.3rem; font-size: 0.85em;
+    }
+    #player-queue-toggle:hover { border-color: #aaa; background: rgba(255,255,255,0.1); }
+    /* Clickable track number/title spans in the player bar */
+    #player-track, #player-title { cursor: pointer; }
+    #player-track:hover, #player-title:hover { text-decoration: underline; }
+
     /* ── Tracks row ── */
     .card-tracks-row {
       padding: 0.4rem 0 0;
@@ -608,23 +662,28 @@
   </header>
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
+    <aside id="player-sidebar" aria-label="Queue and concert tracks">
+      <section id="sidebar-queue-section">
+        <h2>Queue</h2>
+        <ol id="sidebar-queue-list" class="track-list"></ol>
+        <p id="sidebar-queue-empty">Nothing queued</p>
+      </section>
+      <section id="sidebar-concert-section">
+        <h2 id="sidebar-concert-heading">Now playing</h2>
+        <div id="sidebar-concert-tracks"></div>
+      </section>
+    </aside>
     <div id="player-video-panel">
       <video id="player-audio" playsinline webkit-playsinline tabindex="0" onclick="Player.togglePause()"></video>
       <button id="player-video-close" onclick="Player.watch()" title="Minimize video" aria-label="Minimize video">&#10005;</button>
     </div>
     <div id="player-bar">
-      <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>
-      <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
-      <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
-      <span id="player-queue-badge"></span>
-      <button id="player-watch" onclick="Player.watch()" title="Watch video in player">Watch</button>
-      <button id="player-open" onclick="Player.openExternal()" title="Open in system player">&#10697;</button>
-      <button id="player-delete" onclick="Player.deleteTrack()" title="Delete this track" aria-label="Delete this track"><span class="icon-trash"></span></button>
+      <button id="player-queue-toggle" onclick="Player.toggleSidebar()" aria-label="Toggle queue and tracks sidebar" aria-expanded="false" title="Show queue and tracks">&#9776;<span id="player-queue-badge"></span></button>
       <div id="player-info">
         <span class="player-title-line">
           <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
-          <span id="player-track"></span>
-          <span id="player-title"></span>
+          <span id="player-track" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Player.toggleSidebar();}"></span>
+          <span id="player-title" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();Player.toggleSidebar();}"></span>
         </span>
         <a id="player-artist" hx-boost="false" onclick="Player.openConcert(event)"
            hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top"
@@ -632,6 +691,12 @@
       </div>
       <span id="player-error"></span>
       <span id="player-status"></span>
+      <button id="player-watch" onclick="Player.watch()" title="Watch video in player">Watch</button>
+      <button id="player-open" onclick="Player.openExternal()" title="Open in system player">&#10697;</button>
+      <button id="player-delete" onclick="Player.deleteTrack()" title="Delete this track" aria-label="Delete this track"><span class="icon-trash"></span></button>
+      <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>
+      <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
+      <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
       <input id="player-seek" type="range" min="0" max="100" value="0"
         oninput="Player.seek(this.value)">
       <span id="player-time">0:00 / 0:00</span>

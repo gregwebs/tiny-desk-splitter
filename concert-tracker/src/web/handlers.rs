@@ -135,6 +135,10 @@ struct TracksTemplate {
     /// True while a split is running or queued behind a download: every track
     /// button renders disabled until the job finishes.
     tracks_busy: bool,
+    /// True when rendering into the sidebar. Sidebar rows have no `.card`
+    /// ancestor, so the delete button calls Player.sidebarDeleteTrack() via
+    /// onclick instead of using hx-target="closest .card".
+    sidebar: bool,
 }
 
 #[derive(Template)]
@@ -1311,7 +1315,9 @@ pub async fn watch_track(
 pub async fn tracks(
     State(state): State<AppState>,
     Path(id): Path<i64>,
+    Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, AppError> {
+    let sidebar = params.get("context").map(|v| v == "sidebar").unwrap_or(false);
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
@@ -1336,6 +1342,7 @@ pub async fn tracks(
         tracks,
         show_delete: true,
         tracks_busy: tracks_busy(&concert, split_queued(&state, id)),
+        sidebar,
     }
     .render()
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
@@ -2050,10 +2057,14 @@ mod tests {
             tracks: one_track(true),
             show_delete: true,
             tracks_busy: false,
+            sidebar: false,
         }
         .render()
         .unwrap();
+        // Card variant: hx-post delete targeting closest .card.
+        assert!(with_delete.contains("hx-target=\"closest .card\""), "{with_delete}");
         assert!(with_delete.contains("/tracks/0/delete"), "{with_delete}");
+        assert!(!with_delete.contains("sidebarDeleteTrack"), "{with_delete}");
 
         // The detail-page bottom list renders without trash icons but keeps
         // the listen and like controls.
@@ -2062,6 +2073,7 @@ mod tests {
             tracks: one_track(true),
             show_delete: false,
             tracks_busy: false,
+            sidebar: false,
         }
         .render()
         .unwrap();
@@ -2077,6 +2089,29 @@ mod tests {
             without_delete.contains("/tracks/0/like"),
             "{without_delete}"
         );
+    }
+
+    #[test]
+    fn tracks_template_sidebar_uses_js_delete_not_htmx() {
+        let sidebar = TracksTemplate {
+            id: 5,
+            tracks: one_track(true),
+            show_delete: true,
+            tracks_busy: false,
+            sidebar: true,
+        }
+        .render()
+        .unwrap();
+        assert!(
+            sidebar.contains("Player.sidebarDeleteTrack(5, 0)"),
+            "{sidebar}"
+        );
+        assert!(
+            !sidebar.contains("hx-target=\"closest .card\""),
+            "{sidebar}"
+        );
+        assert!(sidebar.contains("Player.playTrack"), "{sidebar}");
+        assert!(sidebar.contains("/tracks/0/like"), "{sidebar}");
     }
 
     #[test]

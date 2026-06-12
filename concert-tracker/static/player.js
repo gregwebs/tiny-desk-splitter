@@ -3,10 +3,12 @@
 const Player = (() => {
   let audio = null;
   let bar = null;
-  let state = { concertId: null, trackIdx: null, activeButton: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
+  let state = { concertId: null, trackIdx: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
   let queue = [];
   let autoAdvanceController = null;
   let keyboardShortcutsBound = false;
+  let sidebarLoadGen = 0;
+  let sidebarConcertId = null;
 
   function onPlay() { setPlayPauseIcon(true); }
   function onPause() { setPlayPauseIcon(false); }
@@ -45,9 +47,8 @@ const Player = (() => {
     document.body.addEventListener("htmx:historyRestore", reassertPlayerUi);
 
     // Reverse like-sync: when a track list re-renders (track-list star toggled,
-    // or a track deleted), re-read the liked state of the playing track so the
-    // player star matches. findTrackButton only matches the current DOM, so this
-    // is a no-op when the playing track's row isn't on the page (cross-concert).
+    // or a track deleted), propagate liked state across all copies of that
+    // track's star buttons (card list, sidebar, queue) and the player star.
     document.body.addEventListener("htmx:afterSwap", syncLikeFromTrackList);
   }
 
@@ -136,23 +137,64 @@ const Player = (() => {
     togglePause();
   }
 
-  // Locate the .btn-like in the same row as the playing track's listen button.
-  function currentTrackLikeButton() {
-    if (state.trackIdx == null) return null;
-    const btn = findTrackButton(state.concertId, state.trackIdx);
-    const li = btn && btn.closest("li");
-    return li ? li.querySelector(".btn-like") : null;
+  // All .btn-like elements for a given concert track (card list, sidebar, etc.).
+  // The hx-post URL is the stable per-track key present on every copy.
+  function likeButtonsFor(concertId, trackIdx) {
+    return document.querySelectorAll(`.btn-like[hx-post="/concerts/${concertId}/tracks/${trackIdx}/like"]`);
   }
 
-  function syncLikeFromTrackList() {
-    const lb = currentTrackLikeButton();
-    if (!lb) return;
-    const liked = lb.classList.contains("liked");
-    if (liked !== state.liked) {
+  // Sync liked state to all copies of the track's star buttons, player star,
+  // and any matching queue entries.
+  function applyLike(concertId, trackIdx, liked) {
+    likeButtonsFor(concertId, trackIdx).forEach(lb => {
+      lb.classList.toggle("liked", liked);
+      lb.textContent = liked ? "★" : "☆";
+    });
+    let queueDirty = false;
+    queue.forEach(e => {
+      if (e.concertId === concertId && e.trackIdx === trackIdx && e.liked !== liked) {
+        e.liked = liked;
+        queueDirty = true;
+      }
+    });
+    if (queueDirty) renderQueue();
+    if (state.concertId === concertId && state.trackIdx === trackIdx) {
       state.liked = liked;
       updateLikeStar();
       updateDeleteButton();
     }
+  }
+
+  // After an htmx:afterSwap (like-button outerHTML swap or whole-card swap),
+  // propagate the new like state to all copies of that track's star. Reads the
+  // live DOM rather than parsing the possibly-detached swapped-out element.
+  function syncLikeFromTrackList(evt) {
+    const target = evt && evt.detail && evt.detail.target;
+    // When a concert card is swapped (track deleted via htmx), refresh the sidebar
+    // so availability counts and greyed rows stay in sync.
+    if (target && target.id === `concert-${state.concertId}` && isSidebarOpen() && state.concertId != null) {
+      loadSidebarTracks(state.concertId);
+    }
+    let concertId = null;
+    let trackIdx = null;
+    if (target && target.getAttribute) {
+      const hxPost = target.getAttribute("hx-post");
+      const m = hxPost && hxPost.match(/\/concerts\/(\d+)\/tracks\/(\d+)\/like/);
+      if (m) {
+        concertId = parseInt(m[1], 10);
+        trackIdx = parseInt(m[2], 10);
+      }
+    }
+    // Fallback: when a whole card is swapped (delete/status), re-check the playing track.
+    if (concertId == null) {
+      concertId = state.concertId;
+      trackIdx = state.trackIdx;
+    }
+    if (concertId == null) return;
+    const lb = likeButtonsFor(concertId, trackIdx)[0];
+    if (!lb) return;
+    const liked = lb.classList.contains("liked");
+    applyLike(concertId, trackIdx, liked);
   }
 
   // After an in-place #content swap or a Back/Forward history restore re-creates
@@ -278,8 +320,8 @@ const Player = (() => {
   // reassertPlayerUi after card swaps replace the button element.
   function markPreparing() {
     if (!pendingPlay) return;
-    const btn = findTrackButton(pendingPlay.concertId, pendingPlay.trackIdx);
-    if (btn) btn.classList.add("preparing");
+    findTrackButtons(pendingPlay.concertId, pendingPlay.trackIdx)
+      .forEach(btn => btn.classList.add("preparing"));
   }
 
   function clearPreparing() {
@@ -408,13 +450,18 @@ const Player = (() => {
   }
 
   // Whether the track's file exists right now (media-info 404s when missing).
-  async function trackAvailable(concertId, trackIdx) {
+  // Returns { title, liked } from media-info, or null if the track file is
+  // missing or unreachable. Used by the enqueue path to capture title/liked
+  // without a separate fetch.
+  async function trackMediaInfo(concertId, trackIdx) {
     try {
       const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/media-info`);
-      return resp.ok;
+      if (!resp.ok) return null;
+      const info = await resp.json();
+      return { title: info.title, liked: !!info.liked };
     } catch (e) {
-      tracing("trackAvailable fetch failed", e);
-      return false;
+      tracing("trackMediaInfo fetch failed", e);
+      return null;
     }
   }
 
@@ -512,36 +559,30 @@ const Player = (() => {
     return m + ":" + (s < 10 ? "0" : "") + s;
   }
 
-  function findTrackButton(concertId, trackIdx) {
+  function findTrackButtons(concertId, trackIdx) {
     if (trackIdx != null) {
-      return document.querySelector(`[data-concert-id="${concertId}"][data-track-idx="${trackIdx}"]`);
+      return document.querySelectorAll(`[data-concert-id="${concertId}"][data-track-idx="${trackIdx}"]`);
     }
-    return document.querySelector(`[data-concert-id="${concertId}"][data-role="listen-album"]`);
+    return document.querySelectorAll(`[data-concert-id="${concertId}"][data-role="listen-album"]`);
+  }
+
+  function findTrackButton(concertId, trackIdx) {
+    return findTrackButtons(concertId, trackIdx)[0] || null;
   }
 
   function clearPlaying() {
-    if (state.activeButton) {
-      state.activeButton.classList.remove("playing");
-      state.activeButton = null;
-    }
+    document.querySelectorAll(".btn-track-listen.playing, .btn-listen.playing")
+      .forEach(b => b.classList.remove("playing"));
   }
 
-  function markPlaying(btn) {
+  function markPlaying(concertId, trackIdx) {
     clearPlaying();
-    if (btn) {
-      btn.classList.add("playing");
-      state.activeButton = btn;
-    }
+    findTrackButtons(concertId, trackIdx).forEach(b => b.classList.add("playing"));
   }
 
   function reapplyPlaying() {
     if (state.concertId == null) return;
-    const btn = findTrackButton(state.concertId, state.trackIdx);
-    if (btn && !audio.paused) {
-      clearPlaying();
-      btn.classList.add("playing");
-      state.activeButton = btn;
-    }
+    if (!audio.paused) markPlaying(state.concertId, state.trackIdx);
   }
 
   // The Watch (toggle inline video) and Open (launch system player) buttons only
@@ -651,18 +692,8 @@ const Player = (() => {
     btn.style.display = state.trackIdx == null || state.liked ? "none" : "inline-block";
   }
 
-  // Set the liked state on the player star and mirror it onto the playing
-  // track's track-list button when that row is on the page (in-place, no
-  // re-render). No-op for the row when it isn't present (cross-concert safe).
   function setLikeState(liked) {
-    state.liked = liked;
-    updateLikeStar();
-    updateDeleteButton();
-    const lb = currentTrackLikeButton();
-    if (lb) {
-      lb.classList.toggle("liked", liked);
-      lb.textContent = liked ? "★" : "☆";
-    }
+    applyLike(state.concertId, state.trackIdx, liked);
   }
 
   // Player-bar like star: toggle the like for the currently-playing track.
@@ -713,7 +744,7 @@ const Player = (() => {
     setStatus("");
     showBar();
     updateInfo(title, artist, trackIdx, concertId);
-    markPlaying(btn);
+    markPlaying(concertId, trackIdx);
 
     state.concertId = concertId;
     state.trackIdx = trackIdx;
@@ -730,6 +761,10 @@ const Player = (() => {
     if (!isVideo) hideVideoPanel();
     updateNextButton();
     updatePrevButton();
+
+    if (isSidebarOpen() && concertId !== sidebarConcertId) {
+      loadSidebarTracks(concertId);
+    }
 
     audio.src = url;
     try {
@@ -753,8 +788,7 @@ const Player = (() => {
     try {
       const resp = await fetch(`/concerts/${concertId}/media-info`);
       if (!resp.ok) {
-        btn.classList.add("btn-listen-error");
-        btn.textContent = "Error";
+        if (btn) { btn.classList.add("btn-listen-error"); btn.textContent = "Error"; }
         return false;
       }
       const info = await resp.json();
@@ -767,8 +801,7 @@ const Player = (() => {
         `/concerts/${concertId}/watch`, info.has_next, info.liked, info.has_prev);
       return true;
     } catch (e) {
-      btn.classList.add("btn-listen-error");
-      btn.textContent = "Error";
+      if (btn) { btn.classList.add("btn-listen-error"); btn.textContent = "Error"; }
       tracing("startAlbum fetch failed", e);
       return false;
     }
@@ -801,8 +834,7 @@ const Player = (() => {
         `/concerts/${concertId}/tracks/${trackIdx}/watch`, info.has_next, info.liked, info.has_prev);
       return true;
     } catch (e) {
-      btn.classList.add("btn-listen-error");
-      btn.textContent = "Error";
+      if (btn) { btn.classList.add("btn-listen-error"); btn.textContent = "Error"; }
       tracing("startTrack fetch failed", e);
       return false;
     }
@@ -817,11 +849,12 @@ const Player = (() => {
       // A missing track must still enter the prepare flow while something
       // else is playing; it gets enqueued once its file appears (pollPrepare
       // re-enters playTrack, which then lands in the enqueue branch).
-      if (!(await trackAvailable(concertId, trackIdx))) {
+      const info = await trackMediaInfo(concertId, trackIdx);
+      if (!info) {
         await preparePlay(btn, concertId, trackIdx);
         return;
       }
-      enqueue(concertId, trackIdx, btn.textContent.trim());
+      enqueue(concertId, trackIdx, info.title || (btn ? btn.textContent.trim() : ""), info.liked);
       return;
     }
     await startTrack(btn, concertId, trackIdx);
@@ -878,21 +911,20 @@ const Player = (() => {
     audio.currentTime = (val / 100) * audio.duration;
   }
 
-  function enqueue(concertId, trackIdx, title) {
+  function enqueue(concertId, trackIdx, title, liked) {
     if (queue.some(q => q.concertId === concertId && q.trackIdx === trackIdx)) {
       tracing("enqueue duplicate skipped", { concertId, trackIdx });
       return;
     }
-    queue.push({ concertId, trackIdx, title });
+    queue.push({ concertId, trackIdx, title, liked: !!liked });
     tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
-    updateQueueBadge();
-    updateNextButton();
+    queueChanged();
   }
 
   async function playFromQueue() {
     while (queue.length > 0) {
       const entry = queue.shift();
-      updateQueueBadge();
+      queueChanged();
       cancelAutoAdvance();
       tracing("playFromQueue", { concertId: entry.concertId, trackIdx: entry.trackIdx });
 
@@ -1002,6 +1034,137 @@ const Player = (() => {
     if (await startTrack(btn, concertId, trackIdx)) showVideoPanel();
   }
 
+  function queueChanged() {
+    renderQueue();
+    updateQueueBadge();
+    updateNextButton();
+  }
+
+  // Render the queue section of the sidebar using DOM APIs (textContent only —
+  // titles are untrusted data and must never be set via innerHTML).
+  function renderQueue() {
+    const list = document.getElementById("sidebar-queue-list");
+    const empty = document.getElementById("sidebar-queue-empty");
+    if (!list) return;
+    list.replaceChildren();
+    if (queue.length === 0) {
+      if (empty) empty.style.display = "";
+      return;
+    }
+    if (empty) empty.style.display = "none";
+    queue.forEach((entry, i) => {
+      const li = document.createElement("li");
+      li.className = "queue-item";
+
+      const star = document.createElement("button");
+      star.className = "btn-like" + (entry.liked ? " liked" : "");
+      star.title = "Like";
+      star.setAttribute("hx-post", `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/like`);
+      star.setAttribute("hx-target", "this");
+      star.setAttribute("hx-swap", "outerHTML");
+      star.textContent = entry.liked ? "★" : "☆";
+
+      const titleSpan = document.createElement("span");
+      titleSpan.className = "queue-title";
+      titleSpan.textContent = entry.title;
+
+      const playBtn = document.createElement("button");
+      playBtn.className = "btn-queue-play";
+      playBtn.title = "Play now";
+      playBtn.textContent = "▶";
+      playBtn.onclick = () => playQueueEntryNow(i);
+
+      const removeBtn = document.createElement("button");
+      removeBtn.className = "btn-queue-remove";
+      removeBtn.title = "Remove from queue";
+      removeBtn.textContent = "✕";
+      removeBtn.onclick = () => dequeue(i);
+
+      li.append(star, titleSpan, playBtn, removeBtn);
+      list.appendChild(li);
+    });
+    if (window.htmx) window.htmx.process(list);
+  }
+
+  function dequeue(pos) {
+    queue.splice(pos, 1);
+    tracing("dequeue", { pos, queueLength: queue.length });
+    queueChanged();
+  }
+
+  function playQueueEntryNow(pos) {
+    const entry = queue.splice(pos, 1)[0];
+    if (!entry) return;
+    tracing("playQueueEntryNow", { pos, concertId: entry.concertId, trackIdx: entry.trackIdx });
+    queueChanged();
+    startTrack(null, entry.concertId, entry.trackIdx);
+  }
+
+  // Fetch `/concerts/:id/tracks?context=sidebar` and inject into the sidebar's
+  // concert-tracks section. A generation counter guards against races when the
+  // concert changes while a fetch is in flight.
+  async function loadSidebarTracks(concertId) {
+    if (concertId == null) return;
+    const gen = ++sidebarLoadGen;
+    const section = document.getElementById("sidebar-concert-tracks");
+    const heading = document.getElementById("sidebar-concert-heading");
+    if (!section) return;
+
+    if (heading) {
+      heading.textContent = document.getElementById("player-artist")?.textContent || "Concert tracks";
+    }
+
+    try {
+      const resp = await fetch(`/concerts/${concertId}/tracks?context=sidebar`);
+      if (gen !== sidebarLoadGen) return;
+      if (!resp.ok) {
+        sidebarConcertId = null;
+        const err = document.createElement("p");
+        err.className = "sidebar-load-error";
+        err.textContent = "Couldn't load tracks";
+        section.replaceChildren(err);
+        return;
+      }
+      const html = await resp.text();
+      if (gen !== sidebarLoadGen) return;
+      section.innerHTML = html;
+      if (window.htmx) window.htmx.process(section);
+      reapplyPlaying();
+      sidebarConcertId = concertId;
+    } catch (e) {
+      if (gen !== sidebarLoadGen) return;
+      tracing("loadSidebarTracks failed", e);
+      sidebarConcertId = null;
+      const err = document.createElement("p");
+      err.className = "sidebar-load-error";
+      err.textContent = "Couldn't load tracks";
+      section.replaceChildren(err);
+    }
+  }
+
+  function isSidebarOpen() {
+    return document.body.classList.contains("sidebar-open");
+  }
+
+  function closeSidebar() {
+    if (!isSidebarOpen()) return;
+    document.body.classList.remove("sidebar-open");
+    const toggle = document.getElementById("player-queue-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "false");
+    tracing("closeSidebar", {});
+  }
+
+  function toggleSidebar() {
+    const open = document.body.classList.toggle("sidebar-open");
+    const toggle = document.getElementById("player-queue-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", open ? "true" : "false");
+    tracing("toggleSidebar", { open });
+    if (open) {
+      renderQueue();
+      loadSidebarTracks(state.concertId);
+    }
+  }
+
   // Tear the player down completely: nothing is playing and there is nothing to
   // advance to. Used after deleting the last remaining track.
   function stopPlayback() {
@@ -1016,8 +1179,12 @@ const Player = (() => {
     }
     clearPlaying();
     hideVideoPanel();
+    closeSidebar();
+    const concertTracks = document.getElementById("sidebar-concert-tracks");
+    if (concertTracks) concertTracks.replaceChildren();
+    sidebarConcertId = null;
     queue = [];
-    updateQueueBadge();
+    queueChanged();
     state.concertId = null;
     state.trackIdx = null;
     state.isVideo = false;
@@ -1035,6 +1202,43 @@ const Player = (() => {
     updatePrevButton();
   }
 
+  // POST the delete, swap the refreshed card HTML in (if on page), return true on success.
+  // Shared by the player-bar deleteTrack() and sidebar sidebarDeleteTrack().
+  async function postDeleteTrack(concertId, trackIdx) {
+    try {
+      const resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/delete`, { method: "POST" });
+      if (!resp.ok) {
+        showError("Delete failed");
+        return false;
+      }
+      const html = await resp.text();
+      // The response is the concert's full card; swap it in if visible on page.
+      // List visibility is pure CSS so no open/closed state needs preserving.
+      const card = document.getElementById("concert-" + concertId);
+      if (card) {
+        card.outerHTML = html;
+        const fresh = document.getElementById("concert-" + concertId);
+        if (fresh && window.htmx) window.htmx.process(fresh);
+      }
+      return true;
+    } catch (e) {
+      showError("Delete failed");
+      tracing("postDeleteTrack fetch failed", e);
+      return false;
+    }
+  }
+
+  // Advance playback after the currently-playing track has been deleted.
+  async function advanceAfterDelete() {
+    cancelAutoAdvance();
+    if (audio) audio.pause();
+    const played = await playFromQueue();
+    if (!played) {
+      const advanced = await playNextTrack();
+      if (!advanced) stopPlayback();
+    }
+  }
+
   // Player-bar Delete button: delete the currently-playing track's files (no
   // confirmation, matching the track-list button), refresh the concert's
   // on-page card, then advance to the next track — or stop if nothing is next.
@@ -1044,50 +1248,38 @@ const Player = (() => {
     const trackIdx = state.trackIdx;
     tracing("deleteTrack", { concertId, trackIdx });
 
-    let resp;
-    try {
-      resp = await fetch(`/concerts/${concertId}/tracks/${trackIdx}/delete`, { method: "POST" });
-    } catch (e) {
-      showError("Delete failed");
-      tracing("deleteTrack fetch failed", e);
-      return;
-    }
-    if (!resp.ok) {
-      showError("Delete failed");
-      return;
-    }
-    const html = await resp.text();
+    if (!(await postDeleteTrack(concertId, trackIdx))) return;
 
-    // The response is the concert's full card (same as the track-list trash
-    // button's htmx swap), so the tracks-button count and split badge refresh
-    // along with the embedded list. Swap it in if the card is on the current
-    // page — no-op otherwise (cross-concert safe). List visibility is pure
-    // CSS (hover), so no open/closed state needs preserving.
-    const card = document.getElementById("concert-" + concertId);
-    if (card) {
-      card.outerHTML = html;
-      const fresh = document.getElementById("concert-" + concertId);
-      // Wire up hx-* attributes on the swapped-in card (its buttons use
-      // hx-post). outerHTML bypasses htmx so we have to process it manually.
-      if (fresh && window.htmx) window.htmx.process(fresh);
-    }
-
-    // The delete succeeded server-side, but if playback moved on while the POST
-    // was in flight (track ended, or the user switched), do not disturb whatever
+    // If playback moved on while the POST was in flight, do not disturb whatever
     // is playing now — just leave the refreshed list.
     if (state.concertId !== concertId || state.trackIdx !== trackIdx) {
       tracing("deleteTrack: playback moved on, not advancing", {});
       return;
     }
 
-    // Advance like the Next button (state left intact so "next" is computed
-    // after the deleted index); stop if there is nothing to advance to.
-    cancelAutoAdvance();
-    if (audio) audio.pause();
-    const played = await playFromQueue();
-    if (!played) {
-      const advanced = await playNextTrack();
-      if (!advanced) stopPlayback();
+    await advanceAfterDelete();
+  }
+
+  // Sidebar trash button: delete a track from the sidebar track list.
+  // Unlike the htmx card-trash button, there is no .card ancestor, so this
+  // calls postDeleteTrack directly, then re-fetches the sidebar to reflect
+  // new availability. Advances playback only when the deleted track was playing.
+  async function sidebarDeleteTrack(concertId, trackIdx) {
+    tracing("sidebarDeleteTrack", { concertId, trackIdx });
+    const btn = document.querySelector(
+      `#sidebar-concert-tracks .btn-delete[onclick*="sidebarDeleteTrack(${concertId}, ${trackIdx})"]`
+    );
+    if (btn) btn.disabled = true;
+
+    const success = await postDeleteTrack(concertId, trackIdx);
+
+    // Sidebar bypasses htmx card events, so refresh it explicitly.
+    if (isSidebarOpen()) await loadSidebarTracks(concertId);
+
+    if (!success) return;
+
+    if (state.concertId === concertId && state.trackIdx === trackIdx) {
+      await advanceAfterDelete();
     }
   }
 
@@ -1099,5 +1291,5 @@ const Player = (() => {
 
   return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
-    openConcert };
+    openConcert, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue };
 })();
