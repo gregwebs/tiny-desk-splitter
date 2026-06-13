@@ -214,6 +214,9 @@ struct JobLogTemplate {
 
 pub enum AppError {
     NotFound,
+    /// A well-formed request that fails validation (bad reference, cycle, empty
+    /// name, …). Surfaced as 422 with the message so the client can show it.
+    BadRequest(String),
     Internal(anyhow::Error),
 }
 
@@ -223,10 +226,26 @@ impl<E: Into<anyhow::Error>> From<E> for AppError {
     }
 }
 
+impl AppError {
+    /// Map the playlist-layer error onto HTTP semantics: missing playlist → 404,
+    /// validation failure → 422, anything else → 500. Used via
+    /// `.map_err(AppError::from_playlist)` rather than `From`/`?`, because the
+    /// blanket `From<E: Into<anyhow::Error>>` would otherwise collapse every
+    /// `PlaylistError` into a 500 and erase the 404/422 distinction.
+    fn from_playlist(e: db::PlaylistError) -> Self {
+        match e {
+            db::PlaylistError::NotFound => AppError::NotFound,
+            db::PlaylistError::Invalid(msg) => AppError::BadRequest(msg),
+            db::PlaylistError::Db(err) => AppError::Internal(err),
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "Not found").into_response(),
+            AppError::BadRequest(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response(),
             AppError::Internal(e) => {
                 tracing::error!("{e:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -2204,6 +2223,326 @@ pub async fn htmx_js() -> impl IntoResponse {
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("../../static/htmx.min.js"),
     )
+}
+
+// ── Playlists (JSON API) ─────────────────────────────────────────────────────
+//
+// All playlist endpoints live under `/api/...` and speak JSON, distinct from the
+// htmx HTML the rest of the app serves (and avoiding a collision with the Phase-2
+// HTML pages that will live at `/playlists` and `/playlists/:id`).
+
+#[derive(serde::Serialize)]
+pub struct PlaylistJson {
+    id: i64,
+    name: String,
+    description: Option<String>,
+    inserted_at: String,
+    updated_at: Option<String>,
+}
+
+impl From<crate::model::Playlist> for PlaylistJson {
+    fn from(p: crate::model::Playlist) -> Self {
+        PlaylistJson {
+            id: p.id,
+            name: p.name,
+            description: p.description,
+            inserted_at: p.inserted_at,
+            updated_at: p.updated_at,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct ResolvedTrackJson {
+    concert_id: i64,
+    track_index: usize,
+    title: String,
+    duration: Option<f64>,
+    available: bool,
+}
+
+impl From<crate::model::ResolvedTrack> for ResolvedTrackJson {
+    fn from(t: crate::model::ResolvedTrack) -> Self {
+        ResolvedTrackJson {
+            concert_id: t.concert_id,
+            track_index: t.track_index,
+            title: t.title,
+            duration: t.duration,
+            available: t.available,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct PlaylistSummaryJson {
+    track_count: usize,
+    known_duration_secs: f64,
+    unknown_count: usize,
+    first_track: Option<ResolvedTrackJson>,
+}
+
+impl From<crate::model::PlaylistSummary> for PlaylistSummaryJson {
+    fn from(s: crate::model::PlaylistSummary) -> Self {
+        PlaylistSummaryJson {
+            track_count: s.track_count,
+            known_duration_secs: s.known_duration_secs,
+            unknown_count: s.unknown_count,
+            first_track: s.first_track.map(Into::into),
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct PlaylistListEntry {
+    playlist: PlaylistJson,
+    summary: PlaylistSummaryJson,
+}
+
+/// One raw playlist item (the un-flattened reference). `item_type` is "track" |
+/// "concert" | "playlist"; the other fields are populated per kind.
+#[derive(serde::Serialize)]
+pub struct PlaylistItemJson {
+    id: i64,
+    position: i64,
+    item_type: String,
+    concert_id: Option<i64>,
+    track_index: Option<usize>,
+    child_playlist_id: Option<i64>,
+}
+
+impl From<crate::model::PlaylistItem> for PlaylistItemJson {
+    fn from(i: crate::model::PlaylistItem) -> Self {
+        use crate::model::PlaylistItemKind::*;
+        let item_type = i.kind.type_str().to_string();
+        let (concert_id, track_index, child_playlist_id) = match i.kind {
+            Track {
+                concert_id,
+                track_index,
+            } => (Some(concert_id), Some(track_index), None),
+            Concert { concert_id } => (Some(concert_id), None, None),
+            Playlist { child_playlist_id } => (None, None, Some(child_playlist_id)),
+        };
+        PlaylistItemJson {
+            id: i.id,
+            position: i.position,
+            item_type,
+            concert_id,
+            track_index,
+            child_playlist_id,
+        }
+    }
+}
+
+#[derive(serde::Serialize)]
+pub struct PlaylistDetailJson {
+    playlist: PlaylistJson,
+    items: Vec<PlaylistItemJson>,
+    resolved_tracks: Vec<ResolvedTrackJson>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CreatePlaylistReq {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct UpdatePlaylistReq {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct AddItemReq {
+    #[serde(rename = "type")]
+    item_type: String,
+    #[serde(default)]
+    concert_id: Option<i64>,
+    #[serde(default)]
+    track_index: Option<usize>,
+    #[serde(default)]
+    child_playlist_id: Option<i64>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct ReorderReq {
+    item_ids: Vec<i64>,
+}
+
+#[derive(serde::Serialize)]
+pub struct CreatedPlaylistJson {
+    id: i64,
+}
+
+#[derive(serde::Serialize)]
+pub struct CreatedItemJson {
+    item_id: i64,
+}
+
+/// Validate the request body into a typed item kind (presence of the right
+/// fields for the declared `type`); the deeper reference/cycle checks happen in
+/// `db::add_playlist_item`.
+fn parse_item_kind(req: &AddItemReq) -> Result<crate::model::PlaylistItemKind, AppError> {
+    use crate::model::PlaylistItemKind;
+    match req.item_type.as_str() {
+        "track" => {
+            let concert_id = req
+                .concert_id
+                .ok_or_else(|| AppError::BadRequest("track item requires concert_id".into()))?;
+            let track_index = req
+                .track_index
+                .ok_or_else(|| AppError::BadRequest("track item requires track_index".into()))?;
+            Ok(PlaylistItemKind::Track {
+                concert_id,
+                track_index,
+            })
+        }
+        "concert" => {
+            let concert_id = req
+                .concert_id
+                .ok_or_else(|| AppError::BadRequest("concert item requires concert_id".into()))?;
+            Ok(PlaylistItemKind::Concert { concert_id })
+        }
+        "playlist" => {
+            let child_playlist_id = req.child_playlist_id.ok_or_else(|| {
+                AppError::BadRequest("playlist item requires child_playlist_id".into())
+            })?;
+            Ok(PlaylistItemKind::Playlist { child_playlist_id })
+        }
+        other => Err(AppError::BadRequest(format!("unknown item type: {other}"))),
+    }
+}
+
+pub async fn create_playlist(
+    State(state): State<AppState>,
+    Json(req): Json<CreatePlaylistReq>,
+) -> Result<Json<CreatedPlaylistJson>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let id = db::create_playlist(&conn, &req.name, req.description.as_deref())
+        .map_err(AppError::from_playlist)?;
+    Ok(Json(CreatedPlaylistJson { id }))
+}
+
+pub async fn list_playlists(
+    State(state): State<AppState>,
+) -> Result<Json<Vec<PlaylistListEntry>>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let playlists = db::list_playlists(&conn)?;
+    let mut out = Vec::with_capacity(playlists.len());
+    for p in playlists {
+        let summary = crate::playlist::summarize_playlist(&conn, p.id)?;
+        out.push(PlaylistListEntry {
+            playlist: p.into(),
+            summary: summary.into(),
+        });
+    }
+    Ok(Json(out))
+}
+
+pub async fn get_playlist(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<PlaylistDetailJson>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let playlist = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+    let items = db::list_playlist_items(&conn, id)?;
+    let resolved = crate::playlist::expand_playlist(&conn, id)?;
+    Ok(Json(PlaylistDetailJson {
+        playlist: playlist.into(),
+        items: items.into_iter().map(Into::into).collect(),
+        resolved_tracks: resolved.into_iter().map(Into::into).collect(),
+    }))
+}
+
+pub async fn update_playlist(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<UpdatePlaylistReq>,
+) -> Result<StatusCode, AppError> {
+    let conn = state.db.lock().unwrap();
+    let existing = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+    let name = req.name.unwrap_or(existing.name);
+    // PATCH semantics: a provided description (incl. empty) replaces; omitted
+    // keeps the current value. Clearing to NULL is not supported in this phase.
+    let description = req.description.or(existing.description);
+    db::update_playlist(&conn, id, &name, description.as_deref())
+        .map_err(AppError::from_playlist)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn delete_playlist(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<StatusCode, AppError> {
+    let conn = state.db.lock().unwrap();
+    if db::delete_playlist(&conn, id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+pub async fn add_playlist_item(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<AddItemReq>,
+) -> Result<Json<CreatedItemJson>, AppError> {
+    let kind = parse_item_kind(&req)?;
+    let conn = state.db.lock().unwrap();
+    let item_id = db::add_playlist_item(&conn, id, &kind).map_err(AppError::from_playlist)?;
+    Ok(Json(CreatedItemJson { item_id }))
+}
+
+pub async fn remove_playlist_item(
+    State(state): State<AppState>,
+    Path((id, item_id)): Path<(i64, i64)>,
+) -> Result<StatusCode, AppError> {
+    let conn = state.db.lock().unwrap();
+    if db::remove_playlist_item(&conn, id, item_id)? {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(AppError::NotFound)
+    }
+}
+
+pub async fn reorder_playlist_items(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(req): Json<ReorderReq>,
+) -> Result<StatusCode, AppError> {
+    let mut conn = state.db.lock().unwrap();
+    db::reorder_playlist_items(&mut conn, id, &req.item_ids).map_err(AppError::from_playlist)?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub async fn track_playlists(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let out = db::playlists_containing_track(&conn, id, idx)?;
+    Ok(Json(out.into_iter().map(Into::into).collect()))
+}
+
+pub async fn concert_playlists(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let out = db::playlists_containing_concert(&conn, id)?;
+    Ok(Json(out.into_iter().map(Into::into).collect()))
+}
+
+pub async fn playlist_nested_in(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let out = db::playlists_nesting_playlist(&conn, id)?;
+    Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
 #[cfg(test)]

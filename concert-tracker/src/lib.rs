@@ -6,6 +6,7 @@ pub mod jobs;
 pub mod model;
 pub mod month_walk;
 pub mod normalize;
+pub mod playlist;
 pub mod scan;
 pub mod scrape;
 pub mod split_timestamps;

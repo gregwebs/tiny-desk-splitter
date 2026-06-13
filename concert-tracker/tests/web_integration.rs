@@ -2601,3 +2601,179 @@ async fn delete_split_preserves_split_timestamp_columns() {
         "user timestamps must survive delete-split"
     );
 }
+
+// ── Playlists JSON API ───────────────────────────────────────────────────────
+
+async fn delete_req(app: &axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+fn seed_playlist_concert(
+    conn: &rusqlite::Connection,
+    url: &str,
+    album: &str,
+    songs: &[&str],
+) -> i64 {
+    db::upsert_listing(
+        conn,
+        &NewListing {
+            source_url: url.to_string(),
+            title: album.to_string(),
+            concert_date: None,
+            teaser: None,
+        },
+    )
+    .unwrap();
+    let id = db::get_concert_by_url(conn, url).unwrap().unwrap().id;
+    db::update_metadata(
+        conn,
+        id,
+        &MetadataUpdate {
+            artist: "Artist".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: songs.iter().map(|s| s.to_string()).collect(),
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    id
+}
+
+#[tokio::test]
+async fn playlist_api_crud_and_resolution() {
+    let conn = db::open_in_memory().unwrap();
+    let cid = seed_playlist_concert(&conn, "https://npr.org/p1", "Album One", &["t0", "t1"]);
+    set_auto_split_timestamps(&conn, cid, &sample_song_timestamps(&["t0", "t1"])).unwrap();
+    let app = router(test_state(conn));
+
+    // Create a playlist.
+    let (status, json) =
+        post_body_json(&app, "/api/playlists", serde_json::json!({"name": "Mix"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let pid = json["id"].as_i64().unwrap();
+
+    // Add a track item, then a whole-concert item.
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "track", "concert_id": cid, "track_index": 0}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "concert", "concert_id": cid}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Detail: 2 raw items flatten to 3 resolved tracks (t0 + [t0, t1]).
+    let (s, detail) = get_json(&app, &format!("/api/playlists/{pid}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(detail["items"].as_array().unwrap().len(), 2);
+    let resolved = detail["resolved_tracks"].as_array().unwrap();
+    assert_eq!(resolved.len(), 3);
+    assert_eq!(resolved[0]["title"], "t0");
+
+    // List page payload carries the summary.
+    let (s, list) = get_json(&app, "/api/playlists").await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["summary"]["track_count"], 3);
+
+    // Membership of a track.
+    let (s, m) = get_json(&app, &format!("/api/concerts/{cid}/tracks/0/playlists")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(m.as_array().unwrap().len(), 1);
+    assert_eq!(m[0]["id"].as_i64().unwrap(), pid);
+
+    // Reorder the two items (reverse), then remove the first.
+    let ids: Vec<i64> = detail["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["id"].as_i64().unwrap())
+        .collect();
+    let reversed: Vec<i64> = ids.iter().rev().copied().collect();
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items/reorder"),
+        serde_json::json!({ "item_ids": reversed }),
+    )
+    .await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+
+    let (s, _) = delete_req(&app, &format!("/api/playlists/{pid}/items/{}", ids[0])).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (_, detail2) = get_json(&app, &format!("/api/playlists/{pid}")).await;
+    assert_eq!(detail2["items"].as_array().unwrap().len(), 1);
+
+    // Delete the playlist; it then 404s.
+    let (s, _) = delete_req(&app, &format!("/api/playlists/{pid}")).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = get_json(&app, &format!("/api/playlists/{pid}")).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn playlist_api_validation_status_codes() {
+    let conn = db::open_in_memory().unwrap();
+    let cid = seed_playlist_concert(&conn, "https://npr.org/p1", "Album One", &["t0"]);
+    let app = router(test_state(conn));
+
+    // Empty name → 422.
+    let (s, _) = post_body_json(&app, "/api/playlists", serde_json::json!({"name": "   "})).await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let (_, j) = post_body_json(&app, "/api/playlists", serde_json::json!({"name": "P"})).await;
+    let pid = j["id"].as_i64().unwrap();
+
+    // Out-of-range track index → 422.
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "track", "concert_id": cid, "track_index": 9}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Cycle: P2 nests P, then P nesting P2 → 422.
+    let (_, j2) = post_body_json(&app, "/api/playlists", serde_json::json!({"name": "P2"})).await;
+    let p2 = j2["id"].as_i64().unwrap();
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{p2}/items"),
+        serde_json::json!({"type": "playlist", "child_playlist_id": pid}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "playlist", "child_playlist_id": p2}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::UNPROCESSABLE_ENTITY);
+
+    // Unknown playlist → 404.
+    let (s, _) = get_json(&app, "/api/playlists/4242").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

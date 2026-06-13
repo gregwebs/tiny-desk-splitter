@@ -437,6 +437,75 @@ pub fn list_all_tracks_from_db(
         .collect()
 }
 
+// ── Playlists ────────────────────────────────────────────────────────────────
+
+/// A user-curated, ordered collection. Its items (see `PlaylistItem`) are
+/// expanded to concrete tracks at read time by `crate::playlist::expand_playlist`.
+#[derive(Debug, Clone)]
+pub struct Playlist {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub inserted_at: String,
+    pub updated_at: Option<String>,
+}
+
+/// What a single playlist item references. A row in `playlist_items` stores this
+/// as an `item_type` discriminator plus nullable `concert_id`/`track_index`/
+/// `child_playlist_id` columns; this enum is the validated, in-memory form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlaylistItemKind {
+    /// A single track: `concert.set_list[track_index]`.
+    Track { concert_id: i64, track_index: usize },
+    /// A whole concert — expands to all of its tracks.
+    Concert { concert_id: i64 },
+    /// Another playlist nested inside this one — expands recursively.
+    Playlist { child_playlist_id: i64 },
+}
+
+impl PlaylistItemKind {
+    /// The `item_type` string stored in the DB.
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            PlaylistItemKind::Track { .. } => "track",
+            PlaylistItemKind::Concert { .. } => "concert",
+            PlaylistItemKind::Playlist { .. } => "playlist",
+        }
+    }
+}
+
+/// One ordered entry in a playlist.
+#[derive(Debug, Clone)]
+pub struct PlaylistItem {
+    pub id: i64,
+    pub playlist_id: i64,
+    pub position: i64,
+    pub kind: PlaylistItemKind,
+}
+
+/// A track produced by flattening a playlist's items (the "live reference"
+/// result). `duration` is `None` when the source concert has no split timestamps
+/// for this index; `available` mirrors the concert's `tracks_present[index]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedTrack {
+    pub concert_id: i64,
+    pub track_index: usize,
+    pub title: String,
+    pub duration: Option<f64>,
+    pub available: bool,
+}
+
+/// Aggregate view of a playlist for the list page: how many tracks it resolves
+/// to, the summed duration of the tracks whose duration is known, how many have
+/// unknown duration, and the first track that would play.
+#[derive(Debug, Clone)]
+pub struct PlaylistSummary {
+    pub track_count: usize,
+    pub known_duration_secs: f64,
+    pub unknown_count: usize,
+    pub first_track: Option<ResolvedTrack>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

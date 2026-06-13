@@ -100,6 +100,42 @@ pub fn router(state: AppState) -> Router {
             "/settings",
             get(handlers::settings_page).post(handlers::settings_save),
         )
+        // Playlists JSON API (Phase 1). Mounted under /api so it doesn't collide
+        // with the Phase-2 HTML pages at /playlists and /playlists/:id.
+        .route(
+            "/api/playlists",
+            get(handlers::list_playlists).post(handlers::create_playlist),
+        )
+        .route(
+            "/api/playlists/:id",
+            get(handlers::get_playlist)
+                .patch(handlers::update_playlist)
+                .delete(handlers::delete_playlist),
+        )
+        .route(
+            "/api/playlists/:id/items",
+            post(handlers::add_playlist_item),
+        )
+        .route(
+            "/api/playlists/:id/items/reorder",
+            post(handlers::reorder_playlist_items),
+        )
+        .route(
+            "/api/playlists/:id/items/:item_id",
+            axum::routing::delete(handlers::remove_playlist_item),
+        )
+        .route(
+            "/api/playlists/:id/nested-in",
+            get(handlers::playlist_nested_in),
+        )
+        .route(
+            "/api/concerts/:id/playlists",
+            get(handlers::concert_playlists),
+        )
+        .route(
+            "/api/concerts/:id/tracks/:idx/playlists",
+            get(handlers::track_playlists),
+        )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .route("/static/player.js", get(handlers::player_js))
         .route("/static/splitter.js", get(handlers::splitter_js))
