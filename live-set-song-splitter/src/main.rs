@@ -221,6 +221,9 @@ fn main() -> Result<()> {
 
     // If timestamps file is provided, read from it instead of detecting segments
     let mut segments = Vec::new();
+    // Unmatched artist-overlay clusters from text detection — preferred anchors for
+    // any song that text detection dropped (e.g. an unreadable short title).
+    let mut overlay_clusters: Vec<f64> = Vec::new();
     if let Some(timestamps_path) = &cli.timestamps_file {
         println!("Reading song timestamps from file: {}", timestamps_path);
         // Fall back to the old format if not found
@@ -291,7 +294,7 @@ fn main() -> Result<()> {
         println!("Attempting to detect song boundaries using text overlays...");
 
         // Get song segments from text detection
-        let song_segments = detect_song_boundaries_from_text(
+        let detection = detect_song_boundaries_from_text(
             &input_file,
             &info.artist,
             &concert.set_list,
@@ -299,7 +302,8 @@ fn main() -> Result<()> {
             &settings,
             &temp_dir,
         )?;
-        segments = song_segments;
+        segments = detection.segments;
+        overlay_clusters = detection.unmatched_overlay_clusters;
         for segment in &segments {
             println!("Segment: {:?}", segment);
         }
@@ -314,8 +318,12 @@ fn main() -> Result<()> {
         println!("Text overlay detection missing some songs; extracting audio for silence-based recovery...");
         let waveform = audio::extract_audio_waveform(&input_file)
             .with_context(|| format!("Failed to extract audio waveform from {}", input_file))?;
-        let results =
-            recover_missing_songs_from_silence(&mut segments, &concert.set_list, &waveform);
+        let results = recover_missing_songs(
+            &mut segments,
+            &concert.set_list,
+            &overlay_clusters,
+            &waveform,
+        );
         audio_data = Some(waveform);
 
         let still_missing: Vec<String> = concert
@@ -586,10 +594,86 @@ fn adaptive_silence_threshold(energy_profile: &[f64]) -> f64 {
         .max(audio::ENERGY_THRESHOLD * 0.1)
 }
 
+/// Where a recovered boundary came from, in order of preference.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum RecoverySource {
+    /// A frame where the artist overlay was detected but the title was unreadable
+    /// (an "unmatched overlay cluster"). The most reliable signal: a real title card
+    /// appeared here, so it is treated as an overlay estimate (gets the pullback).
+    Overlay,
+    /// The midpoint of an audio silence span inside the gap.
+    Silence,
+    /// No candidate available; the gap was equally divided.
+    EqualSplit,
+}
+
+/// Fill still-empty (`None`) slots of `chosen` from `candidates`, assigning each
+/// candidate to the empty slot whose `expected` position it is closest to (iterating
+/// slots in order, matching the original silence-only behavior). Enforces
+/// `MIN_SONG_GAP_SECONDS` spacing both against boundaries an earlier tier already
+/// chose and between candidates picked here. `candidates` must already be filtered
+/// for gap-endpoint spacing (see [`candidates_in_gap`]).
+fn fill_slots_by_proximity(
+    chosen: &mut [Option<(f64, RecoverySource)>],
+    expected: &[f64],
+    mut candidates: Vec<f64>,
+    source: RecoverySource,
+) {
+    // Drop candidates too close to a boundary an earlier tier already chose.
+    let prechosen: Vec<f64> = chosen.iter().filter_map(|c| c.map(|(t, _)| t)).collect();
+    candidates.retain(|&m| {
+        prechosen
+            .iter()
+            .all(|&p| (m - p).abs() >= audio::MIN_SONG_GAP_SECONDS)
+    });
+
+    for slot in 0..chosen.len() {
+        if chosen[slot].is_some() {
+            continue;
+        }
+        if candidates.is_empty() {
+            break;
+        }
+        let exp = expected[slot];
+        // Pick the candidate closest to this slot's expected position.
+        let (best_i, &best) = candidates
+            .iter()
+            .enumerate()
+            .min_by(|(_, a), (_, b)| (*a - exp).abs().partial_cmp(&(*b - exp).abs()).unwrap())
+            .unwrap();
+        chosen[slot] = Some((best, source));
+        candidates.remove(best_i);
+        // Drop other candidates within the spacing window so a later slot can't
+        // pick a near-duplicate.
+        candidates.retain(|&m| (m - best).abs() >= audio::MIN_SONG_GAP_SECONDS);
+    }
+}
+
+/// Candidates strictly inside the gap `(gap_start, gap_end)` that also clear the
+/// `MIN_SONG_GAP_SECONDS` spacing from both endpoints.
+fn candidates_in_gap(candidates: &[f64], gap_start: f64, gap_end: f64) -> Vec<f64> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&m| m > gap_start && m < gap_end)
+        .filter(|&m| {
+            (m - gap_start).abs() >= audio::MIN_SONG_GAP_SECONDS
+                && (gap_end - m).abs() >= audio::MIN_SONG_GAP_SECONDS
+        })
+        .collect()
+}
+
 /// For each missing song that sits in an interior gap (between two found
-/// boundaries), insert a `SongSegment` whose start time is taken from the
-/// longest audio silences inside the gap. Falls back to equal-spacing the gap
-/// when no qualifying silence is available.
+/// boundaries), insert a `SongSegment` for it. Boundary candidates are taken, in
+/// order of preference, from (1) `overlay_clusters` — frames where the artist
+/// overlay was detected but the (short/stylized) title was unreadable, so the song
+/// was dropped from text detection — then (2) the longest audio silences in the
+/// gap, and finally (3) equal-spacing the gap when neither is available.
+///
+/// Overlay clusters are by far the most reliable signal (they mark where a real
+/// title card appeared), so they win over silence within a gap. This is what
+/// rescues e.g. yeule's 2-char "VV" title, whose overlay is detected but never
+/// OCR-matched. See docs/change/2026-06-13-overlay-anchor-recovery.md.
 ///
 /// Songs missing at the head (before the first found boundary) or tail (after
 /// the last) are not recovered here — the head case is handled separately by
@@ -597,9 +681,10 @@ fn adaptive_silence_threshold(energy_profile: &[f64]) -> f64 {
 ///
 /// Returns one `RecoveryResult` per song in `set_list` order so the caller can
 /// build the still-missing list.
-fn recover_missing_songs_from_silence(
+fn recover_missing_songs(
     segments: &mut Vec<SongSegment>,
     set_list: &[Song],
+    overlay_clusters: &[f64],
     audio_data: &[f32],
 ) -> Vec<RecoveryResult> {
     let mut results: Vec<RecoveryResult> = set_list
@@ -620,6 +705,7 @@ fn recover_missing_songs_from_silence(
     let energy_profile = audio::calculate_energy_profile(audio_data);
     let threshold = adaptive_silence_threshold(&energy_profile);
     let silence_spans = audio::find_silence_spans(&energy_profile, threshold);
+    let silence_midpoints: Vec<f64> = silence_spans.iter().map(|s| s.midpoint_seconds).collect();
 
     let mut i = 0;
     while i < set_list.len() {
@@ -655,65 +741,39 @@ fn recover_missing_songs_from_silence(
         let gap_start = prev_segment.segment.start_time;
         let gap_end = next_segment.segment.start_time;
         let missing_count = run_end - i + 1;
-
-        // For each missing slot in chronological order, compute its expected
-        // position (assuming equal-length songs) and pick the silence midpoint
-        // closest to that position. This is more robust than "longest silence"
-        // when the gap contains both an end-of-song silence and a
-        // start-of-song silence — proximity to the expected slot picks the
-        // right one. Spacing constraints keep two chosen midpoints from
-        // landing too close to each other or to the gap endpoints.
-        #[derive(Clone, Copy)]
-        enum Source {
-            Silence,
-            EqualSplit,
-        }
-        let mut chosen: Vec<(f64, Source)> = vec![(0.0, Source::EqualSplit); missing_count];
-        let mut filled = vec![false; missing_count];
-
         let gap_size = gap_end - gap_start;
-        let mut candidates: Vec<f64> = silence_spans
-            .iter()
-            .filter(|s| s.midpoint_seconds > gap_start && s.midpoint_seconds < gap_end)
-            .filter(|s| {
-                let m = s.midpoint_seconds;
-                (m - gap_start).abs() >= audio::MIN_SONG_GAP_SECONDS
-                    && (gap_end - m).abs() >= audio::MIN_SONG_GAP_SECONDS
-            })
-            .map(|s| s.midpoint_seconds)
+
+        // Expected (equal-length) position of each missing slot within the gap. Each
+        // candidate tier picks, per slot, the candidate closest to this position —
+        // more robust than "longest" when a gap holds both an end-of-song and a
+        // start-of-song silence.
+        let expected: Vec<f64> = (0..missing_count)
+            .map(|slot| gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64))
             .collect();
 
-        for slot in 0..missing_count {
-            if candidates.is_empty() {
-                break;
-            }
-            let expected =
-                gap_start + ((slot + 1) as f64) * gap_size / ((missing_count + 1) as f64);
-            // Pick the candidate closest to `expected`.
-            let (best_i, &best_mid) = candidates
-                .iter()
-                .enumerate()
-                .min_by(|(_, a), (_, b)| {
-                    (*a - expected)
-                        .abs()
-                        .partial_cmp(&(*b - expected).abs())
-                        .unwrap()
-                })
-                .unwrap();
-            chosen[slot] = (best_mid, Source::Silence);
-            filled[slot] = true;
-            candidates.remove(best_i);
-            // Drop other candidates within the spacing window so a later slot
-            // can't pick a near-duplicate.
-            candidates.retain(|&m| (m - best_mid).abs() >= audio::MIN_SONG_GAP_SECONDS);
-        }
+        // Two-tier candidate selection: prefer overlay clusters (a real title card
+        // appeared there), then audio silences. Each tier fills only still-empty
+        // slots and respects spacing against boundaries an earlier tier chose.
+        let mut chosen: Vec<Option<(f64, RecoverySource)>> = vec![None; missing_count];
+        fill_slots_by_proximity(
+            &mut chosen,
+            &expected,
+            candidates_in_gap(overlay_clusters, gap_start, gap_end),
+            RecoverySource::Overlay,
+        );
+        fill_slots_by_proximity(
+            &mut chosen,
+            &expected,
+            candidates_in_gap(&silence_midpoints, gap_start, gap_end),
+            RecoverySource::Silence,
+        );
 
-        let unfilled_count = filled.iter().filter(|f| !**f).count();
+        let unfilled_count = chosen.iter().filter(|c| c.is_none()).count();
         if unfilled_count > 0 {
             let missing_titles: Vec<&str> =
                 (i..=run_end).map(|j| set_list[j].title.as_str()).collect();
             println!(
-                "warning: silence-based recovery only filled {}/{} boundaries in gap {:.2}s–{:.2}s; equally spacing remaining songs: {:?}",
+                "warning: overlay/silence recovery only filled {}/{} boundaries in gap {:.2}s–{:.2}s; equally spacing remaining songs: {:?}",
                 missing_count - unfilled_count,
                 missing_count,
                 gap_start,
@@ -725,15 +785,13 @@ fn recover_missing_songs_from_silence(
             let mut anchors: Vec<f64> = Vec::with_capacity(2 + missing_count);
             anchors.push(gap_start);
             anchors.push(gap_end);
-            for (slot, was_filled) in filled.iter().enumerate() {
-                if *was_filled {
-                    anchors.push(chosen[slot].0);
-                }
+            for c in chosen.iter().flatten() {
+                anchors.push(c.0);
             }
             anchors.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-            for (slot, was_filled) in filled.iter().enumerate() {
-                if *was_filled {
+            for slot in 0..missing_count {
+                if chosen[slot].is_some() {
                     continue;
                 }
                 let (widest_i, _) = anchors
@@ -742,18 +800,22 @@ fn recover_missing_songs_from_silence(
                     .max_by(|(_, a), (_, b)| (a[1] - a[0]).partial_cmp(&(b[1] - b[0])).unwrap())
                     .unwrap();
                 let mid = (anchors[widest_i] + anchors[widest_i + 1]) / 2.0;
-                chosen[slot] = (mid, Source::EqualSplit);
+                chosen[slot] = Some((mid, RecoverySource::EqualSplit));
                 anchors.insert(widest_i + 1, mid);
             }
         }
 
+        // Every slot is filled now; unwrap and order chronologically.
+        let mut chosen: Vec<(f64, RecoverySource)> =
+            chosen.into_iter().map(|c| c.unwrap()).collect();
         chosen.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         for (offset, &(start_time, source)) in chosen.iter().enumerate() {
             let song_idx = i + offset;
             let source_label = match source {
-                Source::Silence => "audio silence",
-                Source::EqualSplit => "equal-split",
+                RecoverySource::Overlay => "title overlay",
+                RecoverySource::Silence => "audio silence",
+                RecoverySource::EqualSplit => "equal-split",
             };
             println!(
                 "Recovered missing song '{}' at {:.2}s ({}, between '{}' and '{}')",
@@ -770,8 +832,10 @@ fn recover_missing_songs_from_silence(
                     end_time: gap_end,
                     is_song: true,
                 },
-                // Recovered at a silence/equal-split point, not an overlay estimate.
-                start_from_overlay: false,
+                // An overlay-sourced boundary is an overlay estimate (~OVERLAY_DELAY
+                // late), so it gets the same audio pullback as a detected overlay.
+                // Silence and equal-split boundaries are not overlay estimates.
+                start_from_overlay: source == RecoverySource::Overlay,
             });
             results[song_idx] = RecoveryResult::Recovered;
         }
@@ -1636,7 +1700,7 @@ mod tests_recover_missing_songs {
         ]);
         let set_list = songs(&["A", "B"]);
         let mut segments = vec![segment("A", 0.0), segment("B", 60.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
 
         // Both songs reported as already-found (we seeded both), so nothing to do.
         assert_eq!(results, vec![RecoveryResult::AlreadyFound; 2]);
@@ -1644,7 +1708,7 @@ mod tests_recover_missing_songs {
         // Now drop B and put a missing song between them.
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 60.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(
             results,
             vec![
@@ -1682,7 +1746,7 @@ mod tests_recover_missing_songs {
         // gap_start=0, gap_end=100, expected midpoint=50.
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 100.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results[1], RecoveryResult::Recovered);
         let b = segments.iter().find(|s| s.song.title == "B").unwrap();
         assert!(
@@ -1706,7 +1770,7 @@ mod tests_recover_missing_songs {
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
         let mut segments = vec![segment("A", 0.0), segment("D", 105.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results[1], RecoveryResult::Recovered);
         assert_eq!(results[2], RecoveryResult::Recovered);
 
@@ -1735,7 +1799,7 @@ mod tests_recover_missing_songs {
         ]);
         let set_list = songs(&["A", "B", "C", "D"]);
         let mut segments = vec![segment("A", 0.0), segment("D", 200.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         // Both B and C should be recovered, but C via equal-split since the
         // second silence is within MIN_SONG_GAP_SECONDS=20s of the first.
         assert_eq!(results[1], RecoveryResult::Recovered);
@@ -1757,7 +1821,7 @@ mod tests_recover_missing_songs {
         let audio = synth_audio(&[(60.0, false)]);
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 60.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results[1], RecoveryResult::Recovered);
         let b = segments.iter().find(|s| s.song.title == "B").unwrap();
         // Equal split between 0 and 60 puts B at 30.
@@ -1770,7 +1834,7 @@ mod tests_recover_missing_songs {
         let set_list = songs(&["A", "B"]);
         // B is found at 30s but A is missing — no anchor before A.
         let mut segments = vec![segment("B", 30.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results[0], RecoveryResult::StillMissing);
         assert_eq!(results[1], RecoveryResult::AlreadyFound);
         assert_eq!(
@@ -1785,7 +1849,7 @@ mod tests_recover_missing_songs {
         let audio = synth_audio(&[(60.0, false)]);
         let set_list = songs(&["A", "B"]);
         let mut segments = vec![segment("A", 0.0)];
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results[0], RecoveryResult::AlreadyFound);
         assert_eq!(results[1], RecoveryResult::StillMissing);
         assert_eq!(segments.len(), 1);
@@ -1797,7 +1861,7 @@ mod tests_recover_missing_songs {
         let set_list = songs(&["A", "B"]);
         let mut segments = vec![segment("A", 0.0), segment("B", 30.0)];
         let before = segments.clone();
-        let results = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let results = recover_missing_songs(&mut segments, &set_list, &[], &audio);
         assert_eq!(results, vec![RecoveryResult::AlreadyFound; 2]);
         assert_eq!(segments.len(), before.len());
         for (a, b) in segments.iter().zip(before.iter()) {
@@ -1810,7 +1874,7 @@ mod tests_recover_missing_songs {
         let audio = synth_audio(&[(10.0, false), (5.0, true), (15.0, false)]);
         let set_list = songs(&["A", "B", "C"]);
         let mut segments = vec![segment("A", 0.0), segment("C", 30.0)];
-        let _ = recover_missing_songs_from_silence(&mut segments, &set_list, &audio);
+        let _ = recover_missing_songs(&mut segments, &set_list, &[], &audio);
 
         // After recovery, segments should be sorted by start_time and chained:
         // A.end == B.start, B.end == C.start.
@@ -1845,6 +1909,144 @@ mod tests_recover_missing_songs {
             frames_per_second()
         );
     }
+
+    #[test]
+    fn overlay_cluster_preferred_over_silence() {
+        // Reproduces the yeule "VV" case in miniature: A and C are found, B's title
+        // overlay was detected but unreadable (overlay cluster at 200s), and the gap
+        // also contains an audio silence near 500s. The overlay cluster must win, so
+        // B is anchored at ~200s — NOT mis-placed at the 500s silence.
+        let audio = synth_audio(&[(498.0, false), (4.0, true), (98.0, false)]); // silence ~500s
+        let set_list = songs(&["A", "B", "C"]);
+        let mut segments = vec![segment("A", 0.0), segment("C", 600.0)];
+        let results = recover_missing_songs(&mut segments, &set_list, &[200.0], &audio);
+        assert_eq!(results[1], RecoveryResult::Recovered);
+        let b = segments.iter().find(|s| s.song.title == "B").unwrap();
+        assert!(
+            (b.segment.start_time - 200.0).abs() < 1.0,
+            "B should anchor on the overlay cluster (200s), got {:.2}s",
+            b.segment.start_time
+        );
+        // Overlay-sourced recovery is an overlay estimate, so it gets the pullback.
+        assert!(
+            b.start_from_overlay,
+            "overlay-recovered song must be marked start_from_overlay"
+        );
+    }
+
+    #[test]
+    fn overlay_cluster_outside_gap_is_ignored() {
+        // A cluster outside the missing song's gap (here after C) must not be used;
+        // recovery falls back to the silence in the gap.
+        let audio = synth_audio(&[(290.0, false), (4.0, true), (306.0, false)]); // silence ~292s
+        let set_list = songs(&["A", "B", "C"]);
+        let mut segments = vec![segment("A", 0.0), segment("C", 600.0)];
+        // Cluster at 800s is past C — irrelevant to B's gap (0,600).
+        let results = recover_missing_songs(&mut segments, &set_list, &[800.0], &audio);
+        assert_eq!(results[1], RecoveryResult::Recovered);
+        let b = segments.iter().find(|s| s.song.title == "B").unwrap();
+        assert!(
+            (b.segment.start_time - 292.0).abs() < 3.0,
+            "B should fall back to the in-gap silence (~292s), got {:.2}s",
+            b.segment.start_time
+        );
+        assert!(
+            !b.start_from_overlay,
+            "silence-recovered song must not be marked start_from_overlay"
+        );
+    }
+
+    #[test]
+    fn candidates_in_gap_filters_endpoints_and_outside() {
+        // MIN_SONG_GAP_SECONDS = 20. Inside (0,600): 5 is too close to start, 595 too
+        // close to end, 700 is outside; only 300 survives.
+        let got = candidates_in_gap(&[5.0, 300.0, 595.0, 700.0], 0.0, 600.0);
+        assert_eq!(got, vec![300.0]);
+    }
+}
+
+#[cfg(test)]
+mod tests_cluster_overlay_frames {
+    use super::*;
+
+    #[test]
+    fn collapses_consecutive_run_to_earliest() {
+        // The yeule VV overlay: frames 262..=265 -> one cluster at 262.
+        assert_eq!(cluster_overlay_frames(&[262, 263, 264, 265], 10.0), vec![262.0]);
+    }
+
+    #[test]
+    fn separates_runs_beyond_gap() {
+        assert_eq!(
+            cluster_overlay_frames(&[262, 263, 400, 401], 10.0),
+            vec![262.0, 400.0]
+        );
+    }
+
+    #[test]
+    fn sorts_and_dedups_input() {
+        assert_eq!(
+            cluster_overlay_frames(&[265, 262, 264, 263, 263], 10.0),
+            vec![262.0]
+        );
+    }
+
+    #[test]
+    fn empty_and_single() {
+        assert!(cluster_overlay_frames(&[], 10.0).is_empty());
+        assert_eq!(cluster_overlay_frames(&[42], 10.0), vec![42.0]);
+    }
+
+    #[test]
+    fn gap_exactly_at_threshold_stays_in_cluster() {
+        // 262 and 272 are exactly 10s apart; `> max_gap` splits, so this stays one.
+        assert_eq!(cluster_overlay_frames(&[262, 272], 10.0), vec![262.0]);
+        // 11s apart -> two clusters.
+        assert_eq!(cluster_overlay_frames(&[262, 273], 10.0), vec![262.0, 273.0]);
+    }
+}
+
+/// A title card stays on screen for several seconds, so an "artist overlay seen but
+/// title unreadable" event spans a run of consecutive 1-fps frames. Frames within
+/// this many seconds of each other are collapsed into a single cluster.
+const OVERLAY_CLUSTER_GAP_SECONDS: f64 = 10.0;
+
+/// Result of the text-overlay detection pass.
+struct TextDetection {
+    /// One segment per song whose title overlay was detected and matched.
+    segments: Vec<SongSegment>,
+    /// Timestamps (seconds) of frames where the artist overlay was detected but no
+    /// song title matched — one earliest timestamp per consecutive cluster. These
+    /// mark title cards whose (short/stylized) title was unreadable; they are used as
+    /// the preferred boundary anchors for still-missing songs in
+    /// [`recover_missing_songs`].
+    unmatched_overlay_clusters: Vec<f64>,
+}
+
+/// Collapse "artist overlay seen but title unreadable" frame numbers into one
+/// earliest timestamp per cluster. Detection frames are 1 fps, so a frame number is
+/// a timestamp in seconds; consecutive frames within `max_gap_seconds` belong to the
+/// same title card. Input need not be sorted.
+fn cluster_overlay_frames(frames: &[usize], max_gap_seconds: f64) -> Vec<f64> {
+    let mut sorted: Vec<usize> = frames.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+
+    let mut clusters = Vec::new();
+    let mut iter = sorted.into_iter();
+    if let Some(first) = iter.next() {
+        let mut cluster_start = first;
+        let mut prev = first;
+        for f in iter {
+            if (f - prev) as f64 > max_gap_seconds {
+                clusters.push(cluster_start as f64);
+                cluster_start = f;
+            }
+            prev = f;
+        }
+        clusters.push(cluster_start as f64);
+    }
+    clusters
 }
 
 fn detect_song_boundaries_from_text(
@@ -1854,7 +2056,7 @@ fn detect_song_boundaries_from_text(
     video_info: &VideoInfo,
     settings: &Settings,
     temp_dir: &str,
-) -> Result<Vec<SongSegment>> {
+) -> Result<TextDetection> {
     let mut frames = extract_frames(input_file, temp_dir, settings.reuse_frames)?;
 
     let total_duration = video_info.duration;
@@ -1885,6 +2087,11 @@ fn detect_song_boundaries_from_text(
     // Whether to try a binarized fallback pass when the color pass finds no overlay
     // (tesseract: yes; paddle: no).
     let do_bw = backend.options().black_and_white;
+
+    // Frames where the artist overlay was detected but no title matched (e.g. a
+    // short/stylized title the OCR couldn't read). Clustered and returned so missing
+    // songs can be anchored to a real title card rather than a silence guess.
+    let mut unmatched_overlay_frames: Vec<usize> = Vec::new();
 
     let mut last_song_start_time: Option<f64> = None;
     for mut frame_path in frames {
@@ -1918,6 +2125,12 @@ fn detect_song_boundaries_from_text(
         // owns the OCR fan-out; the pipeline only decides whether to run the B/W pass.
         let mut all_ocr_results: Vec<ocr::OcrParse> = Vec::new();
 
+        // Track, for this frame, whether the artist overlay was seen at all and
+        // whether it produced a title match. An overlay seen with no match means a
+        // title card we couldn't read — recorded as an unmatched-overlay frame.
+        let mut overlay_seen_this_frame = false;
+        let mut overlay_matched_this_frame = false;
+
         let passes: &[bool] = if do_bw { &[false, true] } else { &[false] };
         'convert: for &convert in passes {
             if convert {
@@ -1936,6 +2149,7 @@ fn detect_song_boundaries_from_text(
 
             // Check if any OCR result contains the artist name (indicates overlay)
             let has_artist_overlay = all_ocr_results.iter().any(|(_, overlay)| *overlay);
+            overlay_seen_this_frame |= has_artist_overlay;
 
             // If we haven't found the overlay, first do the B/W conversion and look for it.
             if !has_artist_overlay && !convert && do_bw {
@@ -1963,6 +2177,7 @@ fn detect_song_boundaries_from_text(
                     if overlay {
                         song_title_matched.insert(song, time);
                         last_song_start_time = Some(time);
+                        overlay_matched_this_frame = true;
                         break 'convert; // Found a match, no need to try other OCR results
                     } else {
                         // Store title-only match for potential fallback
@@ -1970,6 +2185,12 @@ fn detect_song_boundaries_from_text(
                     }
                 }
             }
+        }
+
+        // Overlay present but no title matched: an unreadable title card. Record it
+        // as a boundary candidate for a missing song (see `recover_missing_songs`).
+        if overlay_seen_this_frame && !overlay_matched_this_frame {
+            unmatched_overlay_frames.push(frame_num);
         }
     }
 
@@ -2013,12 +2234,25 @@ fn detect_song_boundaries_from_text(
     let mut song_start_times: Vec<(&String, &f64)> = song_title_matched.iter().collect();
     song_start_times.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
 
+    let unmatched_overlay_clusters =
+        cluster_overlay_frames(&unmatched_overlay_frames, OVERLAY_CLUSTER_GAP_SECONDS);
+    if !unmatched_overlay_clusters.is_empty() {
+        println!(
+            "Detected {} unmatched artist-overlay cluster(s) (title unreadable) at: {:?}",
+            unmatched_overlay_clusters.len(),
+            unmatched_overlay_clusters
+        );
+    }
+
     // Create segments from detected song boundaries
     let mut segments = Vec::new();
 
     if song_start_times.is_empty() {
         println!("No song titles detected in frames. Will fall back to audio analysis.");
-        return Ok(Vec::new());
+        return Ok(TextDetection {
+            segments: Vec::new(),
+            unmatched_overlay_clusters,
+        });
     }
 
     println!(
@@ -2072,7 +2306,10 @@ fn detect_song_boundaries_from_text(
     // Clean up temporary files
     // fs::remove_dir_all(temp_dir)?;
 
-    Ok(segments)
+    Ok(TextDetection {
+        segments,
+        unmatched_overlay_clusters,
+    })
 }
 
 fn match_song_titles(

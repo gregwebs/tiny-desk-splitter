@@ -385,6 +385,12 @@ fn check_line_match(
     }
     // Hard cap: never tolerate more than half the shorter string differing,
     // no matter how generous the per-line/overlay budget would otherwise be.
+    // Note: this makes a very short title (e.g. the 2-char "VV") effectively
+    // unmatchable — limit_cap = min(2,2)/2 = 0, so even one OCR error fails. That is
+    // deliberate (widening it would let short titles match OCR noise). When such a
+    // title is dropped, it is rescued not here but by the overlay-anchor path in
+    // `recover_missing_songs` (main.rs), which uses the detected-but-unreadable
+    // artist overlay frame as the boundary. Do NOT loosen this cap for short titles.
     let limit_cap = (std::cmp::min(line_count, title_count) as u32) / 2;
     levenshtein_limit = std::cmp::min(levenshtein_limit, limit_cap);
     // If we have an overlay and no exact match was found, try fuzzy matching
