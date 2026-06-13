@@ -556,6 +556,7 @@ dependencies = [
  "axum",
  "chrono",
  "clap",
+ "concert-types",
  "image 0.25.10",
  "rusqlite",
  "serde",

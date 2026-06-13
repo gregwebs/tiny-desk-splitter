@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use anyhow::Context;
 use askama::Template;
 use askama_axum::IntoResponse;
 use axum::{
@@ -13,8 +14,9 @@ use rusqlite::Connection;
 use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
-use crate::jobs::split::start_split;
-use crate::jobs::{JobKey, JobKind};
+use crate::jobs::split::{auto_timestamps_with_backfill, start_split};
+use crate::jobs::{JobKey, JobKind, SplitMode};
+use crate::split_timestamps::{song_timestamps_to_payload, TimestampPayload, ValidatedTimestamps};
 use crate::model::{
     concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
     SplitStatus, TrackInfo,
@@ -910,6 +912,7 @@ pub async fn split(
         state.registry.clone(),
         state.jobs.clone(),
         id,
+        SplitMode::Analyze,
     )
     .await?;
     render_card(&state, id)
@@ -1898,6 +1901,244 @@ pub async fn player_js() -> impl IntoResponse {
         [(axum::http::header::CONTENT_TYPE, "application/javascript")],
         include_str!("../../static/player.js"),
     )
+}
+
+// ── Split-timestamp API ───────────────────────────────────────────────────────
+
+/// Response body for GET /concerts/:id/split-timestamps.
+#[derive(serde::Serialize)]
+pub struct SplitTimestampsResponse {
+    pub set_list: Vec<String>,
+    pub auto: Option<Vec<concert_types::SongTimestamp>>,
+    pub user: Option<Vec<concert_types::SongTimestamp>>,
+}
+
+pub async fn get_split_timestamps(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<SplitTimestampsResponse>, AppError> {
+    let conn = state.db.lock().unwrap();
+    let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+    let auto = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
+        .map_err(|e| AppError::Internal(e))?;
+    let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+    Ok(Json(SplitTimestampsResponse {
+        set_list: concert.set_list,
+        auto,
+        user: stored.user,
+    }))
+}
+
+pub async fn set_split_timestamps(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+    Json(payload): Json<TimestampPayload>,
+) -> Result<Response, AppError> {
+    let (concert, source_path) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let source_path = concert
+            .album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
+        (concert, source_path)
+    };
+
+    let source_path = match source_path {
+        Some(p) => p,
+        None => {
+            return Ok((StatusCode::CONFLICT, "Source file not found — download the concert first").into_response());
+        }
+    };
+
+    // Quick count check before the ffprobe syscall so tests can exercise this
+    // 422 without needing a real media file.
+    if payload.songs.len() != concert.set_list.len() {
+        return Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            format!(
+                "Expected {} timestamps (one per set-list song), got {}",
+                concert.set_list.len(),
+                payload.songs.len()
+            ),
+        )
+            .into_response());
+    }
+
+    let media_duration = ffprobe_duration(&source_path).await.map_err(|e| {
+        tracing::warn!("ffprobe failed for {}: {}", source_path.display(), e);
+        AppError::Internal(e)
+    })?;
+
+    let validated = match ValidatedTimestamps::validate(
+        &concert.set_list,
+        Some(media_duration),
+        &payload.songs,
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response());
+        }
+    };
+
+    // Reconcile downloaded_at if missing (e.g. manually copied source file).
+    {
+        let conn = state.db.lock().unwrap();
+        if concert.downloaded_at.is_none() {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = db::set_downloaded_at_if_missing(&conn, id, &now) {
+                tracing::warn!("set_downloaded_at_if_missing failed for concert {}: {}", id, e);
+            }
+        }
+    }
+
+    let outcome = start_split(
+        state.db.clone(),
+        state.registry.clone(),
+        state.jobs.clone(),
+        id,
+        SplitMode::UserTimestamps(validated),
+    )
+    .await
+    .map_err(AppError::Internal)?;
+
+    match outcome {
+        crate::jobs::split::StartOutcome::Spawned => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "splitting"})),
+        )
+            .into_response()),
+        crate::jobs::split::StartOutcome::AlreadyRunning => Ok((
+            StatusCode::CONFLICT,
+            "A split job is already running for this concert",
+        )
+            .into_response()),
+        crate::jobs::split::StartOutcome::NotDownloaded => Ok((
+            StatusCode::CONFLICT,
+            "Concert source file not downloaded",
+        )
+            .into_response()),
+        // Should not happen for user mode (AlreadySplit branch is Analyze-only).
+        crate::jobs::split::StartOutcome::AlreadySplit => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "splitting"})),
+        )
+            .into_response()),
+    }
+}
+
+pub async fn reset_split_timestamps(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let (concert, auto_ts) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let auto_ts = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
+            .map_err(|e| AppError::Internal(e))?;
+        (concert, auto_ts)
+    };
+
+    let auto_ts = match auto_ts {
+        Some(ts) => ts,
+        None => {
+            return Ok((
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "No automated split timestamps available — run analysis first",
+            )
+                .into_response());
+        }
+    };
+
+    // If user column is already NULL, the tracks are already using auto timestamps.
+    let user_is_null = {
+        let conn = state.db.lock().unwrap();
+        let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+        stored.user.is_none()
+    };
+    if user_is_null {
+        return Ok(Json(serde_json::json!({"status": "already-auto"})).into_response());
+    }
+
+    let payload_songs = song_timestamps_to_payload(&auto_ts);
+    let validated = match ValidatedTimestamps::validate_for_reset(&concert.set_list, &payload_songs) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response());
+        }
+    };
+
+    // Reconcile downloaded_at if missing.
+    {
+        let conn = state.db.lock().unwrap();
+        if concert.downloaded_at.is_none() {
+            let now = chrono::Utc::now().to_rfc3339();
+            if let Err(e) = db::set_downloaded_at_if_missing(&conn, id, &now) {
+                tracing::warn!("set_downloaded_at_if_missing failed for concert {}: {}", id, e);
+            }
+        }
+    }
+
+    let outcome = start_split(
+        state.db.clone(),
+        state.registry.clone(),
+        state.jobs.clone(),
+        id,
+        SplitMode::ResetToAuto(validated),
+    )
+    .await
+    .map_err(AppError::Internal)?;
+
+    match outcome {
+        crate::jobs::split::StartOutcome::Spawned => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "splitting"})),
+        )
+            .into_response()),
+        crate::jobs::split::StartOutcome::AlreadyRunning => Ok((
+            StatusCode::CONFLICT,
+            "A split job is already running for this concert",
+        )
+            .into_response()),
+        crate::jobs::split::StartOutcome::NotDownloaded => Ok((
+            StatusCode::CONFLICT,
+            "Concert source file not downloaded",
+        )
+            .into_response()),
+        crate::jobs::split::StartOutcome::AlreadySplit => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({"status": "splitting"})),
+        )
+            .into_response()),
+    }
+}
+
+/// Returns the duration in seconds of a media file using ffprobe.
+async fn ffprobe_duration(path: &std::path::Path) -> anyhow::Result<f64> {
+    let output = tokio::process::Command::new("ffprobe")
+        .args([
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_entries", "format=duration",
+        ])
+        .arg(path)
+        .output()
+        .await
+        .context("ffprobe not found")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("ffprobe exited non-zero: {}", stderr);
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .context("ffprobe output not valid JSON")?;
+    let duration_str = json["format"]["duration"]
+        .as_str()
+        .context("ffprobe JSON missing format.duration")?;
+    duration_str
+        .parse::<f64>()
+        .context("ffprobe duration not a float")
 }
 
 // Vendored htmx, served locally instead of from a CDN so the UI works offline

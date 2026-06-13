@@ -42,6 +42,8 @@ Key columns in the `concerts` table:
 | `musicians_json` | TEXT | `[{"name": "...", "instruments": [...]}]` |
 | `tracks_present` | TEXT | JSON `[bool, ...]` parallel to `set_list_json` — whether the track file is on disk. NULL when never set. |
 | `tracks_liked` | TEXT | JSON `[bool, ...]` parallel to `set_list_json` — user "like" state per track. NULL when none liked. |
+| `auto_split_timestamps_json` | TEXT | JSON `[SongTimestamp, ...]` — timestamps written by the automated Analyze split. Populated after a successful analysis, also lazy-backfilled from `timestamps.json` on disk for concerts split before this column existed. |
+| `user_split_timestamps_json` | TEXT | JSON `[SongTimestamp, ...]` — user-submitted timestamps. Non-NULL iff the tracks on disk were cut by a user-supplied split; cleared by a successful Analyze split or a successful reset. |
 
 `tracks_present` and `tracks_liked` index by position in `set_list_json`. This
 assumes `set_list_json` is **append-only** after first scrape. If a re-scrape
@@ -81,6 +83,8 @@ Events recorded:
 * archive_started
 * archived
 * archive_error
+* split_timestamps_user: JSON contains the user-submitted timestamps
+* split_timestamps_reset: recorded when user column is cleared back to auto (only when it was non-NULL)
 
 ## Settings
 

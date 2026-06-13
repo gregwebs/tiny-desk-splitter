@@ -1,5 +1,12 @@
 use serde::{Deserialize, Serialize};
 
+/// The `{"songs":[...]}` wire format consumed by `live-set-splitter --timestamps-file`.
+/// Shared between the splitter (which writes it) and concert-tracker (which produces it).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+pub struct TimestampsFile {
+    pub songs: Vec<SongTimestamp>,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Musician {
     pub name: String,

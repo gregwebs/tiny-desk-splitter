@@ -25,6 +25,10 @@ pub enum Event {
     ArchiveError,
     ArchiveDelete,
     Watch,
+    /// User-supplied timestamps were stored; tracks re-cut with them.
+    SplitTimestampsUser,
+    /// User timestamps cleared; tracks reset to automated boundaries.
+    SplitTimestampsReset,
 }
 
 impl Event {
@@ -53,6 +57,8 @@ impl Event {
             Event::ArchiveError => "archive_error",
             Event::ArchiveDelete => "archive_delete",
             Event::Watch => "watch",
+            Event::SplitTimestampsUser => "split_timestamps_user",
+            Event::SplitTimestampsReset => "split_timestamps_reset",
         }
     }
 }

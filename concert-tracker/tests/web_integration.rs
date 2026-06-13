@@ -2087,3 +2087,516 @@ async fn download_force_starts_when_tracks_present_but_source_missing() {
     }
     panic!("source file never created by forced download");
 }
+
+// ── split-timestamps API tests ────────────────────────────────────────────────
+
+use concert_tracker::db::{get_split_timestamps, set_auto_split_timestamps, set_user_split_timestamps};
+
+fn sample_song_timestamps(songs: &[&str]) -> Vec<concert_types::SongTimestamp> {
+    songs
+        .iter()
+        .enumerate()
+        .map(|(i, title)| concert_types::SongTimestamp {
+            title: title.to_string(),
+            start_time: (i * 60) as f64,
+            end_time: (i * 60 + 55) as f64,
+            duration: 55.0,
+        })
+        .collect()
+}
+
+/// Seed a concert with scraped metadata and a set_list. Returns the concert id.
+/// Uses a unique URL per album to avoid collisions between tests.
+fn seed_ts_concert(
+    conn: &rusqlite::Connection,
+    album: &str,
+    songs: &[&str],
+) -> i64 {
+    db::upsert_listing(
+        conn,
+        &NewListing {
+            source_url: format!("https://npr.org/ts/{}", album),
+            title: format!("{} Concert", album),
+            concert_date: Some("2024-06-01".to_string()),
+            teaser: None,
+        },
+    )
+    .unwrap();
+    let id = conn
+        .query_row(
+            "SELECT id FROM concerts WHERE source_url = ?1",
+            [format!("https://npr.org/ts/{}", album)],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap();
+    db::update_metadata(
+        conn,
+        id,
+        &MetadataUpdate {
+            artist: "Test Artist".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: songs.iter().map(|s| s.to_string()).collect(),
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    id
+}
+
+/// Create a tiny real source file (a 5-second sine wave) using ffmpeg. Returns
+/// None if ffmpeg is not available so tests can be skipped gracefully.
+async fn create_test_audio(dir: &std::path::Path, name: &str) -> Option<std::path::PathBuf> {
+    let out = dir.join(format!("{}.m4a", name));
+    let status = tokio::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f", "lavfi",
+            "-i", "sine=frequency=440:duration=5",
+            "-c:a", "aac",
+            "-b:a", "32k",
+        ])
+        .arg(&out)
+        .output()
+        .await
+        .ok()?;
+    if status.status.success() { Some(out) } else { None }
+}
+
+// ── GET /concerts/:id/split-timestamps ───────────────────────────────────────
+
+#[tokio::test]
+async fn get_split_timestamps_returns_404_for_unknown_id() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+    let (status, _) = get_json(&app, "/concerts/999/split-timestamps").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn get_split_timestamps_returns_null_auto_and_user_initially() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["Song A", "Song B"];
+    let id = seed_ts_concert(&conn, "Null Album", &songs);
+    let app = router(test_state(conn));
+
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["auto"], serde_json::Value::Null);
+    assert_eq!(json["user"], serde_json::Value::Null);
+    let set_list = json["set_list"].as_array().unwrap();
+    assert_eq!(set_list.len(), 2);
+    assert_eq!(set_list[0], "Song A");
+}
+
+#[tokio::test]
+async fn get_split_timestamps_returns_seeded_auto_timestamps() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["Track One", "Track Two"];
+    let id = seed_ts_concert(&conn, "Auto Album", &songs);
+    let ts = sample_song_timestamps(&songs);
+    set_auto_split_timestamps(&conn, id, &ts).unwrap();
+
+    let app = router(test_state(conn));
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    assert_eq!(status, StatusCode::OK);
+    let auto_arr = json["auto"].as_array().unwrap();
+    assert_eq!(auto_arr.len(), 2);
+    assert_eq!(auto_arr[0]["title"], "Track One");
+    assert_eq!(json["user"], serde_json::Value::Null);
+}
+
+#[tokio::test]
+async fn get_split_timestamps_returns_both_auto_and_user() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["Alpha", "Beta"];
+    let id = seed_ts_concert(&conn, "Both Album", &songs);
+    let auto_ts = sample_song_timestamps(&songs);
+    set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
+    let user_ts: Vec<concert_types::SongTimestamp> = songs
+        .iter()
+        .enumerate()
+        .map(|(i, title)| concert_types::SongTimestamp {
+            title: title.to_string(),
+            start_time: (i * 60 + 2) as f64,
+            end_time: (i * 60 + 57) as f64,
+            duration: 55.0,
+        })
+        .collect();
+    set_user_split_timestamps(&conn, id, &user_ts).unwrap();
+
+    let app = router(test_state(conn));
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["auto"].is_array());
+    assert!(json["user"].is_array());
+    assert_eq!(json["auto"].as_array().unwrap().len(), 2);
+    assert_eq!(json["user"].as_array().unwrap().len(), 2);
+    assert_eq!(json["auto"][0]["start_time"], 0.0);
+    assert_eq!(json["user"][0]["start_time"], 2.0);
+}
+
+#[tokio::test]
+async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
+    use concert_types::ConcertInfo;
+
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Backfill Album";
+    let songs = ["Old Song A", "Old Song B"];
+
+    let conn = db::open_in_memory().unwrap();
+    let id = seed_ts_concert(&conn, album, &songs);
+
+    // Write timestamps.json to the concert dir (simulating a pre-feature split).
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let ts_json = serde_json::to_string(&ConcertInfo {
+        artist: "Test".to_string(),
+        source: String::new(),
+        show: String::new(),
+        date: None,
+        album: album.to_string(),
+        description: None,
+        set_list: vec![],
+        musicians: vec![],
+        preview_image_url: None,
+        teaser: None,
+        timestamps: Some(sample_song_timestamps(&songs)),
+    })
+    .unwrap();
+    std::fs::write(cd.join("timestamps.json"), ts_json).unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    assert_eq!(status, StatusCode::OK);
+    let auto_arr = json["auto"].as_array().unwrap();
+    assert_eq!(auto_arr.len(), 2, "backfill should populate auto from disk");
+    assert_eq!(auto_arr[0]["title"], "Old Song A");
+}
+
+// ── POST /concerts/:id/split-timestamps ──────────────────────────────────────
+
+async fn post_body_json(
+    app: &axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, serde_json::Value) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+#[tokio::test]
+async fn set_split_timestamps_returns_404_for_unknown_concert() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+    let body = serde_json::json!({"songs": []});
+    let (status, _) = post_body_json(&app, "/concerts/999/split-timestamps", body).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn set_split_timestamps_returns_409_when_source_missing() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["A", "B"];
+    let id = seed_ts_concert(&conn, "No Source Album", &songs);
+    // No source file on disk — workdir points to /tmp (no files).
+    let app = router(test_state(conn));
+
+    let body = serde_json::json!({"songs": [
+        {"title": "A", "start_time": 0.0, "end_time": 55.0},
+        {"title": "B", "start_time": 60.0, "end_time": 115.0}
+    ]});
+    let (status, _) = post_body_json(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
+    assert_eq!(status, StatusCode::CONFLICT);
+}
+
+#[tokio::test]
+async fn set_split_timestamps_returns_422_on_count_mismatch() {
+    // Source file must exist to pass the 409 check before we reach the count check.
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Count Mismatch Album";
+    let songs = ["A", "B"];
+
+    let conn = db::open_in_memory().unwrap();
+    let id = seed_ts_concert(&conn, album, &songs);
+
+    // Touch a fake source file so the handler gets past the 409 check.
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join(format!("{}.mp4", album)), b"fake").unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    // Submit 1 timestamp but set_list has 2 songs → 422 before ffprobe.
+    let body = serde_json::json!({"songs": [
+        {"title": "A", "start_time": 0.0, "end_time": 55.0}
+    ]});
+    let (status, _) = post_body_json(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Happy path: POST user timestamps → 202 and eventually the user column is set.
+/// Skips if ffmpeg is unavailable.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "User TS Album";
+    let songs = ["Song One", "Song Two"];
+
+    let conn = db::open_in_memory().unwrap();
+    let id = seed_ts_concert(&conn, album, &songs);
+
+    // Create real audio file for ffprobe.
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let source = match create_test_audio(&cd, album).await {
+        Some(p) => p,
+        None => {
+            eprintln!("skipping: ffmpeg not available");
+            return;
+        }
+    };
+
+    let db_arc = Arc::new(Mutex::new(conn));
+    // Touch output track files so the split cmd "succeeds".
+    let song_files: Vec<String> = songs
+        .iter()
+        .map(|s| {
+            format!(
+                "'{}'",
+                cd.join(format!("{}.m4a", sanitize_filename(s))).display()
+            )
+        })
+        .collect();
+    let touch_songs = format!("touch {}", song_files.join(" "));
+    let state = AppState {
+        db: db_arc.clone(),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig {
+            working_dir: workdir.path().to_path_buf(),
+            download_cmd: Arc::new(|_| Command::new("true")),
+            split_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(touch_songs.clone());
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    // The source exists but downloaded_at is NULL — handler reconciles it.
+    let _ = source; // just for clarity; file is already on disk
+    let body = serde_json::json!({"songs": [
+        {"title": "Song One", "start_time": 0.0, "end_time": 2.5},
+        {"title": "Song Two", "start_time": 2.5, "end_time": 5.0}
+    ]});
+    let (status, json) = post_body_json(
+        &app,
+        &format!("/concerts/{id}/split-timestamps"),
+        body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "expected 202: {:?}", json);
+    assert_eq!(json["status"], "splitting");
+
+    // Wait for the job to finish (user column set).
+    for _ in 0..200 {
+        let stored = {
+            let conn = db_arc.lock().unwrap();
+            get_split_timestamps(&conn, id).unwrap()
+        };
+        if stored.user.is_some() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("user_split_timestamps_json never set after split job completed");
+}
+
+// ── POST /concerts/:id/split-timestamps/reset ────────────────────────────────
+
+#[tokio::test]
+async fn reset_split_timestamps_returns_404_for_unknown_concert() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+    let (status, _) = post_json(&app, "/concerts/999/split-timestamps/reset").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn reset_split_timestamps_returns_422_when_no_auto_timestamps() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["A", "B"];
+    let id = seed_ts_concert(&conn, "No Auto Album", &songs);
+    let app = router(test_state(conn));
+
+    let (status, _) = post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn reset_split_timestamps_returns_already_auto_when_user_is_null() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["A", "B"];
+    let id = seed_ts_concert(&conn, "Already Auto Album", &songs);
+    let ts = sample_song_timestamps(&songs);
+    // auto is set, user is NULL → already-auto
+    set_auto_split_timestamps(&conn, id, &ts).unwrap();
+
+    let app = router(test_state(conn));
+    let (status, json) = get_json(
+        &app,
+        &format!("/concerts/{id}/split-timestamps"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(json["auto"].is_array());
+    assert_eq!(json["user"], serde_json::Value::Null);
+
+    let (status, json) = post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["status"], "already-auto");
+}
+
+/// Happy path for reset: user column is non-NULL + auto available → 202 and
+/// eventually user column is cleared. Skips if ffmpeg is unavailable (need
+/// source file for start_split to proceed).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reset_split_timestamps_happy_path_returns_202_and_clears_user_column() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Reset Album";
+    let songs = ["Reset A", "Reset B"];
+
+    let conn = db::open_in_memory().unwrap();
+    let id = seed_ts_concert(&conn, album, &songs);
+
+    // Need a real source file for start_split (downloaded_at reconcile + path check).
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    let source_path = cd.join(format!("{}.mp4", album));
+    // Use ffmpeg if available, else a fake file (start_split only checks existence).
+    if create_test_audio(&cd, album).await.is_none() {
+        // Create a zero-byte file; start_split only checks file existence.
+        std::fs::write(&source_path, b"fake").unwrap();
+    }
+
+    let auto_ts = sample_song_timestamps(&songs);
+    set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
+    let user_ts: Vec<concert_types::SongTimestamp> = songs
+        .iter()
+        .enumerate()
+        .map(|(i, title)| concert_types::SongTimestamp {
+            title: title.to_string(),
+            start_time: (i * 60 + 1) as f64,
+            end_time: (i * 60 + 54) as f64,
+            duration: 53.0,
+        })
+        .collect();
+    set_user_split_timestamps(&conn, id, &user_ts).unwrap();
+
+    let db_arc = Arc::new(Mutex::new(conn));
+    let song_files: Vec<String> = songs
+        .iter()
+        .map(|s| {
+            format!(
+                "'{}'",
+                cd.join(format!("{}.m4a", sanitize_filename(s))).display()
+            )
+        })
+        .collect();
+    let touch_songs = format!("touch {}", song_files.join(" "));
+    let state = AppState {
+        db: db_arc.clone(),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig {
+            working_dir: workdir.path().to_path_buf(),
+            download_cmd: Arc::new(|_| Command::new("true")),
+            split_cmd: Arc::new(move |_| {
+                let mut cmd = Command::new("sh");
+                cmd.arg("-c").arg(touch_songs.clone());
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        },
+    };
+    let app = router(state);
+
+    let (status, json) =
+        post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "expected 202: {:?}", json);
+    assert_eq!(json["status"], "splitting");
+
+    // Wait for job to clear user column.
+    for _ in 0..200 {
+        let stored = {
+            let conn = db_arc.lock().unwrap();
+            get_split_timestamps(&conn, id).unwrap()
+        };
+        if stored.user.is_none() {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("user_split_timestamps_json not cleared after reset job completed");
+}
+
+#[tokio::test]
+async fn delete_split_preserves_split_timestamp_columns() {
+    // delete-split (clear_split_state) must NOT wipe the timestamp columns —
+    // the invariant is that they reflect what's on disk, and delete-split does
+    // not delete the track files.
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Preserve TS Album";
+    let songs = ["Keep A", "Keep B"];
+
+    let conn = db::open_in_memory().unwrap();
+    let id = seed_ts_concert(&conn, album, &songs);
+
+    // Put the concert in split state so delete-split accepts it.
+    db::try_mark_download_started(&conn, id).unwrap();
+    db::mark_download_succeeded(&conn, id, "mp4").unwrap();
+    db::try_mark_split_started(&conn, id).unwrap();
+    db::mark_split_succeeded(&conn, id).unwrap();
+
+    let auto_ts = sample_song_timestamps(&songs);
+    set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
+    set_user_split_timestamps(&conn, id, &auto_ts).unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let (status, _) =
+        post_json(&app, &format!("/concerts/{id}/delete-split")).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Verify both columns survive.
+    let (status, json) =
+        get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        json["auto"].is_array(),
+        "auto timestamps must survive delete-split"
+    );
+    assert!(
+        json["user"].is_array(),
+        "user timestamps must survive delete-split"
+    );
+}

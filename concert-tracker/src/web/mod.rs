@@ -52,6 +52,14 @@ pub fn router(state: AppState) -> Router {
             get(handlers::prepare_status),
         )
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
+        .route(
+            "/concerts/:id/split-timestamps",
+            get(handlers::get_split_timestamps).post(handlers::set_split_timestamps),
+        )
+        .route(
+            "/concerts/:id/split-timestamps/reset",
+            post(handlers::reset_split_timestamps),
+        )
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/watch", post(handlers::watch))
         .route("/concerts/:id/media-info", get(handlers::media_info))

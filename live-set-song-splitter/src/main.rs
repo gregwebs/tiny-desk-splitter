@@ -14,7 +14,7 @@ mod io;
 mod video;
 use crate::cut::VideoCutMode;
 use crate::video::VideoInfo;
-use concert_types::{ConcertInfo, Song, SongTimestamp};
+use concert_types::{ConcertInfo, Song, SongTimestamp, TimestampsFile};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
@@ -151,10 +151,7 @@ fn folder_name(info: &ConcertInfo) -> String {
     io::sanitize_filename(&name.replace(':', ""))
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct Timestamps {
-    songs: Vec<SongTimestamp>,
-}
+// TimestampsFile is the shared `{"songs":[...]}` wire type from concert-types.
 
 fn main() -> Result<()> {
     // Parse command line arguments using clap
@@ -230,7 +227,7 @@ fn main() -> Result<()> {
         let timestamps_file = File::open(timestamps_path)
             .with_context(|| format!("Failed to open timestamps file: {}", timestamps_path))?;
         let timestamps_reader = BufReader::new(timestamps_file);
-        let timestamps_data: Timestamps = serde_json::from_reader(timestamps_reader)
+        let timestamps_data: TimestampsFile = serde_json::from_reader(timestamps_reader)
             .with_context(|| format!("Failed to parse timestamps JSON from {}", timestamps_path))?;
 
         if timestamps_data.songs.len() == 0 {

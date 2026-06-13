@@ -156,7 +156,7 @@ pub fn spawn_dependents(
                 JobKind::Download => download::start_download(db, registry, config, dep.concert_id)
                     .await
                     .map(|_| ()),
-                JobKind::Split => split::start_split(db, registry, config, dep.concert_id)
+                JobKind::Split => split::start_split(db, registry, config, dep.concert_id, SplitMode::Analyze)
                     .await
                     .map(|_| ()),
                 JobKind::Archive => {
@@ -184,6 +184,26 @@ pub struct DownloadJob {
     pub working_dir: PathBuf,
 }
 
+/// How tracks should be split: automated analysis, user-supplied timestamps, or
+/// reset to previously stored automated timestamps.
+#[derive(Clone)]
+pub enum SplitMode {
+    Analyze,
+    UserTimestamps(crate::split_timestamps::ValidatedTimestamps),
+    /// Reset to automated timestamps; the ValidatedTimestamps were resolved by the handler.
+    ResetToAuto(crate::split_timestamps::ValidatedTimestamps),
+}
+
+impl SplitMode {
+    pub fn name(&self) -> &'static str {
+        match self {
+            SplitMode::Analyze => "analyze",
+            SplitMode::UserTimestamps(_) => "user-timestamps",
+            SplitMode::ResetToAuto(_) => "reset-to-auto",
+        }
+    }
+}
+
 pub struct SplitJob {
     pub concert_id: i64,
     pub json_path: PathBuf,
@@ -191,7 +211,12 @@ pub struct SplitJob {
     /// Directory the splitter writes per-song files into. With the
     /// `concerts/<album>/` layout this is the concert directory itself.
     pub output_dir: PathBuf,
+    pub mode: SplitMode,
+    /// Kept alive so the temp file isn't deleted before the splitter reads it.
     pub _temp_file: tempfile::NamedTempFile,
+    /// Timestamps temp file for user/reset modes; kept alive alongside _temp_file.
+    pub _timestamps_temp_file: Option<tempfile::NamedTempFile>,
+    pub timestamps_path: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -307,6 +332,12 @@ impl JobConfig {
                     // box outside rectangle") emitted during OCR refinement on
                     // near-empty frames. 4 == L_SEVERITY_NONE.
                     .env("LEPT_MSG_SEVERITY", "4");
+                // User/reset modes: skip analysis and cut at the provided boundaries.
+                // Deliberately no --refine-timestamps so the splitter doesn't
+                // rewrite timestamps.json, preserving the automated record.
+                if let Some(ts_path) = &job.timestamps_path {
+                    cmd.arg("--timestamps-file").arg(ts_path);
+                }
                 cmd
             }),
         }

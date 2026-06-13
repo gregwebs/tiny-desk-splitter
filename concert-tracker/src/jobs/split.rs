@@ -1,16 +1,19 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use concert_types::ConcertInfo;
 use rusqlite::Connection;
 use serde::Serialize;
 use std::io::Write;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
 use crate::db;
 use crate::jobs::{
     find_downloaded_file, persist_job_log, run_with_logging, JobConfig, JobKey, JobKind,
-    JobRegistry, SplitJob,
+    JobRegistry, SplitJob, SplitMode,
 };
 use crate::model::{concert_dir, Concert, Musician};
+use crate::split_timestamps::ValidatedTimestamps;
 
 #[derive(Debug)]
 pub enum StartOutcome {
@@ -87,6 +90,7 @@ pub async fn start_split(
     registry: Arc<JobRegistry>,
     config: JobConfig,
     concert_id: i64,
+    mode: SplitMode,
 ) -> Result<StartOutcome> {
     let key = JobKey {
         concert_id,
@@ -115,8 +119,26 @@ pub async fn start_split(
 
     let title = concert.title.clone();
 
+    // For user/reset modes, validate that the provided timestamps still match the
+    // current set_list (a concurrent re-scrape may have changed it since the handler
+    // read it). This check is advisory — validation already ran in the handler.
+    if let SplitMode::UserTimestamps(ts) | SplitMode::ResetToAuto(ts) = &mode {
+        if ts.songs().len() != concert.set_list.len() {
+            let e = anyhow::anyhow!(
+                "Timestamp count {} does not match set_list length {} for concert {}",
+                ts.songs().len(),
+                concert.set_list.len(),
+                concert_id
+            );
+            registry.drop_dependency_edges(&key);
+            let conn = db.lock().unwrap();
+            let _ = db::mark_split_failed(&conn, concert_id, &e.to_string());
+            return Err(e);
+        }
+    }
+
     enum SetupResult {
-        Ready(NamedTempFile, std::path::PathBuf, std::path::PathBuf),
+        Ready(NamedTempFile, std::path::PathBuf, std::path::PathBuf, Option<NamedTempFile>, Option<std::path::PathBuf>),
         AlreadySplit,
     }
 
@@ -130,27 +152,37 @@ pub async fn start_split(
         if let Some(input_file) = find_downloaded_file(&config.working_dir, album) {
             let temp_file = write_splitter_input(&concert)?;
             let output_dir = concert_dir(&config.working_dir, album);
-            return Ok(SetupResult::Ready(temp_file, input_file, output_dir));
+
+            // For user/reset modes, write the timestamps to a temp file for --timestamps-file.
+            let (ts_temp, ts_path) = match &mode {
+                SplitMode::Analyze => (None, None),
+                SplitMode::UserTimestamps(ts) | SplitMode::ResetToAuto(ts) => {
+                    let file = write_timestamps_file(ts)?;
+                    let path = file.path().to_path_buf();
+                    (Some(file), Some(path))
+                }
+            };
+
+            return Ok(SetupResult::Ready(temp_file, input_file, output_dir, ts_temp, ts_path));
         }
-        // Source file missing. If the concert dir already contains split
-        // tracks (e.g. imported from an archive that no longer has the
-        // original full-concert file), reconcile split state from disk
-        // instead of failing. Older imports left split_at NULL even when
-        // tracks were present, which surfaced the Split button in the UI
-        // and made clicks fail with a "not found" error.
-        let cd = concert_dir(&config.working_dir, album);
-        if !concert.set_list.is_empty() && crate::scan::has_split_tracks(&cd, album) {
-            let present: Vec<bool> = concert
-                .set_list
-                .iter()
-                .map(|title| {
-                    crate::model::find_track_file(&config.working_dir, album, title).is_some()
-                })
-                .collect();
-            let conn = db.lock().unwrap();
-            db::set_tracks_present(&conn, concert_id, &present)?;
-            db::mark_split_succeeded(&conn, concert_id)?;
-            return Ok(SetupResult::AlreadySplit);
+        // Source file missing. Only Analyze mode supports auto-recovery from
+        // existing split tracks — user/reset modes require the source file
+        // to re-cut.
+        if matches!(mode, SplitMode::Analyze) {
+            let cd = concert_dir(&config.working_dir, album);
+            if !concert.set_list.is_empty() && crate::scan::has_split_tracks(&cd, album) {
+                let present: Vec<bool> = concert
+                    .set_list
+                    .iter()
+                    .map(|title| {
+                        crate::model::find_track_file(&config.working_dir, album, title).is_some()
+                    })
+                    .collect();
+                let conn = db.lock().unwrap();
+                db::set_tracks_present(&conn, concert_id, &present)?;
+                db::mark_split_succeeded(&conn, concert_id)?;
+                return Ok(SetupResult::AlreadySplit);
+            }
         }
         Err(anyhow::anyhow!(
             "Downloaded file for concert {} (album {:?}) not found in {}",
@@ -160,8 +192,8 @@ pub async fn start_split(
         ))
     })();
 
-    let (temp_file, input_file, output_dir) = match setup {
-        Ok(SetupResult::Ready(t, i, o)) => (t, i, o),
+    let (temp_file, input_file, output_dir, ts_temp, ts_path) = match setup {
+        Ok(SetupResult::Ready(t, i, o, ts, tp)) => (t, i, o, ts, tp),
         Ok(SetupResult::AlreadySplit) => {
             tracing::info!(
                 "split auto-recovered for concert {} ({}) — tracks already present on disk",
@@ -189,14 +221,84 @@ pub async fn start_split(
         json_path,
         input_file,
         output_dir,
+        mode,
         _temp_file: temp_file,
+        _timestamps_temp_file: ts_temp,
+        timestamps_path: ts_path,
     };
 
-    tracing::info!("split started for concert {} ({})", concert_id, title);
+    tracing::info!(
+        "split started for concert {} ({}) mode={}",
+        concert_id,
+        title,
+        job.mode.name()
+    );
     let handle = tokio::task::spawn(run_split(db.clone(), registry.clone(), config, job));
     registry.insert(key, handle);
 
     Ok(StartOutcome::Spawned)
+}
+
+fn write_timestamps_file(ts: &ValidatedTimestamps) -> Result<NamedTempFile> {
+    let file_data = ts.to_timestamps_file();
+    let json = serde_json::to_string(&file_data)?;
+    let mut file = NamedTempFile::new()?;
+    file.write_all(json.as_bytes())?;
+    Ok(file)
+}
+
+/// Read the automated timestamps from the `timestamps.json` the splitter writes
+/// into `output_dir` after analysis. Returns an error on I/O or parse failure.
+pub fn read_analysis_timestamps(
+    output_dir: &Path,
+) -> Result<Vec<concert_types::SongTimestamp>> {
+    let path = output_dir.join("timestamps.json");
+    let file = std::fs::File::open(&path)
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let info: ConcertInfo = serde_json::from_reader(std::io::BufReader::new(file))
+        .with_context(|| format!("Failed to parse {}", path.display()))?;
+    info.timestamps
+        .ok_or_else(|| anyhow::anyhow!("timestamps.json has no timestamps field"))
+}
+
+/// Return automated timestamps for a concert from the DB, falling back to
+/// parsing `{concert_dir}/timestamps.json` from disk (lazy backfill for
+/// concerts split before this feature). Persists the backfilled value into
+/// the DB column on success.
+pub fn auto_timestamps_with_backfill(
+    conn: &Connection,
+    working_dir: &Path,
+    concert: &Concert,
+) -> Result<Option<Vec<concert_types::SongTimestamp>>> {
+    let stored = db::get_split_timestamps(conn, concert.id)?;
+    if stored.auto.is_some() {
+        return Ok(stored.auto);
+    }
+    // Attempt disk backfill
+    let album = match concert.album.as_deref() {
+        Some(a) => a,
+        None => return Ok(None),
+    };
+    let output_dir = concert_dir(working_dir, album);
+    match read_analysis_timestamps(&output_dir) {
+        Ok(ts) => {
+            db::set_auto_split_timestamps(conn, concert.id, &ts)?;
+            tracing::debug!(
+                "auto_timestamps_with_backfill: backfilled {} timestamps for concert {} from disk",
+                ts.len(),
+                concert.id
+            );
+            Ok(Some(ts))
+        }
+        Err(e) => {
+            tracing::debug!(
+                "auto_timestamps_with_backfill: no timestamps.json for concert {}: {}",
+                concert.id,
+                e
+            );
+            Ok(None)
+        }
+    }
 }
 
 async fn run_split(
@@ -226,7 +328,7 @@ async fn run_split(
 
     match run_with_logging(cmd, "split", concert_id, temp_path.as_deref()).await {
         Ok((status, _)) if status.success() => {
-            tracing::info!("split completed for concert {}", concert_id);
+            tracing::info!("split completed for concert {} mode={}", concert_id, job.mode.name());
             drop(temp_file);
             {
                 let conn = db.lock().unwrap();
@@ -243,6 +345,36 @@ async fn run_split(
                             })
                             .collect();
                         let _ = db::set_tracks_present(&conn, concert_id, &present);
+                    }
+                }
+                // Persist timestamp state by mode. Never fail the job over a
+                // metadata error — warn and continue.
+                match &job.mode {
+                    SplitMode::Analyze => {
+                        match read_analysis_timestamps(&job.output_dir) {
+                            Ok(ts) => {
+                                if let Err(e) = db::set_auto_split_timestamps(&conn, concert_id, &ts) {
+                                    tracing::warn!("failed to store auto timestamps for concert {}: {}", concert_id, e);
+                                }
+                                // Successful re-analysis supersedes any user cut.
+                                if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
+                                    tracing::warn!("failed to clear user timestamps for concert {}: {}", concert_id, e);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to read timestamps.json for concert {}: {}", concert_id, e);
+                            }
+                        }
+                    }
+                    SplitMode::UserTimestamps(ts) => {
+                        if let Err(e) = db::set_user_split_timestamps(&conn, concert_id, ts.songs()) {
+                            tracing::warn!("failed to store user timestamps for concert {}: {}", concert_id, e);
+                        }
+                    }
+                    SplitMode::ResetToAuto(_) => {
+                        if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
+                            tracing::warn!("failed to clear user timestamps for concert {}: {}", concert_id, e);
+                        }
                     }
                 }
             }
@@ -351,6 +483,7 @@ mod tests {
             registry.clone(),
             config_for(tmp.path().to_path_buf()),
             1,
+            SplitMode::Analyze,
         )
         .await
         .unwrap();
@@ -386,6 +519,7 @@ mod tests {
             registry,
             config_for(tmp.path().to_path_buf()),
             1,
+            SplitMode::Analyze,
         )
         .await
         .unwrap();
@@ -411,6 +545,7 @@ mod tests {
             registry,
             config_for(tmp.path().to_path_buf()),
             1,
+            SplitMode::Analyze,
         )
         .await
         .unwrap_err();
@@ -439,6 +574,7 @@ mod tests {
             registry.clone(),
             config_for(tmp.path().to_path_buf()),
             1,
+            SplitMode::Analyze,
         )
         .await
         .unwrap();
@@ -454,5 +590,176 @@ mod tests {
             concert_id: 1,
             kind: JobKind::Split,
         });
+    }
+
+    /// Config whose splitter writes a fake timestamps.json into the output_dir on success.
+    fn config_with_fake_analyze(working_dir: PathBuf, set_list: &[String]) -> JobConfig {
+        let songs_json: String = set_list
+            .iter()
+            .enumerate()
+            .map(|(i, title)| {
+                let start = i as f64 * 100.0;
+                let end = start + 90.0;
+                format!(
+                    r#"{{"title":"{}","start_time":{},"end_time":{},"duration":90.0}}"#,
+                    title, start, end
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        // The splitter writes ConcertInfo JSON (with timestamps) to timestamps.json
+        let ts_json = format!(
+            r#"{{"artist":"A","source":"","show":"","album":"","set_list":[],"musicians":[],"timestamps":[{}]}}"#,
+            songs_json
+        );
+        let script = format!(
+            "mkdir -p \"$2\" && printf '{}' > \"$2/timestamps.json\"",
+            ts_json.replace('\'', "'\\''")
+        );
+        JobConfig {
+            working_dir,
+            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
+            split_cmd: Arc::new(move |job: &SplitJob| {
+                let output_dir = job.output_dir.to_str().unwrap().to_string();
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &script, "--", "", &output_dir]);
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        }
+    }
+
+    /// Config whose splitter records the --timestamps-file content and creates track stubs.
+    fn config_with_timestamps_check(working_dir: PathBuf, set_list: &[String]) -> JobConfig {
+        let touch_cmds: Vec<String> = set_list
+            .iter()
+            .map(|t| format!("touch \"$2/{}.m4a\"", t))
+            .collect();
+        let touch = touch_cmds.join("; ");
+        let script = format!("mkdir -p \"$2\" && {}", touch);
+        JobConfig {
+            working_dir,
+            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
+            split_cmd: Arc::new(move |job: &SplitJob| {
+                let output_dir = job.output_dir.to_str().unwrap().to_string();
+                // Verify --timestamps-file is present in the command args
+                let ts_flag = job.timestamps_path.is_some();
+                assert!(ts_flag, "user/reset mode must pass --timestamps-file");
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", &script, "--", "", &output_dir]);
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        }
+    }
+
+    #[tokio::test]
+    async fn analyze_mode_stores_auto_timestamps_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Analyze Album";
+        let set_list = vec!["Track One".to_string(), "Track Two".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        fs::write(cd.join("Analyze Album.mp4"), b"video").unwrap();
+
+        let db = seeded_db(album, set_list.clone());
+        let registry = Arc::new(JobRegistry::new());
+        let config = config_with_fake_analyze(tmp.path().to_path_buf(), &set_list);
+        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+
+        // Wait for job to finish
+        for _ in 0..100 {
+            if !registry.is_running(&JobKey { concert_id: 1, kind: JobKind::Split }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let conn = db.lock().unwrap();
+        let stored = db::get_split_timestamps(&conn, 1).unwrap();
+        assert!(stored.auto.is_some(), "auto timestamps should be stored");
+        assert!(stored.user.is_none(), "user timestamps should be cleared");
+        let auto = stored.auto.unwrap();
+        assert_eq!(auto.len(), 2);
+        assert_eq!(auto[0].title, "Track One");
+    }
+
+    #[tokio::test]
+    async fn user_timestamps_mode_stores_user_column() {
+        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "User Album";
+        let set_list = vec!["Alpha".to_string(), "Beta".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        fs::write(cd.join("User Album.mp4"), b"video").unwrap();
+
+        let db = seeded_db(album, set_list.clone());
+        let registry = Arc::new(JobRegistry::new());
+        let config = config_with_timestamps_check(tmp.path().to_path_buf(), &set_list);
+
+        let payload = vec![
+            TimestampPayloadSong { title: "Alpha".to_string(), start_time: 0.0, end_time: 95.0 },
+            TimestampPayloadSong { title: "Beta".to_string(), start_time: 100.0, end_time: 200.0 },
+        ];
+        let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
+
+        let outcome = start_split(
+            db.clone(), registry.clone(), config, 1, SplitMode::UserTimestamps(ts),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+
+        for _ in 0..100 {
+            if !registry.is_running(&JobKey { concert_id: 1, kind: JobKind::Split }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let conn = db.lock().unwrap();
+        let stored = db::get_split_timestamps(&conn, 1).unwrap();
+        assert!(stored.user.is_some(), "user timestamps should be stored");
+        let user = stored.user.unwrap();
+        assert_eq!(user.len(), 2);
+        assert_eq!(user[0].title, "Alpha");
+        assert_eq!(user[0].start_time, 0.0);
+        assert_eq!(user[0].end_time, 95.0);
+    }
+
+    #[tokio::test]
+    async fn user_mode_does_not_auto_recover_when_source_missing() {
+        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "No Source Album";
+        let set_list = vec!["Song A".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        // Track exists on disk but NO source file
+        fs::write(cd.join("Song A.m4a"), b"audio").unwrap();
+
+        let db = seeded_db(album, set_list.clone());
+        let registry = Arc::new(JobRegistry::new());
+        let config = config_for(tmp.path().to_path_buf());
+
+        let payload = vec![
+            TimestampPayloadSong { title: "Song A".to_string(), start_time: 0.0, end_time: 90.0 },
+        ];
+        let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
+
+        let err = start_split(
+            db.clone(), registry, config, 1, SplitMode::UserTimestamps(ts),
+        )
+        .await
+        .unwrap_err();
+
+        // Should error (not auto-recover), because user mode requires the source file.
+        assert!(err.to_string().contains("Downloaded file"));
     }
 }

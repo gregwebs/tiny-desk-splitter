@@ -74,6 +74,8 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "concerts", "tracks_present", "TEXT")?;
     add_column_if_missing(conn, "concerts", "tracks_liked", "TEXT")?;
     add_column_if_missing(conn, "concerts", "downloaded_extension", "TEXT")?;
+    add_column_if_missing(conn, "concerts", "auto_split_timestamps_json", "TEXT")?;
+    add_column_if_missing(conn, "concerts", "user_split_timestamps_json", "TEXT")?;
     add_column_if_missing(
         conn,
         "settings",
@@ -591,6 +593,81 @@ pub fn clear_split_state(conn: &Connection, id: i64) -> Result<()> {
     )
     .context("Failed to clear split state")?;
     events::record_now(conn, id, Event::SplitDelete, None);
+    Ok(())
+}
+
+/// Stored automated and user-supplied split timestamps for a concert.
+pub struct StoredSplitTimestamps {
+    pub auto: Option<Vec<concert_types::SongTimestamp>>,
+    pub user: Option<Vec<concert_types::SongTimestamp>>,
+}
+
+pub fn get_split_timestamps(conn: &Connection, id: i64) -> Result<StoredSplitTimestamps> {
+    let (auto_json, user_json): (Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT auto_split_timestamps_json, user_split_timestamps_json
+             FROM concerts WHERE id = ?1",
+            params![id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .context("Failed to read split timestamps")?;
+
+    let auto = auto_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    let user = user_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str(j).ok());
+    Ok(StoredSplitTimestamps { auto, user })
+}
+
+pub fn set_auto_split_timestamps(
+    conn: &Connection,
+    id: i64,
+    ts: &[concert_types::SongTimestamp],
+) -> Result<()> {
+    let json = serde_json::to_string(ts).context("Failed to serialize auto timestamps")?;
+    conn.execute(
+        "UPDATE concerts SET auto_split_timestamps_json = ?1 WHERE id = ?2",
+        params![json, id],
+    )
+    .context("Failed to set auto_split_timestamps_json")?;
+    Ok(())
+}
+
+pub fn set_user_split_timestamps(
+    conn: &Connection,
+    id: i64,
+    ts: &[concert_types::SongTimestamp],
+) -> Result<()> {
+    let json = serde_json::to_string(ts).context("Failed to serialize user timestamps")?;
+    conn.execute(
+        "UPDATE concerts SET user_split_timestamps_json = ?1 WHERE id = ?2",
+        params![json, id],
+    )
+    .context("Failed to set user_split_timestamps_json")?;
+    events::record_now(conn, id, Event::SplitTimestampsUser, Some(&json));
+    Ok(())
+}
+
+/// Clear the user-supplied timestamps (reset to automated boundaries).
+/// Records a `SplitTimestampsReset` event only when the column was non-NULL.
+pub fn clear_user_split_timestamps(conn: &Connection, id: i64) -> Result<()> {
+    let was_set: bool = conn
+        .query_row(
+            "SELECT user_split_timestamps_json IS NOT NULL FROM concerts WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .context("Failed to check user_split_timestamps_json")?;
+    conn.execute(
+        "UPDATE concerts SET user_split_timestamps_json = NULL WHERE id = ?1",
+        params![id],
+    )
+    .context("Failed to clear user_split_timestamps_json")?;
+    if was_set {
+        events::record_now(conn, id, Event::SplitTimestampsReset, None);
+    }
     Ok(())
 }
 
@@ -2114,6 +2191,119 @@ pub mod tests {
             })
             .unwrap();
         assert_eq!(value2, "2024-01-01T00:00:00Z");
+    }
+
+    fn make_timestamps() -> Vec<concert_types::SongTimestamp> {
+        vec![
+            concert_types::SongTimestamp {
+                title: "Song A".to_string(),
+                start_time: 0.0,
+                end_time: 120.0,
+                duration: 120.0,
+            },
+            concert_types::SongTimestamp {
+                title: "Song B".to_string(),
+                start_time: 125.0,
+                end_time: 250.0,
+                duration: 125.0,
+            },
+        ]
+    }
+
+    #[test]
+    fn set_and_get_auto_split_timestamps() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let ts = make_timestamps();
+
+        set_auto_split_timestamps(&conn, id, &ts).unwrap();
+
+        let stored = get_split_timestamps(&conn, id).unwrap();
+        assert_eq!(stored.auto, Some(ts));
+        assert!(stored.user.is_none());
+    }
+
+    #[test]
+    fn set_and_get_user_split_timestamps() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let ts = make_timestamps();
+
+        set_user_split_timestamps(&conn, id, &ts).unwrap();
+
+        let stored = get_split_timestamps(&conn, id).unwrap();
+        assert!(stored.auto.is_none());
+        assert_eq!(stored.user, Some(ts));
+    }
+
+    #[test]
+    fn clear_user_split_timestamps_when_set() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let ts = make_timestamps();
+
+        set_user_split_timestamps(&conn, id, &ts).unwrap();
+        clear_user_split_timestamps(&conn, id).unwrap();
+
+        let stored = get_split_timestamps(&conn, id).unwrap();
+        assert!(stored.user.is_none());
+
+        // Event should be recorded
+        let events: Vec<String> = conn
+            .prepare("SELECT event FROM events WHERE concert_id = ?1 ORDER BY id")
+            .unwrap()
+            .query_map(params![id], |row| row.get(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(events.contains(&"split_timestamps_user".to_string()));
+        assert!(events.contains(&"split_timestamps_reset".to_string()));
+    }
+
+    #[test]
+    fn clear_user_split_timestamps_no_event_when_already_null() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+
+        // Should not record a reset event when nothing was set
+        conn.execute("DELETE FROM events", []).unwrap();
+        clear_user_split_timestamps(&conn, id).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM events WHERE concert_id = ?1 AND event = 'split_timestamps_reset'", params![id], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn get_split_timestamps_returns_both_null_initially() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let stored = get_split_timestamps(&conn, id).unwrap();
+        assert!(stored.auto.is_none());
+        assert!(stored.user.is_none());
+    }
+
+    #[test]
+    fn clear_split_state_preserves_timestamp_columns() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        let ts = make_timestamps();
+
+        set_auto_split_timestamps(&conn, id, &ts).unwrap();
+        set_user_split_timestamps(&conn, id, &ts).unwrap();
+
+        // Simulate a split (so clear_split_state won't error)
+        try_mark_download_started(&conn, id).unwrap();
+        mark_download_succeeded(&conn, id, "mp4").unwrap();
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+        clear_split_state(&conn, id).unwrap();
+
+        // Both timestamp columns survive delete-split
+        let stored = get_split_timestamps(&conn, id).unwrap();
+        assert_eq!(stored.auto, Some(ts.clone()));
+        assert_eq!(stored.user, Some(ts));
     }
 }
 

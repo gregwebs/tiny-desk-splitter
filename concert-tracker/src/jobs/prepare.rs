@@ -10,7 +10,7 @@ use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
 use crate::db;
-use crate::jobs::{download, find_downloaded_file, split, JobConfig, JobKey, JobKind, JobRegistry};
+use crate::jobs::{download, find_downloaded_file, split, JobConfig, JobKey, JobKind, JobRegistry, SplitMode};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -103,7 +103,7 @@ pub async fn prepare(
             db::set_downloaded_at_if_missing(&conn, concert_id, &db::now_string())?;
         }
         tracing::info!("prepare: starting split for concert {}", concert_id);
-        split::start_split(db, registry, config, concert_id).await?;
+        split::start_split(db, registry, config, concert_id, SplitMode::Analyze).await?;
         return Ok(PrepareOutcome::Splitting);
     }
 
