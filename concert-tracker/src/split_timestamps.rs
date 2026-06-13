@@ -20,15 +20,38 @@ pub struct TimestampPayloadSong {
 #[derive(Debug, PartialEq)]
 pub enum TimestampValidationError {
     EmptySetList,
-    CountMismatch { expected: usize, got: usize },
-    TitleMismatch { index: usize, expected: String, got: String },
-    NonFinite { index: usize, field: &'static str },
-    NegativeStart { index: usize },
-    TooShort { index: usize, duration: f64 },
-    Overlap { index: usize },
-    BeyondMediaDuration { index: usize, end_time: f64, duration: f64 },
+    CountMismatch {
+        expected: usize,
+        got: usize,
+    },
+    TitleMismatch {
+        index: usize,
+        expected: String,
+        got: String,
+    },
+    NonFinite {
+        index: usize,
+        field: &'static str,
+    },
+    NegativeStart {
+        index: usize,
+    },
+    TooShort {
+        index: usize,
+        duration: f64,
+    },
+    Overlap {
+        index: usize,
+    },
+    BeyondMediaDuration {
+        index: usize,
+        end_time: f64,
+        duration: f64,
+    },
     /// Set list changed since analysis — user must re-run analysis before resetting.
-    SetListChangedSinceAnalysis { message: String },
+    SetListChangedSinceAnalysis {
+        message: String,
+    },
 }
 
 impl fmt::Display for TimestampValidationError {
@@ -40,7 +63,11 @@ impl fmt::Display for TimestampValidationError {
                 "Expected {} timestamps (one per track), got {}",
                 expected, got
             ),
-            Self::TitleMismatch { index, expected, got } => write!(
+            Self::TitleMismatch {
+                index,
+                expected,
+                got,
+            } => write!(
                 f,
                 "Track {} title mismatch: expected {:?}, got {:?}",
                 index + 1,
@@ -65,7 +92,11 @@ impl fmt::Display for TimestampValidationError {
                 "Track {}: end_time exceeds the start_time of the next track",
                 index + 1
             ),
-            Self::BeyondMediaDuration { index, end_time, duration } => write!(
+            Self::BeyondMediaDuration {
+                index,
+                end_time,
+                duration,
+            } => write!(
                 f,
                 "Track {}: end_time {:.2}s exceeds the source file duration {:.2}s",
                 index + 1,
@@ -280,7 +311,10 @@ mod tests {
         let err = ValidatedTimestamps::validate(&set_list(), None, &songs).unwrap_err();
         assert!(matches!(
             err,
-            TimestampValidationError::CountMismatch { expected: 3, got: 1 }
+            TimestampValidationError::CountMismatch {
+                expected: 3,
+                got: 1
+            }
         ));
     }
 
@@ -308,7 +342,10 @@ mod tests {
         let mut songs = valid_songs();
         songs[0].end_time = songs[0].start_time + 0.5;
         let err = ValidatedTimestamps::validate(&set_list(), None, &songs).unwrap_err();
-        assert!(matches!(err, TimestampValidationError::TooShort { index: 0, .. }));
+        assert!(matches!(
+            err,
+            TimestampValidationError::TooShort { index: 0, .. }
+        ));
     }
 
     #[test]
@@ -344,7 +381,11 @@ mod tests {
         let err = ValidatedTimestamps::validate(&set_list(), Some(350.0), &songs).unwrap_err();
         assert!(matches!(
             err,
-            TimestampValidationError::BeyondMediaDuration { index: 2, end_time: 400.0, duration: 350.0 }
+            TimestampValidationError::BeyondMediaDuration {
+                index: 2,
+                end_time: 400.0,
+                duration: 350.0
+            }
         ));
     }
 
@@ -355,7 +396,10 @@ mod tests {
 
     #[test]
     fn validate_for_reset_set_list_count_changed() {
-        let songs = vec![valid_songs()[0].clone_for_test(), valid_songs()[1].clone_for_test()];
+        let songs = vec![
+            valid_songs()[0].clone_for_test(),
+            valid_songs()[1].clone_for_test(),
+        ];
         let err = ValidatedTimestamps::validate_for_reset(&set_list(), &songs).unwrap_err();
         assert!(matches!(
             err,

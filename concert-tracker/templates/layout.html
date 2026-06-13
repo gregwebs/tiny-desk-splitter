@@ -656,6 +656,100 @@
     .btn-track-listen.playing { font-weight: 700; }
     .btn-track-listen.playing::before { content: "\25B6 "; }
     .btn-listen.playing { background: var(--btn-success); color: #fff; border-color: var(--btn-success); }
+
+    /* ── Track splitter ─────────────────────────────────────────────── */
+    .splitter-section { margin: 0.75rem 0 1rem; }
+    .splitter-toggle { cursor: pointer; }
+    .splitter:not(.splitter-open) { display: none; }
+    .splitter.splitter-open {
+      display: block;
+      margin-top: 0.75rem;
+      padding: 0.75rem;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--surface-alt);
+    }
+    .splitter-toolbar { display: flex; align-items: center; gap: 0.5rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
+    .splitter-status { font-size: 0.85rem; color: var(--fg-muted); margin-right: auto; }
+    .splitter-status-error { color: var(--badge-error-fg); }
+    .splitter-status-ok { color: var(--badge-split-fg); }
+    .splitter-note { font-size: 0.8rem; color: var(--fg-faint); margin: 0.25rem 0 0.5rem; }
+
+    /* Timeline */
+    .splitter-timeline {
+      position: relative;
+      height: 56px;
+      margin: 0.5rem 0 1rem;
+      background: var(--surface);
+      border: 1px solid var(--border-strong);
+      border-radius: 4px;
+      overflow: hidden;
+      touch-action: none;
+      cursor: pointer;
+    }
+    .splitter-seg {
+      position: absolute;
+      top: 0; bottom: 0;
+      background: var(--badge-split-bg);
+      border-left: 1px solid var(--border-strong);
+      border-right: 1px solid var(--border-strong);
+      box-sizing: border-box;
+      overflow: hidden;
+    }
+    .splitter-seg-label {
+      position: absolute;
+      left: 4px; top: 2px; right: 2px;
+      font-size: 0.72rem;
+      line-height: 1.2;
+      color: var(--badge-split-fg);
+      white-space: nowrap;
+      text-overflow: ellipsis;
+      overflow: hidden;
+      pointer-events: none;
+    }
+    .splitter-gap {
+      position: absolute;
+      top: 0; bottom: 0;
+      background: repeating-linear-gradient(45deg,
+        var(--border-faint), var(--border-faint) 4px,
+        var(--surface) 4px, var(--surface) 8px);
+      pointer-events: none;
+    }
+    .splitter-handle {
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 11px;
+      margin-left: -5px;
+      cursor: ew-resize;
+      background: var(--accent);
+      opacity: 0.85;
+      border-radius: 2px;
+      touch-action: none;
+    }
+    .splitter-handle:hover, .splitter-handle.dragging { opacity: 1; box-shadow: 0 0 0 2px var(--accent); }
+    .splitter-handle-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+    .splitter-playhead {
+      position: absolute;
+      top: 0; bottom: 0;
+      width: 2px;
+      margin-left: -1px;
+      background: var(--fg);
+      pointer-events: none;
+      display: none;
+    }
+
+    /* Boundary detach/link controls */
+    .splitter-boundaries { display: flex; flex-direction: column; gap: 0.25rem; margin-bottom: 0.75rem; }
+    .splitter-boundary { display: flex; align-items: center; gap: 0.5rem; font-size: 0.8rem; }
+    .splitter-boundary-label { color: var(--fg-muted); }
+    .splitter-detach { cursor: pointer; font-size: 0.75rem; padding: 0.1rem 0.4rem; }
+
+    /* Numeric table */
+    .splitter-table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    .splitter-table th, .splitter-table td { padding: 0.2rem 0.4rem; text-align: left; border-bottom: 1px solid var(--border-faint); }
+    .splitter-num { color: var(--fg-fainter); width: 1.5rem; }
+    .splitter-time { width: 5.5rem; font-family: ui-monospace, monospace; }
+    .splitter-play { cursor: pointer; margin-left: 0.25rem; padding: 0 0.3rem; font-size: 0.7rem; }
   </style>
 </head>
 <body hx-boost="true">
@@ -797,5 +891,6 @@
     })();
   </script>
   <script src="/static/player.js"></script>
+  <script src="/static/splitter.js"></script>
 </body>
 </html>

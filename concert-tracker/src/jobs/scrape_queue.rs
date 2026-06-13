@@ -42,7 +42,8 @@ pub const SCRAPE_JOB_NAME: &str = "scrape";
 /// Best-effort: a failed insert is logged, never propagated — it must not mask
 /// the original scrape error. Caller must hold the DB lock (`conn`).
 fn record_scrape_failure(conn: &Connection, concert_id: i64, err: &anyhow::Error) {
-    if let Err(e) = db::insert_failed_job(conn, concert_id, SCRAPE_JOB_NAME, &format!("{:#}", err)) {
+    if let Err(e) = db::insert_failed_job(conn, concert_id, SCRAPE_JOB_NAME, &format!("{:#}", err))
+    {
         tracing::warn!(
             target: LOG_TARGET,
             "failed to record scrape failure for concert {}: {}",

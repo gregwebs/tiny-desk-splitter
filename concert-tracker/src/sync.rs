@@ -521,10 +521,16 @@ mod tests {
         let synced = import_listings(&conn, &kept).unwrap();
 
         assert_eq!(synced.len(), 1);
-        assert_eq!(synced[0].id, original_id, "same row, not a duplicate import");
+        assert_eq!(
+            synced[0].id, original_id,
+            "same row, not a duplicate import"
+        );
         assert!(synced[0].metadata_scraped_at.is_none());
         let c = db::get_concert_by_url(&conn, url).unwrap().unwrap();
-        assert_eq!(c.title, "Original Title", "listing fields untouched on retry");
+        assert_eq!(
+            c.title, "Original Title",
+            "listing fields untouched on retry"
+        );
         assert_eq!(db::list_concerts(&conn).unwrap().len(), 1);
     }
 }

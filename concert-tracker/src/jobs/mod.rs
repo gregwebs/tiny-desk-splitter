@@ -156,9 +156,11 @@ pub fn spawn_dependents(
                 JobKind::Download => download::start_download(db, registry, config, dep.concert_id)
                     .await
                     .map(|_| ()),
-                JobKind::Split => split::start_split(db, registry, config, dep.concert_id, SplitMode::Analyze)
-                    .await
-                    .map(|_| ()),
+                JobKind::Split => {
+                    split::start_split(db, registry, config, dep.concert_id, SplitMode::Analyze)
+                        .await
+                        .map(|_| ())
+                }
                 JobKind::Archive => {
                     tracing::warn!(?dep, "archive jobs cannot be chained; skipping");
                     Ok(())

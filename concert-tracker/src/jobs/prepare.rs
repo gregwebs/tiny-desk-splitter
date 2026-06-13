@@ -10,7 +10,9 @@ use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
 use crate::db;
-use crate::jobs::{download, find_downloaded_file, split, JobConfig, JobKey, JobKind, JobRegistry, SplitMode};
+use crate::jobs::{
+    download, find_downloaded_file, split, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "kebab-case")]

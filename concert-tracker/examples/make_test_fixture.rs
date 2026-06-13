@@ -201,6 +201,32 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// Contiguous automated timestamps, one per set-list song, over [0, TOTAL].
+/// TOTAL stays under the ~20s full-concert file duration so they validate.
+fn auto_timestamps(fc: &FixtureConcert) -> Vec<concert_types::SongTimestamp> {
+    const TOTAL: f64 = 19.0;
+    let n = fc.tracks.len();
+    let seg = TOTAL / n as f64;
+    fc.tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let start = i as f64 * seg;
+            let end = if i + 1 == n {
+                TOTAL
+            } else {
+                (i + 1) as f64 * seg
+            };
+            concert_types::SongTimestamp {
+                title: t.title.to_string(),
+                start_time: start,
+                end_time: end,
+                duration: end - start,
+            }
+        })
+        .collect()
+}
+
 fn build_concert(
     conn: &rusqlite::Connection,
     workdir: &Path,
@@ -248,6 +274,10 @@ fn build_concert(
         db::mark_split_succeeded(conn, id)?;
         let tracks_present: Vec<bool> = fc.tracks.iter().map(|t| t.present).collect();
         db::set_tracks_present(conn, id, &tracks_present)?;
+        // Seed automated split timestamps (one contiguous segment per set-list
+        // song, spread over the ~20s full-concert file with a margin under its
+        // duration) so the splitter editor has data to load.
+        db::set_auto_split_timestamps(conn, id, &auto_timestamps(fc))?;
     }
     db::set_tracks_liked(conn, id, &fc.liked)?;
     // Record a delete event for each absent track so the track list shows it

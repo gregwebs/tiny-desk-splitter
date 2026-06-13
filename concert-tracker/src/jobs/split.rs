@@ -138,7 +138,13 @@ pub async fn start_split(
     }
 
     enum SetupResult {
-        Ready(NamedTempFile, std::path::PathBuf, std::path::PathBuf, Option<NamedTempFile>, Option<std::path::PathBuf>),
+        Ready(
+            NamedTempFile,
+            std::path::PathBuf,
+            std::path::PathBuf,
+            Option<NamedTempFile>,
+            Option<std::path::PathBuf>,
+        ),
         AlreadySplit,
     }
 
@@ -163,7 +169,9 @@ pub async fn start_split(
                 }
             };
 
-            return Ok(SetupResult::Ready(temp_file, input_file, output_dir, ts_temp, ts_path));
+            return Ok(SetupResult::Ready(
+                temp_file, input_file, output_dir, ts_temp, ts_path,
+            ));
         }
         // Source file missing. Only Analyze mode supports auto-recovery from
         // existing split tracks — user/reset modes require the source file
@@ -249,12 +257,10 @@ fn write_timestamps_file(ts: &ValidatedTimestamps) -> Result<NamedTempFile> {
 
 /// Read the automated timestamps from the `timestamps.json` the splitter writes
 /// into `output_dir` after analysis. Returns an error on I/O or parse failure.
-pub fn read_analysis_timestamps(
-    output_dir: &Path,
-) -> Result<Vec<concert_types::SongTimestamp>> {
+pub fn read_analysis_timestamps(output_dir: &Path) -> Result<Vec<concert_types::SongTimestamp>> {
     let path = output_dir.join("timestamps.json");
-    let file = std::fs::File::open(&path)
-        .with_context(|| format!("Failed to open {}", path.display()))?;
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("Failed to open {}", path.display()))?;
     let info: ConcertInfo = serde_json::from_reader(std::io::BufReader::new(file))
         .with_context(|| format!("Failed to parse {}", path.display()))?;
     info.timestamps
@@ -328,7 +334,11 @@ async fn run_split(
 
     match run_with_logging(cmd, "split", concert_id, temp_path.as_deref()).await {
         Ok((status, _)) if status.success() => {
-            tracing::info!("split completed for concert {} mode={}", concert_id, job.mode.name());
+            tracing::info!(
+                "split completed for concert {} mode={}",
+                concert_id,
+                job.mode.name()
+            );
             drop(temp_file);
             {
                 let conn = db.lock().unwrap();
@@ -353,27 +363,50 @@ async fn run_split(
                     SplitMode::Analyze => {
                         match read_analysis_timestamps(&job.output_dir) {
                             Ok(ts) => {
-                                if let Err(e) = db::set_auto_split_timestamps(&conn, concert_id, &ts) {
-                                    tracing::warn!("failed to store auto timestamps for concert {}: {}", concert_id, e);
+                                if let Err(e) =
+                                    db::set_auto_split_timestamps(&conn, concert_id, &ts)
+                                {
+                                    tracing::warn!(
+                                        "failed to store auto timestamps for concert {}: {}",
+                                        concert_id,
+                                        e
+                                    );
                                 }
                                 // Successful re-analysis supersedes any user cut.
                                 if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
-                                    tracing::warn!("failed to clear user timestamps for concert {}: {}", concert_id, e);
+                                    tracing::warn!(
+                                        "failed to clear user timestamps for concert {}: {}",
+                                        concert_id,
+                                        e
+                                    );
                                 }
                             }
                             Err(e) => {
-                                tracing::warn!("failed to read timestamps.json for concert {}: {}", concert_id, e);
+                                tracing::warn!(
+                                    "failed to read timestamps.json for concert {}: {}",
+                                    concert_id,
+                                    e
+                                );
                             }
                         }
                     }
                     SplitMode::UserTimestamps(ts) => {
-                        if let Err(e) = db::set_user_split_timestamps(&conn, concert_id, ts.songs()) {
-                            tracing::warn!("failed to store user timestamps for concert {}: {}", concert_id, e);
+                        if let Err(e) = db::set_user_split_timestamps(&conn, concert_id, ts.songs())
+                        {
+                            tracing::warn!(
+                                "failed to store user timestamps for concert {}: {}",
+                                concert_id,
+                                e
+                            );
                         }
                     }
                     SplitMode::ResetToAuto(_) => {
                         if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
-                            tracing::warn!("failed to clear user timestamps for concert {}: {}", concert_id, e);
+                            tracing::warn!(
+                                "failed to clear user timestamps for concert {}: {}",
+                                concert_id,
+                                e
+                            );
                         }
                     }
                 }
@@ -672,7 +705,10 @@ mod tests {
 
         // Wait for job to finish
         for _ in 0..100 {
-            if !registry.is_running(&JobKey { concert_id: 1, kind: JobKind::Split }) {
+            if !registry.is_running(&JobKey {
+                concert_id: 1,
+                kind: JobKind::Split,
+            }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -703,20 +739,35 @@ mod tests {
         let config = config_with_timestamps_check(tmp.path().to_path_buf(), &set_list);
 
         let payload = vec![
-            TimestampPayloadSong { title: "Alpha".to_string(), start_time: 0.0, end_time: 95.0 },
-            TimestampPayloadSong { title: "Beta".to_string(), start_time: 100.0, end_time: 200.0 },
+            TimestampPayloadSong {
+                title: "Alpha".to_string(),
+                start_time: 0.0,
+                end_time: 95.0,
+            },
+            TimestampPayloadSong {
+                title: "Beta".to_string(),
+                start_time: 100.0,
+                end_time: 200.0,
+            },
         ];
         let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
 
         let outcome = start_split(
-            db.clone(), registry.clone(), config, 1, SplitMode::UserTimestamps(ts),
+            db.clone(),
+            registry.clone(),
+            config,
+            1,
+            SplitMode::UserTimestamps(ts),
         )
         .await
         .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
 
         for _ in 0..100 {
-            if !registry.is_running(&JobKey { concert_id: 1, kind: JobKind::Split }) {
+            if !registry.is_running(&JobKey {
+                concert_id: 1,
+                kind: JobKind::Split,
+            }) {
                 break;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -748,13 +799,19 @@ mod tests {
         let registry = Arc::new(JobRegistry::new());
         let config = config_for(tmp.path().to_path_buf());
 
-        let payload = vec![
-            TimestampPayloadSong { title: "Song A".to_string(), start_time: 0.0, end_time: 90.0 },
-        ];
+        let payload = vec![TimestampPayloadSong {
+            title: "Song A".to_string(),
+            start_time: 0.0,
+            end_time: 90.0,
+        }];
         let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
 
         let err = start_split(
-            db.clone(), registry, config, 1, SplitMode::UserTimestamps(ts),
+            db.clone(),
+            registry,
+            config,
+            1,
+            SplitMode::UserTimestamps(ts),
         )
         .await
         .unwrap_err();

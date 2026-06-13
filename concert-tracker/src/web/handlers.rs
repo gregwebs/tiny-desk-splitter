@@ -16,11 +16,11 @@ use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::{auto_timestamps_with_backfill, start_split};
 use crate::jobs::{JobKey, JobKind, SplitMode};
-use crate::split_timestamps::{song_timestamps_to_payload, TimestampPayload, ValidatedTimestamps};
 use crate::model::{
     concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
     SplitStatus, TrackInfo,
 };
+use crate::split_timestamps::{song_timestamps_to_payload, TimestampPayload, ValidatedTimestamps};
 use crate::sync::{concerts_needing_scrape, sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
 
@@ -789,7 +789,10 @@ pub async fn download(
                 // downloaded_at is now set so the Download button will disappear.
             }
             Ok(_) => {}
-            Err(e) if e.downcast_ref::<crate::jobs::prepare::NoSetList>().is_some() => {
+            Err(e)
+                if e.downcast_ref::<crate::jobs::prepare::NoSetList>()
+                    .is_some() =>
+            {
                 // TOCTOU: metadata cleared between our check and prepare's re-read.
                 // Fall back to a plain download rather than a 500.
                 start_download(
@@ -1375,7 +1378,10 @@ pub async fn tracks(
     Path(id): Path<i64>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let sidebar = params.get("context").map(|v| v == "sidebar").unwrap_or(false);
+    let sidebar = params
+        .get("context")
+        .map(|v| v == "sidebar")
+        .unwrap_or(false);
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
@@ -1903,6 +1909,13 @@ pub async fn player_js() -> impl IntoResponse {
     )
 }
 
+pub async fn splitter_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/splitter.js"),
+    )
+}
+
 // ── Split-timestamp API ───────────────────────────────────────────────────────
 
 /// Response body for GET /concerts/:id/split-timestamps.
@@ -1911,21 +1924,51 @@ pub struct SplitTimestampsResponse {
     pub set_list: Vec<String>,
     pub auto: Option<Vec<concert_types::SongTimestamp>>,
     pub user: Option<Vec<concert_types::SongTimestamp>>,
+    /// Total source-media duration in seconds, from `ffprobe`. `None` when the
+    /// source isn't downloaded or `ffprobe` is unavailable/fails. The frontend
+    /// timeline uses this for its scale and right-edge clamp — independent of
+    /// whether the source is browser-playable (e.g. `.mkv`), so the editor still
+    /// works when only preview playback is unavailable.
+    pub media_duration: Option<f64>,
 }
 
 pub async fn get_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<SplitTimestampsResponse>, AppError> {
-    let conn = state.db.lock().unwrap();
-    let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-    let auto = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
-        .map_err(|e| AppError::Internal(e))?;
-    let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+    // Gather everything that needs the DB lock first, then release it before the
+    // async ffprobe call (the MutexGuard must not be held across an await).
+    let (set_list, auto, user, source_path) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let auto = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
+            .map_err(|e| AppError::Internal(e))?;
+        let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+        let source_path = concert
+            .album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
+        (concert.set_list, auto, stored.user, source_path)
+    };
+
+    // Best-effort duration: degrade to None (editor falls back to the last end
+    // time) rather than failing the whole request if ffprobe is missing/errors.
+    let media_duration = match source_path {
+        Some(path) => match ffprobe_duration(&path).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!("ffprobe failed for {}: {}", path.display(), e);
+                None
+            }
+        },
+        None => None,
+    };
+
     Ok(Json(SplitTimestampsResponse {
-        set_list: concert.set_list,
+        set_list,
         auto,
-        user: stored.user,
+        user,
+        media_duration,
     }))
 }
 
@@ -1947,7 +1990,11 @@ pub async fn set_split_timestamps(
     let source_path = match source_path {
         Some(p) => p,
         None => {
-            return Ok((StatusCode::CONFLICT, "Source file not found — download the concert first").into_response());
+            return Ok((
+                StatusCode::CONFLICT,
+                "Source file not found — download the concert first",
+            )
+                .into_response());
         }
     };
 
@@ -1987,7 +2034,11 @@ pub async fn set_split_timestamps(
         if concert.downloaded_at.is_none() {
             let now = chrono::Utc::now().to_rfc3339();
             if let Err(e) = db::set_downloaded_at_if_missing(&conn, id, &now) {
-                tracing::warn!("set_downloaded_at_if_missing failed for concert {}: {}", id, e);
+                tracing::warn!(
+                    "set_downloaded_at_if_missing failed for concert {}: {}",
+                    id,
+                    e
+                );
             }
         }
     }
@@ -2013,11 +2064,9 @@ pub async fn set_split_timestamps(
             "A split job is already running for this concert",
         )
             .into_response()),
-        crate::jobs::split::StartOutcome::NotDownloaded => Ok((
-            StatusCode::CONFLICT,
-            "Concert source file not downloaded",
-        )
-            .into_response()),
+        crate::jobs::split::StartOutcome::NotDownloaded => {
+            Ok((StatusCode::CONFLICT, "Concert source file not downloaded").into_response())
+        }
         // Should not happen for user mode (AlreadySplit branch is Analyze-only).
         crate::jobs::split::StartOutcome::AlreadySplit => Ok((
             StatusCode::ACCEPTED,
@@ -2061,7 +2110,8 @@ pub async fn reset_split_timestamps(
     }
 
     let payload_songs = song_timestamps_to_payload(&auto_ts);
-    let validated = match ValidatedTimestamps::validate_for_reset(&concert.set_list, &payload_songs) {
+    let validated = match ValidatedTimestamps::validate_for_reset(&concert.set_list, &payload_songs)
+    {
         Ok(v) => v,
         Err(e) => {
             return Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response());
@@ -2074,7 +2124,11 @@ pub async fn reset_split_timestamps(
         if concert.downloaded_at.is_none() {
             let now = chrono::Utc::now().to_rfc3339();
             if let Err(e) = db::set_downloaded_at_if_missing(&conn, id, &now) {
-                tracing::warn!("set_downloaded_at_if_missing failed for concert {}: {}", id, e);
+                tracing::warn!(
+                    "set_downloaded_at_if_missing failed for concert {}: {}",
+                    id,
+                    e
+                );
             }
         }
     }
@@ -2100,11 +2154,9 @@ pub async fn reset_split_timestamps(
             "A split job is already running for this concert",
         )
             .into_response()),
-        crate::jobs::split::StartOutcome::NotDownloaded => Ok((
-            StatusCode::CONFLICT,
-            "Concert source file not downloaded",
-        )
-            .into_response()),
+        crate::jobs::split::StartOutcome::NotDownloaded => {
+            Ok((StatusCode::CONFLICT, "Concert source file not downloaded").into_response())
+        }
         crate::jobs::split::StartOutcome::AlreadySplit => Ok((
             StatusCode::ACCEPTED,
             Json(serde_json::json!({"status": "splitting"})),
@@ -2117,9 +2169,12 @@ pub async fn reset_split_timestamps(
 async fn ffprobe_duration(path: &std::path::Path) -> anyhow::Result<f64> {
     let output = tokio::process::Command::new("ffprobe")
         .args([
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_entries", "format=duration",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_entries",
+            "format=duration",
         ])
         .arg(path)
         .output()
@@ -2131,8 +2186,8 @@ async fn ffprobe_duration(path: &std::path::Path) -> anyhow::Result<f64> {
         anyhow::bail!("ffprobe exited non-zero: {}", stderr);
     }
 
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .context("ffprobe output not valid JSON")?;
+    let json: serde_json::Value =
+        serde_json::from_slice(&output.stdout).context("ffprobe output not valid JSON")?;
     let duration_str = json["format"]["duration"]
         .as_str()
         .context("ffprobe JSON missing format.duration")?;
@@ -2223,6 +2278,35 @@ mod tests {
 
         let html = render_row(&concert, false, false, false).unwrap();
         assert!(!html.contains("card-thumb"), "html: {html}");
+    }
+
+    #[test]
+    fn split_timestamps_response_serializes_media_duration() {
+        let resp = SplitTimestampsResponse {
+            set_list: vec!["Song A".to_string()],
+            auto: Some(vec![concert_types::SongTimestamp {
+                title: "Song A".to_string(),
+                start_time: 0.0,
+                end_time: 180.0,
+                duration: 180.0,
+            }]),
+            user: None,
+            media_duration: Some(212.5),
+        };
+        let v: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["media_duration"], 212.5);
+        assert!(v["user"].is_null());
+        assert_eq!(v["auto"][0]["end_time"], 180.0);
+
+        // Null duration (ffprobe unavailable) still serializes the key.
+        let resp2 = SplitTimestampsResponse {
+            set_list: vec![],
+            auto: None,
+            user: None,
+            media_duration: None,
+        };
+        let v2: serde_json::Value = serde_json::to_value(&resp2).unwrap();
+        assert!(v2["media_duration"].is_null());
     }
 
     /// A downloaded+split concert with 4 set-list tracks, one already deleted
@@ -2358,7 +2442,10 @@ mod tests {
         .render()
         .unwrap();
         // Card variant: hx-post delete targeting closest .card.
-        assert!(with_delete.contains("hx-target=\"closest .card\""), "{with_delete}");
+        assert!(
+            with_delete.contains("hx-target=\"closest .card\""),
+            "{with_delete}"
+        );
         assert!(with_delete.contains("/tracks/0/delete"), "{with_delete}");
         assert!(!with_delete.contains("sidebarDeleteTrack"), "{with_delete}");
 

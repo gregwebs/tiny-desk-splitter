@@ -63,6 +63,12 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 - **Preview image** display: the full-size preview is shown in the concert card (the listing
   uses the smaller thumbnail instead)
 - **Track list** with per-track playback, watch, like (★), and delete buttons
+- **Track splitter**: an inline, collapsible timeline editor for downloaded concerts.
+  Drag a handle per track boundary, detach a shared split point into two handles to
+  open a gap that belongs to no track (e.g. cut out talking), audition cut points
+  against the album audio, then submit to re-cut the tracks (or reset to the
+  automatic split). See
+  [docs/change/2026-06-13-splitter-timeline-ui.md](docs/change/2026-06-13-splitter-timeline-ui.md).
 - **Set list** display for concerts that haven't been split yet
 - **Musicians** listing with instruments
 - **Notes** field with save (persisted to DB)

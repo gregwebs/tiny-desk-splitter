@@ -910,6 +910,12 @@ const Player = (() => {
     }
   }
 
+  // Idempotent pause — unlike togglePause(), never starts playback. Used by the
+  // splitter to silence the global player before previewing a cut point.
+  function pause() {
+    if (audio && !audio.paused) audio.pause();
+  }
+
   function seek(val) {
     if (!audio || !audio.duration) return;
     audio.currentTime = (val / 100) * audio.duration;
@@ -1296,7 +1302,7 @@ const Player = (() => {
     init();
   }
 
-  return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
+  return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, pause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
     openConcert, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue };
 })();

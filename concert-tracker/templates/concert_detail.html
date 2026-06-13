@@ -8,6 +8,13 @@
         hx-on::after-request="this.textContent='Re-scrape'"
         style="margin: 0.5rem 0;">Re-scrape</button>
 
+{% if concert.downloaded_at.is_some() && !concert.set_list.is_empty() %}
+<div class="splitter-section">
+  <button type="button" class="splitter-toggle" onclick="Splitter.toggle(this)">Edit track splits</button>
+  <div id="splitter" class="splitter" data-concert-id="{{ concert.id }}"></div>
+</div>
+{% endif %}
+
 {% if let Some(artist) = concert.artist.as_ref() %}<p><strong>Artist:</strong> {{ artist }}</p>{% endif %}
 
 {% if let Some(date) = concert.display_date() %}<p><strong>Date:</strong> {{ date }}</p>{% endif %}

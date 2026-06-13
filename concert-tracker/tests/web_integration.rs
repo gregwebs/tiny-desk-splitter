@@ -1863,8 +1863,8 @@ fn state_with_chain(
 async fn wait_for_split(app: &axum::Router, id: i64, tracks: usize) {
     for _ in 0..200 {
         let (_, j) = get_json(app, &format!("/concerts/{id}/prepare-status")).await;
-        let present: Vec<bool> = serde_json::from_value(j["tracks_present"].clone())
-            .unwrap_or_default();
+        let present: Vec<bool> =
+            serde_json::from_value(j["tracks_present"].clone()).unwrap_or_default();
         if present.len() == tracks && present.iter().all(|&p| p) {
             return;
         }
@@ -1964,7 +1964,10 @@ async fn download_no_set_list_plain_download_no_split_queued() {
     // No split should be queued.
     let (_, j) = get_json(&app, "/concerts/1/prepare-status").await;
     assert_eq!(j["split_queued"], false);
-    assert_ne!(j["download"], "not-downloaded", "download should have started");
+    assert_ne!(
+        j["download"], "not-downloaded",
+        "download should have started"
+    );
 }
 
 /// Re-downloading a concert that is already split (e.g. source file deleted
@@ -2001,7 +2004,10 @@ async fn download_does_not_resplit_already_split_concert() {
     // Wait a little for the download to run, then confirm no split was queued.
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     let content = std::fs::read(cd.join("Keep Track.m4a")).unwrap();
-    assert_eq!(content, b"original-audio", "track file must not be overwritten");
+    assert_eq!(
+        content, b"original-audio",
+        "track file must not be overwritten"
+    );
 }
 
 /// A second POST /download while one is already running must not drop the queued
@@ -2090,7 +2096,9 @@ async fn download_force_starts_when_tracks_present_but_source_missing() {
 
 // ── split-timestamps API tests ────────────────────────────────────────────────
 
-use concert_tracker::db::{get_split_timestamps, set_auto_split_timestamps, set_user_split_timestamps};
+use concert_tracker::db::{
+    get_split_timestamps, set_auto_split_timestamps, set_user_split_timestamps,
+};
 
 fn sample_song_timestamps(songs: &[&str]) -> Vec<concert_types::SongTimestamp> {
     songs
@@ -2107,11 +2115,7 @@ fn sample_song_timestamps(songs: &[&str]) -> Vec<concert_types::SongTimestamp> {
 
 /// Seed a concert with scraped metadata and a set_list. Returns the concert id.
 /// Uses a unique URL per album to avoid collisions between tests.
-fn seed_ts_concert(
-    conn: &rusqlite::Connection,
-    album: &str,
-    songs: &[&str],
-) -> i64 {
+fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> i64 {
     db::upsert_listing(
         conn,
         &NewListing {
@@ -2151,16 +2155,24 @@ async fn create_test_audio(dir: &std::path::Path, name: &str) -> Option<std::pat
     let status = tokio::process::Command::new("ffmpeg")
         .args([
             "-y",
-            "-f", "lavfi",
-            "-i", "sine=frequency=440:duration=5",
-            "-c:a", "aac",
-            "-b:a", "32k",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "32k",
         ])
         .arg(&out)
         .output()
         .await
         .ok()?;
-    if status.status.success() { Some(out) } else { None }
+    if status.status.success() {
+        Some(out)
+    } else {
+        None
+    }
 }
 
 // ── GET /concerts/:id/split-timestamps ───────────────────────────────────────
@@ -2408,12 +2420,8 @@ async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
         {"title": "Song One", "start_time": 0.0, "end_time": 2.5},
         {"title": "Song Two", "start_time": 2.5, "end_time": 5.0}
     ]});
-    let (status, json) = post_body_json(
-        &app,
-        &format!("/concerts/{id}/split-timestamps"),
-        body,
-    )
-    .await;
+    let (status, json) =
+        post_body_json(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
     assert_eq!(status, StatusCode::ACCEPTED, "expected 202: {:?}", json);
     assert_eq!(json["status"], "splitting");
 
@@ -2462,11 +2470,7 @@ async fn reset_split_timestamps_returns_already_auto_when_user_is_null() {
     set_auto_split_timestamps(&conn, id, &ts).unwrap();
 
     let app = router(test_state(conn));
-    let (status, json) = get_json(
-        &app,
-        &format!("/concerts/{id}/split-timestamps"),
-    )
-    .await;
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(json["auto"].is_array());
     assert_eq!(json["user"], serde_json::Value::Null);
@@ -2540,8 +2544,7 @@ async fn reset_split_timestamps_happy_path_returns_202_and_clears_user_column() 
     };
     let app = router(state);
 
-    let (status, json) =
-        post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
+    let (status, json) = post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
     assert_eq!(status, StatusCode::ACCEPTED, "expected 202: {:?}", json);
     assert_eq!(json["status"], "splitting");
 
@@ -2583,13 +2586,11 @@ async fn delete_split_preserves_split_timestamp_columns() {
 
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
-    let (status, _) =
-        post_json(&app, &format!("/concerts/{id}/delete-split")).await;
+    let (status, _) = post_json(&app, &format!("/concerts/{id}/delete-split")).await;
     assert_eq!(status, StatusCode::OK);
 
     // Verify both columns survive.
-    let (status, json) =
-        get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
     assert_eq!(status, StatusCode::OK);
     assert!(
         json["auto"].is_array(),
