@@ -797,7 +797,7 @@
       <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>
       <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
       <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
-      <input id="player-seek" type="range" min="0" max="100" value="0"
+      <input id="player-seek" type="range" min="0" max="100" value="0" step="1"
         oninput="Player.seek(this.value)">
       <span id="player-time">0:00 / 0:00</span>
     </div>

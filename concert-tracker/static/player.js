@@ -269,8 +269,11 @@ const Player = (() => {
   function onTimeUpdate() {
     const seek = document.getElementById("player-seek");
     const time = document.getElementById("player-time");
-    if (!audio.duration) return;
-    if (seek) seek.value = (audio.currentTime / audio.duration) * 100;
+    if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    if (seek) {
+      seek.max = Math.ceil(audio.duration); // set once-ish; ceil so the end is reachable
+      seek.value = audio.currentTime;
+    }
     if (time) time.textContent = formatTime(audio.currentTime) + " / " + formatTime(audio.duration);
   }
 
@@ -911,8 +914,8 @@ const Player = (() => {
   }
 
   function seek(val) {
-    if (!audio || !audio.duration) return;
-    audio.currentTime = (val / 100) * audio.duration;
+    if (!audio || !Number.isFinite(audio.duration) || audio.duration <= 0) return;
+    audio.currentTime = Number(val);
   }
 
   let pendingSeekHandler = null;
