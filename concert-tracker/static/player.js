@@ -740,7 +740,7 @@ const Player = (() => {
     btn.disabled = !state.hasPrev;
   }
 
-  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev) {
+  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev, recordListen = true) {
     if (!audio) init();
     if (!audio) return;
 
@@ -779,7 +779,7 @@ const Player = (() => {
       return;
     }
 
-    if (listenUrl) {
+    if (listenUrl && recordListen) {
       fetch(listenUrl, { method: "POST" }).catch(() => {});
     }
   }
@@ -787,7 +787,7 @@ const Player = (() => {
   // Fetch the whole-album media info and start playing it now (no enqueue).
   // Returns true when in-browser playback started; false on error or when the
   // file is not browser-playable (in which case it falls back to window.open).
-  async function startAlbum(btn, concertId) {
+  async function startAlbum(btn, concertId, recordListen = true) {
     cancelAutoAdvance();
     try {
       const resp = await fetch(`/concerts/${concertId}/media-info`);
@@ -802,7 +802,7 @@ const Player = (() => {
       }
       await play(btn, info.url, info.title, info.artist, concertId, null,
         `/concerts/${concertId}/listen`, info.is_video,
-        `/concerts/${concertId}/watch`, info.has_next, info.liked, info.has_prev);
+        `/concerts/${concertId}/watch`, info.has_next, info.liked, info.has_prev, recordListen);
       return true;
     } catch (e) {
       if (btn) { btn.classList.add("btn-listen-error"); btn.textContent = "Error"; }
@@ -910,15 +910,57 @@ const Player = (() => {
     }
   }
 
-  // Idempotent pause — unlike togglePause(), never starts playback. Used by the
-  // splitter to silence the global player before previewing a cut point.
-  function pause() {
-    if (audio && !audio.paused) audio.pause();
-  }
-
   function seek(val) {
     if (!audio || !audio.duration) return;
     audio.currentTime = (val / 100) * audio.duration;
+  }
+
+  let pendingSeekHandler = null;
+
+  // Set audio.currentTime when metadata is available, cancelling any prior
+  // pending seek so rapid preview clicks can't seek to a stale earlier time.
+  function seekWhenReady(seconds) {
+    if (pendingSeekHandler) {
+      audio.removeEventListener("loadedmetadata", pendingSeekHandler);
+      pendingSeekHandler = null;
+    }
+    if (audio.readyState >= 1) {
+      audio.currentTime = seconds;
+    } else {
+      pendingSeekHandler = () => {
+        pendingSeekHandler = null;
+        audio.currentTime = seconds;
+      };
+      audio.addEventListener("loadedmetadata", pendingSeekHandler, { once: true });
+    }
+  }
+
+  // Start whole-album playback for concertId and seek to `seconds`. If the
+  // album is already current (bar showing, no individual track selected),
+  // just seek + resume; otherwise start fresh via startAlbum. Never records
+  // a listen event so splitter preview auditions don't spam the event log.
+  async function playAlbumAt(concertId, seconds) {
+    if (!audio) init();
+    if (!audio) return;
+    if (state.concertId === concertId && state.trackIdx === null) {
+      seekWhenReady(seconds);
+      if (audio.paused) {
+        audio.play().catch((e) => {
+          showError("Playback blocked");
+          tracing("playAlbumAt play rejected", e);
+        });
+      }
+      return;
+    }
+    const started = await startAlbum(null, concertId, false);
+    if (!started) return;
+    seekWhenReady(seconds);
+  }
+
+  // Snapshot of what is currently playing. Returns { concertId, trackIdx }
+  // where trackIdx is null for whole-album playback.
+  function nowPlaying() {
+    return { concertId: state.concertId, trackIdx: state.trackIdx };
   }
 
   function enqueue(concertId, trackIdx, title, liked) {
@@ -1302,7 +1344,12 @@ const Player = (() => {
     init();
   }
 
-  return { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, pause, seek,
+  const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
-    openConcert, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue };
+    openConcert, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue,
+    playAlbumAt, nowPlaying };
+  // Expose on window so other scripts (splitter.js) can access it via window.Player —
+  // `const Player` at script top-level is not automatically a window property.
+  if (typeof window !== "undefined") window.Player = api;
+  return api;
 })();

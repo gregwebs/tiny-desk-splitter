@@ -6,6 +6,7 @@ const { test, expect } = require("./fixtures");
 // concert 2 ("Second Concert" — split, 3 playable wav tracks), which the
 // fixture seeds with automated split timestamps over the ~20s source file.
 const ID = 2;
+const CONCERT_2_TITLE = "Second Concert";
 
 const toggle = ".splitter-toggle";
 const timeline = "#splitter .splitter-timeline";
@@ -136,5 +137,68 @@ test.describe("track splitter", () => {
     await expect(page.locator(submit)).toBeEnabled();
     await page.click(submit);
     await expect(page.locator(status)).toContainText("Splitting");
+  });
+
+  test("clicking start ▶ plays album through the global player bar", async ({ page }) => {
+    await openSplitter(page);
+    // Click the start preview button of the first track row.
+    const startPlay = page.locator(rows).nth(0).locator(".splitter-play").nth(0);
+    await startPlay.click();
+    // Player bar becomes active and shows the album title.
+    await expect(page.locator("#player-bar")).toHaveClass(/active/, { timeout: 5000 });
+    await expect(page.locator("#player-title")).toHaveText(CONCERT_2_TITLE);
+    // Audio is playing.
+    await expect.poll(
+      () => page.evaluate(() => {
+        const a = document.getElementById("player-audio");
+        return a && !a.paused;
+      }),
+      { timeout: 5000 }
+    ).toBe(true);
+    // currentTime is near the start of the track (< 3s after clicking).
+    const ct = await page.evaluate(() => document.getElementById("player-audio").currentTime);
+    expect(ct).toBeGreaterThanOrEqual(0);
+    expect(ct).toBeLessThan(3);
+  });
+
+  test("clicking end ▶ seeks the global player to ~end-3s", async ({ page }) => {
+    await openSplitter(page);
+    // End preview of first track: clicks at max(0, end-3). The first track ends ~6.33s.
+    const endPlay = page.locator(rows).nth(0).locator(".splitter-play").nth(1);
+    await endPlay.click();
+    await expect(page.locator("#player-bar")).toHaveClass(/active/, { timeout: 5000 });
+    await expect.poll(
+      () => page.evaluate(() => {
+        const a = document.getElementById("player-audio");
+        return a && !a.paused;
+      }),
+      { timeout: 5000 }
+    ).toBe(true);
+  });
+
+  test("no listen events are recorded when previewing with the splitter", async ({ page }) => {
+    // Count existing listen-row events on the concert detail page.
+    await page.goto(`/concerts/${ID}`);
+    const countListens = async () =>
+      page.locator("#events-table tbody tr").filter({ hasText: "listen" }).count();
+
+    const before = await countListens();
+
+    // Open splitter and click preview several times.
+    await page.click(toggle);
+    await expect(page.locator(timeline)).toBeVisible();
+    const startPlay = page.locator(rows).nth(0).locator(".splitter-play").nth(0);
+    await startPlay.click();
+    await expect(page.locator("#player-bar")).toHaveClass(/active/, { timeout: 5000 });
+    await startPlay.click();
+    const endPlay = page.locator(rows).nth(0).locator(".splitter-play").nth(1);
+    await endPlay.click();
+    // Give the server time to persist any spurious events.
+    await page.waitForTimeout(800);
+
+    // Reload the page to get the freshest event table from the server.
+    await page.reload();
+    const after = await countListens();
+    expect(after).toBe(before);
   });
 });

@@ -211,8 +211,9 @@ const Splitter = (() => {
   }
 
   function close(container, btn) {
-    if (S && S.audio) {
-      S.audio.pause();
+    if (S && S.globalPlayheadHandler) {
+      const globalAudio = document.getElementById("player-audio");
+      if (globalAudio) globalAudio.removeEventListener("timeupdate", S.globalPlayheadHandler);
     }
     container.classList.remove("splitter-open");
     container.innerHTML = "";
@@ -223,7 +224,7 @@ const Splitter = (() => {
   async function open(container) {
     const id = Number(container.getAttribute("data-concert-id"));
     container.innerHTML = '<p class="splitter-status">Loading…</p>';
-    S = { id, container, state: null, mediaUrl: null, playable: false, audio: null, dom: {}, busy: false };
+    S = { id, container, state: null, mediaUrl: null, playable: false, dom: {}, busy: false, globalPlayheadHandler: null };
     try {
       const [tsResp, mediaResp] = await Promise.all([
         fetch(`/concerts/${id}/split-timestamps`).then(okJson),
@@ -241,6 +242,12 @@ const Splitter = (() => {
         S.playable = !!mediaResp.playable;
       }
       render();
+      const globalAudio = document.getElementById("player-audio");
+      if (globalAudio) {
+        const handler = () => positionPlayhead();
+        S.globalPlayheadHandler = handler;
+        globalAudio.addEventListener("timeupdate", handler);
+      }
     } catch (e) {
       container.innerHTML =
         '<p class="splitter-status splitter-status-error">Could not load split timestamps.</p>';
@@ -303,17 +310,9 @@ const Splitter = (() => {
       S.dom.handles.push(handle);
     });
 
-    // Preview hint / audio.
+    // Preview note for non-playable sources.
     let previewNote = null;
-    if (S.mediaUrl && S.playable) {
-      S.audio = el("audio", "splitter-audio");
-      S.audio.id = "splitter-audio";
-      S.audio.preload = "metadata";
-      S.audio.src = S.mediaUrl;
-      S.audio.addEventListener("timeupdate", positionPlayhead);
-      S.audio.addEventListener("play", onSplitterPlay);
-      bindGlobalPlayerExclusivity();
-    } else {
+    if (!S.playable) {
       previewNote = el(
         "p",
         "splitter-note",
@@ -390,7 +389,8 @@ const Splitter = (() => {
     const b = el("button", "splitter-play", "▶");
     b.type = "button";
     b.title = "Play from here";
-    b.addEventListener("click", fn);
+    if (S.playable) b.addEventListener("click", fn);
+    else b.disabled = true;
     return b;
   }
 
@@ -481,7 +481,7 @@ const Splitter = (() => {
   }
 
   function onTimelineSeek(e) {
-    if (!S.audio) return;
+    if (!S.playable) return;
     previewAt(timeFromClientX(e.clientX));
   }
 
@@ -507,39 +507,27 @@ const Splitter = (() => {
   // ── Preview audio ───────────────────────────────────────────────────────────
 
   function previewAt(sec) {
-    if (!S.audio) return;
-    try {
-      S.audio.currentTime = clamp(sec, 0, S.state.duration);
-    } catch (e) {
-      /* not seekable yet */
+    if (!S.playable) return;
+    if (window.Player && typeof window.Player.playAlbumAt === "function") {
+      window.Player.playAlbumAt(S.id, clamp(sec, 0, S.state.duration));
     }
-    S.audio.play().catch(() => {});
-  }
-
-  function onSplitterPlay() {
-    // Avoid two audio streams: silence the global player when we start.
-    if (window.Player && typeof window.Player.pause === "function") window.Player.pause();
-  }
-
-  function bindGlobalPlayerExclusivity() {
-    const global = document.getElementById("player-audio");
-    if (!global || global._splitterBound) return;
-    global._splitterBound = true;
-    // Reverse direction: when the global player starts, pause our preview.
-    global.addEventListener("play", () => {
-      if (S && S.audio && !S.audio.paused) S.audio.pause();
-    });
   }
 
   function positionPlayhead() {
-    if (!S || !S.audio || !S.dom.playhead) return;
+    if (!S || !S.dom.playhead) return;
     const ph = S.dom.playhead;
-    if (S.audio.paused && S.audio.currentTime === 0) {
+    const globalAudio = document.getElementById("player-audio");
+    if (!globalAudio || !window.Player || typeof window.Player.nowPlaying !== "function") {
+      ph.style.display = "none";
+      return;
+    }
+    const np = window.Player.nowPlaying();
+    if (np.concertId !== S.id || np.trackIdx !== null || globalAudio.paused) {
       ph.style.display = "none";
       return;
     }
     ph.style.display = "block";
-    ph.style.left = pct(S.state, S.audio.currentTime) + "%";
+    ph.style.left = pct(S.state, globalAudio.currentTime) + "%";
   }
 
   // ── Submit / reset ──────────────────────────────────────────────────────────

@@ -25,11 +25,11 @@ for every boundary plus a synced numeric table (`m:ss.s`) for precise entry.
 - **Head/tail handles** trim the intro/outro (the server does not require the
   first track to start at 0).
 - **Audio preview.** Clicking the timeline seeks + plays the album audio; each
-  table row has ▶ buttons to audition a cut. Preview uses a dedicated
-  `<audio id="splitter-audio">` and stays mutually exclusive with the global
-  player bar (each pauses the other on play). Preview is disabled (with a note)
-  when the source isn't browser-playable (e.g. `.mkv`), but the editor still
-  works.
+  table row has ▶ buttons to audition a cut point. Preview routes through the
+  global player bar (`Player.playAlbumAt`) so the now-playing title, seek bar,
+  and timeline playhead all reflect the audition. Auditioning never records a
+  listen event. Preview buttons are disabled (with a note) when the source
+  isn't browser-playable (e.g. `.mkv`), but the editor still works.
 - **Submit / Reset.** Submit POSTs to `/concerts/:id/split-timestamps`; Reset
   POSTs to `.../reset`. On `202` the concert card is refreshed so its existing
   in-progress badge + 3s polling reflect the running split. A reset `200`
@@ -65,8 +65,11 @@ the source is absent or `ffprobe` fails, rather than failing the request.
   DOM-free helpers (`parseTimecode`/`formatTimecode`/`setStart`/`setEnd`/
   `detach`/`link`/`validate`/`buildPayload`, exposed under `_pure`) with a thin
   DOM/interaction layer over them.
-- `concert-tracker/static/player.js` — idempotent `pause()` export (does not
-  start playback, unlike `togglePause()`).
+- `concert-tracker/static/player.js` — `playAlbumAt(concertId, seconds)` starts
+  whole-album playback and seeks to a position without recording a listen event;
+  `nowPlaying()` returns a snapshot `{concertId, trackIdx}` for external callers;
+  `recordListen` flag threaded through `play()` and `startAlbum()` to suppress
+  the listen POST when called from the splitter.
 - `concert-tracker/templates/concert_detail.html` — gated splitter section +
   container.
 - `concert-tracker/templates/layout.html` — `splitter.js` script tag + splitter
