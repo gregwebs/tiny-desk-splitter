@@ -201,6 +201,9 @@
   // captures the token at call time and discards its result if the token has
   // changed (i.e. a newer openAdd was called before the fetch resolved).
   let addPanelToken = 0;
+  // The action Enter should invoke in the current filter state, or null if
+  // Enter is a no-op (ambiguous results — let the user click explicitly).
+  let enterAction = null;
 
   // Detect sidebar close (player.js removes sidebar-open from body) while the
   // add panel is showing, and clear our state so reopening shows the queue.
@@ -231,9 +234,9 @@
 
   function targetLabel(target) {
     const n = target.label || "";
-    if (target.type === "track")    return n ? "Adding “" + n + "” to…" : "Adding track to…";
-    if (target.type === "concert")  return n ? "Adding “" + n + "” to…" : "Adding concert to…";
-    if (target.type === "playlist") return n ? "Nesting “" + n + "” into…" : "Nesting playlist into…";
+    if (target.type === "track")    return n ? "Adding \u201c" + n + "\u201d to\u2026" : "Adding track to\u2026";
+    if (target.type === "concert")  return n ? "Adding \u201c" + n + "\u201d to\u2026" : "Adding concert to\u2026";
+    if (target.type === "playlist") return n ? "Nesting \u201c" + n + "\u201d into\u2026" : "Nesting playlist into\u2026";
     return "";
   }
 
@@ -316,12 +319,16 @@
     const list = document.getElementById("add-pl-list");
     if (!list) return;
     const q = (query || "").trim().toLowerCase();
+    const qRaw = (query || "").trim(); // preserve case for create / label
     list.replaceChildren();
+    enterAction = null; // reset; re-computed below
 
     const filtered = allPlaylists.filter(function (p) {
       return !q || p.name.toLowerCase().indexOf(q) !== -1;
     });
 
+    // Build non-member rows and track candidates for Enter-key logic.
+    const nonMemberRows = []; // [{li, id, name, nameLower}]
     for (const pl of filtered) {
       const isMember = memberSet.has(pl.id);
       const li = document.createElement("li");
@@ -331,12 +338,12 @@
       check.className = "add-pl-check";
       check.textContent = isMember ? "✓" : "";
 
-      const name = document.createElement("span");
-      name.className = "add-pl-name";
-      name.textContent = pl.name; // textContent — never innerHTML for untrusted data
+      const nameEl = document.createElement("span");
+      nameEl.className = "add-pl-name";
+      nameEl.textContent = pl.name; // textContent — never innerHTML for untrusted data
 
       li.appendChild(check);
-      li.appendChild(name);
+      li.appendChild(nameEl);
       if (!isMember) {
         const handler = (function (id, n) {
           return function () { addToPlaylist(id, n); };
@@ -347,27 +354,29 @@
         li.addEventListener("keydown", function (e) {
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
         });
+        nonMemberRows.push({ li: li, id: pl.id, name: pl.name, nameLower: pl.name.toLowerCase() });
       }
       list.appendChild(li);
     }
 
     // "Create new 'query'" row — shown whenever there is a filter term.
+    let createLi = null;
     if (q) {
-      const createLi = document.createElement("li");
+      createLi = document.createElement("li");
       createLi.className = "add-pl-row add-pl-row-new";
       const check = document.createElement("span");
       check.className = "add-pl-check";
       check.textContent = "+";
       const label = document.createElement("span");
       label.className = "add-pl-name";
-      label.textContent = "Create “" + query + "”"; // textContent — no XSS
+      label.textContent = "Create \u201c" + qRaw + "\u201d"; // textContent — no XSS
       createLi.appendChild(check);
       createLi.appendChild(label);
       createLi.setAttribute("role", "button");
       createLi.setAttribute("tabindex", "0");
-      createLi.addEventListener("click", function () { createAndAdd(query); });
+      createLi.addEventListener("click", function () { createAndAdd(qRaw); });
       createLi.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(query); }
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(qRaw); }
       });
       list.appendChild(createLi);
     } else if (filtered.length === 0) {
@@ -377,11 +386,11 @@
       const check = document.createElement("span");
       check.className = "add-pl-check";
       check.textContent = "+";
-      const name = document.createElement("span");
-      name.className = "add-pl-name";
-      name.textContent = "Create a new playlist";
+      const nameEl = document.createElement("span");
+      nameEl.className = "add-pl-name";
+      nameEl.textContent = "Create a new playlist";
       li.appendChild(check);
-      li.appendChild(name);
+      li.appendChild(nameEl);
       li.setAttribute("role", "button");
       li.setAttribute("tabindex", "0");
       const createEmpty = function () {
@@ -394,10 +403,40 @@
       });
       list.appendChild(li);
     }
+
+    // Determine which row (if any) gets the active highlight and owns Enter.
+    //
+    // Rule 1 — exact name match with a non-member row: highlight that row and
+    //   make Enter add to that playlist. (An exact match to a *member* is a
+    //   no-op; the track is already there.)
+    // Rule 2 — no non-member rows are shown but a Create row is present (query
+    //   typed, all matches are members or there are none): highlight the Create
+    //   row and make Enter create-and-add.
+    // Otherwise: no highlight, Enter does nothing (multiple choices → user must
+    //   click).
+    if (q) {
+      const exactMatch = nonMemberRows.find(function (r) { return r.nameLower === q; });
+      if (exactMatch) {
+        exactMatch.li.classList.add("add-pl-row-active");
+        const matchId = exactMatch.id, matchName = exactMatch.name;
+        enterAction = function () { addToPlaylist(matchId, matchName); };
+      } else if (nonMemberRows.length === 0 && createLi) {
+        // Only the Create row is actionable.
+        createLi.classList.add("add-pl-row-active");
+        enterAction = function () { createAndAdd(qRaw); };
+      }
+    }
   }
 
   function filterPlaylists(query) {
     renderAddList(query);
+  }
+
+  function filterKeydown(event) {
+    if (event.key === "Enter" && enterAction) {
+      event.preventDefault();
+      enterAction();
+    }
   }
 
   function closeAdd() {
@@ -463,5 +502,6 @@
     openAdd: openAdd,
     closeAdd: closeAdd,
     filterPlaylists: filterPlaylists,
+    filterKeydown: filterKeydown,
   };
 })();

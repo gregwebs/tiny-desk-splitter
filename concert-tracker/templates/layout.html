@@ -854,7 +854,8 @@
     .add-pl-list { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex: 1 1 0; min-height: 0; }
     .add-pl-row { display: flex; align-items: center; gap: 0.5rem;
       padding: 0.4rem 0.35rem; border-bottom: 1px solid var(--border-faint); cursor: pointer; }
-    .add-pl-row:hover:not(.add-pl-row-member) { background: var(--surface-hover); }
+    .add-pl-row:hover:not(.add-pl-row-member),
+    .add-pl-row-active:not(.add-pl-row-member) { background: var(--surface-hover); }
     .add-pl-row-member { cursor: default; color: var(--fg-faint); }
     .add-pl-check { flex: 0 0 1.2em; text-align: center; font-weight: bold; color: var(--accent); }
     .add-pl-name { flex: 1; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -892,7 +893,8 @@
         <p class="add-pl-context" id="add-pl-context"></p>
         <input type="text" id="add-pl-filter" class="add-pl-filter"
                placeholder="Filter playlists&#x2026;" autocomplete="off"
-               oninput="window.Playlists&&Playlists.filterPlaylists(this.value)">
+               oninput="window.Playlists&&Playlists.filterPlaylists(this.value)"
+               onkeydown="window.Playlists&&Playlists.filterKeydown(event)">
         <ul id="add-pl-list" class="add-pl-list"></ul>
         <p id="add-pl-error" class="add-pl-error" style="display:none"></p>
       </section>

@@ -47,7 +47,7 @@ async function openAddPanelForTrack(page) {
   await addBtn.click();
 
   await expect(page.locator("#sidebar-add-section")).toBeVisible();
-  await expect(page.locator(".add-pl-context")).toContainText("track");
+  await expect(page.locator(".add-pl-context")).toContainText("Adding");
 }
 
 // Wait for the add panel list to finish loading (past the "Loading…" state).
@@ -195,7 +195,7 @@ test.describe("Add-to-playlist (2b)", () => {
     await jsClick(page, concertAddBtn);
 
     await expect(page.locator("#sidebar-add-section")).toBeVisible();
-    await expect(page.locator(".add-pl-context")).toContainText("concert");
+    await expect(page.locator(".add-pl-context")).toContainText("Adding");
   });
 
   test("playlist row shows '+' button and opens add panel for nesting", async ({ page }) => {
@@ -212,7 +212,7 @@ test.describe("Add-to-playlist (2b)", () => {
     await jsClick(page, nestBtn);
 
     await expect(page.locator("#sidebar-add-section")).toBeVisible();
-    await expect(page.locator(".add-pl-context")).toContainText("playlist");
+    await expect(page.locator(".add-pl-context")).toContainText("Nesting");
   });
 
   test("cycle detection 422 surfaces as inline error", async ({ page }) => {
@@ -241,5 +241,53 @@ test.describe("Add-to-playlist (2b)", () => {
     // Error message should appear.
     await expect(page.locator("#add-pl-error")).toBeVisible({ timeout: 3000 });
     await expect(page.locator("#add-pl-error")).toContainText("Couldn't add");
+  });
+
+  test("typing the exact name of a non-member playlist highlights it and Enter adds it", async ({ page }) => {
+    await page.goto("/concerts/1");
+    const pid = await createPlaylist(page, "Keyboard Target");
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    // Type the exact name — row should become active-highlighted.
+    await page.fill("#add-pl-filter", "Keyboard Target");
+    const row = page.locator(".add-pl-row-active", { hasText: "Keyboard Target" });
+    await expect(row).toBeVisible();
+
+    // Press Enter — should add the track and flip to member.
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".add-pl-row-member", { hasText: "Keyboard Target" })).toBeVisible();
+
+    // Confirm via API.
+    const items = await page.evaluate(async (id) => {
+      return (await (await fetch(`/api/playlists/${id}`)).json()).items;
+    }, pid);
+    expect(items.length).toBe(1);
+    expect(items[0].item_type).toBe("track");
+  });
+
+  test("typing a unique new name leaves only the Create row highlighted and Enter creates-and-adds", async ({ page }) => {
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    const uniqueName = "EnterCreate " + Date.now();
+    await page.fill("#add-pl-filter", uniqueName);
+
+    // Only the Create row should be visible and active.
+    const createRow = page.locator(".add-pl-row-new.add-pl-row-active");
+    await expect(createRow).toBeVisible();
+
+    // Press Enter — should create the playlist and add the track.
+    await page.keyboard.press("Enter");
+    await expect(page.locator(".add-pl-row-member", { hasText: uniqueName })).toBeVisible();
+
+    // Confirm via API.
+    const lists = await page.evaluate(async () => (await (await fetch("/api/playlists")).json()));
+    const newPl = lists.find((e) => e.playlist.name === uniqueName);
+    expect(newPl).toBeTruthy();
+    const detail = await page.evaluate(async (id) => (await (await fetch(`/api/playlists/${id}`)).json()), newPl.playlist.id);
+    expect(detail.items.length).toBe(1);
+    expect(detail.items[0].item_type).toBe("track");
   });
 });
