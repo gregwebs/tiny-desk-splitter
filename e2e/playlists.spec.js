@@ -5,6 +5,9 @@
 // drag events directly (Playwright can't drive native DnD, and real pointer
 // events crash single-process Chromium in the sandbox), which still runs the
 // real delegation handlers in playlists.js and the reorder API call.
+//
+// Phase 2c — playlist playback: Player.playPlaylist(id) appends the playlist's
+// resolved tracks to the queue and starts playing if idle.
 
 const { test, expect } = require("./fixtures");
 
@@ -111,5 +114,112 @@ test.describe("Playlists — pages (2a)", () => {
     await expect
       .poll(async () => (await itemOrder(page, pid)).join(","))
       .toBe([before[1], before[0]].join(","));
+  });
+});
+
+// ── Phase 2c helpers ──────────────────────────────────────────────────────────
+
+async function createPlaylist(page, name) {
+  return page.evaluate(async (n) => {
+    const r = await fetch("/api/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: n }),
+    });
+    return (await r.json()).id;
+  }, name);
+}
+
+async function waitForPlaying(page) {
+  await page.waitForFunction(() => {
+    const a = document.getElementById("player-audio");
+    return a && !a.paused;
+  });
+}
+
+// ── Phase 2c specs ────────────────────────────────────────────────────────────
+
+test.describe("Playlist playback (2c)", () => {
+  // Fixture concert IDs referenced in these tests.
+  // Concert 1 "Audio Concert"         — 4 available tracks (Celular, Limbo, Track Three, Dando Vueltas)
+  // Concert 2 "Second Concert"        — 3 available tracks (Song One, Song Two, Song Three)
+  // Concert 5 "Deleted-First Concert" — track 0 unavailable; tracks 1+2 available
+
+  test("playPlaylist from idle player starts first track, queues rest, shows label", async ({ page }) => {
+    await page.goto("/");
+    const pid = await createPlaylist(page, "My Mix");
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 0 });
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 1 });
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 2 });
+
+    await page.waitForFunction(() => !!window.Player);
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+    await waitForPlaying(page);
+
+    // First track should be playing.
+    await expect(page.locator("#player-title")).toHaveText("Celular");
+    // The other two tracks are queued.
+    await expect(page.locator("#player-queue-badge")).toHaveText("2");
+    // Playlist label is visible and shows the playlist name.
+    await expect(page.locator("#player-playlist")).toBeVisible();
+    await expect(page.locator("#player-playlist")).toContainText("My Mix");
+  });
+
+  test("playPlaylist while playing appends to queue without interrupting current track", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+    // Start a track directly (startTrack is exported on window.Player).
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await expect(page.locator("#player-title")).toHaveText("Celular");
+
+    const pid = await createPlaylist(page, "Appended");
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 0 });
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 1 });
+
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+
+    // Current track must be unchanged.
+    await expect(page.locator("#player-title")).toHaveText("Celular");
+    // The two playlist tracks were appended to the queue.
+    await expect(page.locator("#player-queue-badge")).toHaveText("2");
+  });
+
+  test("playPlaylist skips unavailable tracks", async ({ page }) => {
+    await page.goto("/");
+    // Concert 5 track 0 has tracks_present[0]=false so available=false in resolved_tracks.
+    const pid = await createPlaylist(page, "Partial Avail");
+    await addItem(page, pid, { type: "track", concert_id: 5, track_index: 0 }); // unavailable
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 0 }); // available
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 1 }); // available
+
+    await page.waitForFunction(() => !!window.Player);
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+    await waitForPlaying(page);
+
+    // First *available* track plays (the unavailable one was filtered before enqueuing).
+    await expect(page.locator("#player-title")).toHaveText("Celular");
+    // One remaining in queue (concert 1 track 1); unavailable track never entered the queue.
+    await expect(page.locator("#player-queue-badge")).toHaveText("1");
+  });
+
+  test("playlist label clears when a non-playlist track starts", async ({ page }) => {
+    await page.goto("/");
+    const pid = await createPlaylist(page, "Temp List");
+    await addItem(page, pid, { type: "track", concert_id: 1, track_index: 0 });
+
+    await page.waitForFunction(() => !!window.Player);
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-playlist")).toBeVisible();
+    await expect(page.locator("#player-playlist")).toContainText("Temp List");
+
+    // Start a regular (non-playlist) track — playlistName defaults to null in startTrack.
+    await page.evaluate(() => Player.startTrack(null, 2, 0));
+    await waitForPlaying(page);
+
+    // Label should now be hidden.
+    await expect(page.locator("#player-playlist")).toBeHidden();
   });
 });

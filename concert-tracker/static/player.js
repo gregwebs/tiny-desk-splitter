@@ -114,6 +114,13 @@ const Player = (() => {
     return hasActiveMedia() && !audio.paused && !audio.ended;
   }
 
+  // True when the player is not actively occupying a track — nothing loaded, or
+  // the last track has naturally ended. A paused mid-track is NOT idle (append
+  // behind it, don't hijack). Used by playPlaylist to decide whether to auto-start.
+  function playerIdle() {
+    return !hasActiveMedia() || (audio && audio.ended);
+  }
+
   function onGlobalKeydown(e) {
     if (e.defaultPrevented) return;
 
@@ -263,6 +270,22 @@ const Player = (() => {
         n.textContent = "";
         n.style.display = "none";
       }
+    }
+  }
+
+  // Show or hide the playlist-context label in the player bar. Called from play()
+  // with the playlistName carried on the queue entry, so the label appears while
+  // playlist tracks are playing and clears automatically when playback moves to a
+  // non-playlist source (startAlbum / startTrack / set-list auto-advance).
+  function updatePlaylistLabel(name) {
+    const el = document.getElementById('player-playlist');
+    if (!el) return;
+    if (name) {
+      el.textContent = '♫ ' + name;
+      el.style.display = 'block';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
     }
   }
 
@@ -743,7 +766,7 @@ const Player = (() => {
     btn.disabled = !state.hasPrev;
   }
 
-  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev, recordListen = true) {
+  async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev, recordListen = true, playlistName = null) {
     if (!audio) init();
     if (!audio) return;
 
@@ -751,6 +774,7 @@ const Player = (() => {
     setStatus("");
     showBar();
     updateInfo(title, artist, trackIdx, concertId);
+    updatePlaylistLabel(playlistName);
     markPlaying(concertId, trackIdx);
 
     state.concertId = concertId;
@@ -966,14 +990,53 @@ const Player = (() => {
     return { concertId: state.concertId, trackIdx: state.trackIdx };
   }
 
+  // Shared entry constructor so enqueue and playPlaylist both produce the same shape.
+  // playlistName is null for ad-hoc queued tracks and non-null when the entry came
+  // from a playlist (used by play() to show/clear the bar label).
+  function makeQueueEntry(concertId, trackIdx, title, liked, playlistName) {
+    return { concertId, trackIdx, title, liked: !!liked, playlistName: playlistName || null };
+  }
+
   function enqueue(concertId, trackIdx, title, liked) {
     if (queue.some(q => q.concertId === concertId && q.trackIdx === trackIdx)) {
       tracing("enqueue duplicate skipped", { concertId, trackIdx });
       return;
     }
-    queue.push({ concertId, trackIdx, title, liked: !!liked });
+    queue.push(makeQueueEntry(concertId, trackIdx, title, liked));
     tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
     queueChanged();
+  }
+
+  // Load a playlist by id and append all its available resolved tracks to the
+  // queue. If the player is idle (nothing loaded, or the last track has ended)
+  // start playing immediately; otherwise let the current track finish first.
+  async function playPlaylist(playlistId) {
+    tracing('playPlaylist', { playlistId });
+    try {
+      const resp = await fetch('/api/playlists/' + playlistId);
+      if (!resp.ok) {
+        showError('Couldn\'t load playlist');
+        tracing('playPlaylist fetch failed', { playlistId, status: resp.status });
+        return;
+      }
+      const data = await resp.json();
+      const name = data.playlist.name;
+      const tracks = (data.resolved_tracks || []).filter(t => t.available);
+      if (tracks.length === 0) {
+        showError('Nothing to play in this playlist');
+        tracing('playPlaylist empty', { playlistId, name });
+        return;
+      }
+      for (const t of tracks) {
+        queue.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, name));
+      }
+      tracing('playPlaylist enqueued', { playlistId, name, count: tracks.length, queueLength: queue.length });
+      queueChanged();
+      if (playerIdle()) await playFromQueue();
+    } catch (e) {
+      showError('Couldn\'t load playlist');
+      tracing('playPlaylist failed', e);
+    }
   }
 
   async function playFromQueue() {
@@ -997,7 +1060,8 @@ const Player = (() => {
         const btn = findTrackButton(entry.concertId, entry.trackIdx);
         await play(btn, info.url, info.title, info.artist, entry.concertId, entry.trackIdx,
           `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/listen`, info.is_video,
-          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next, info.liked, info.has_prev);
+          `/concerts/${entry.concertId}/tracks/${entry.trackIdx}/watch`, info.has_next, info.liked, info.has_prev,
+          true, entry.playlistName);
         return true;
       } catch (e) {
         tracing("playFromQueue failed", e);
@@ -1360,7 +1424,7 @@ const Player = (() => {
   const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
     openConcert, openSidebar, closeSidebar, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow,
-    dequeue, playAlbumAt, nowPlaying };
+    dequeue, playAlbumAt, nowPlaying, playPlaylist };
   // Expose on window so other scripts (splitter.js) can access it via window.Player —
   // `const Player` at script top-level is not automatically a window property.
   if (typeof window !== "undefined") window.Player = api;
