@@ -204,19 +204,23 @@
   // The action Enter should invoke in the current filter state, or null if
   // Enter is a no-op (ambiguous results — let the user click explicitly).
   let enterAction = null;
+  // Whether the sidebar was open before openAdd was called. Used by closeAdd
+  // to decide whether to close the sidebar when the add panel is dismissed.
+  let sidebarWasOpen = false;
 
   // Detect sidebar close (player.js removes sidebar-open from body) while the
   // add panel is showing, and clear our state so reopening shows the queue.
   (function () {
     const obs = new MutationObserver(function () {
       if (!document.body.classList.contains("sidebar-open") && currentAddTarget) {
-        // Sidebar was closed while add panel was active; reset showing-add so
-        // reopening the sidebar via toggleSidebar shows the queue normally.
+        // Sidebar was closed externally while add panel was active; reset
+        // showing-add so reopening the sidebar shows the queue normally.
         const sidebar = document.getElementById("player-sidebar");
         if (sidebar) sidebar.classList.remove("showing-add");
         currentAddTarget = null;
         allPlaylists = [];
         memberSet = new Set();
+        sidebarWasOpen = false;
       }
     });
     obs.observe(document.body, { attributes: true, attributeFilter: ["class"] });
@@ -256,6 +260,9 @@
     currentAddTarget = target;
     allPlaylists = [];
     memberSet = new Set();
+
+    // Record whether the sidebar was already open so closeAdd can restore that state.
+    sidebarWasOpen = document.body.classList.contains("sidebar-open");
 
     // Open sidebar via Player (single owner of sidebar-open state).
     if (window.Player && window.Player.openSidebar) window.Player.openSidebar();
@@ -433,9 +440,18 @@
   }
 
   function filterKeydown(event) {
-    if (event.key === "Enter" && enterAction) {
+    if (event.key !== "Enter") return;
+    if (enterAction) {
       event.preventDefault();
-      enterAction();
+      const action = enterAction; // capture before renderAddList resets it
+      const filter = document.getElementById("add-pl-filter");
+      if (filter) filter.value = "";
+      renderAddList(""); // clear highlight, show full list
+      action();          // async; re-renders again when fetch resolves
+    } else if (!(event.target.value || "").trim()) {
+      // Empty filter, no action → close the add panel (and sidebar if needed).
+      event.preventDefault();
+      closeAdd();
     }
   }
 
@@ -443,9 +459,13 @@
     trace("closeAdd");
     const sidebar = document.getElementById("player-sidebar");
     if (sidebar) sidebar.classList.remove("showing-add");
+    if (!sidebarWasOpen && window.Player && window.Player.closeSidebar) {
+      window.Player.closeSidebar();
+    }
     currentAddTarget = null;
     allPlaylists = [];
     memberSet = new Set();
+    sidebarWasOpen = false;
   }
 
   async function addToPlaylist(playlistId, playlistName) {

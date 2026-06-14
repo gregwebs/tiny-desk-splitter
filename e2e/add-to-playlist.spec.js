@@ -290,4 +290,76 @@ test.describe("Add-to-playlist (2b)", () => {
     expect(detail.items.length).toBe(1);
     expect(detail.items[0].item_type).toBe("track");
   });
+
+  test("Enter after add clears the filter text and shows all playlists", async ({ page }) => {
+    await page.goto("/concerts/1");
+    await createPlaylist(page, "Clear Test");
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    // Type exact name so Enter is wired up.
+    await page.fill("#add-pl-filter", "Clear Test");
+    await expect(page.locator(".add-pl-row-active")).toBeVisible();
+
+    await page.keyboard.press("Enter");
+
+    // Filter should be cleared and all playlists visible (not just the match).
+    await expect(page.locator("#add-pl-filter")).toHaveValue("");
+    // The row should now show as a member (no longer active/highlighted).
+    await expect(page.locator(".add-pl-row-member", { hasText: "Clear Test" })).toBeVisible();
+  });
+
+  test("Enter on empty filter closes the add panel", async ({ page }) => {
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    // Ensure filter is empty, then press Enter.
+    await expect(page.locator("#add-pl-filter")).toHaveValue("");
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("#sidebar-queue-section")).toBeVisible();
+  });
+
+  test("closing the add panel via Enter closes the sidebar when it was not open before", async ({ page }) => {
+    await page.goto("/concerts/1");
+    // Sidebar must not be open before clicking the + button.
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    // Press Enter on empty filter → closeAdd should also close the sidebar.
+    await page.keyboard.press("Enter");
+
+    await expect(page.locator("body")).not.toHaveClass(/sidebar-open/);
+  });
+
+  test("closing the add panel via Enter leaves the sidebar open when it was already open", async ({ page }) => {
+    await page.goto("/concerts/1");
+    await page.waitForSelector(".track-list li");
+
+    // Open the sidebar programmatically (the queue toggle requires an active player).
+    await page.waitForFunction(() => !!window.Player);
+    await page.evaluate(() => Player.openSidebar());
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+
+    // Now click the '+' button on the first track without re-navigating.
+    const trackLi = page.locator(".track-list li").first();
+    await trackLi.hover();
+    const addBtn = trackLi.locator(".btn-add-pl");
+    await addBtn.waitFor({ state: "visible" });
+    await addBtn.click();
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+
+    await waitForAddList(page);
+
+    // Press Enter on empty filter to close the add panel.
+    await page.keyboard.press("Enter");
+
+    // Add panel should be gone but sidebar must remain open.
+    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+  });
 });
