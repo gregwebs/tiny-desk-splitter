@@ -1,0 +1,245 @@
+"use strict";
+
+// Phase 2b — Add-to-playlist affordances: hover "+" on track rows, concert
+// cards, and playlist rows; sidebar add panel; membership indicators; create-
+// and-add flow; 422 error surface for cycle detection.
+
+const { test, expect } = require("./fixtures");
+
+// ── helpers ──────────────────────────────────────────────────────────────────
+
+// All page.evaluate calls use relative URLs, so the page must be navigated to
+// the server before calling these helpers.
+async function createPlaylist(page, name) {
+  return page.evaluate(async (n) => {
+    const r = await fetch("/api/playlists", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: n }),
+    });
+    return (await r.json()).id;
+  }, name);
+}
+
+async function addItemToPlaylist(page, playlistId, body) {
+  return page.evaluate(
+    async ([id, b]) => {
+      const r = await fetch(`/api/playlists/${id}/items`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(b),
+      });
+      return r.status;
+    },
+    [playlistId, body]
+  );
+}
+
+// Open the sidebar add panel for a track (concert 1, track 0).
+async function openAddPanelForTrack(page) {
+  await page.goto("/concerts/1");
+  await page.waitForSelector(".track-list li");
+
+  const trackLi = page.locator(".track-list li").first();
+  await trackLi.hover();
+  const addBtn = trackLi.locator(".btn-add-pl");
+  await addBtn.waitFor({ state: "visible" });
+  await addBtn.click();
+
+  await expect(page.locator("#sidebar-add-section")).toBeVisible();
+  await expect(page.locator(".add-pl-context")).toContainText("track");
+}
+
+// Wait for the add panel list to finish loading (past the "Loading…" state).
+async function waitForAddList(page) {
+  await page.waitForFunction(() => {
+    const rows = document.querySelectorAll(".add-pl-row");
+    return rows.length > 0 && ![...rows].every((r) => r.textContent.includes("Loading"));
+  });
+}
+
+// Dispatch a click via JS (works around single-process Chromium pointer-event
+// constraints that can block Playwright .click() on list items inside a sidebar).
+async function jsClick(page, locator) {
+  const el = await locator.elementHandle();
+  await page.evaluate((node) => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })), el);
+}
+
+// ── specs ─────────────────────────────────────────────────────────────────────
+
+test.describe("Add-to-playlist (2b)", () => {
+  test("hovering a track row reveals the '+' button", async ({ page }) => {
+    await page.goto("/concerts/1");
+    await page.waitForSelector(".track-list li");
+
+    const firstLi = page.locator(".track-list li").first();
+    await firstLi.hover();
+    const addBtn = firstLi.locator(".btn-add-pl");
+    await addBtn.waitFor({ state: "visible" });
+    await expect(addBtn).toBeVisible();
+  });
+
+  test("clicking '+' on a track opens the add panel in the sidebar", async ({ page }) => {
+    await openAddPanelForTrack(page);
+    await expect(page.locator("#player-sidebar")).toHaveClass(/showing-add/);
+    await expect(page.locator("#sidebar-queue-section")).not.toBeVisible();
+    await expect(page.locator("#add-pl-list")).toBeVisible();
+  });
+
+  test("add panel lists existing playlists with membership checks", async ({ page }) => {
+    // Navigate first so page.evaluate can use relative URLs.
+    await page.goto("/concerts/1");
+    const pid = await createPlaylist(page, "Already In");
+    await addItemToPlaylist(page, pid, { type: "track", concert_id: 1, track_index: 0 });
+    await createPlaylist(page, "Not In");
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    // "Already In" should show a checkmark and the member class.
+    const memberRow = page.locator(".add-pl-row-member", { hasText: "Already In" });
+    await expect(memberRow).toBeVisible();
+    await expect(memberRow.locator(".add-pl-check")).toHaveText("✓");
+
+    // "Not In" should be a normal (clickable) row.
+    const normalRow = page.locator(".add-pl-row:not(.add-pl-row-member)", { hasText: "Not In" });
+    await expect(normalRow).toBeVisible();
+  });
+
+  test("clicking a playlist row adds the track and flips to checked", async ({ page }) => {
+    await page.goto("/concerts/1");
+    const pid = await createPlaylist(page, "Target Playlist");
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    const row = page.locator(".add-pl-row:not(.add-pl-row-member)", { hasText: "Target Playlist" });
+    await expect(row).toBeVisible();
+    await jsClick(page, row);
+
+    // Row should now be a member.
+    await expect(page.locator(".add-pl-row-member", { hasText: "Target Playlist" })).toBeVisible();
+
+    // Confirm via API.
+    const items = await page.evaluate(async (id) => {
+      const r = await fetch(`/api/playlists/${id}`);
+      return (await r.json()).items;
+    }, pid);
+    expect(items.length).toBe(1);
+    expect(items[0].item_type).toBe("track");
+  });
+
+  test("filter input narrows the playlist list", async ({ page }) => {
+    await page.goto("/concerts/1");
+    await createPlaylist(page, "Alpha List");
+    await createPlaylist(page, "Beta List");
+
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    await page.fill("#add-pl-filter", "Alpha");
+    // Re-render is synchronous; just check the result.
+    const texts = await page.locator(".add-pl-row").allTextContents();
+    expect(texts.some((t) => t.includes("Beta"))).toBe(false);
+    expect(texts.some((t) => t.includes("Alpha"))).toBe(true);
+    // The "Create" row appears when there is filter text.
+    expect(texts.some((t) => t.includes("Create"))).toBe(true);
+  });
+
+  test("create-and-add flow creates a new playlist with the track", async ({ page }) => {
+    await openAddPanelForTrack(page);
+    await waitForAddList(page);
+
+    const uniqueName = "Brand New " + Date.now();
+    await page.fill("#add-pl-filter", uniqueName);
+
+    const createRow = page.locator(".add-pl-row-new", { hasText: "Create" });
+    await expect(createRow).toBeVisible();
+    await jsClick(page, createRow);
+
+    // The new playlist row should appear as a member.
+    await expect(page.locator(".add-pl-row-member", { hasText: uniqueName })).toBeVisible();
+
+    // Confirm via API.
+    const lists = await page.evaluate(async () => {
+      return (await (await fetch("/api/playlists")).json());
+    });
+    const newPl = lists.find((e) => e.playlist.name === uniqueName);
+    expect(newPl).toBeTruthy();
+
+    const detail = await page.evaluate(async (id) => {
+      return (await (await fetch(`/api/playlists/${id}`)).json());
+    }, newPl.playlist.id);
+    expect(detail.items.length).toBe(1);
+    expect(detail.items[0].item_type).toBe("track");
+  });
+
+  test("closing the add panel restores queue/concert sections", async ({ page }) => {
+    await openAddPanelForTrack(page);
+
+    await page.locator(".add-pl-close").click();
+
+    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("#sidebar-queue-section")).toBeVisible();
+  });
+
+  test("concert card shows '+' button on hover and opens add panel", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForSelector(".card");
+
+    const card = page.locator(".card").first();
+    await card.hover();
+
+    const concertAddBtn = card.locator(".btn-add-pl-concert");
+    await concertAddBtn.waitFor({ state: "visible" });
+    await jsClick(page, concertAddBtn);
+
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    await expect(page.locator(".add-pl-context")).toContainText("concert");
+  });
+
+  test("playlist row shows '+' button and opens add panel for nesting", async ({ page }) => {
+    await page.goto("/playlists");
+    await createPlaylist(page, "Inner Playlist");
+    await createPlaylist(page, "Outer Playlist");
+
+    await page.goto("/playlists");
+    const row = page.locator(".playlist-row", { hasText: "Inner Playlist" });
+    await row.hover();
+
+    const nestBtn = row.locator(".btn-pl-nest");
+    await nestBtn.waitFor({ state: "visible" });
+    await jsClick(page, nestBtn);
+
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    await expect(page.locator(".add-pl-context")).toContainText("playlist");
+  });
+
+  test("cycle detection 422 surfaces as inline error", async ({ page }) => {
+    await page.goto("/playlists");
+    const idA = await createPlaylist(page, "Playlist A");
+    const idB = await createPlaylist(page, "Playlist B");
+    // Nest B into A (valid direction).
+    await addItemToPlaylist(page, idA, { type: "playlist", child_playlist_id: idB });
+
+    // Try to nest A into B (would create a cycle) via the add panel.
+    await page.goto("/playlists");
+    const row = page.locator(".playlist-row", { hasText: "Playlist A" });
+    await row.hover();
+    const nestBtn = row.locator(".btn-pl-nest");
+    await nestBtn.waitFor({ state: "visible" });
+    await jsClick(page, nestBtn);
+
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    await waitForAddList(page);
+
+    // Click "Playlist B" to attempt the cyclic nesting.
+    const targetRow = page.locator(".add-pl-row:not(.add-pl-row-member)", { hasText: "Playlist B" });
+    await expect(targetRow).toBeVisible();
+    await jsClick(page, targetRow);
+
+    // Error message should appear.
+    await expect(page.locator("#add-pl-error")).toBeVisible({ timeout: 3000 });
+    await expect(page.locator("#add-pl-error")).toContainText("Couldn't add");
+  });
+});

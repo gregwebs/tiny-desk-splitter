@@ -1,7 +1,7 @@
 // Playlist UI: the /playlists list page (create), the /playlists/:id detail page
-// (edit / delete / remove item / drag-drop reorder), and — added in later phases —
-// the add-to-playlist sidebar panel. Playback lives in player.js (it extends the
-// queue); this file only ever *calls* Player.playPlaylist.
+// (edit / delete / remove item / drag-drop reorder), and the add-to-playlist sidebar
+// panel. Playback lives in player.js (it extends the queue); this file only ever
+// *calls* Player.playPlaylist.
 //
 // The app uses hx-boost, so page bodies are swapped into #content rather than
 // reloaded. All interaction is therefore wired via event delegation on `document`
@@ -192,6 +192,266 @@
     persistOrder(list);
   });
 
+  // ── Add-to-playlist sidebar panel ──────────────────────────────────────────
+
+  let currentAddTarget = null;
+  let allPlaylists = [];    // [{id, name}]
+  let memberSet = new Set(); // playlist ids that already contain the target
+  // Monotonic counter; incremented on each openAdd call. Each fetch closure
+  // captures the token at call time and discards its result if the token has
+  // changed (i.e. a newer openAdd was called before the fetch resolved).
+  let addPanelToken = 0;
+
+  // Detect sidebar close (player.js removes sidebar-open from body) while the
+  // add panel is showing, and clear our state so reopening shows the queue.
+  (function () {
+    const obs = new MutationObserver(function () {
+      if (!document.body.classList.contains("sidebar-open") && currentAddTarget) {
+        // Sidebar was closed while add panel was active; reset showing-add so
+        // reopening the sidebar via toggleSidebar shows the queue normally.
+        const sidebar = document.getElementById("player-sidebar");
+        if (sidebar) sidebar.classList.remove("showing-add");
+        currentAddTarget = null;
+        allPlaylists = [];
+        memberSet = new Set();
+      }
+    });
+    obs.observe(document.body, { attributes: true, attributeFilter: ["class"] });
+  }());
+
+  function membershipUrl(target) {
+    if (target.type === "track")
+      return "/api/concerts/" + target.concertId + "/tracks/" + target.trackIndex + "/playlists";
+    if (target.type === "concert")
+      return "/api/concerts/" + target.concertId + "/playlists";
+    if (target.type === "playlist")
+      return "/api/playlists/" + target.childPlaylistId + "/nested-in";
+    return null;
+  }
+
+  function targetLabel(target) {
+    if (target.type === "track")   return "Adding track to…";
+    if (target.type === "concert") return "Adding concert to…";
+    if (target.type === "playlist") return "Nesting playlist into…";
+    return "";
+  }
+
+  function addItemBody(target) {
+    if (target.type === "track")
+      return { type: "track", concert_id: target.concertId, track_index: target.trackIndex };
+    if (target.type === "concert")
+      return { type: "concert", concert_id: target.concertId };
+    if (target.type === "playlist")
+      return { type: "playlist", child_playlist_id: target.childPlaylistId };
+    return null;
+  }
+
+  async function openAdd(target) {
+    trace("openAdd", target);
+    const token = ++addPanelToken;
+    currentAddTarget = target;
+    allPlaylists = [];
+    memberSet = new Set();
+
+    // Open sidebar via Player (single owner of sidebar-open state).
+    if (window.Player && window.Player.openSidebar) window.Player.openSidebar();
+
+    // Swap to add panel by adding the CSS class that hides queue/concert sections.
+    const sidebar = document.getElementById("player-sidebar");
+    if (sidebar) sidebar.classList.add("showing-add");
+
+    // Set context label.
+    const ctx = document.getElementById("add-pl-context");
+    if (ctx) ctx.textContent = targetLabel(target);
+
+    // Reset filter and error.
+    const filter = document.getElementById("add-pl-filter");
+    if (filter) filter.value = "";
+    const error = document.getElementById("add-pl-error");
+    if (error) error.style.display = "none";
+
+    // Show loading indicator.
+    const list = document.getElementById("add-pl-list");
+    if (list) {
+      list.replaceChildren();
+      const loading = document.createElement("li");
+      loading.className = "add-pl-row add-pl-row-member";
+      loading.style.justifyContent = "center";
+      loading.textContent = "Loading…";
+      list.appendChild(loading);
+    }
+
+    // Fetch all playlists and memberships in parallel.
+    try {
+      const memUrl = membershipUrl(target);
+      const [plResp, memResp] = await Promise.all([
+        fetch("/api/playlists"),
+        memUrl ? fetch(memUrl) : Promise.resolve(null),
+      ]);
+      // Discard result if a newer openAdd has been called since this fetch started.
+      if (token !== addPanelToken) return;
+
+      if (!plResp.ok) throw new Error("playlists fetch failed: " + plResp.status);
+      if (memResp && !memResp.ok) throw new Error("membership fetch failed: " + memResp.status);
+
+      const plData = await plResp.json();
+      const memData = memResp ? await memResp.json() : [];
+
+      if (token !== addPanelToken) return; // recheck after json parsing
+
+      allPlaylists = plData.map(function (e) { return { id: e.playlist.id, name: e.playlist.name }; });
+      memberSet = new Set(memData.map(function (m) { return m.id; }));
+
+      renderAddList(filter ? filter.value : "");
+    } catch (e) {
+      trace("openAdd fetch failed", e);
+      if (token !== addPanelToken) return;
+      if (error) { error.textContent = "Couldn't load playlists."; error.style.display = ""; }
+      if (list) list.replaceChildren();
+    }
+  }
+
+  function renderAddList(query) {
+    const list = document.getElementById("add-pl-list");
+    if (!list) return;
+    const q = (query || "").trim().toLowerCase();
+    list.replaceChildren();
+
+    const filtered = allPlaylists.filter(function (p) {
+      return !q || p.name.toLowerCase().indexOf(q) !== -1;
+    });
+
+    for (const pl of filtered) {
+      const isMember = memberSet.has(pl.id);
+      const li = document.createElement("li");
+      li.className = "add-pl-row" + (isMember ? " add-pl-row-member" : "");
+
+      const check = document.createElement("span");
+      check.className = "add-pl-check";
+      check.textContent = isMember ? "✓" : "";
+
+      const name = document.createElement("span");
+      name.className = "add-pl-name";
+      name.textContent = pl.name; // textContent — never innerHTML for untrusted data
+
+      li.appendChild(check);
+      li.appendChild(name);
+      if (!isMember) {
+        const handler = (function (id, n) {
+          return function () { addToPlaylist(id, n); };
+        }(pl.id, pl.name));
+        li.setAttribute("role", "button");
+        li.setAttribute("tabindex", "0");
+        li.addEventListener("click", handler);
+        li.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
+        });
+      }
+      list.appendChild(li);
+    }
+
+    // "Create new 'query'" row — shown whenever there is a filter term.
+    if (q) {
+      const createLi = document.createElement("li");
+      createLi.className = "add-pl-row add-pl-row-new";
+      const check = document.createElement("span");
+      check.className = "add-pl-check";
+      check.textContent = "+";
+      const label = document.createElement("span");
+      label.className = "add-pl-name";
+      label.textContent = "Create “" + query + "”"; // textContent — no XSS
+      createLi.appendChild(check);
+      createLi.appendChild(label);
+      createLi.setAttribute("role", "button");
+      createLi.setAttribute("tabindex", "0");
+      createLi.addEventListener("click", function () { createAndAdd(query); });
+      createLi.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(query); }
+      });
+      list.appendChild(createLi);
+    } else if (filtered.length === 0) {
+      // Empty state: no playlists at all.
+      const li = document.createElement("li");
+      li.className = "add-pl-row add-pl-row-new";
+      const check = document.createElement("span");
+      check.className = "add-pl-check";
+      check.textContent = "+";
+      const name = document.createElement("span");
+      name.className = "add-pl-name";
+      name.textContent = "Create a new playlist";
+      li.appendChild(check);
+      li.appendChild(name);
+      li.setAttribute("role", "button");
+      li.setAttribute("tabindex", "0");
+      const createEmpty = function () {
+        const n = prompt("New playlist name:");
+        if (n && n.trim()) createAndAdd(n.trim());
+      };
+      li.addEventListener("click", createEmpty);
+      li.addEventListener("keydown", function (e) {
+        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createEmpty(); }
+      });
+      list.appendChild(li);
+    }
+  }
+
+  function filterPlaylists(query) {
+    renderAddList(query);
+  }
+
+  function closeAdd() {
+    trace("closeAdd");
+    const sidebar = document.getElementById("player-sidebar");
+    if (sidebar) sidebar.classList.remove("showing-add");
+    currentAddTarget = null;
+    allPlaylists = [];
+    memberSet = new Set();
+  }
+
+  async function addToPlaylist(playlistId, playlistName) {
+    if (!currentAddTarget) return;
+    const body = addItemBody(currentAddTarget);
+    if (!body) return;
+    const error = document.getElementById("add-pl-error");
+    if (error) error.style.display = "none";
+    trace("addToPlaylist", { playlistId, playlistName, target: currentAddTarget });
+    try {
+      const resp = await postJson("/api/playlists/" + playlistId + "/items", body);
+      if (!resp.ok) {
+        const msg = await resp.text();
+        if (error) { error.textContent = "Couldn't add: " + msg; error.style.display = ""; }
+        return;
+      }
+      memberSet.add(playlistId);
+      const filter = document.getElementById("add-pl-filter");
+      renderAddList(filter ? filter.value : "");
+    } catch (e) {
+      trace("addToPlaylist failed", e);
+      if (error) { error.textContent = "Couldn't add to playlist."; error.style.display = ""; }
+    }
+  }
+
+  async function createAndAdd(name) {
+    if (!currentAddTarget || !name) return;
+    const error = document.getElementById("add-pl-error");
+    if (error) error.style.display = "none";
+    trace("createAndAdd", { name, target: currentAddTarget });
+    try {
+      const plResp = await postJson("/api/playlists", { name });
+      if (!plResp.ok) {
+        const msg = await plResp.text();
+        if (error) { error.textContent = "Couldn't create: " + msg; error.style.display = ""; }
+        return;
+      }
+      const { id } = await plResp.json();
+      allPlaylists.push({ id, name });
+      await addToPlaylist(id, name);
+    } catch (e) {
+      trace("createAndAdd failed", e);
+      if (error) { error.textContent = "Couldn't create playlist."; error.style.display = ""; }
+    }
+  }
+
   window.Playlists = {
     createFromForm: createFromForm,
     editDetails: editDetails,
@@ -199,5 +459,8 @@
     saveDetails: saveDetails,
     deletePlaylist: deletePlaylist,
     removeItem: removeItem,
+    openAdd: openAdd,
+    closeAdd: closeAdd,
+    filterPlaylists: filterPlaylists,
   };
 })();

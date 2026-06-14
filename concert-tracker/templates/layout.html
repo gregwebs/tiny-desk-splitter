@@ -813,6 +813,53 @@
     .btn-pl-remove { cursor: pointer; border: none; background: none; color: var(--fg-fainter);
       font-size: 1.1em; line-height: 1; padding: 0 0.3rem; flex: 0 0 auto; }
     .btn-pl-remove:hover { color: var(--accent); }
+
+    /* ── Add-to-playlist affordances ───────────────────────────────────────── */
+    .btn-add-pl { opacity: 0; transition: opacity 0.12s; cursor: pointer; border: none;
+      background: none; color: var(--fg-faint); font-size: 0.95em;
+      padding: 0 0.3rem; line-height: 1; flex-shrink: 0; }
+    .track-list li:hover .btn-add-pl,
+    .track-list li:focus-within .btn-add-pl { opacity: 1; }
+    .btn-add-pl:hover { color: var(--accent); }
+    .btn-add-pl-concert { cursor: pointer; border: 1px solid transparent; background: none;
+      color: var(--fg-fainter); font-size: 0.82em; padding: 0.1rem 0.35rem;
+      border-radius: 3px; opacity: 0; transition: opacity 0.12s; }
+    .card:hover .btn-add-pl-concert { opacity: 1; }
+    .btn-add-pl-concert:hover { color: var(--accent); border-color: var(--accent); }
+    .btn-pl-nest { cursor: pointer; border: none; background: none; color: var(--fg-fainter);
+      font-size: 1em; padding: 0 0.3rem; opacity: 0; transition: opacity 0.12s; flex-shrink: 0; }
+    .playlist-row:hover .btn-pl-nest { opacity: 1; }
+    .btn-pl-nest:hover { color: var(--accent); }
+
+    /* ── Sidebar add-to-playlist panel ─────────────────────────────────────── */
+    /* Collapse the spacer so the add section can fill the sidebar from the top. */
+    #player-sidebar.showing-add .sidebar-top-spacer { flex: 0 0 0; }
+    #sidebar-add-section { display: none; }
+    #player-sidebar.showing-add #sidebar-queue-section,
+    #player-sidebar.showing-add #sidebar-concert-section { display: none; }
+    #player-sidebar.showing-add #sidebar-add-section {
+      flex: 1 1 auto; display: flex; flex-direction: column; gap: 0.5rem;
+      padding: 0.75rem; min-height: 0; }
+    .add-pl-header { display: flex; align-items: center; }
+    .add-pl-header h2 { margin: 0; font-size: 1em; flex: 1; }
+    .add-pl-close { cursor: pointer; border: none; background: none;
+      color: var(--fg-faint); font-size: 1.1em; padding: 0.2rem 0.3rem; }
+    .add-pl-close:hover { color: var(--fg); }
+    .add-pl-context { font-size: 0.82em; color: var(--fg-faint); margin: 0;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .add-pl-filter { width: 100%; box-sizing: border-box; padding: 0.4rem 0.5rem;
+      background: var(--surface); color: var(--fg);
+      border: 1px solid var(--border-strong); border-radius: 4px;
+      font: inherit; font-size: 0.9em; }
+    .add-pl-list { list-style: none; padding: 0; margin: 0; overflow-y: auto; flex: 1 1 0; min-height: 0; }
+    .add-pl-row { display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.4rem 0.35rem; border-bottom: 1px solid var(--border-faint); cursor: pointer; }
+    .add-pl-row:hover:not(.add-pl-row-member) { background: var(--surface-hover); }
+    .add-pl-row-member { cursor: default; color: var(--fg-faint); }
+    .add-pl-check { flex: 0 0 1.2em; text-align: center; font-weight: bold; color: var(--accent); }
+    .add-pl-name { flex: 1; font-size: 0.9em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .add-pl-row-new { color: var(--accent); border-top: 1px solid var(--border); }
+    .add-pl-error { color: var(--error-fg); font-size: 0.85em; margin: 0; }
   </style>
 </head>
 <body hx-boost="true">
@@ -835,6 +882,19 @@
       <section id="sidebar-concert-section">
         <h2 id="sidebar-concert-heading">Now playing</h2>
         <div id="sidebar-concert-tracks"></div>
+      </section>
+      <section id="sidebar-add-section" aria-label="Add to playlist">
+        <div class="add-pl-header">
+          <h2>Add to playlist</h2>
+          <button class="add-pl-close" title="Close" aria-label="Close"
+                  onclick="window.Playlists&&Playlists.closeAdd()">&times;</button>
+        </div>
+        <p class="add-pl-context" id="add-pl-context"></p>
+        <input type="text" id="add-pl-filter" class="add-pl-filter"
+               placeholder="Filter playlists&#x2026;" autocomplete="off"
+               oninput="window.Playlists&&Playlists.filterPlaylists(this.value)">
+        <ul id="add-pl-list" class="add-pl-list"></ul>
+        <p id="add-pl-error" class="add-pl-error" style="display:none"></p>
       </section>
     </aside>
     <div id="player-video-panel">

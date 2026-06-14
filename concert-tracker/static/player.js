@@ -1212,6 +1212,16 @@ const Player = (() => {
     tracing("closeSidebar", {});
   }
 
+  function openSidebar() {
+    if (isSidebarOpen()) return;
+    document.body.classList.add("sidebar-open");
+    const toggle = document.getElementById("player-queue-toggle");
+    if (toggle) toggle.setAttribute("aria-expanded", "true");
+    renderQueue();
+    loadSidebarTracks(state.concertId);
+    tracing("openSidebar", {});
+  }
+
   function toggleSidebar() {
     const open = document.body.classList.toggle("sidebar-open");
     const toggle = document.getElementById("player-queue-toggle");
@@ -1349,7 +1359,7 @@ const Player = (() => {
 
   const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
-    openConcert, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue,
+    openConcert, openSidebar, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow, dequeue,
     playAlbumAt, nowPlaying };
   // Expose on window so other scripts (splitter.js) can access it via window.Player —
   // `const Player` at script top-level is not automatically a window property.

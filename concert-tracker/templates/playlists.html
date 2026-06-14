@@ -25,6 +25,8 @@
         <span class="playlist-meta">{{ r.track_count }} track{% if r.track_count != 1 %}s{% endif %} &middot; {{ r.total_time }}</span>
         {% if !r.first_track.is_empty() %}<span class="playlist-first">{{ r.first_track }}</span>{% endif %}
       </a>
+      <button class="btn-pl-nest" title="Add to another playlist"
+              onclick="Playlists.openAdd({type:'playlist',childPlaylistId:{{ r.id }}})">+</button>
     </li>
     {% endfor %}
   </ul>

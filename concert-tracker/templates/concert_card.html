@@ -17,6 +17,8 @@
     <div class="card-head">
       <div class="card-head-text">
         <h3 class="card-title"><a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ title }}</a></h3>
+        <button class="btn-add-pl-concert" title="Add concert to playlist"
+                onclick="window.Playlists&&Playlists.openAdd({type:'concert',concertId:{{ id }}})">+ playlist</button>
         {% if !teaser.is_empty() %}
           <p class="card-teaser">
             <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
