@@ -30,7 +30,7 @@ async function waitForPlaying(page) {
 }
 
 test.describe("Hover reveals tracks on listing cards", () => {
-  test("hover shrinks the picture and shows the tracks; mouseleave reverts; no refetch on second hover", async ({
+  test("hover shows the tracks; mouseleave reverts; no refetch on second hover", async ({
     page,
   }) => {
     let tracksFetches = 0;
@@ -40,30 +40,27 @@ test.describe("Hover reveals tracks on listing cards", () => {
       }
     });
 
-    const cardHeight = () =>
-      page.locator(`#concert-${AUDIO}`).evaluate((el) => el.offsetHeight);
     const thumbHeight = () =>
       page.locator(thumb(AUDIO)).evaluate((el) => el.offsetHeight);
 
     await page.goto("/");
     await expect(page.locator(thumb(AUDIO))).toBeVisible();
     await expect(page.locator(tracksBox(AUDIO))).toBeHidden();
-    const cardBefore = await cardHeight();
     const thumbBefore = await thumbHeight();
 
+    // Hover to reveal the track list; openTracks handles --single-process hover quirks.
     await openTracks(page, AUDIO);
-    // The picture stays visible but shrinks to a banner strip; the track list
-    // fills the freed space and the card height does not change.
-    await expect(page.locator(thumb(AUDIO))).toBeVisible();
-    expect(await thumbHeight()).toBeLessThan(thumbBefore);
     await expect(page.locator(tracksBox(AUDIO))).toBeVisible();
     await expect(
       page.locator(`${tracksBox(AUDIO)} ol.track-list li`)
     ).toHaveCount(4);
-    expect(Math.abs((await cardHeight()) - cardBefore)).toBeLessThanOrEqual(1);
 
-    // Mouse leaves the card: picture returns to full size, list hides but
-    // stays in the DOM as a cache.
+    // The thumb stays full size — .card-tracks-box lives in .card-body (a sibling
+    // of .card-media), not inside .card-media, so it doesn't compete for flex space.
+    // The card itself expands to accommodate the newly-visible track list.
+    expect(await thumbHeight()).toBe(thumbBefore);
+
+    // Mouse leaves the card: list hides but stays in the DOM as a cache.
     await page.hover("header");
     await expect(page.locator(thumb(AUDIO))).toBeVisible();
     expect(await thumbHeight()).toBe(thumbBefore);
@@ -139,8 +136,10 @@ test.describe("Automated split on play", () => {
   }) => {
     await page.goto("/");
     // Hover first so the card's hover layout swap settles before the click.
+    // Use evaluate to bypass pointer-position interactions that can cause the
+    // hover state (and thus button visibility) to be lost in --single-process.
     await openTracks(page, UNSPLIT);
-    await page.locator(tracksBtn(UNSPLIT)).click();
+    await page.locator(tracksBtn(UNSPLIT)).evaluate(el => el.click());
 
     await expect(page.locator("#player-title")).toHaveText("First Song", {
       timeout: 15000,

@@ -5,6 +5,10 @@ module.exports = defineConfig({
   // Each test boots its own concert-web (see e2e/fixtures.js), so allow a little
   // headroom over a pure in-browser test.
   timeout: 45000,
+  // Chromium runs --single-process in the sandbox (see use.launchOptions /
+  // e2e/fixtures.js); parallel single-process instances crash under CPU contention.
+  // Serialize to keep the suite deterministic. Determinism > wall-clock here.
+  workers: 1,
   // Builds the concert-web binary + the pristine fixture (DB + media) once.
   globalSetup: require.resolve("./e2e/global-setup.js"),
   use: {

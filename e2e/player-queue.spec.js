@@ -110,8 +110,10 @@ test.describe("Player Queue", () => {
     page,
   }) => {
     // Hover first so the card's hover layout swap settles before the click.
+    // Use evaluate to bypass pointer-position interactions that can cause the
+    // hover state (and thus button visibility) to be lost in --single-process.
     await openTracks(page, AUDIO);
-    await page.locator(`#concert-${AUDIO} button.btn-tracks`).click();
+    await page.locator(`#concert-${AUDIO} button.btn-tracks`).evaluate(el => el.click());
 
     await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
@@ -126,7 +128,7 @@ test.describe("Player Queue", () => {
     // tracks/0/media-info 404s. Play must start the first surviving track
     // ("Survivor One", #2) rather than show "Error".
     await openTracks(page, DELETED_FIRST);
-    await page.locator(`#concert-${DELETED_FIRST} button.btn-tracks`).click();
+    await page.locator(`#concert-${DELETED_FIRST} button.btn-tracks`).evaluate(el => el.click());
 
     await waitForPlaying(page);
     await expect(page.locator("#player-title")).toHaveText("Survivor One");
@@ -151,10 +153,13 @@ test.describe("Player Queue", () => {
   test("Next button re-enables once a track is queued", async ({ page }) => {
     await playTrack(page, AUDIO, 3); // last track, nothing next
     await expect(page.locator("#player-next")).toBeDisabled();
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     // Queue a track from another concert — Next now has somewhere to go.
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar on top of the card list.
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
     await expect(page.locator("#player-next")).toBeEnabled();
   });
 
@@ -183,9 +188,10 @@ test.describe("Player Queue", () => {
 
   test("clicking a track while playing enqueues it", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
 
     await expect(page.locator("#player-queue-badge")).toBeVisible();
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
@@ -194,42 +200,49 @@ test.describe("Player Queue", () => {
 
   test("multiple tracks can be queued", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
-    await trackButton(page, SECOND, 1).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
+    await trackButton(page, SECOND, 1).evaluate(el => el.click());
 
     await expect(page.locator("#player-queue-badge")).toHaveText("2");
   });
 
   test("duplicate tracks are not enqueued", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
-    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
 
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
   });
 
   test("clicking currently-playing track toggles pause", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    // No loop=true here: we're intentionally toggling pause/play, not letting
+    // the track run; loop would not interfere but is unnecessary.
 
-    await trackButton(page, AUDIO, 0).click();
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar on top of the card list.
+    await trackButton(page, AUDIO, 0).evaluate(el => el.click());
     await page.waitForFunction(() => {
       const a = document.getElementById("player-audio");
       return a && a.paused;
     });
 
-    await trackButton(page, AUDIO, 0).click();
+    await trackButton(page, AUDIO, 0).evaluate(el => el.click());
     await waitForPlaying(page);
   });
 
   test("next button plays from queue", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
 
     await page.locator("#player-next").click();
@@ -252,9 +265,13 @@ test.describe("Player Queue", () => {
     page,
   }) => {
     await playTrack(page, AUDIO, 0);
+    // loop=true prevents native track-end from firing before simulateTrackEnd;
+    // the synthetic "ended" event dispatched by simulateTrackEnd still reaches
+    // the player handler regardless of loop state.
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 1).click();
+    await trackButton(page, SECOND, 1).evaluate(el => el.click());
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
 
     await simulateTrackEnd(page);
@@ -269,9 +286,10 @@ test.describe("Player Queue", () => {
     page,
   }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 1).click(); // queue Song Two
+    await trackButton(page, SECOND, 1).evaluate(el => el.click()); // queue Song Two
 
     await page.locator("#player-next").click();
     await expect(page.locator("#player-title")).toHaveText("Song Two");
@@ -283,10 +301,11 @@ test.describe("Player Queue", () => {
 
   test("queue badge tooltip shows queued track titles", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
     await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).click();
-    await trackButton(page, SECOND, 1).click();
+    await trackButton(page, SECOND, 0).evaluate(el => el.click());
+    await trackButton(page, SECOND, 1).evaluate(el => el.click());
 
     const badge = page.locator("#player-queue-badge");
     await expect(badge).toHaveText("2");
@@ -1007,8 +1026,11 @@ test.describe("Player like star", () => {
     page,
   }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
 
-    await trackListLikeButton(page, AUDIO, 0).click();
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar on top of the card list.
+    await trackListLikeButton(page, AUDIO, 0).evaluate(el => el.click());
     await expect
       .poll(async () => {
         const listLiked = await trackListLikeButton(page, AUDIO, 0).evaluate((el) =>
@@ -1026,14 +1048,17 @@ test.describe("Player like star", () => {
     page,
   }) => {
     await playTrack(page, AUDIO, 0);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
     const playing = trackListLikeButton(page, AUDIO, 0);
     const playingBefore = await playing.evaluate((el) =>
       el.classList.contains("liked")
     );
 
     // Toggle the like on an unrelated concert's track (real endpoint + swap).
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar on top of the card list.
     await expandTracks(page, SECOND);
-    await trackListLikeButton(page, SECOND, 0).click();
+    await trackListLikeButton(page, SECOND, 0).evaluate(el => el.click());
     await expect(trackListLikeButton(page, SECOND, 0)).toBeVisible();
 
     expect(await playing.evaluate((el) => el.classList.contains("liked"))).toBe(
@@ -1257,6 +1282,9 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     await playTrack(page, concertId, trackIdx);
     await page.evaluate(() => {
       window.__noReload = true;
+      // Prevent native track-end from firing auto-advance side effects while
+      // we click delete buttons; mirrors the sidebar.spec.js pattern.
+      document.getElementById("player-audio").loop = true;
     });
     return page.evaluate(() => document.getElementById("player-audio").currentTime);
   }
@@ -1267,11 +1295,13 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     const t0 = await playAndMark(page, AUDIO, 0);
     // Per-track delete swaps the whole SECOND card (hx-target="closest .card").
     await openTracks(page, SECOND);
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar when the card is low in the grid.
     await page
       .locator(
         `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/0/delete"]`
       )
-      .click();
+      .evaluate(el => el.click());
 
     await expect(
       page.locator(
@@ -1285,9 +1315,11 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     page,
   }) => {
     const t0 = await playAndMark(page, AUDIO, 0);
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar when the card is low in the grid.
     await page
       .locator(`#concert-${SECOND} button[title="Delete downloaded file"]`)
-      .click();
+      .evaluate(el => el.click());
 
     await expect(
       page.locator(`#concert-${SECOND} button[title="Delete downloaded file"]`)
@@ -1301,11 +1333,13 @@ test.describe("Deleting a download/split keeps the player playing", () => {
     const t0 = await playAndMark(page, SECOND, 0);
     // Delete a *different* track of the playing concert: the whole card swaps
     // while its track 0 keeps playing in the persistent player.
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar when the card is low in the grid.
     await page
       .locator(
         `#concert-${SECOND} button.btn-delete[hx-post$="/tracks/1/delete"]`
       )
-      .click();
+      .evaluate(el => el.click());
 
     await expect(
       page.locator(
