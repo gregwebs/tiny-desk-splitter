@@ -2545,6 +2545,183 @@ pub async fn playlist_nested_in(
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
+// ── Playlist HTML pages (Phase 2a) ─────────────────────────────────────────────
+
+#[derive(Template)]
+#[template(path = "playlists.html")]
+struct PlaylistsTemplate {
+    chrome: Chrome,
+    rows: Vec<PlaylistRow>,
+}
+
+/// One row on the `/playlists` list page. Display-ready: `total_time` is already
+/// formatted and `first_track` is `""` when the playlist resolves to nothing.
+struct PlaylistRow {
+    id: i64,
+    name: String,
+    track_count: usize,
+    total_time: String,
+    first_track: String,
+}
+
+#[derive(Template)]
+#[template(path = "playlist_detail.html")]
+struct PlaylistDetailTemplate {
+    chrome: Chrome,
+    id: i64,
+    name: String,
+    description: String,
+    track_count: usize,
+    total_time: String,
+    items: Vec<PlaylistItemRow>,
+}
+
+/// One raw playlist item rendered for the detail page. `href`/`sublabel` are `""`
+/// when absent (a track item has no link; a nested playlist has no sublabel).
+struct PlaylistItemRow {
+    item_id: i64,
+    kind: &'static str,
+    label: String,
+    sublabel: String,
+    href: String,
+    available: bool,
+}
+
+pub async fn playlists_page(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    // Lock for the page's own queries and drop the guard before
+    // `Chrome::from_state` (which takes its own lock — the Mutex is not reentrant).
+    let rows = {
+        let conn = state.db.lock().unwrap();
+        let playlists = db::list_playlists(&conn)?;
+        let mut rows = Vec::with_capacity(playlists.len());
+        for p in playlists {
+            let summary = crate::playlist::summarize_playlist(&conn, p.id)?;
+            rows.push(PlaylistRow {
+                id: p.id,
+                name: p.name,
+                track_count: summary.track_count,
+                total_time: crate::model::format_duration_summary(
+                    summary.known_duration_secs,
+                    summary.unknown_count,
+                ),
+                first_track: summary.first_track.map(|t| t.title).unwrap_or_default(),
+            });
+        }
+        rows
+    };
+    Ok(PlaylistsTemplate {
+        chrome: Chrome::from_state(&state),
+        rows,
+    })
+}
+
+pub async fn playlist_detail_page(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, AppError> {
+    let (name, description, track_count, total_time, items) = {
+        let conn = state.db.lock().unwrap();
+        let playlist = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+        let raw_items = db::list_playlist_items(&conn, id)?;
+        let summary = crate::playlist::summarize_playlist(&conn, id)?;
+        let mut items = Vec::with_capacity(raw_items.len());
+        for it in raw_items {
+            items.push(build_item_row(&conn, it)?);
+        }
+        (
+            playlist.name,
+            playlist.description.unwrap_or_default(),
+            summary.track_count,
+            crate::model::format_duration_summary(
+                summary.known_duration_secs,
+                summary.unknown_count,
+            ),
+            items,
+        )
+    };
+    Ok(PlaylistDetailTemplate {
+        chrome: Chrome::from_state(&state),
+        id,
+        name,
+        description,
+        track_count,
+        total_time,
+        items,
+    })
+}
+
+/// Resolve one raw playlist item into its display row. A missing referenced
+/// concert/playlist (live reference broken by a delete) renders as a clearly
+/// labelled placeholder rather than erroring the whole page.
+fn build_item_row(
+    conn: &Connection,
+    item: crate::model::PlaylistItem,
+) -> Result<PlaylistItemRow, AppError> {
+    use crate::model::PlaylistItemKind::*;
+    let row = match item.kind {
+        Track {
+            concert_id,
+            track_index,
+        } => match db::get_concert_opt(conn, concert_id)? {
+            Some(c) => PlaylistItemRow {
+                item_id: item.id,
+                kind: "track",
+                label: c
+                    .set_list
+                    .get(track_index)
+                    .cloned()
+                    .unwrap_or_else(|| format!("Track {}", track_index + 1)),
+                sublabel: c.title,
+                href: String::new(),
+                available: c.tracks_present.get(track_index).copied().unwrap_or(false),
+            },
+            None => PlaylistItemRow {
+                item_id: item.id,
+                kind: "track",
+                label: format!("Track {}", track_index + 1),
+                sublabel: "(missing concert)".to_string(),
+                href: String::new(),
+                available: false,
+            },
+        },
+        Concert { concert_id } => {
+            let concert = db::get_concert_opt(conn, concert_id)?;
+            PlaylistItemRow {
+                item_id: item.id,
+                kind: "concert",
+                label: concert
+                    .as_ref()
+                    .map(|c| c.title.clone())
+                    .unwrap_or_else(|| "(missing concert)".to_string()),
+                sublabel: concert
+                    .as_ref()
+                    .and_then(|c| c.artist.clone())
+                    .unwrap_or_default(),
+                href: format!("/concerts/{concert_id}"),
+                available: true,
+            }
+        }
+        Playlist { child_playlist_id } => PlaylistItemRow {
+            item_id: item.id,
+            kind: "playlist",
+            label: db::get_playlist(conn, child_playlist_id)?
+                .map(|p| p.name)
+                .unwrap_or_else(|| "(missing playlist)".to_string()),
+            sublabel: String::new(),
+            href: format!("/playlists/{child_playlist_id}"),
+            available: true,
+        },
+    };
+    Ok(row)
+}
+
+pub async fn playlists_js() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/javascript")],
+        include_str!("../../static/playlists.js"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

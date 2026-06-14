@@ -506,6 +506,36 @@ pub struct PlaylistSummary {
     pub first_track: Option<ResolvedTrack>,
 }
 
+/// Render a playlist's total time for the list/detail pages. The summed *known*
+/// duration is shown as `M:SS` (or `H:MM:SS` once it passes an hour); when some
+/// tracks have no known duration, `+ N unknown` is appended. A playlist whose
+/// durations are all unknown shows just `N unknown`; an empty playlist shows
+/// `0:00`.
+pub fn format_duration_summary(known_secs: f64, unknown_count: usize) -> String {
+    let known = if known_secs >= 1.0 {
+        Some(format_hms(known_secs))
+    } else {
+        None
+    };
+    match (known, unknown_count) {
+        (Some(k), 0) => k,
+        (Some(k), n) => format!("{k} + {n} unknown"),
+        (None, 0) => "0:00".to_string(),
+        (None, n) => format!("{n} unknown"),
+    }
+}
+
+/// Format a non-negative second count as `M:SS`, or `H:MM:SS` past an hour.
+fn format_hms(secs: f64) -> String {
+    let total = (secs.round() as i64).max(0);
+    let (h, m, s) = (total / 3600, (total % 3600) / 60, total % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -951,6 +981,36 @@ mod tests {
         let mut c = bare_concert();
         c.metadata_scraped_at = Some("2024-01-01T00:00:00Z".to_string());
         assert!(c.thumbnail_url_from_db().is_none());
+    }
+
+    #[test]
+    fn format_duration_summary_known_only() {
+        assert_eq!(format_duration_summary(2530.0, 0), "42:10");
+        assert_eq!(format_duration_summary(9.6, 0), "0:10");
+        assert_eq!(format_duration_summary(3661.0, 0), "1:01:01");
+    }
+
+    #[test]
+    fn format_duration_summary_known_plus_unknown() {
+        assert_eq!(format_duration_summary(2530.0, 3), "42:10 + 3 unknown");
+    }
+
+    #[test]
+    fn format_duration_summary_all_unknown() {
+        assert_eq!(format_duration_summary(0.0, 5), "5 unknown");
+    }
+
+    #[test]
+    fn format_duration_summary_empty() {
+        assert_eq!(format_duration_summary(0.0, 0), "0:00");
+    }
+
+    #[test]
+    fn format_duration_summary_subsecond_known_renders_zero() {
+        // Below the 1.0s threshold with nothing unknown, total time shows "0:00"
+        // rather than a stray "0 unknown". Documents the boundary so a future
+        // threshold change is a deliberate one.
+        assert_eq!(format_duration_summary(0.4, 0), "0:00");
     }
 
     #[test]

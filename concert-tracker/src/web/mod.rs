@@ -100,6 +100,10 @@ pub fn router(state: AppState) -> Router {
             "/settings",
             get(handlers::settings_page).post(handlers::settings_save),
         )
+        // Playlists HTML pages (Phase 2a). Distinct from the /api/playlists JSON
+        // surface below, which these pages hydrate from.
+        .route("/playlists", get(handlers::playlists_page))
+        .route("/playlists/:id", get(handlers::playlist_detail_page))
         // Playlists JSON API (Phase 1). Mounted under /api so it doesn't collide
         // with the Phase-2 HTML pages at /playlists and /playlists/:id.
         .route(
@@ -138,6 +142,7 @@ pub fn router(state: AppState) -> Router {
         )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .route("/static/player.js", get(handlers::player_js))
+        .route("/static/playlists.js", get(handlers::playlists_js))
         .route("/static/splitter.js", get(handlers::splitter_js))
         .route("/static/htmx.min.js", get(handlers::htmx_js))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))

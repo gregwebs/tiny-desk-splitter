@@ -750,14 +750,78 @@
     .splitter-num { color: var(--fg-fainter); width: 1.5rem; }
     .splitter-time { width: 5.5rem; font-family: ui-monospace, monospace; }
     .splitter-play { cursor: pointer; margin-left: 0.25rem; padding: 0 0.3rem; font-size: 0.7rem; }
+
+    /* ── Playlists pages (Phase 2a) ─────────────────────────────────────────── */
+    .new-playlist-form { display: flex; gap: 0.5rem; margin: 0.75rem 0 1.25rem; }
+    .new-playlist-form input { flex: 1; max-width: 24rem; padding: 0.45rem 0.6rem;
+      background: var(--surface); color: var(--fg);
+      border: 1px solid var(--border-strong); border-radius: 4px; font-size: 0.95em; }
+    .playlists-empty { color: var(--fg-faint); font-size: 0.9em; }
+
+    .playlist-list { list-style: none; padding: 0; margin: 0; }
+    .playlist-row { display: flex; align-items: center; gap: 0.6rem;
+      padding: 0.5rem 0.4rem; border-bottom: 1px solid var(--border-faint); }
+    .playlist-row:hover { background: var(--surface-hover); }
+    .playlist-link { display: flex; flex-direction: column; gap: 0.1rem;
+      flex: 1; text-decoration: none; color: var(--fg); min-width: 0; }
+    .playlist-name { font-weight: 600; }
+    .playlist-meta { font-size: 0.8em; color: var(--fg-faint); }
+    .playlist-first { font-size: 0.8em; color: var(--fg-fainter);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .btn-pl-play { cursor: pointer; border: 1px solid var(--border-strong);
+      background: var(--surface); color: var(--fg); border-radius: 4px;
+      padding: 0.25rem 0.55rem; font-size: 0.85em; flex: 0 0 auto; }
+    .btn-pl-play:hover { background: var(--surface-hover); }
+
+    /* Detail page */
+    .playlist-detail-back { margin: 0 0 0.5rem; font-size: 0.85em; }
+    .playlist-detail-back a { color: var(--fg-faint); text-decoration: none; }
+    .playlist-detail-header { display: flex; align-items: center; gap: 0.75rem;
+      flex-wrap: wrap; }
+    .playlist-detail-name { margin: 0; }
+    .playlist-detail-actions { display: flex; gap: 0.4rem; margin-left: auto; }
+    .playlist-detail-actions button { cursor: pointer; border: 1px solid var(--border-strong);
+      background: var(--surface); color: var(--fg); border-radius: 4px; padding: 0.25rem 0.6rem; font-size: 0.85em; }
+    .playlist-detail-actions button:hover { background: var(--surface-hover); }
+    .playlist-detail-desc { color: var(--fg-muted); margin: 0.5rem 0; }
+    .playlist-detail-meta { color: var(--fg-faint); font-size: 0.85em; margin: 0.25rem 0 1rem; }
+    .playlist-edit-form { display: flex; flex-direction: column; gap: 0.5rem;
+      max-width: 32rem; margin: 0.5rem 0 1rem; }
+    .playlist-edit-form input, .playlist-edit-form textarea { padding: 0.45rem 0.6rem;
+      background: var(--surface); color: var(--fg);
+      border: 1px solid var(--border-strong); border-radius: 4px; font: inherit; }
+    .playlist-edit-form textarea { min-height: 3.5rem; resize: vertical; }
+    .playlist-edit-actions { display: flex; gap: 0.4rem; }
+    .playlist-edit-actions button { cursor: pointer; }
+
+    .playlist-items { list-style: none; padding: 0; margin: 0; }
+    .playlist-item { display: flex; align-items: center; gap: 0.5rem;
+      padding: 0.45rem 0.4rem; border-bottom: 1px solid var(--border-faint); }
+    .playlist-item:hover { background: var(--surface-hover); }
+    .playlist-item.dragging { opacity: 0.4; }
+    .playlist-item.track-unavailable .pl-item-label { color: var(--fg-fainter); }
+    .pl-item-grip { cursor: grab; color: var(--fg-fainter); font-size: 0.9em; user-select: none; }
+    .pl-item-kind { font-size: 0.62em; text-transform: uppercase; letter-spacing: 0.04em;
+      color: var(--fg-faint); border: 1px solid var(--border); border-radius: 3px;
+      padding: 0.05rem 0.3rem; flex: 0 0 auto; }
+    .pl-item-kind-concert { border-color: var(--accent); color: var(--accent); }
+    .pl-item-body { display: flex; flex-direction: column; gap: 0.05rem; flex: 1; min-width: 0; }
+    .pl-item-label { color: var(--fg); text-decoration: none; }
+    a.pl-item-label:hover { text-decoration: underline; }
+    .pl-item-sub { font-size: 0.78em; color: var(--fg-faint);
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .btn-pl-remove { cursor: pointer; border: none; background: none; color: var(--fg-fainter);
+      font-size: 1.1em; line-height: 1; padding: 0 0.3rem; flex: 0 0 auto; }
+    .btn-pl-remove:hover { color: var(--accent); }
   </style>
 </head>
 <body hx-boost="true">
   <header>
     <h1><a href="/" style="text-decoration: none;" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Tiny Desk Concerts</a></h1>
-    <span style="font-size: 0.85em;"><a href="/jobs" style="text-decoration: none; font-weight: 500;" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Jobs</a><span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></span>
+    <span style="font-size: 0.85em;"><a href="/playlists" style="text-decoration: none; font-weight: 500;" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Playlists</a></span>
     <span id="banner"></span>
-    <a href="/settings" style="font-size: 1.1em; text-decoration: none; margin-left: auto;" title="Settings" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">&#9881;</a>
+    <span style="font-size: 0.85em; margin-left: auto;"><a href="/jobs" style="text-decoration: none; font-weight: 500;" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">Jobs</a><span hx-get="/jobs/count" hx-trigger="load, every 5s" hx-swap="innerHTML"></span></span>
+    <a href="/settings" style="font-size: 1.1em; text-decoration: none;" title="Settings" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">&#9881;</a>
   </header>
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
@@ -891,6 +955,7 @@
     })();
   </script>
   <script src="/static/player.js"></script>
+  <script src="/static/playlists.js"></script>
   <script src="/static/splitter.js"></script>
 </body>
 </html>

@@ -1,0 +1,56 @@
+{% extends "layout.html" %}
+{% block content %}
+<div class="playlist-detail" data-playlist-id="{{ id }}">
+  <p class="playlist-detail-back"><a href="/playlists"
+       hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">&larr; Playlists</a></p>
+
+  <div class="playlist-detail-header">
+    <h2 id="playlist-name" class="playlist-detail-name">{{ name }}</h2>
+    <div class="playlist-detail-actions">
+      <button class="btn-pl-play" title="Play playlist"
+              onclick="if(window.Player&&Player.playPlaylist)Player.playPlaylist({{ id }})">&#9654; Play</button>
+      <button class="btn-pl-edit" onclick="Playlists.editDetails()">Edit</button>
+      <button class="btn-pl-delete" onclick="Playlists.deletePlaylist({{ id }})">Delete</button>
+    </div>
+  </div>
+
+  <form id="playlist-edit-form" class="playlist-edit-form" style="display:none"
+        hx-boost="false" onsubmit="return Playlists.saveDetails(event, {{ id }})">
+    <input type="text" id="edit-playlist-name" value="{{ name }}" required>
+    <textarea id="edit-playlist-description" placeholder="Description (optional)">{{ description }}</textarea>
+    <div class="playlist-edit-actions">
+      <button type="submit" class="btn-primary">Save</button>
+      <button type="button" onclick="Playlists.cancelEdit()">Cancel</button>
+    </div>
+  </form>
+
+  {% if !description.is_empty() %}<p id="playlist-description" class="playlist-detail-desc">{{ description }}</p>{% endif %}
+  <p class="playlist-detail-meta">{{ track_count }} track{% if track_count != 1 %}s{% endif %} &middot; {{ total_time }}</p>
+
+  {% if items.is_empty() %}
+  <p class="playlists-empty">This playlist is empty. Add tracks, whole concerts, or
+    other playlists with the <strong>+</strong> button.</p>
+  {% else %}
+  <ol id="playlist-items" class="playlist-items">
+    {% for it in items.iter() %}
+    <li class="playlist-item{% if !it.available %} track-unavailable{% endif %}"
+        draggable="true" data-item-id="{{ it.item_id }}">
+      <span class="pl-item-grip" title="Drag to reorder" aria-hidden="true">&#9776;</span>
+      <span class="pl-item-kind pl-item-kind-{{ it.kind }}">{{ it.kind }}</span>
+      <span class="pl-item-body">
+        {% if !it.href.is_empty() %}
+        <a class="pl-item-label" href="{{ it.href }}"
+           hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ it.label }}</a>
+        {% else %}
+        <span class="pl-item-label">{{ it.label }}</span>
+        {% endif %}
+        {% if !it.sublabel.is_empty() %}<span class="pl-item-sub">{{ it.sublabel }}</span>{% endif %}
+      </span>
+      <button class="btn-pl-remove" title="Remove from playlist"
+              onclick="Playlists.removeItem({{ id }}, {{ it.item_id }})">&times;</button>
+    </li>
+    {% endfor %}
+  </ol>
+  {% endif %}
+</div>
+{% endblock %}

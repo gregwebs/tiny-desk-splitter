@@ -2777,3 +2777,96 @@ async fn playlist_api_validation_status_codes() {
     let (s, _) = get_json(&app, "/api/playlists/4242").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+/// Fetch an HTML page, returning its status and body text.
+async fn get_html(app: &axum::Router, uri: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[tokio::test]
+async fn playlists_html_pages_render() {
+    let conn = db::open_in_memory().unwrap();
+    let cid = seed_playlist_concert(
+        &conn,
+        "https://npr.org/h1",
+        "Album H",
+        &["Song Zero", "Song One"],
+    );
+    set_auto_split_timestamps(
+        &conn,
+        cid,
+        &sample_song_timestamps(&["Song Zero", "Song One"]),
+    )
+    .unwrap();
+    let app = router(test_state(conn));
+
+    // Create a playlist and add a track + the whole concert.
+    let (_, j) = post_body_json(
+        &app,
+        "/api/playlists",
+        serde_json::json!({"name": "My Mix"}),
+    )
+    .await;
+    let pid = j["id"].as_i64().unwrap();
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "track", "concert_id": cid, "track_index": 1}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "concert", "concert_id": cid}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // List page shows the playlist name and links to its detail page.
+    let (s, list) = get_html(&app, "/playlists").await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(
+        list.contains("My Mix"),
+        "list must name the playlist: {list}"
+    );
+    assert!(
+        list.contains(&format!("/playlists/{pid}")),
+        "list must link to the detail page"
+    );
+    // Nav reshuffle: Playlists link present.
+    assert!(
+        list.contains("href=\"/playlists\""),
+        "nav must link Playlists"
+    );
+
+    // Detail page shows the playlist name and a known track title.
+    let (s, detail) = get_html(&app, &format!("/playlists/{pid}")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(detail.contains("My Mix"), "detail must name the playlist");
+    assert!(
+        detail.contains("Song One"),
+        "detail must list a track title: {detail}"
+    );
+    assert!(
+        detail.contains(&format!("data-playlist-id=\"{pid}\"")),
+        "detail must carry the playlist id for the JS"
+    );
+}
+
+#[tokio::test]
+async fn playlist_detail_page_unknown_id_is_404() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+    let (s, _) = get_html(&app, "/playlists/999").await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
