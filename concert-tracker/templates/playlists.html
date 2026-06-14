@@ -26,7 +26,8 @@
         {% if !r.first_track.is_empty() %}<span class="playlist-first">{{ r.first_track }}</span>{% endif %}
       </a>
       <button class="btn-pl-nest" title="Add to another playlist"
-              onclick="Playlists.openAdd({type:'playlist',childPlaylistId:{{ r.id }}})">+</button>
+              data-label="{{ r.name }}"
+              onclick="Playlists.openAdd({type:'playlist',childPlaylistId:{{ r.id }},label:this.getAttribute('data-label')})">+</button>
     </li>
     {% endfor %}
   </ul>

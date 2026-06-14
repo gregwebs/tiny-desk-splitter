@@ -18,7 +18,8 @@
     <button class="btn-track-listen track-title-unavailable" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})"{% if tracks_busy %} disabled{% endif %}>{{ t.title }}</button>
     {% endif %}
     <button class="btn-add-pl" title="Add to playlist"
-            onclick="window.Playlists&&Playlists.openAdd({type:'track',concertId:{{ id }},trackIndex:{{ t.index }}})">+</button>
+            data-label="{{ t.title }}"
+            onclick="window.Playlists&&Playlists.openAdd({type:'track',concertId:{{ id }},trackIndex:{{ t.index }},label:this.getAttribute('data-label')})">+</button>
   </li>
   {% endfor %}
 </ol>

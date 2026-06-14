@@ -230,9 +230,10 @@
   }
 
   function targetLabel(target) {
-    if (target.type === "track")   return "Adding track to…";
-    if (target.type === "concert") return "Adding concert to…";
-    if (target.type === "playlist") return "Nesting playlist into…";
+    const n = target.label || "";
+    if (target.type === "track")    return n ? "Adding “" + n + "” to…" : "Adding track to…";
+    if (target.type === "concert")  return n ? "Adding “" + n + "” to…" : "Adding concert to…";
+    if (target.type === "playlist") return n ? "Nesting “" + n + "” into…" : "Nesting playlist into…";
     return "";
   }
 
@@ -264,9 +265,9 @@
     const ctx = document.getElementById("add-pl-context");
     if (ctx) ctx.textContent = targetLabel(target);
 
-    // Reset filter and error.
+    // Reset filter, focus it so the user can type immediately.
     const filter = document.getElementById("add-pl-filter");
-    if (filter) filter.value = "";
+    if (filter) { filter.value = ""; filter.focus(); }
     const error = document.getElementById("add-pl-error");
     if (error) error.style.display = "none";
 
