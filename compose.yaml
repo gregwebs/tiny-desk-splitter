@@ -1,0 +1,31 @@
+# compose.yaml — Compose file for running tiny-desk-splitter
+#
+# Works with:  docker compose up  |  podman-compose up
+#
+# Before first use, build the release image:
+#   docker build --target release -t tiny-desk .
+#   # or:  podman build --target release -t tiny-desk .
+#
+# Then start the service:
+#   docker compose up
+#
+# The app is available at http://localhost:3000
+# All persistent data (concerts.db, downloads, split tracks, logs) is stored in
+# the named volume `tiny-desk-data`, mounted at /data inside the container.
+
+services:
+  concert-web:
+    image: tiny-desk
+    ports:
+      - "3000:3000"
+    volumes:
+      - tiny-desk-data:/data
+    # The image CMD already sets --host 0.0.0.0, --db /data/concerts.db,
+    # --workdir /data, and --open-cmd true.  Override individual flags here
+    # if needed, e.g.:
+    #   command: ["--host", "0.0.0.0", "--db", "/data/concerts.db",
+    #             "--workdir", "/data", "--open-cmd", "true", "--port", "8080"]
+    restart: unless-stopped
+
+volumes:
+  tiny-desk-data:

@@ -1,6 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -21,6 +21,12 @@ struct Cli {
     /// printed once the listener is bound).
     #[arg(long, default_value = "3000")]
     port: u16,
+
+    /// Address to bind. Defaults to 127.0.0.1 (loopback-only). Set to 0.0.0.0
+    /// to listen on all interfaces — required when running inside a container.
+    /// Also read from the HOST environment variable.
+    #[arg(long, env = "HOST", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+    host: IpAddr,
 
     /// Path to the `live-set-splitter` binary. Defaults to a sibling of the
     /// running executable, falling back to a PATH lookup of `live-set-splitter`.
@@ -123,10 +129,13 @@ async fn main() -> Result<()> {
     };
 
     let app = router(state.clone());
-    let addr = SocketAddr::from(([127, 0, 0, 1], cli.port));
+    let addr = SocketAddr::from((cli.host, cli.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    // Print the *bound* address so callers learn the real port when `--port 0`
-    // was used (ephemeral). Tests parse this line to find the server.
+    // Always print the *bound* local_addr (not cli.host) so callers learn the
+    // real port when --port 0 was used (ephemeral). The e2e fixture parser in
+    // e2e/fixtures.js matches "Listening on http://127.0.0.1:<port>" — that
+    // pattern holds as long as the default --host stays at loopback; do not
+    // change this line to echo cli.host or tests will break for container runs.
     let bound = listener.local_addr()?;
     println!("Listening on http://{}", bound);
     let server = axum::serve(listener, app).with_graceful_shutdown(shutdown_signal());

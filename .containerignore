@@ -1,0 +1,32 @@
+# Build context exclusions for OCI builds (podman / buildah / docker).
+# Keep the context small and avoid shipping runtime/generated data.
+
+# Rust build artefacts (large; regenerated in the builder stage)
+target/
+
+# Node / Playwright tooling
+node_modules/
+
+# Runtime-generated data — never belongs in the image
+concerts.db
+concerts.db-wal
+concerts.db-shm
+/concerts/
+/thumbnails/
+/log/
+e2e/.fixture/
+
+# Git history
+.git/
+
+# Local editor / IDE config
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# The vendor/ directory (ocr-rs path dep) IS included in the build context.
+# The source models/ dir is NOT excluded: build.rs regenerates the models
+# from the network during `cargo build`, writing them into the source tree.
+# Including the local copies would be stale on a cold build — let build.rs
+# always fetch them fresh.

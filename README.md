@@ -18,6 +18,38 @@ cargo run --bin concert-web
 # → http://localhost:3000
 ```
 
+## Running with containers
+
+OCI images (Docker / Podman / Buildah compatible) are the easiest way to run
+the app without installing Rust, a C++ toolchain, or the OCR build dependencies.
+
+```sh
+# 1. Build the release image (requires network: downloads MNN + OCR models)
+docker build --target release -t tiny-desk .
+# same with: podman build --target release -t tiny-desk .
+
+# 2. Run (all data persisted in the named volume tiny-desk-data at /data)
+docker run --rm -p 3000:3000 -v tiny-desk-data:/data tiny-desk
+# → http://localhost:3000
+
+# Or via Compose:
+docker compose up
+```
+
+Three image targets are available:
+
+| Target | Tag | Use |
+|---|---|---|
+| `base` | `tiny-desk-base` | Runtime only: ffmpeg, yt-dlp |
+| `dev` | `tiny-desk-dev` | base + Rust + C++ toolchain (development) |
+| `release` | `tiny-desk` | Compiled binaries + OCR models on top of base |
+
+Build all three with `./scripts/build-images.sh` (auto-detects Docker or Podman).
+
+See [docs/change/2026-06-15-containerization.md](docs/change/2026-06-15-containerization.md)
+for full details: volume/port contract, yt-dlp version bumps, CLI tool access via
+`--entrypoint`, and the `--host` flag added to `concert-web`.
+
 ## Dependencies
 
 - **Rust** — run the project (`cargo build && cargo run --bin concert-web`)
