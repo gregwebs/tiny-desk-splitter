@@ -11,6 +11,8 @@
     :root {
       --player-bar-height: 56px;
       --sidebar-width: 320px;
+      --sidebar-min-width: 240px;
+      --sidebar-max-width: 600px;
       --bg: #f7f7f7;
       --fg: #1a1a1a;
       --fg-muted: #555;
@@ -664,6 +666,29 @@
     #player-track, #player-title { cursor: pointer; }
     #player-track:hover, #player-title:hover { text-decoration: underline; }
 
+    /* Sidebar close button (normal mode only; hidden in add mode which has its own ×) */
+    #sidebar-close {
+      position: absolute; top: 0.4rem; right: 0.5rem; z-index: 1004;
+      background: none; border: none; cursor: pointer;
+      color: var(--fg-faint); font-size: 1.2em; line-height: 1; padding: 0.2rem 0.3rem;
+    }
+    #sidebar-close:hover { color: var(--fg); }
+    #player-sidebar.showing-add #sidebar-close { display: none; }
+
+    /* Drag handle on the sidebar's right edge for resizing */
+    #sidebar-resize {
+      position: absolute; top: 0; right: 0; bottom: 0; width: 6px;
+      cursor: ew-resize; z-index: 1003; touch-action: none;
+    }
+    #sidebar-resize:hover,
+    body.sidebar-resizing #sidebar-resize { background: var(--accent); opacity: 0.4; }
+    /* Suppress transitions during drag for 1:1 tracking. */
+    body.sidebar-resizing,
+    body.sidebar-resizing #player-sidebar,
+    body.sidebar-resizing #player-video-panel { transition: none !important; }
+    /* Resize is a desktop affordance; hide on narrow/overlay layout. */
+    @media (max-width: 700px) { #sidebar-resize { display: none; } }
+
     /* ── Tracks row ── */
     .card-tracks-row {
       padding: 0.4rem 0 0;
@@ -897,6 +922,9 @@
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
     <aside id="player-sidebar" aria-label="Queue and concert tracks">
+      <button id="sidebar-close" type="button" title="Close"
+              aria-label="Close sidebar" onclick="Player.closeSidebar()">&times;</button>
+      <div id="sidebar-resize" aria-hidden="true"></div>
       <div class="sidebar-top-spacer"></div>
       <section id="sidebar-queue-section">
         <h2>Queue</h2>

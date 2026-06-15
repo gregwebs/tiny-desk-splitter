@@ -26,11 +26,73 @@ const Player = (() => {
     audio.addEventListener("pause", onPause);
   }
 
+  // ── Sidebar resize + width persistence ──────────────────────────────────────
+
+  const SIDEBAR_WIDTH_KEY = "sidebarWidth";
+  const SIDEBAR_MIN_WIDTH = 240, SIDEBAR_MAX_WIDTH = 600;
+
+  // Pure + unit-testable: the 240/600 clamp with no DOM access.
+  function clampSidebarWidth(px) {
+    return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
+  }
+
+  // Write the clamped width to the CSS variable that drives sidebar width,
+  // body margin, and the video panel offset — one var reflows all three.
+  function applySidebarWidth(px) {
+    const w = clampSidebarWidth(px);
+    document.documentElement.style.setProperty("--sidebar-width", w + "px");
+    return w;
+  }
+
+  // Restore the saved preferred width on load (ignores missing/corrupt values).
+  function loadSidebarWidth() {
+    try {
+      const v = parseInt(window.localStorage.getItem(SIDEBAR_WIDTH_KEY) || "", 10);
+      if (Number.isFinite(v)) applySidebarWidth(v);
+    } catch (e) { /* storage may be unavailable */ }
+  }
+
+  function initSidebarResize() {
+    const handle = document.getElementById("sidebar-resize");
+    if (!handle) return;
+    let dragging = false, moved = false, lastW = 0;
+    handle.addEventListener("pointerdown", (e) => {
+      dragging = true; moved = false;
+      // Seed from the live computed width so a click-without-drag never persists 0.
+      lastW = parseInt(getComputedStyle(document.documentElement)
+                .getPropertyValue("--sidebar-width"), 10) || SIDEBAR_MIN_WIDTH;
+      handle.setPointerCapture(e.pointerId);
+      document.body.classList.add("sidebar-resizing");
+      e.preventDefault();
+    });
+    handle.addEventListener("pointermove", (e) => {
+      if (!dragging) return;
+      moved = true;
+      // The sidebar is position:fixed; left:0, so clientX directly equals the desired width.
+      lastW = applySidebarWidth(e.clientX);
+    });
+    const end = () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.classList.remove("sidebar-resizing");
+      if (moved) {  // only persist on a real drag, not a bare click on the handle
+        try { window.localStorage.setItem(SIDEBAR_WIDTH_KEY, String(lastW)); } catch (e) {}
+      }
+      tracing("sidebarResize", { width: lastW, moved });
+    };
+    handle.addEventListener("pointerup", end);
+    handle.addEventListener("pointercancel", end);
+  }
+
+  // ── Initialisation ──────────────────────────────────────────────────────────
+
   function init() {
     audio = document.getElementById("player-audio");
     bar = document.getElementById("player-bar");
     if (!audio || !bar) return;
 
+    loadSidebarWidth();
+    initSidebarResize();
     bindAudioEvents();
     bindKeyboardShortcuts();
 
