@@ -201,10 +201,14 @@
   // captures the token at call time and discards its result if the token has
   // changed (i.e. a newer openAdd was called before the fetch resolved).
   let addPanelToken = 0;
-  // The action Enter should invoke in the current filter state, or null if
-  // Enter is a no-op (ambiguous results -- let the user click explicitly).
-  // Only consulted when activeId is null (no arrow-key highlight active).
-  let enterAction = null;
+  // Whether the current activeId highlight was set by an exact-name / Create
+  // row match while the user was typing (true) or by arrow-key navigation
+  // (false).  Controls whether Enter clears the filter:
+  //   true  -> typing-originated: clear filter + show full list (the user just
+  //             confirmed a name match, no reason to keep the filter term).
+  //   false -> arrow-key: keep filter so the user can keep toggling the same
+  //            highlighted row with repeated Enter presses.
+  let activeFromTyping = false;
   // Whether the sidebar was open before openAdd was called. Used by closeAdd
   // to decide whether to close the sidebar when the add panel is dismissed.
   let sidebarWasOpen = false;
@@ -222,7 +226,7 @@
     currentAddTarget = null;
     allPlaylists = [];
     memberMap = new Map();
-    enterAction = null;
+    activeFromTyping = false;
     sidebarWasOpen = false;
     activeId = null;
     actionableRows = [];
@@ -369,7 +373,8 @@
     const q = (query || "").trim().toLowerCase();
     const qRaw = (query || "").trim(); // preserve case for create / label
     list.replaceChildren();
-    enterAction = null; // reset; re-computed below
+    // activeFromTyping is reset by filterPlaylists before each re-render;
+    // arrow-key handlers reset it themselves when they move the highlight.
     actionableRows = []; // rebuilt below
 
     // ARIA listbox role on the container.
@@ -530,28 +535,30 @@
       appendEntries(memberEntries);
     }
 
-    // Apply the active highlight (tracked by playlist id across re-renders).
-    applyActiveHighlight();
-
-    // Determine which row (if any) owns Enter when no row is arrow-highlighted.
+    // Auto-highlight the exact-match row (or the Create row) when the user has
+    // typed a query, but only when no arrow-key highlight is already active.
     //
-    // Rule 1 -- exact name match with a non-member row: highlight that row and
-    //   make Enter add to that playlist. (An exact match to a *member* is a
-    //   no-op; the track is already there.)
-    // Rule 2 -- no non-member rows are shown but a Create row is present (query
-    //   typed, all matches are members or there are none): highlight the Create
-    //   row and make Enter create-and-add.
-    // Otherwise: no highlight, Enter does nothing (multiple choices -> user must
-    //   click or arrow-down to select).
-    if (q) {
+    // Rule 1 -- exact name match with a non-member row: highlight it and mark
+    //   the highlight as typing-originated so Enter will clear the filter.
+    //   (An exact match to a *member* is a no-op -- the target is already there.)
+    // Rule 2 -- no non-member rows visible but a Create row is present (unique
+    //   new name, or all matches are members): highlight the Create row.
+    // Otherwise -- no auto-highlight; Enter does nothing until the user clicks
+    //   or arrow-keys to a row.
+    if (q && activeId === null) {
       const exactMatch = nonMemberRows.find(function (r) { return r.nameLower === q; });
       if (exactMatch) {
-        const matchId = exactMatch.id, matchName = exactMatch.name;
-        enterAction = function () { addToPlaylist(matchId, matchName); };
+        activeId = exactMatch.id;   // highlight the matched non-member row
+        activeFromTyping = true;    // Enter clears the filter after adding
       } else if (nonMemberRows.length === 0 && createLi) {
-        enterAction = function () { createAndAdd(qRaw); };
+        activeId = "new";           // highlight the Create row
+        activeFromTyping = true;
       }
     }
+
+    // Apply the active highlight (after the auto-match block so typing-set
+    // highlights are reflected immediately without a second render).
+    applyActiveHighlight();
   }
 
   // Apply (or remove) the active highlight based on activeId.
@@ -577,26 +584,42 @@
   }
 
   function filterPlaylists(query) {
-    // Typing clears the arrow-key highlight so the user is back in filter mode.
+    // Each keystroke clears both the highlight and the provenance bit; the
+    // auto-match block in renderAddList will recompute them for the new query.
     activeId = null;
+    activeFromTyping = false;
     renderAddList(query);
   }
 
-  // Explicit Enter-dispatch so precedence is clear and easy to follow:
-  // 1. Arrow-highlighted row action (add or remove), filter NOT cleared.
-  // 2. enterAction (exact-name add / create), filter cleared (original behavior).
-  // 3. Empty filter -> close the panel.
+  // Enter-dispatch — two cases, distinguished by activeFromTyping:
+  //
+  // 1a. Typing-originated highlight (exact name match / Create row):
+  //     Clear the filter first, show the full list, then run the action.
+  //     (The user confirmed a name; no reason to keep the filter term.)
+  //
+  // 1b. Arrow-key highlight (user navigated explicitly):
+  //     Run the action WITHOUT clearing the filter, so the user can press
+  //     Enter again to toggle the same row (add → remove → add …).
+  //
+  // 2. No highlight, non-empty filter: no-op (ambiguous — let the user click).
+  //
+  // 3. No highlight, empty filter: close the panel.
   function dispatchEnter(filterEl) {
     if (activeId !== null) {
       const row = actionableRows.find(function (r) { return r.id === activeId; });
-      if (row) { row.action(); return; }
-    }
-    if (enterAction) {
-      const action = enterAction;
-      if (filterEl) filterEl.value = "";
-      renderAddList("");
-      action();
-      return;
+      if (row) {
+        // Capture action before any re-render (closures hold id/name by value).
+        const action = row.action;
+        if (activeFromTyping && filterEl) {
+          // Typing-originated: clear filter + re-render before the async action.
+          filterEl.value = "";
+          activeId = null;
+          activeFromTyping = false;
+          renderAddList("");
+        }
+        action();
+        return;
+      }
     }
     if (!(filterEl ? filterEl.value : "").trim()) {
       closeAdd();
@@ -615,6 +638,8 @@
         if (idx < actionableRows.length - 1) activeId = actionableRows[idx + 1].id;
         // else already at the bottom -- clamp
       }
+      // Arrow nav takes over: Enter should now keep the filter (repeated toggle).
+      activeFromTyping = false;
       applyActiveHighlight();
     } else if (event.key === "ArrowUp") {
       event.preventDefault();
@@ -623,9 +648,11 @@
       if (idx <= 0) {
         // Already at or before the first row: return focus to filter-only mode.
         activeId = null;
+        activeFromTyping = false;
         applyActiveHighlight();
       } else {
         activeId = actionableRows[idx - 1].id;
+        activeFromTyping = false;
         applyActiveHighlight();
       }
     } else if (event.key === "Enter") {
