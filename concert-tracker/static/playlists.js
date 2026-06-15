@@ -379,8 +379,16 @@
       return !q || p.name.toLowerCase().indexOf(q) !== -1;
     });
 
-    // Build rows (member and non-member) and record actionable ones.
-    const nonMemberRows = []; // [{li, id, name, nameLower}] for enterAction logic
+    // Build rows into member and non-member groups first (without appending to the
+    // DOM yet).  Display order depends on whether a filter is active:
+    //   - No filter: members on top so they're visible even with many playlists.
+    //   - Filtered:  non-members first (the likely add targets), then members below.
+    // actionableRows is always pushed in the same order rows are appended, so
+    // arrow-key navigation matches the visual top-to-bottom order in both states.
+    const memberEntries = [];    // { li, row } for playlists the target belongs to
+    const nonMemberEntries = []; // { li, row } for other matching playlists
+    const nonMemberRows = [];    // [{li, id, name, nameLower}] for enterAction exact-match
+
     for (const pl of filtered) {
       const isMember = memberMap.has(pl.id);
       const rowId = "add-pl-opt-" + pl.id;
@@ -393,7 +401,7 @@
       const check = document.createElement("span");
       check.className = "add-pl-check";
       check.setAttribute("aria-hidden", "true");
-      check.textContent = isMember ? "✓" : "";
+      check.textContent = isMember ? "\u2713" : "";
 
       const nameEl = document.createElement("span");
       nameEl.className = "add-pl-name";
@@ -419,9 +427,10 @@
           });
         }(pl.id));
         li.appendChild(trashBtn);
-        actionableRows.push({ id: pl.id, el: li, action: (function (id) {
+        const row = { id: pl.id, el: li, action: (function (id) {
           return function () { removeFromPlaylist(id); };
-        }(pl.id)) });
+        }(pl.id)) };
+        memberEntries.push({ li: li, row: row });
       } else {
         const handler = (function (id, n) {
           return function () { addToPlaylist(id, n); };
@@ -432,66 +441,93 @@
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
         });
         nonMemberRows.push({ li: li, id: pl.id, name: pl.name, nameLower: pl.name.toLowerCase() });
-        actionableRows.push({ id: pl.id, el: li, action: handler });
+        const row = { id: pl.id, el: li, action: handler };
+        nonMemberEntries.push({ li: li, row: row });
       }
-
-      list.appendChild(li);
     }
 
-    // "Create new 'query'" row -- shown when there is a filter term that does NOT
-    // exactly match an existing playlist name (exact match means the user is adding
-    // to that playlist, not creating a new one).
+    // Append entries to the DOM and register in actionableRows in one step so the
+    // two arrays stay in sync (arrow-key nav walks actionableRows positionally).
+    function appendEntries(entries) {
+      for (var i = 0; i < entries.length; i++) {
+        list.appendChild(entries[i].li);
+        actionableRows.push(entries[i].row);
+      }
+    }
+
+    // "Create new 'query'" row (when filter term has no exact match) or
+    // "Create a new playlist" empty-state row (when there are no playlists at all).
+    // Kept as a single unit so both arms share one code path regardless of which
+    // display branch calls us.  Sets createLi when the Create arm fires (used
+    // by the enterAction rule below).
     const exactNameExists = allPlaylists.some(function (p) { return p.name.toLowerCase() === q; });
     let createLi = null;
-    if (q && !exactNameExists) {
-      createLi = document.createElement("li");
-      createLi.className = "add-pl-row add-pl-row-new";
-      createLi.id = "add-pl-opt-new";
-      createLi.setAttribute("role", "option");
-      createLi.setAttribute("aria-selected", "false");
-      const check = document.createElement("span");
-      check.className = "add-pl-check";
-      check.setAttribute("aria-hidden", "true");
-      check.textContent = "+";
-      const label = document.createElement("span");
-      label.className = "add-pl-name";
-      label.textContent = "Create “" + qRaw + "”"; // textContent -- no XSS
-      createLi.appendChild(check);
-      createLi.appendChild(label);
-      createLi.setAttribute("tabindex", "0");
-      createLi.addEventListener("click", function () { createAndAdd(qRaw); });
-      createLi.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(qRaw); }
-      });
-      list.appendChild(createLi);
-      actionableRows.push({ id: "new", el: createLi, action: function () { createAndAdd(qRaw); } });
-    } else if (filtered.length === 0) {
-      // Empty state: no playlists at all.
-      const li = document.createElement("li");
-      li.className = "add-pl-row add-pl-row-new";
-      li.id = "add-pl-opt-new";
-      li.setAttribute("role", "option");
-      li.setAttribute("aria-selected", "false");
-      const check = document.createElement("span");
-      check.className = "add-pl-check";
-      check.setAttribute("aria-hidden", "true");
-      check.textContent = "+";
-      const nameEl = document.createElement("span");
-      nameEl.className = "add-pl-name";
-      nameEl.textContent = "Create a new playlist";
-      li.appendChild(check);
-      li.appendChild(nameEl);
-      li.setAttribute("tabindex", "0");
-      const createEmpty = function () {
-        const n = prompt("New playlist name:");
-        if (n && n.trim()) createAndAdd(n.trim());
-      };
-      li.addEventListener("click", createEmpty);
-      li.addEventListener("keydown", function (e) {
-        if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createEmpty(); }
-      });
-      list.appendChild(li);
-      actionableRows.push({ id: "new", el: li, action: createEmpty });
+    function appendCreateOrEmpty() {
+      if (q && !exactNameExists) {
+        createLi = document.createElement("li");
+        createLi.className = "add-pl-row add-pl-row-new";
+        createLi.id = "add-pl-opt-new";
+        createLi.setAttribute("role", "option");
+        createLi.setAttribute("aria-selected", "false");
+        const ck = document.createElement("span");
+        ck.className = "add-pl-check";
+        ck.setAttribute("aria-hidden", "true");
+        ck.textContent = "+";
+        const label = document.createElement("span");
+        label.className = "add-pl-name";
+        label.textContent = "Create \u201c" + qRaw + "\u201d"; // textContent -- no XSS
+        createLi.appendChild(ck);
+        createLi.appendChild(label);
+        createLi.setAttribute("tabindex", "0");
+        createLi.addEventListener("click", function () { createAndAdd(qRaw); });
+        createLi.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(qRaw); }
+        });
+        list.appendChild(createLi);
+        actionableRows.push({ id: "new", el: createLi, action: function () { createAndAdd(qRaw); } });
+      } else if (filtered.length === 0) {
+        // Empty state: no playlists exist at all.
+        const li = document.createElement("li");
+        li.className = "add-pl-row add-pl-row-new";
+        li.id = "add-pl-opt-new";
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", "false");
+        const ck = document.createElement("span");
+        ck.className = "add-pl-check";
+        ck.setAttribute("aria-hidden", "true");
+        ck.textContent = "+";
+        const nameEl = document.createElement("span");
+        nameEl.className = "add-pl-name";
+        nameEl.textContent = "Create a new playlist";
+        li.appendChild(ck);
+        li.appendChild(nameEl);
+        li.setAttribute("tabindex", "0");
+        const createEmpty = function () {
+          const n = prompt("New playlist name:");
+          if (n && n.trim()) createAndAdd(n.trim());
+        };
+        li.addEventListener("click", createEmpty);
+        li.addEventListener("keydown", function (e) {
+          if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createEmpty(); }
+        });
+        list.appendChild(li);
+        actionableRows.push({ id: "new", el: li, action: createEmpty });
+      }
+    }
+
+    // Choose display order and append.  actionableRows ends up in visual order,
+    // which is what the ArrowDown/ArrowUp handlers rely on.
+    if (!q) {
+      // No filter: members on top so the user can see what's already added.
+      appendEntries(memberEntries);
+      appendEntries(nonMemberEntries);
+      appendCreateOrEmpty(); // only the empty-state arm can fire when q is empty
+    } else {
+      // Filtered: non-member matches first (likely add targets), then Create row,
+      // then members at the bottom (already-added playlists sink out of the way).
+      appendEntries(nonMemberEntries);
+      appendCreateOrEmpty();
+      appendEntries(memberEntries);
     }
 
     // Apply the active highlight (tracked by playlist id across re-renders).
