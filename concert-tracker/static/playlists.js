@@ -366,9 +366,12 @@
       list.appendChild(li);
     }
 
-    // "Create new 'query'" row — shown whenever there is a filter term.
+    // "Create new 'query'" row — shown when there is a filter term that does NOT
+    // exactly match an existing playlist name (exact match means the user is adding
+    // to that playlist, not creating a new one).
+    const exactNameExists = allPlaylists.some(function (p) { return p.name.toLowerCase() === q; });
     let createLi = null;
-    if (q) {
+    if (q && !exactNameExists) {
       createLi = document.createElement("li");
       createLi.className = "add-pl-row add-pl-row-new";
       const check = document.createElement("span");
