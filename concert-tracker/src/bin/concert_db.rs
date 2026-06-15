@@ -1,9 +1,15 @@
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use concert_tracker::db;
 use concert_tracker::import::import_dir;
+use concert_tracker::jobs::{
+    check_dependencies, default_splitter_bin, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
+};
+use concert_tracker::jobs::split::{start_split, StartOutcome};
 use concert_tracker::model::{sanitize_album, Concert};
 use concert_tracker::scan::scan;
 use concert_tracker::scrape::{ensure_thumbnail, scrape_url, ThumbOutcome};
@@ -91,6 +97,19 @@ enum Command {
         /// Print what would happen without making changes
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Re-run automated splitting on concerts that were split (or errored) but
+    /// have no user-edited timestamps — e.g. after splitter improvements.
+    /// Concerts with user-edited timestamps are never touched.
+    Resplit {
+        /// List the concerts that would be re-split without making any changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Required to actually mutate the database. Re-splitting rewrites
+        /// split_at, tracks_present, and auto_split_timestamps_json across many
+        /// rows. Run --dry-run first and back up the database before using this.
+        #[arg(long)]
+        confirm: bool,
     },
 }
 
@@ -365,6 +384,131 @@ fn main() -> Result<()> {
             println!(
                 "Updated {} JSON files ({} skipped/missing)",
                 updated, skipped
+            );
+        }
+
+        Command::Resplit { dry_run, confirm } => {
+            let candidates = db::list_resplit_candidates(&conn)?;
+            println!("Found {} resplit candidate(s)", candidates.len());
+
+            if dry_run {
+                for c in &candidates {
+                    println!("  [{}] {} ({})", c.id, c.title, c.split_status().slug());
+                }
+                return Ok(());
+            }
+
+            if !confirm {
+                eprintln!(
+                    "WARNING: This will re-run automated splitting on {} concert(s) \
+                     using the database {:?}.\n\
+                     This rewrites split_at, tracks_present, and auto_split_timestamps_json \
+                     across many rows.\n\
+                     Run with --dry-run first to preview the affected concerts.\n\
+                     Back up the database before proceeding.\n\
+                     Re-run with --confirm to proceed.",
+                    candidates.len(),
+                    cli.db
+                );
+                return Ok(());
+            }
+
+            let splitter_bin = default_splitter_bin();
+            for warning in check_dependencies(&splitter_bin) {
+                eprintln!("WARNING: {}", warning);
+            }
+
+            // Snapshot id, title, and initial split_errors count before any mutation.
+            // Capturing the error count up front lets us distinguish a failed re-split
+            // from a successful one: a failed re-split keeps the old split_at (so the
+            // status slug alone would misreport it as "split"), but always appends to
+            // split_errors.
+            let concert_infos: Vec<(i64, String, usize)> = candidates
+                .iter()
+                .map(|c| (c.id, c.title.clone(), c.split_errors.len()))
+                .collect();
+
+            // open_cmd "true" is a no-op placeholder; splitting never invokes the open command.
+            let db = Arc::new(Mutex::new(conn));
+            let registry = Arc::new(JobRegistry::new());
+            let config = JobConfig::production(
+                cli.workdir.clone(),
+                splitter_bin,
+                "true".to_string(),
+            );
+
+            let rt = tokio::runtime::Runtime::new()?;
+            let (succeeded, failed, skipped_no_source, skipped_in_progress, errored) =
+                rt.block_on(async {
+                    let mut succeeded = 0usize;
+                    let mut failed = 0usize;
+                    let mut skipped_no_source = 0usize;
+                    let mut skipped_in_progress = 0usize;
+                    let mut errored = 0usize;
+
+                    for (id, title, initial_errors) in &concert_infos {
+                        let id = *id;
+                        let initial_errors = *initial_errors;
+                        let key = JobKey { concert_id: id, kind: JobKind::Split };
+
+                        let label = match start_split(
+                            db.clone(),
+                            registry.clone(),
+                            config.clone(),
+                            id,
+                            SplitMode::Analyze,
+                        )
+                        .await
+                        {
+                            Ok(StartOutcome::Spawned) => {
+                                // Poll until the async split job finishes.
+                                while registry.is_running(&key) {
+                                    tokio::time::sleep(Duration::from_millis(200)).await;
+                                }
+                                // Determine outcome via split_errors count: a failed re-split
+                                // keeps the old split_at but always appends an error entry.
+                                let post_errors = {
+                                    let conn = db.lock().unwrap();
+                                    db::get_concert(&conn, id)
+                                        .map(|c| c.split_errors.len())
+                                        .unwrap_or(initial_errors + 1)
+                                };
+                                if post_errors > initial_errors {
+                                    failed += 1;
+                                    "FAILED"
+                                } else {
+                                    succeeded += 1;
+                                    "OK"
+                                }
+                            }
+                            Ok(StartOutcome::AlreadySplit) => {
+                                succeeded += 1;
+                                "OK (recovered from disk)"
+                            }
+                            Ok(StartOutcome::NotDownloaded) => {
+                                skipped_no_source += 1;
+                                "SKIPPED (source file missing)"
+                            }
+                            Ok(StartOutcome::AlreadyRunning) => {
+                                skipped_in_progress += 1;
+                                "SKIPPED (in progress — run `concert-db reset-in-progress` to clear)"
+                            }
+                            Err(e) => {
+                                eprintln!("  [{}] {} — start error: {}", id, title, e);
+                                errored += 1;
+                                "ERROR"
+                            }
+                        };
+                        println!("  [{}] {} ... {}", id, title, label);
+                    }
+
+                    (succeeded, failed, skipped_no_source, skipped_in_progress, errored)
+                });
+
+            println!(
+                "Re-split complete: {} succeeded, {} failed, \
+                 {} skipped (no source), {} skipped (in progress), {} errored",
+                succeeded, failed, skipped_no_source, skipped_in_progress, errored
             );
         }
     }

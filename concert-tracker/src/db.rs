@@ -830,6 +830,25 @@ pub fn list_concerts_needing_tracks_backfill(conn: &Connection) -> Result<Vec<Co
     Ok(concerts)
 }
 
+/// Concerts eligible for automated re-splitting: successfully split or
+/// previously split-errored, with no user-edited timestamps, and not
+/// currently mid-split. Includes concerts whose download may no longer be
+/// present on disk (those will be reported as skipped at run time).
+pub fn list_resplit_candidates(conn: &Connection) -> Result<Vec<Concert>> {
+    let mut stmt = conn.prepare(
+        "SELECT * FROM concerts
+         WHERE user_split_timestamps_json IS NULL
+           AND split_started_at IS NULL
+           AND (split_at IS NOT NULL OR COALESCE(split_errors_json, '[]') != '[]')
+         ORDER BY id",
+    )?;
+    let concerts = stmt
+        .query_map([], concert_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list resplit candidates")?;
+    Ok(concerts)
+}
+
 /// Set split_at from filesystem mtime if not already set (for scan/recovery).
 pub fn set_split_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<()> {
     conn.execute(
@@ -3218,6 +3237,88 @@ pub mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(nested_in, vec![p1]);
+    }
+
+    // ── list_resplit_candidates ──────────────────────────────────────────────
+
+    fn seed_downloaded(conn: &Connection, url: &str) -> i64 {
+        upsert_listing(conn, &listing(url, "Concert")).unwrap();
+        let id = get_concert_by_url(conn, url).unwrap().unwrap().id;
+        try_mark_download_started(conn, id).unwrap();
+        mark_download_succeeded(conn, id, "mp4").unwrap();
+        id
+    }
+
+    #[test]
+    fn list_resplit_candidates_includes_split_with_null_user_ts() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_downloaded(&conn, "https://npr.org/c/1");
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+        // user_split_timestamps_json is NULL (default) — should be included
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, id);
+    }
+
+    #[test]
+    fn list_resplit_candidates_excludes_split_with_user_ts() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_downloaded(&conn, "https://npr.org/c/1");
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+        // Set user timestamps — this concert should be excluded
+        set_user_split_timestamps(&conn, id, &[]).unwrap();
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn list_resplit_candidates_includes_split_error_concert() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_downloaded(&conn, "https://npr.org/c/1");
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_failed(&conn, id, "ocr died").unwrap();
+        // split_at IS NULL but split_errors non-empty — should be included
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].id, id);
+    }
+
+    #[test]
+    fn list_resplit_candidates_excludes_mid_split_concert() {
+        let conn = open_in_memory().unwrap();
+        let id = seed_downloaded(&conn, "https://npr.org/c/1");
+        // Mark as previously split, then start a new split (split_started_at set)
+        try_mark_split_started(&conn, id).unwrap();
+        mark_split_succeeded(&conn, id).unwrap();
+        try_mark_split_started(&conn, id).unwrap(); // leaves split_started_at set
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn list_resplit_candidates_excludes_never_split_concert() {
+        let conn = open_in_memory().unwrap();
+        seed_downloaded(&conn, "https://npr.org/c/1");
+        // No split state at all
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn list_resplit_candidates_ordered_by_id() {
+        let conn = open_in_memory().unwrap();
+        // Insert two split concerts; IDs are assigned in insertion order
+        let id1 = seed_downloaded(&conn, "https://npr.org/c/1");
+        try_mark_split_started(&conn, id1).unwrap();
+        mark_split_succeeded(&conn, id1).unwrap();
+        let id2 = seed_downloaded(&conn, "https://npr.org/c/2");
+        try_mark_split_started(&conn, id2).unwrap();
+        mark_split_succeeded(&conn, id2).unwrap();
+        let candidates = list_resplit_candidates(&conn).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(candidates[0].id < candidates[1].id);
     }
 }
 

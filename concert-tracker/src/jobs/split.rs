@@ -819,4 +819,118 @@ mod tests {
         // Should error (not auto-recover), because user mode requires the source file.
         assert!(err.to_string().contains("Downloaded file"));
     }
+
+    /// Config whose splitter always exits non-zero, recording a split failure.
+    fn config_with_failing_split(working_dir: PathBuf) -> JobConfig {
+        JobConfig {
+            working_dir,
+            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
+            split_cmd: Arc::new(|_| {
+                let mut cmd = Command::new("sh");
+                cmd.args(["-c", "exit 1"]);
+                cmd
+            }),
+            open_cmd: Arc::new(|_| Command::new("true")),
+        }
+    }
+
+    /// Simulate a concert that was already split (split_at IS NOT NULL) and re-split
+    /// it successfully. Confirms the outcome is detected as success via split_errors
+    /// count (since split_at stays set regardless, the status slug alone is unreliable).
+    #[tokio::test]
+    async fn resplit_success_reports_ok_via_error_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Resplit Success";
+        let set_list = vec!["Track One".to_string(), "Track Two".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        fs::write(cd.join("Resplit Success.mp4"), b"video").unwrap();
+
+        let db = seeded_db(album, set_list.clone());
+        // Simulate a prior successful split
+        {
+            let conn = db.lock().unwrap();
+            db::try_mark_split_started(&conn, 1).unwrap();
+            db::mark_split_succeeded(&conn, 1).unwrap();
+        }
+        let initial_errors = {
+            let conn = db.lock().unwrap();
+            db::get_concert(&conn, 1).unwrap().split_errors.len()
+        };
+
+        let registry = Arc::new(JobRegistry::new());
+        let config = config_with_fake_analyze(tmp.path().to_path_buf(), &set_list);
+        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+
+        let key = JobKey { concert_id: 1, kind: JobKind::Split };
+        for _ in 0..100 {
+            if !registry.is_running(&key) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let post_errors = {
+            let conn = db.lock().unwrap();
+            db::get_concert(&conn, 1).unwrap().split_errors.len()
+        };
+        assert_eq!(
+            post_errors, initial_errors,
+            "successful re-split must not add errors"
+        );
+    }
+
+    /// Simulate a concert that was already split and re-split it with a failing
+    /// splitter. Confirms the outcome is detected as failure via split_errors count
+    /// (the old split_at stays set, so status slug alone would misreport this).
+    #[tokio::test]
+    async fn resplit_failure_detected_via_error_count() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Resplit Failure";
+        let set_list = vec!["Song".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        fs::write(cd.join("Resplit Failure.mp4"), b"video").unwrap();
+
+        let db = seeded_db(album, set_list.clone());
+        // Simulate a prior successful split
+        {
+            let conn = db.lock().unwrap();
+            db::try_mark_split_started(&conn, 1).unwrap();
+            db::mark_split_succeeded(&conn, 1).unwrap();
+        }
+        let initial_errors = {
+            let conn = db.lock().unwrap();
+            db::get_concert(&conn, 1).unwrap().split_errors.len()
+        };
+
+        let registry = Arc::new(JobRegistry::new());
+        let config = config_with_failing_split(tmp.path().to_path_buf());
+        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+            .await
+            .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+
+        let key = JobKey { concert_id: 1, kind: JobKind::Split };
+        for _ in 0..100 {
+            if !registry.is_running(&key) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+
+        let post_errors = {
+            let conn = db.lock().unwrap();
+            db::get_concert(&conn, 1).unwrap().split_errors.len()
+        };
+        assert!(
+            post_errors > initial_errors,
+            "failing re-split must append to split_errors (initial={}, post={})",
+            initial_errors,
+            post_errors
+        );
+    }
 }
