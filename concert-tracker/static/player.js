@@ -5,6 +5,10 @@ const Player = (() => {
   let bar = null;
   let state = { concertId: null, trackIdx: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
   let queue = [];
+  // Monotonic id minted once per playPlaylist call so a playlist's queued tracks
+  // form one visually-grouped, separately-removable block. Lifetime-only — never
+  // persisted or compared across reloads.
+  let nextGroupId = 1;
   let autoAdvanceController = null;
   let keyboardShortcutsBound = false;
   let sidebarLoadGen = 0;
@@ -992,9 +996,15 @@ const Player = (() => {
 
   // Shared entry constructor so enqueue and playPlaylist both produce the same shape.
   // playlistName is null for ad-hoc queued tracks and non-null when the entry came
-  // from a playlist (used by play() to show/clear the bar label).
-  function makeQueueEntry(concertId, trackIdx, title, liked, playlistName) {
-    return { concertId, trackIdx, title, liked: !!liked, playlistName: playlistName || null };
+  // from a playlist (used by play() to show/clear the bar label). groupId is non-null
+  // only for playlist tracks; a contiguous run of entries sharing a groupId renders as
+  // one grouped block in the queue sidebar (see renderQueue).
+  function makeQueueEntry(concertId, trackIdx, title, liked, playlistName, groupId) {
+    return {
+      concertId, trackIdx, title, liked: !!liked,
+      playlistName: playlistName || null,
+      groupId: groupId || null,
+    };
   }
 
   function enqueue(concertId, trackIdx, title, liked) {
@@ -1027,10 +1037,13 @@ const Player = (() => {
         tracing('playPlaylist empty', { playlistId, name });
         return;
       }
+      // Mint one groupId for this entire play action so all enqueued tracks form a
+      // single removable group in the queue sidebar (see renderQueue/removeGroup).
+      const groupId = nextGroupId++;
       for (const t of tracks) {
-        queue.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, name));
+        queue.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, name, groupId));
       }
-      tracing('playPlaylist enqueued', { playlistId, name, count: tracks.length, queueLength: queue.length });
+      tracing('playPlaylist enqueued', { playlistId, name, groupId, count: tracks.length, queueLength: queue.length });
       queueChanged();
       if (playerIdle()) await playFromQueue();
     } catch (e) {
@@ -1159,8 +1172,24 @@ const Player = (() => {
     updateNextButton();
   }
 
+  // Shared button factory: all queue icon-buttons (▶ play, ✕ remove, group ✕)
+  // share the same shape — only className/title/glyph/handler differ.
+  function makeIconButton(className, title, glyph, onClick) {
+    const b = document.createElement("button");
+    b.className = className;
+    b.title = title;
+    b.textContent = glyph;
+    b.onclick = onClick;
+    return b;
+  }
+
   // Render the queue section of the sidebar using DOM APIs (textContent only —
   // titles are untrusted data and must never be set via innerHTML).
+  //
+  // Queue entries whose groupId is non-null and contiguous form a playlist group:
+  // a header row (playlist name + single ✕ to remove the whole group) followed by
+  // indented song rows. Ad-hoc entries (groupId===null) render exactly as before.
+  // The list is reversed (highest index at top) and bottom-scrolled as before.
   function renderQueue() {
     const list = document.getElementById("sidebar-queue-list");
     const empty = document.getElementById("sidebar-queue-empty");
@@ -1171,22 +1200,54 @@ const Player = (() => {
       return;
     }
     if (empty) empty.style.display = "none";
+
+    // prevGroupId tracks the last seen groupId so we emit one header per contiguous run.
+    // Seeded to undefined (not null) because null is the meaningful "ad-hoc" value.
+    let prevGroupId = undefined;
+    // headeredGroups guards the load-bearing contiguity assumption: if a groupId
+    // reappears non-contiguously (future non-tail insert), log rather than silently
+    // splitting it into two headers.
+    const headeredGroups = new Set();
+
     for (let i = queue.length - 1; i >= 0; i--) {
       const entry = queue[i];
+
+      // Emit a group header whenever we enter a new playlist group (groupId changes).
+      if (entry.groupId !== null && entry.groupId !== prevGroupId) {
+        if (headeredGroups.has(entry.groupId)) {
+          tracing("renderQueue non-contiguous group — group split across queue", { groupId: entry.groupId });
+        }
+        headeredGroups.add(entry.groupId);
+        prevGroupId = entry.groupId;
+
+        const header = document.createElement("li");
+        header.className = "queue-group";
+
+        const nameSpan = document.createElement("span");
+        nameSpan.className = "queue-group-name";
+        nameSpan.textContent = entry.playlistName || "Playlist";
+
+        // Capture groupId in a const so the closure is stable across loop iterations.
+        const gid = entry.groupId;
+        const groupRemoveBtn = makeIconButton(
+          "btn-queue-remove",
+          "Remove playlist from queue",
+          "✕",
+          () => removeGroup(gid)
+        );
+
+        header.append(nameSpan, groupRemoveBtn);
+        list.appendChild(header);
+      } else if (entry.groupId === null) {
+        prevGroupId = null;
+      }
+
+      // Song row — nested (indented) when it belongs to a group.
       const li = document.createElement("li");
-      li.className = "queue-item";
+      li.className = entry.groupId !== null ? "queue-item nested" : "queue-item";
 
-      const playBtn = document.createElement("button");
-      playBtn.className = "btn-queue-play";
-      playBtn.title = "Play now";
-      playBtn.textContent = "▶";
-      playBtn.onclick = () => playQueueEntryNow(i);
-
-      const removeBtn = document.createElement("button");
-      removeBtn.className = "btn-queue-remove";
-      removeBtn.title = "Remove from queue";
-      removeBtn.textContent = "✕";
-      removeBtn.onclick = () => dequeue(i);
+      const playBtn = makeIconButton("btn-queue-play", "Play now", "▶", () => playQueueEntryNow(i));
+      const removeBtn = makeIconButton("btn-queue-remove", "Remove from queue", "✕", () => dequeue(i));
 
       const titleSpan = document.createElement("span");
       titleSpan.className = "queue-title";
@@ -1211,6 +1272,13 @@ const Player = (() => {
   function dequeue(pos) {
     queue.splice(pos, 1);
     tracing("dequeue", { pos, queueLength: queue.length });
+    queueChanged();
+  }
+
+  // Remove all remaining queue entries belonging to a playlist group in one action.
+  function removeGroup(groupId) {
+    queue = queue.filter(q => q.groupId !== groupId);
+    tracing("removeGroup", { groupId, queueLength: queue.length });
     queueChanged();
   }
 
@@ -1424,7 +1492,7 @@ const Player = (() => {
   const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
     openConcert, openSidebar, closeSidebar, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow,
-    dequeue, playAlbumAt, nowPlaying, playPlaylist };
+    dequeue, enqueue, playAlbumAt, nowPlaying, playPlaylist };
   // Expose on window so other scripts (splitter.js) can access it via window.Player —
   // `const Player` at script top-level is not automatically a window property.
   if (typeof window !== "undefined") window.Player = api;

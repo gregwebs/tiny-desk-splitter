@@ -8,6 +8,10 @@
 //
 // Phase 2c — playlist playback: Player.playPlaylist(id) appends the playlist's
 // resolved tracks to the queue and starts playing if idle.
+//
+// Phase 2d — playlist queue groups: a played playlist appears in the queue sidebar
+// as a group (header + nested song rows). The header carries a single ✕ that
+// removes all remaining songs in the group at once.
 
 const { test, expect } = require("./fixtures");
 
@@ -221,5 +225,157 @@ test.describe("Playlist playback (2c)", () => {
 
     // Label should now be hidden.
     await expect(page.locator("#player-playlist")).toBeHidden();
+  });
+});
+
+// ── Phase 2d specs ────────────────────────────────────────────────────────────
+
+test.describe("Playlist queue groups (2d)", () => {
+  // Open the queue sidebar via the toggle button.
+  async function openQueueSidebar(page) {
+    const sidebar = page.locator("#player-sidebar");
+    const isOpen = await sidebar.evaluate(el => el.classList.contains("showing-queue"));
+    if (!isOpen) {
+      await page.locator("#player-queue-toggle").evaluate(el => el.click());
+    }
+    await expect(page.locator("#sidebar-queue-section")).toBeVisible();
+  }
+
+  test("playing a playlist while another track plays shows a group header in the queue", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    // Start a track so the player is busy; playlist will queue behind it.
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    const pid = await createPlaylist(page, "Group Test");
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 0 });
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 1 });
+
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+
+    // Two tracks queued.
+    await expect(page.locator("#player-queue-badge")).toHaveText("2");
+
+    await openQueueSidebar(page);
+
+    // One group header appears with the playlist name.
+    await expect(page.locator(".queue-group")).toHaveCount(1);
+    await expect(page.locator(".queue-group .queue-group-name")).toHaveText("Group Test");
+
+    // Both song rows are nested under the group.
+    await expect(page.locator(".queue-item.nested")).toHaveCount(2);
+  });
+
+  test("playing the same playlist twice creates two independent groups", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    const pid = await createPlaylist(page, "Double Play");
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 0 });
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 1 });
+
+    // Play the same playlist twice.
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+
+    // 4 tracks total in queue (no dedup for playlist pushes).
+    await expect(page.locator("#player-queue-badge")).toHaveText("4");
+
+    await openQueueSidebar(page);
+
+    // Two separate group headers.
+    await expect(page.locator(".queue-group")).toHaveCount(2);
+  });
+
+  test("the group ✕ removes all songs in the group at once", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    const pid = await createPlaylist(page, "Removable");
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 0 });
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 1 });
+    await addItem(page, pid, { type: "track", concert_id: 2, track_index: 2 });
+
+    await page.evaluate((id) => Player.playPlaylist(id), pid);
+    await expect(page.locator("#player-queue-badge")).toHaveText("3");
+
+    await openQueueSidebar(page);
+    await expect(page.locator(".queue-group")).toHaveCount(1);
+
+    // Click the group ✕ button.
+    await page.locator(".queue-group .btn-queue-remove").evaluate(el => el.click());
+
+    // All 3 tracks removed — badge gone and header vanishes.
+    await expect(page.locator("#player-queue-badge")).toHaveText("");
+    await expect(page.locator(".queue-group")).toHaveCount(0);
+    await expect(page.locator(".queue-item.nested")).toHaveCount(0);
+  });
+
+  test("removing a group ✕ leaves another group untouched", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    const pid1 = await createPlaylist(page, "First Group");
+    await addItem(page, pid1, { type: "track", concert_id: 2, track_index: 0 });
+    await addItem(page, pid1, { type: "track", concert_id: 2, track_index: 1 });
+
+    const pid2 = await createPlaylist(page, "Second Group");
+    await addItem(page, pid2, { type: "track", concert_id: 1, track_index: 1 });
+
+    await page.evaluate((id) => Player.playPlaylist(id), pid1);
+    await page.evaluate((id) => Player.playPlaylist(id), pid2);
+
+    // 3 total queued across two groups.
+    await expect(page.locator("#player-queue-badge")).toHaveText("3");
+
+    await openQueueSidebar(page);
+    await expect(page.locator(".queue-group")).toHaveCount(2);
+
+    // Remove the FIRST group (it renders at the bottom = last-appended, so it is
+    // the last .queue-group in the list since we iterate in reverse).
+    const groups = page.locator(".queue-group");
+    await groups.last().locator(".btn-queue-remove").evaluate(el => el.click());
+
+    // 1 track remains (the second group's song).
+    await expect(page.locator("#player-queue-badge")).toHaveText("1");
+    await expect(page.locator(".queue-group")).toHaveCount(1);
+    await expect(page.locator(".queue-group .queue-group-name")).toHaveText("Second Group");
+  });
+
+  test("ad-hoc queued tracks are not nested and have no group header", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    // Queue a track ad-hoc (while playing, so it enqueues rather than plays).
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    // Enqueue a track directly (not via playPlaylist) using the public API.
+    await page.evaluate(() => Player.enqueue(2, 0, "Song One", false));
+
+    await expect(page.locator("#player-queue-badge")).toHaveText("1");
+
+    await openQueueSidebar(page);
+
+    // No group header; the item is not nested.
+    await expect(page.locator(".queue-group")).toHaveCount(0);
+    await expect(page.locator(".queue-item")).toHaveCount(1);
+    await expect(page.locator(".queue-item.nested")).toHaveCount(0);
   });
 });
