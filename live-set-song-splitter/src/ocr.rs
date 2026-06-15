@@ -35,7 +35,7 @@ pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> 
     let mut cmd = Command::new("tesseract");
 
     if let Some(psm_value) = psm {
-        cmd.args(&["--psm", psm_value]);
+        cmd.args(["--psm", psm_value]);
         output_path = format!("{}_psm{}", output_path, psm_value);
     }
     cmd.arg(image_path).arg(&output_path);
@@ -69,7 +69,7 @@ pub fn parse_tesseract_output(text: &str, artist: &str) -> Option<OcrParse> {
     let lines: Vec<String> = detected_text
         .lines()
         .map(|line| line.trim())
-        .filter(|line| line.len() > 0)
+        .filter(|line| !line.is_empty())
         .map(|line| line.to_string())
         .collect();
 
@@ -89,11 +89,11 @@ pub enum ArtistMatchReason {
 
 impl fmt::Display for ArtistMatchReason {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self {
-            &ArtistMatchReason::No(no) => {
+        match self {
+            ArtistMatchReason::No(no) => {
                 write!(f, "{}", no)
             }
-            &ArtistMatchReason::Yes(yes) => {
+            ArtistMatchReason::Yes(yes) => {
                 write!(f, "{}", yes)
             }
         }
@@ -119,14 +119,14 @@ pub enum NoArtistMatchReason {
 
 impl fmt::Display for NoArtistMatchReason {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self {
-            &NoArtistMatchReason::EmptyArtist => {
+        match self {
+            NoArtistMatchReason::EmptyArtist => {
                 write!(f, "empty artist")
             }
-            &NoArtistMatchReason::EmptyLine => {
+            NoArtistMatchReason::EmptyLine => {
                 write!(f, "empty line")
             }
-            &NoArtistMatchReason::Fallthrough => {
+            NoArtistMatchReason::Fallthrough => {
                 write!(f, "no match")
             }
         }
@@ -141,11 +141,11 @@ pub enum YesArtistMatchReason {
 
 impl fmt::Display for YesArtistMatchReason {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        match &self {
-            &YesArtistMatchReason::StartsWith => {
+        match self {
+            YesArtistMatchReason::StartsWith => {
                 write!(f, "starts with")
             }
-            &YesArtistMatchReason::OffByOne => {
+            YesArtistMatchReason::OffByOne => {
                 write!(f, "off by 1")
             }
         }
@@ -193,21 +193,20 @@ fn fuzzy_match_artist_reason(line_input: &str, artist_input: &str) -> ArtistMatc
     // Off by 1
     let levenshtein_limit = 1;
 
-    if levenshtein_weight(&artist, &line, levenshtein_limit + 10 as u32, &weights)
-        <= levenshtein_limit
+    if levenshtein_weight(&artist, &line, levenshtein_limit + 10_u32, &weights) <= levenshtein_limit
     {
         return ArtistMatchReason::Yes(YesArtistMatchReason::OffByOne);
     }
     let more_line = (line.len() as i32) - (artist.len() as i32);
     if more_line > 0 {
         let line = line.chars().take(artist_chars_count).collect::<String>();
-        if levenshtein_weight(&artist, &line, levenshtein_limit + 10 as u32, &weights)
+        if levenshtein_weight(&artist, &line, levenshtein_limit + 10_u32, &weights)
             <= levenshtein_limit
         {
             return ArtistMatchReason::Yes(YesArtistMatchReason::OffByOne);
         }
     }
-    return ArtistMatchReason::No(NoArtistMatchReason::Fallthrough);
+    ArtistMatchReason::No(NoArtistMatchReason::Fallthrough)
     /*
     last_artist_alpha = match artist.chars().last() {
         None => panic!("expected a last char"),
@@ -224,7 +223,7 @@ mod tests {
     fn assert_fuzzy_match_artist(line_input: &str, artist_input: &str) {
         let result = fuzzy_match_artist_reason(line_input, artist_input);
         if !result.bool() {
-            assert!(false, "{:?}", result)
+            panic!("{:?}", result)
         }
     }
 
@@ -400,7 +399,7 @@ fn check_line_match(
         // It seems to stop if hitting this limit with any iteration
         // We need a high limit so that it will backtrack and try a different approach
         levenshtein_limit + 10 + title_count as u32,
-        &weights,
+        weights,
     );
     if lev <= levenshtein_limit {
         return Some((
@@ -439,22 +438,21 @@ fn spell_number(i: u8) -> &'static str {
 
 fn strip_movement_prefix(song_title: &str) -> Option<String> {
     let movement = "Movement ";
-    if song_title.starts_with(movement) {
-        let numbered = &song_title[movement.len()..];
+    if let Some(numbered) = song_title.strip_prefix(movement) {
         // println!("starts with Movement, now: {}", &numbered);
         for i in 1..9 {
             let spelled = spell_number(i);
-            if numbered.to_lowercase().starts_with(&spelled) {
+            if numbered.to_lowercase().starts_with(spelled) {
                 let un_numbered = &numbered[spelled.len()..];
                 // println!("number {} now: {}", i, &un_numbered);
                 if un_numbered.starts_with(": ") {
-                    let mut un_coloned = &un_numbered[2..];
+                    let mut un_coloned = un_numbered.strip_prefix(": ").unwrap();
                     // println!("no colon {} now: {}", i, &un_coloned);
-                    if un_coloned.chars().nth(0) == Some('"') {
+                    if un_coloned.starts_with('"') {
                         un_coloned = &un_coloned[1..];
                         // println!("no quote now: {}", &un_coloned);
                     }
-                    if un_coloned.len() > 0
+                    if !un_coloned.is_empty()
                         && un_coloned.chars().nth(un_coloned.chars().count() - 1) == Some('"')
                     {
                         un_coloned = &un_coloned[..un_coloned.len() - 1];
@@ -465,7 +463,7 @@ fn strip_movement_prefix(song_title: &str) -> Option<String> {
             }
         }
     }
-    return None;
+    None
 }
 
 pub fn matches_song_title_weighted(
@@ -516,7 +514,7 @@ mod tests_matches_song_title {
         // Test punctuation
         let greedy = weights_for_greedy_extractor();
         assert!(matches_song_title_weighted(
-            &vec!["__ My Everythi".to_string()],
+            &["__ My Everythi".to_string()],
             "My Everything",
             false,
             &greedy
@@ -542,14 +540,14 @@ mod tests_matches_song_title {
 
         // Test non-matches
         let other_lines = vec!["completely different".to_string()];
-        assert!(!matches_song_title(&other_lines, "test song", true).is_some());
+        assert!(matches_song_title(&other_lines, "test song", true).is_none());
     }
 
     #[test]
     fn test_matches_overlay() {
         // Test fuzzy matching (only works with overlay flag)
         let ocr_lines = vec!["helo wrld".to_string()]; // OCR might miss letters
-        assert!(!matches_song_title(&ocr_lines, "hello world", false).is_some()); // Should fail without overlay
+        assert!(matches_song_title(&ocr_lines, "hello world", false).is_none()); // Should fail without overlay
         let result = matches_song_title(&ocr_lines, "hello world", true);
         assert!(result.is_some()); // Should pass with overlay
     }
@@ -579,7 +577,7 @@ mod tests_matches_song_title {
     #[test]
     fn test_not_matches_small_text() {
         let lines = vec!["//".to_string()];
-        assert!(!matches_song_title(&lines, "too much", true).is_some());
+        assert!(matches_song_title(&lines, "too much", true).is_none());
     }
 
     #[test]
@@ -620,11 +618,11 @@ mod tests_matches_song_title {
     fn test_too_loose() {
         let lines = vec!["seenaneiias Thibaudcn™".to_string()];
         let song_title = "heitor villa-lobos: \"o polichinelo\" (from a prole do bebê no. 1)";
-        let result = matches_song_title(&lines, &song_title, true);
+        let result = matches_song_title(&lines, song_title, true);
         if let Some(ref r) = result {
             print_match_result(r);
         }
-        assert!(!result.is_some());
+        assert!(result.is_none());
     }
 
     #[test]

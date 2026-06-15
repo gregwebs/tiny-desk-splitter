@@ -38,22 +38,18 @@ use concert_types::ConcertInfo;
 /// sync; they trade cut precision against speed/quality.
 #[derive(Parser, Debug, Clone, Copy, ValueEnum, PartialEq)]
 #[clap(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum VideoCutMode {
     /// Stream-copy (fastest, lossless). Snaps each cut back to the nearest preceding
     /// keyframe, so a track may start up to one GOP (a few seconds) early.
     Copy,
     /// Stream-copy everything except the head of the track (cut point to next
     /// keyframe), which is re-encoded. Frame-accurate start at near-copy speed.
+    #[default]
     Smart,
     /// Re-encode the whole video so each cut is frame-accurate at the detected start
     /// (slowest, slight quality change).
     Reencode,
-}
-
-impl Default for VideoCutMode {
-    fn default() -> Self {
-        VideoCutMode::Smart
-    }
 }
 
 /// x264 encoding parameters used by [`VideoCutMode::Reencode`] and for the head
@@ -400,7 +396,7 @@ fn parse_next_keyframe(ffprobe_csv: &str, start: f64) -> Option<f64> {
 /// per input file.
 pub fn probe_source_video_params(input_file: &str) -> Result<SourceVideoParams> {
     let output = ffmpeg::create_ffprobe_command()
-        .args(&[
+        .args([
             "-v",
             "error",
             "-select_streams",
@@ -464,7 +460,7 @@ fn parse_frame_rate(rate: &str) -> Option<f64> {
 /// [`KEYFRAME_PROBE_WINDOW_SECS`].
 fn probe_next_keyframe(input_file: &str, start: f64) -> Result<Option<f64>> {
     let output = ffmpeg::create_ffprobe_command()
-        .args(&[
+        .args([
             "-v",
             "error",
             "-read_intervals",
@@ -500,7 +496,7 @@ fn probe_next_keyframe(input_file: &str, start: f64) -> Result<Option<f64>> {
 /// container).
 fn probe_video_frame_count(path: &str) -> Result<u64> {
     let output = ffmpeg::create_ffprobe_command()
-        .args(&[
+        .args([
             "-v",
             "error",
             "-select_streams",
@@ -534,7 +530,7 @@ fn run_ffmpeg(args: &[String], output_file: &str, what: &str) -> Result<()> {
     let mut ffmpeg_cmd = ffmpeg::create_ffmpeg_command();
     ffmpeg_cmd.args(args);
     let mut cmd = ffmpeg_cmd.cmd();
-    cmd.args(&["-y", output_file]);
+    cmd.args(["-y", output_file]);
     let status = cmd
         .status()
         .with_context(|| format!("spawning ffmpeg for {}", what))?;
@@ -546,6 +542,7 @@ fn run_ffmpeg(args: &[String], output_file: &str, what: &str) -> Result<()> {
 
 /// Extract `[start_time, end_time]` with a single ffmpeg command
 /// ([`VideoCutMode::Copy`] or [`VideoCutMode::Reencode`]).
+#[allow(clippy::too_many_arguments)] // All arguments are required ffmpeg segment parameters
 pub fn extract_segment(
     input_file: &str,
     output_file: &str,
@@ -568,7 +565,7 @@ pub fn extract_segment(
     // Add metadata
     ffmpeg::add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
 
-    cmd.args(&[
+    cmd.args([
         "-y", // Overwrite output file
         output_file,
     ]);
@@ -585,6 +582,7 @@ pub fn extract_segment(
 /// Extract `[start_time, end_time]` under [`VideoCutMode::Smart`]: plan against the
 /// next keyframe, then either delegate to a single-command mode or build the
 /// head/tail/audio splice in a `<output>.work` directory (removed afterwards).
+#[allow(clippy::too_many_arguments)] // All arguments are required ffmpeg segment parameters
 pub fn extract_segment_smart(
     input_file: &str,
     output_file: &str,
@@ -657,6 +655,7 @@ pub fn extract_segment_smart(
 
 /// Build the head/tail/audio parts in `work_dir` and concat-mux them into
 /// `output_file`. See the module docs for the splice layout.
+#[allow(clippy::too_many_arguments)] // All arguments are required ffmpeg splice parameters
 fn splice_segment(
     input_file: &str,
     output_file: &str,
@@ -717,7 +716,7 @@ fn splice_segment(
     ffmpeg_cmd.args(build_smart_concat_args(&list_file, &audio_file));
     let mut cmd = ffmpeg_cmd.cmd();
     ffmpeg::add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
-    cmd.args(&["-y", output_file]);
+    cmd.args(["-y", output_file]);
     let status = cmd
         .status()
         .context("spawning ffmpeg for smart cut concat")?;

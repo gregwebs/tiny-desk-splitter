@@ -25,7 +25,7 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>> {
 }
 
 fn first_split(s: &str, char: char) -> String {
-    return s.split(char).next().unwrap_or("").trim().to_string();
+    s.split(char).next().unwrap_or("").trim().to_string()
 }
 
 /// Lowercase a string and strip all whitespace. Used to compare artist names
@@ -249,11 +249,10 @@ pub fn extract_set_list(paragraphs: &[ElementRef]) -> Result<Vec<Song>> {
                         for li in ul_element.select(&li_selector) {
                             let mut song_text = li.text().collect::<String>().trim().to_string();
 
-                            if let Some(start) = song_text.chars().nth(0) {
+                            if let Some(start) = song_text.chars().next() {
                                 if start == '"' || start == '\'' {
-                                    song_text = song_text[1..]
-                                        .trim_end_matches(|c| c == '"' || c == '\'')
-                                        .to_string();
+                                    song_text =
+                                        song_text[1..].trim_end_matches(['"', '\'']).to_string();
                                 }
                                 set_list.push(Song { title: song_text });
                             }
@@ -276,7 +275,7 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
 
     let musicians_para_find = paragraphs.iter().find(|p| -> bool {
         let mtext = p.text().collect::<String>().trim().to_uppercase();
-        return mtext == "MUSICIANS" || mtext == "MUSICIAN";
+        mtext == "MUSICIANS" || mtext == "MUSICIAN"
     });
     let p = match musicians_para_find {
         None => return Err(anyhow::anyhow!("musicians text not found on page")),
@@ -297,8 +296,8 @@ pub fn extract_musicians(paragraphs: &[ElementRef]) -> Result<Vec<Musician>> {
                         .text()
                         .collect::<String>()
                         .trim()
-                        .trim_start_matches(|c| c == '"' || c == '\'')
-                        .trim_end_matches(|c| c == '"' || c == '\'')
+                        .trim_start_matches(['"', '\''])
+                        .trim_end_matches(['"', '\''])
                         .to_string();
 
                     // Parse musician name and instruments
@@ -445,8 +444,8 @@ pub fn scrape_data(url: &str) -> Result<()> {
 
 fn strip_suffix<'a>(s: &'a str, suffix: &str) -> &'a str {
     if let Some(stripped) = s.strip_suffix(&suffix) {
-        return stripped;
+        stripped
     } else {
-        return s;
+        s
     }
 }

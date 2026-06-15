@@ -174,9 +174,9 @@ fn dir_mtime(dir: &Path) -> String {
     std::fs::metadata(dir)
         .and_then(|m| m.modified())
         .ok()
-        .and_then(|t| {
+        .map(|t| {
             let dt: chrono::DateTime<chrono::Utc> = t.into();
-            Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+            dt.format("%Y-%m-%dT%H:%M:%SZ").to_string()
         })
         .unwrap_or_else(|| chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string())
 }

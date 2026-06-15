@@ -26,7 +26,7 @@ impl Ffmpeg {
         Str: AsRef<OsStr>,
     {
         self.cmd.args(args);
-        return self;
+        self
     }
 
     pub fn video_filter(&mut self, file: &str, filters: Vec<&str>) -> &mut Ffmpeg {
@@ -36,7 +36,7 @@ impl Ffmpeg {
         self
     }
 
-    pub fn from_to(&mut self, start_time: f64, end_time: f64) -> &mut Ffmpeg {
+    pub fn time_range(&mut self, start_time: f64, end_time: f64) -> &mut Ffmpeg {
         self.args(vec![
             "-ss",
             &format!("{:.3}", start_time),
@@ -53,14 +53,14 @@ impl Ffmpeg {
 
 pub fn create_ffmpeg_command() -> Ffmpeg {
     let mut cmd = Command::new("ffmpeg");
-    cmd.args(&["-hide_banner", "-loglevel", "warning"]);
+    cmd.args(["-hide_banner", "-loglevel", "warning"]);
     cmd.stdout(std::process::Stdio::null());
-    Ffmpeg { cmd: cmd }
+    Ffmpeg { cmd }
 }
 
 pub fn create_ffprobe_command() -> Command {
     let mut cmd = Command::new("ffprobe");
-    cmd.args(&["-hide_banner", "-loglevel", "warning"]);
+    cmd.args(["-hide_banner", "-loglevel", "warning"]);
     cmd
 }
 
@@ -74,7 +74,7 @@ fn _extract_segment_mp4box(
 
     // Use MP4Box for segment extraction
     let status = Command::new("MP4Box")
-        .args(&[
+        .args([
             "-splitx",
             &format!("{:.3}:{:.3}", start_time, end_time),
             "-out",
@@ -102,18 +102,18 @@ pub fn extract_audio_segment(
 ) -> Result<()> {
     let mut ffmpeg = create_ffmpeg_command();
     ffmpeg
-        .args(&[
+        .args([
             "-i", input_file, "-vn", // No video
             "-acodec", "copy", // Copy audio stream without re-encoding
             "-map", "0:a",
         ])
-        .from_to(start_time, end_time);
+        .time_range(start_time, end_time);
     let mut cmd = ffmpeg.cmd();
 
     // Add metadata
     add_metadata_to_cmd(&mut cmd, song_title, concertdata, track_number);
 
-    cmd.args(&[
+    cmd.args([
         "-y", // Overwrite output file
         output_file,
     ]);
@@ -138,26 +138,26 @@ pub fn add_metadata_to_cmd(
     track_number: Option<usize>,
 ) {
     // Add artist metadata
-    cmd.args(&["-metadata", &format!("artist={}", concertdata.artist)]);
+    cmd.args(["-metadata", &format!("artist={}", concertdata.artist)]);
 
     // Add title metadata if available
     if let Some(title) = song_title {
-        cmd.args(&["-metadata", &format!("title={}", title)]);
+        cmd.args(["-metadata", &format!("title={}", title)]);
     }
 
     if !concertdata.album.is_empty() {
-        cmd.args(&["-metadata", &format!("album={}", concertdata.album)]);
+        cmd.args(["-metadata", &format!("album={}", concertdata.album)]);
     }
 
     // Add year metadata if available
     if let Some(year_value) = concertdata.year() {
         if !year_value.is_empty() {
-            cmd.args(&["-metadata", &format!("date={}", year_value)]);
+            cmd.args(["-metadata", &format!("date={}", year_value)]);
         }
     }
 
     // Add track number metadata if available
     if let Some(track) = track_number {
-        cmd.args(&["-metadata", &format!("track={}", track)]);
+        cmd.args(["-metadata", &format!("track={}", track)]);
     }
 }

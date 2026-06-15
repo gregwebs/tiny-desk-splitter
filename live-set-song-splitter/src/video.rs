@@ -102,7 +102,7 @@ impl VideoInfo {
 
         // Get basic video information in one call
         let basic_info_output = create_ffprobe_command()
-            .args(&[
+            .args([
                 "-v",
                 "error",
                 "-select_streams",
@@ -111,7 +111,7 @@ impl VideoInfo {
                 "stream=r_frame_rate:format=duration,start_time",
                 "-of",
                 "json",
-                &input_file,
+                input_file,
             ])
             .output()?;
 
@@ -168,7 +168,7 @@ impl VideoInfo {
         // Get all frame information in a single pass
         println!("Extracting all frame information...");
         let frame_data = create_ffprobe_command()
-            .args(&[
+            .args([
                 "-v",
                 "error",
                 "-select_streams",

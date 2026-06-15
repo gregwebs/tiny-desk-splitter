@@ -1129,8 +1129,7 @@ fn find_next_playable_track(
     after_idx: usize,
 ) -> Option<(usize, String, String, bool)> {
     let sanitized_album = crate::model::sanitize_album(album);
-    for next_idx in (after_idx + 1)..set_list.len() {
-        let title = &set_list[next_idx];
+    for (next_idx, title) in set_list.iter().enumerate().skip(after_idx + 1) {
         if let Some(filename) = crate::model::find_track_file(working_dir, album, title) {
             let ext = filename.rsplit('.').next().unwrap_or("");
             if !is_browser_playable(ext) {
@@ -1972,8 +1971,8 @@ pub async fn get_split_timestamps(
         let conn = state.db.lock().unwrap();
         let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         let auto = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
-            .map_err(|e| AppError::Internal(e))?;
-        let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+            .map_err(AppError::Internal)?;
+        let stored = db::get_split_timestamps(&conn, id).map_err(AppError::Internal)?;
         let source_path = concert
             .album
             .as_deref()
@@ -2114,7 +2113,7 @@ pub async fn reset_split_timestamps(
         let conn = state.db.lock().unwrap();
         let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         let auto_ts = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
-            .map_err(|e| AppError::Internal(e))?;
+            .map_err(AppError::Internal)?;
         (concert, auto_ts)
     };
 
@@ -2132,7 +2131,7 @@ pub async fn reset_split_timestamps(
     // If user column is already NULL, the tracks are already using auto timestamps.
     let user_is_null = {
         let conn = state.db.lock().unwrap();
-        let stored = db::get_split_timestamps(&conn, id).map_err(|e| AppError::Internal(e))?;
+        let stored = db::get_split_timestamps(&conn, id).map_err(AppError::Internal)?;
         stored.user.is_none()
     };
     if user_is_null {
@@ -2876,7 +2875,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut concert = db::get_concert(&conn, id).unwrap();
+        let mut concert = db::get_concert(conn, id).unwrap();
         concert.downloaded_at = Some("2026-01-01T00:00:00Z".to_string());
         concert.split_at = Some("2026-01-01T01:00:00Z".to_string());
         concert.tracks_present = vec![true, true, false, true];

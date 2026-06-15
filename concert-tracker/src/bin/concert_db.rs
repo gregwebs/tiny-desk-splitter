@@ -129,7 +129,7 @@ fn main() -> Result<()> {
                 .as_deref()
                 .map(YearMonth::parse)
                 .transpose()?
-                .unwrap_or_else(|| YearMonth {
+                .unwrap_or(YearMonth {
                     year: current.year,
                     month: current.month,
                 });
@@ -137,7 +137,7 @@ fn main() -> Result<()> {
                 .as_deref()
                 .map(YearMonth::parse)
                 .transpose()?
-                .unwrap_or_else(|| YearMonth {
+                .unwrap_or(YearMonth {
                     year: current.year,
                     month: current.month,
                 });

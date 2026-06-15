@@ -42,7 +42,7 @@ pub fn extract_audio_waveform(input_file: &str) -> Result<Vec<f32>> {
     // fixed temp path is a race (one process deletes or overwrites the file
     // while another is reading it).
     let mut cmd = create_ffmpeg_command().cmd();
-    cmd.args(&[
+    cmd.args([
         "-i",
         input_file,
         "-vn", // No video
@@ -120,7 +120,7 @@ pub fn calculate_energy_profile(samples: &[f32]) -> Vec<f64> {
     let mut smoothed_profile = Vec::with_capacity(energy_profile.len());
 
     for i in 0..energy_profile.len() {
-        let start = if i < window_size { 0 } else { i - window_size };
+        let start = i.saturating_sub(window_size);
         let end = std::cmp::min(i + window_size + 1, energy_profile.len());
         let avg = energy_profile[start..end].iter().sum::<f64>() / (end - start) as f64;
         smoothed_profile.push(avg);
@@ -208,7 +208,7 @@ mod tests {
     fn generate_sine_file(frequency: u32) -> PathBuf {
         let path = std::env::temp_dir().join(format!("lsss_test_sine_{}.wav", frequency));
         let status = std::process::Command::new("ffmpeg")
-            .args(&[
+            .args([
                 "-hide_banner",
                 "-loglevel",
                 "error",

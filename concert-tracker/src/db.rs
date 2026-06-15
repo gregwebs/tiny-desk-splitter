@@ -1537,6 +1537,112 @@ pub fn playlists_nesting_playlist(
     Ok(out)
 }
 
+// ── Failed jobs ─────────────────────────────────────────────────────────────
+
+pub struct FailedJob {
+    pub id: i64,
+    pub concert_id: i64,
+    pub name: String,
+    pub failed_at: String,
+    pub failure_message: String,
+    pub title: String,
+    pub artist: String,
+}
+
+pub fn insert_failed_job(
+    conn: &Connection,
+    concert_id: i64,
+    name: &str,
+    failure_message: &str,
+) -> Result<i64> {
+    conn.execute(
+        "INSERT INTO jobs (concert_id, name, failed_at, failure_message)
+         VALUES (?1, ?2, datetime('now'), ?3)",
+        params![concert_id, name, failure_message],
+    )
+    .context("Failed to insert failed job")?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_failed_jobs(conn: &Connection, limit: usize) -> Result<Vec<FailedJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.id, j.concert_id, j.name, j.failed_at, j.failure_message,
+                COALESCE(c.title, 'Unknown'), COALESCE(c.artist, '')
+         FROM jobs j
+         LEFT JOIN concerts c ON j.concert_id = c.id
+         ORDER BY j.failed_at DESC, j.id DESC
+         LIMIT ?1",
+    )?;
+    let jobs = stmt
+        .query_map(params![limit as i64], |row| {
+            Ok(FailedJob {
+                id: row.get(0)?,
+                concert_id: row.get(1)?,
+                name: row.get(2)?,
+                failed_at: row.get(3)?,
+                failure_message: row.get(4)?,
+                title: row.get(5)?,
+                artist: row.get(6)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list failed jobs")?;
+    Ok(jobs)
+}
+
+pub fn get_failed_job(conn: &Connection, id: i64) -> Result<FailedJob> {
+    conn.query_row(
+        "SELECT j.id, j.concert_id, j.name, j.failed_at, j.failure_message,
+                COALESCE(c.title, 'Unknown'), COALESCE(c.artist, '')
+         FROM jobs j
+         LEFT JOIN concerts c ON j.concert_id = c.id
+         WHERE j.id = ?1",
+        params![id],
+        |row| {
+            Ok(FailedJob {
+                id: row.get(0)?,
+                concert_id: row.get(1)?,
+                name: row.get(2)?,
+                failed_at: row.get(3)?,
+                failure_message: row.get(4)?,
+                title: row.get(5)?,
+                artist: row.get(6)?,
+            })
+        },
+    )
+    .context("Failed to get failed job")
+}
+
+fn append_error(conn: &Connection, id: i64, column: &str, error: &str) -> Result<()> {
+    assert!(
+        column == "download_errors_json"
+            || column == "split_errors_json"
+            || column == "archive_errors_json",
+        "invalid error column"
+    );
+    let current: String = conn
+        .query_row(
+            &format!("SELECT {} FROM concerts WHERE id = ?1", column),
+            params![id],
+            |row| row.get(0),
+        )
+        .context("Failed to read error column")?;
+
+    let mut errors: Vec<ErrorEntry> = serde_json::from_str(&current).unwrap_or_default();
+    errors.push(ErrorEntry {
+        error: error.to_string(),
+        at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    });
+    let new_json = serde_json::to_string(&errors).context("Failed to serialize errors")?;
+
+    conn.execute(
+        &format!("UPDATE concerts SET {} = ?1 WHERE id = ?2", column),
+        params![new_json, id],
+    )
+    .context("Failed to write error column")?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub mod tests {
     use super::*;
@@ -3395,110 +3501,4 @@ pub mod tests {
         assert_eq!(candidates.len(), 2);
         assert!(candidates[0].id < candidates[1].id);
     }
-}
-
-// ── Failed jobs ─────────────────────────────────────────────────────────────
-
-pub struct FailedJob {
-    pub id: i64,
-    pub concert_id: i64,
-    pub name: String,
-    pub failed_at: String,
-    pub failure_message: String,
-    pub title: String,
-    pub artist: String,
-}
-
-pub fn insert_failed_job(
-    conn: &Connection,
-    concert_id: i64,
-    name: &str,
-    failure_message: &str,
-) -> Result<i64> {
-    conn.execute(
-        "INSERT INTO jobs (concert_id, name, failed_at, failure_message)
-         VALUES (?1, ?2, datetime('now'), ?3)",
-        params![concert_id, name, failure_message],
-    )
-    .context("Failed to insert failed job")?;
-    Ok(conn.last_insert_rowid())
-}
-
-pub fn list_failed_jobs(conn: &Connection, limit: usize) -> Result<Vec<FailedJob>> {
-    let mut stmt = conn.prepare(
-        "SELECT j.id, j.concert_id, j.name, j.failed_at, j.failure_message,
-                COALESCE(c.title, 'Unknown'), COALESCE(c.artist, '')
-         FROM jobs j
-         LEFT JOIN concerts c ON j.concert_id = c.id
-         ORDER BY j.failed_at DESC, j.id DESC
-         LIMIT ?1",
-    )?;
-    let jobs = stmt
-        .query_map(params![limit as i64], |row| {
-            Ok(FailedJob {
-                id: row.get(0)?,
-                concert_id: row.get(1)?,
-                name: row.get(2)?,
-                failed_at: row.get(3)?,
-                failure_message: row.get(4)?,
-                title: row.get(5)?,
-                artist: row.get(6)?,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()
-        .context("Failed to list failed jobs")?;
-    Ok(jobs)
-}
-
-pub fn get_failed_job(conn: &Connection, id: i64) -> Result<FailedJob> {
-    conn.query_row(
-        "SELECT j.id, j.concert_id, j.name, j.failed_at, j.failure_message,
-                COALESCE(c.title, 'Unknown'), COALESCE(c.artist, '')
-         FROM jobs j
-         LEFT JOIN concerts c ON j.concert_id = c.id
-         WHERE j.id = ?1",
-        params![id],
-        |row| {
-            Ok(FailedJob {
-                id: row.get(0)?,
-                concert_id: row.get(1)?,
-                name: row.get(2)?,
-                failed_at: row.get(3)?,
-                failure_message: row.get(4)?,
-                title: row.get(5)?,
-                artist: row.get(6)?,
-            })
-        },
-    )
-    .context("Failed to get failed job")
-}
-
-fn append_error(conn: &Connection, id: i64, column: &str, error: &str) -> Result<()> {
-    assert!(
-        column == "download_errors_json"
-            || column == "split_errors_json"
-            || column == "archive_errors_json",
-        "invalid error column"
-    );
-    let current: String = conn
-        .query_row(
-            &format!("SELECT {} FROM concerts WHERE id = ?1", column),
-            params![id],
-            |row| row.get(0),
-        )
-        .context("Failed to read error column")?;
-
-    let mut errors: Vec<ErrorEntry> = serde_json::from_str(&current).unwrap_or_default();
-    errors.push(ErrorEntry {
-        error: error.to_string(),
-        at: Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
-    });
-    let new_json = serde_json::to_string(&errors).context("Failed to serialize errors")?;
-
-    conn.execute(
-        &format!("UPDATE concerts SET {} = ?1 WHERE id = ?2", column),
-        params![new_json, id],
-    )
-    .context("Failed to write error column")?;
-    Ok(())
 }

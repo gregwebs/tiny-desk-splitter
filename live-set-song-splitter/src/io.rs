@@ -13,7 +13,7 @@ pub fn ensure_dir<P: AsRef<Path>>(path: P) -> Result<()> {
         fs::create_dir(&path)
             .with_context(|| format!("Failed to create directory: {}", path_str))?;
     }
-    return Ok(());
+    Ok(())
 }
 
 pub fn overwrite_dir<P: AsRef<Path>>(path: P) -> Result<()> {

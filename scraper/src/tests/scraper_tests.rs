@@ -182,7 +182,7 @@ fn test_regression_failures() -> Result<()> {
         let entry = entry?;
         let path = entry.path();
 
-        if path.extension().map_or(false, |ext| ext == "html") {
+        if path.extension().is_some_and(|ext| ext == "html") {
             let filename = path.file_stem().unwrap().to_string_lossy();
             println!("Testing regression case: {}", filename);
 
@@ -202,7 +202,7 @@ fn test_regression_failures() -> Result<()> {
             }
         }
     }
-    if failures.len() > 0 {
+    if !failures.is_empty() {
         return Err(anyhow::anyhow!(failures.join("\n")));
     }
 
@@ -380,7 +380,7 @@ fn test_musicians_colon() {
     "#;
 
     let result = parse_concert_info(html, "https://example.com/test");
-    assert!(!result.is_err());
+    assert!(result.is_ok());
     assert_eq!(
         result.unwrap().musicians,
         vec![

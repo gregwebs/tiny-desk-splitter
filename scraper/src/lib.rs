@@ -96,6 +96,15 @@ pub fn http_client() -> reqwest::blocking::Client {
     build_http_client(proxy_mode())
 }
 
+pub use crate::archive_scraper::{
+    fetch_archive_month, get_last_day_of_month, parse_archive_html, ConcertListing,
+};
+pub use crate::scraper::{
+    extract_content, extract_musicians, extract_og_description, extract_preview_image_url,
+    extract_set_list, extract_teaser_from_html, fetch_bytes, fetch_html, parse_concert_info,
+    save_concert_info, save_concert_info_to, scrape_data, ConcertInfo, Musician, Song,
+};
+
 #[cfg(test)]
 mod http_tests {
     use super::*;
@@ -128,12 +137,3 @@ mod http_tests {
         assert_eq!(proxy_mode_from_flags(true, true), ProxyMode::None);
     }
 }
-
-pub use crate::archive_scraper::{
-    fetch_archive_month, get_last_day_of_month, parse_archive_html, ConcertListing,
-};
-pub use crate::scraper::{
-    extract_content, extract_musicians, extract_og_description, extract_preview_image_url,
-    extract_set_list, extract_teaser_from_html, fetch_bytes, fetch_html, parse_concert_info,
-    save_concert_info, save_concert_info_to, scrape_data, ConcertInfo, Musician, Song,
-};

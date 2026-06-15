@@ -321,15 +321,14 @@ async fn run_split(
     let cmd = (config.split_cmd)(&job);
 
     let log_dir = config.log_dir();
-    let temp_file = match std::fs::create_dir_all(&log_dir)
-        .and_then(|_| NamedTempFile::new_in(&log_dir).map_err(Into::into))
-    {
-        Ok(f) => Some(f),
-        Err(e) => {
-            tracing::warn!("failed to create temp log file: {}", e);
-            None
-        }
-    };
+    let temp_file =
+        match std::fs::create_dir_all(&log_dir).and_then(|_| NamedTempFile::new_in(&log_dir)) {
+            Ok(f) => Some(f),
+            Err(e) => {
+                tracing::warn!("failed to create temp log file: {}", e);
+                None
+            }
+        };
     let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
 
     match run_with_logging(cmd, "split", concert_id, temp_path.as_deref()).await {

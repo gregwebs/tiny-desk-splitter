@@ -122,7 +122,7 @@ pub fn list_all_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> 
                 index,
                 title: title.clone(),
                 available: ext.is_some(),
-                is_video: ext.map_or(false, is_video_extension),
+                is_video: ext.is_some_and(is_video_extension),
                 liked: false,
             }
         })

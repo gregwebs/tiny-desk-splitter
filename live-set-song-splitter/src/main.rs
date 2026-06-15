@@ -18,7 +18,6 @@ use concert_types::{ConcertInfo, Song, SongTimestamp, TimestampsFile};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::BufReader;
@@ -27,19 +26,15 @@ use std::path::Path;
 /// Output format for extracted segments
 #[derive(Parser, Debug, Clone, Copy, ValueEnum)]
 #[clap(rename_all = "lowercase")]
+#[derive(Default)]
 enum OutputFormat {
     /// Output video files (mp4)
     Video,
     /// Output audio files (m4a)
     Audio,
     /// Output both video and audio files
+    #[default]
     Both,
-}
-
-impl Default for OutputFormat {
-    fn default() -> Self {
-        OutputFormat::Both
-    }
 }
 
 /// Tool for splitting live music recordings into individual songs
@@ -186,7 +181,7 @@ fn main() -> Result<()> {
                 Some(dir) => dir.to_str().unwrap(),
                 None => ".",
             };
-            if input_dir == "" {
+            if input_dir.is_empty() {
                 format!("{}.mp4", album)
             } else {
                 format!("{}/{}.mp4", input_dir, album).to_string()
@@ -233,7 +228,7 @@ fn main() -> Result<()> {
         let timestamps_data: TimestampsFile = serde_json::from_reader(timestamps_reader)
             .with_context(|| format!("Failed to parse timestamps JSON from {}", timestamps_path))?;
 
-        if timestamps_data.songs.len() == 0 {
+        if timestamps_data.songs.is_empty() {
             return Err(anyhow!("Timestamps file has no timestamps"));
         }
         // Create segments from the timestamps
@@ -283,7 +278,7 @@ fn main() -> Result<()> {
     let temp_dir = format!("temp_frames/{}", folder_name(&info));
     io::ensure_dir(&temp_dir)?;
 
-    if segments.len() == 0 {
+    if segments.is_empty() {
         let settings = Settings {
             analyze_images: cli.analyze_images,
             reuse_frames: cli.reuse_frames,
@@ -493,10 +488,10 @@ fn find_black_frame_end_time(
         // Extract frames at full framerate for the last 40 seconds
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
         ffmpeg
-            .from_to(search_start, total_duration)
-            .args(&["-i", input_file])
+            .time_range(search_start, total_duration)
+            .args(["-i", input_file])
             .png()
-            .args(&[
+            .args([
                 "-frame_pts",
                 "1",
                 "-fps_mode",
@@ -523,7 +518,7 @@ fn find_black_frame_end_time(
     // Get list of extracted frames
     let mut frames = fs::read_dir(&temp_dir)?
         .filter_map(Result::ok)
-        .filter(|entry| entry.path().extension().map_or(false, |ext| ext == "png"))
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "png"))
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
@@ -589,9 +584,7 @@ enum RecoveryResult {
 fn adaptive_silence_threshold(energy_profile: &[f64]) -> f64 {
     let mean_energy: f64 = energy_profile.iter().sum::<f64>() / energy_profile.len() as f64;
     let adaptive = mean_energy * 0.25;
-    adaptive
-        .min(audio::ENERGY_THRESHOLD)
-        .max(audio::ENERGY_THRESHOLD * 0.1)
+    adaptive.clamp(audio::ENERGY_THRESHOLD * 0.1, audio::ENERGY_THRESHOLD)
 }
 
 /// Where a recovered boundary came from, in order of preference.
@@ -790,8 +783,8 @@ fn recover_missing_songs(
             }
             anchors.sort_by(|a, b| a.partial_cmp(b).unwrap());
 
-            for slot in 0..missing_count {
-                if chosen[slot].is_some() {
+            for entry in chosen.iter_mut().take(missing_count) {
+                if entry.is_some() {
                     continue;
                 }
                 let (widest_i, _) = anchors
@@ -800,7 +793,7 @@ fn recover_missing_songs(
                     .max_by(|(_, a), (_, b)| (a[1] - a[0]).partial_cmp(&(b[1] - b[0])).unwrap())
                     .unwrap();
                 let mid = (anchors[widest_i] + anchors[widest_i + 1]) / 2.0;
-                chosen[slot] = Some((mid, RecoverySource::EqualSplit));
+                *entry = Some((mid, RecoverySource::EqualSplit));
                 anchors.insert(widest_i + 1, mid);
             }
         }
@@ -940,9 +933,8 @@ fn refine_segments_with_audio_analysis(
     // Adaptive threshold calculation (similar to analyze_audio)
     let mean_energy: f64 = energy_profile.iter().sum::<f64>() / energy_profile.len() as f64;
     let adaptive_threshold = mean_energy * 0.25; // 25% of mean energy
-    let threshold = adaptive_threshold
-        .min(audio::ENERGY_THRESHOLD)
-        .max(audio::ENERGY_THRESHOLD * 0.1);
+    let threshold =
+        adaptive_threshold.clamp(audio::ENERGY_THRESHOLD * 0.1, audio::ENERGY_THRESHOLD);
 
     println!("Using energy threshold for refinement: {:.6}", threshold);
 
@@ -1188,12 +1180,12 @@ fn process_segments(
     Ok(())
 }
 
-fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
+fn frame_number_from_image_filename(frame_path: &std::path::Path) -> usize {
     let frame_name = frame_path.file_name().unwrap().to_string_lossy();
-    return frame_name
+    frame_name
         .strip_suffix(".png")
         .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(0);
+        .unwrap_or(0)
 }
 
 /// True for a primary extracted frame (`N.png`), false for anything else,
@@ -1203,11 +1195,11 @@ fn frame_number_from_image_filename(frame_path: &std::path::PathBuf) -> usize {
 /// must be excluded from a frame listing or they inflate `frames.len()` and break
 /// the index arithmetic in [`refined_match_to_source_frame`].
 fn is_source_frame(path: &std::path::Path) -> bool {
-    path.extension().map_or(false, |ext| ext == "png")
+    path.extension().is_some_and(|ext| ext == "png")
         && path
             .file_stem()
             .and_then(|s| s.to_str())
-            .map_or(false, |s| s.parse::<usize>().is_ok())
+            .is_some_and(|s| s.parse::<usize>().is_ok())
 }
 
 /// Map a 1-based index into the refined extraction back to a source-video frame
@@ -1248,7 +1240,7 @@ fn extract_frames(
         io::ensure_dir(temp_dir)?;
     } else {
         // Only overwrite directory if not reusing frames or if no frames exist
-        io::overwrite_dir(&temp_dir)?;
+        io::overwrite_dir(temp_dir)?;
 
         println!("Extracting frames every 1 seconds for song title detection...");
 
@@ -1262,7 +1254,7 @@ fn extract_frames(
         // Extract frames every 1 seconds with potential text overlays
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
         // Add command line options to invert the colors
-        ffmpeg.args(&[
+        ffmpeg.args([
             "-i",
             input_file,
             "-c:v",
@@ -1285,21 +1277,21 @@ fn extract_frames(
     }
 
     // Get list of extracted frames, excluding BW variants and refined subdirectories
-    let frames = fs::read_dir(&temp_dir)?
+    let frames = fs::read_dir(temp_dir)?
         .filter_map(Result::ok)
         .filter(|entry| {
             let path = entry.path();
-            path.extension().map_or(false, |ext| ext == "png")
+            path.extension().is_some_and(|ext| ext == "png")
                 && path
                     .file_stem()
                     .and_then(|s| s.to_str())
-                    .map_or(false, |s| s.parse::<usize>().is_ok())
+                    .is_some_and(|s| s.parse::<usize>().is_ok())
         })
         .map(|entry| entry.path())
         .collect::<Vec<_>>();
 
     println!("Extracted {} frames, analyzing for text...", frames.len());
-    return Ok(frames);
+    Ok(frames)
 }
 
 const MIN_GAP_FOR_FIRST_SONG_FALLBACK: f64 = 60.0;
@@ -1350,7 +1342,7 @@ mod tests_back_search_offset {
             .unwrap()
             .filter_map(Result::ok)
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |e| e == "png"))
+            .filter(|p| p.extension().is_some_and(|e| e == "png"))
             .collect();
         v.sort();
         v
@@ -2104,7 +2096,7 @@ fn detect_song_boundaries_from_text(
         // Extract frame number to calculate timestamp
         let frame_num = frame_number_from_image_filename(&frame_path);
 
-        if song_title_matched.len() > 0 {
+        if !song_title_matched.is_empty() {
             if song_title_matched.len() == songs.len() {
                 break;
             }
@@ -2169,7 +2161,7 @@ fn detect_song_boundaries_from_text(
 
                 let title_time = match_song_titles(
                     input_file,
-                    &temp_dir,
+                    temp_dir,
                     &modified_ocr,
                     song_titles_to_match,
                     &artist_cmp,
@@ -2220,10 +2212,10 @@ fn detect_song_boundaries_from_text(
             // Find the best title-only match for the missing song
             let mut best_match: Option<(String, f64, usize)> = None;
             for (song_title, time, frame_num) in &title_only_matches {
-                if *song_title == missing_song {
-                    if best_match.is_none() || time < &best_match.as_ref().unwrap().1 {
-                        best_match = Some((song_title.clone(), *time, *frame_num));
-                    }
+                if *song_title == missing_song
+                    && (best_match.is_none() || time < &best_match.as_ref().unwrap().1)
+                {
+                    best_match = Some((song_title.clone(), *time, *frame_num));
                 }
             }
 
@@ -2238,7 +2230,7 @@ fn detect_song_boundaries_from_text(
 
     // Sort song start times by timestamp
     let mut song_start_times: Vec<(&String, &f64)> = song_title_matched.iter().collect();
-    song_start_times.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    song_start_times.sort_by(|a, b| a.1.partial_cmp(b.1).unwrap());
 
     let unmatched_overlay_clusters =
         cluster_overlay_frames(&unmatched_overlay_frames, OVERLAY_CLUSTER_GAP_SECONDS);
@@ -2318,6 +2310,7 @@ fn detect_song_boundaries_from_text(
     })
 }
 
+#[allow(clippy::too_many_arguments)] // All arguments are required for per-frame OCR matching
 fn match_song_titles(
     input_file: &str,
     temp_dir: &str,
@@ -2393,7 +2386,7 @@ fn match_song_titles(
                     match_line, match_title, frame_num, match_dist, match_reason,
                 );
             } else {
-                let overlay_text = if lines.len() > 0 { &lines[0] } else { "" };
+                let overlay_text = if !lines.is_empty() { &lines[0] } else { "" };
                 println!(
                     "Skipping best match because no artist. '{}' matches song '{}' frame={} dist={} reason={} (best match)\n{}",
                     match_line, match_title, frame_num, match_dist, match_reason, overlay_text
@@ -2410,7 +2403,7 @@ fn match_song_titles(
     // If analyze_images flag is enabled, save the matched image
     if settings.analyze_images {
         let frame_path = std::path::PathBuf::from(format!("{}/{}.png", temp_dir, frame_num));
-        save_matched_image(&frame_path, &song_title, frame_num, "initial")?;
+        save_matched_image(&frame_path, song_title, frame_num, "initial")?;
     }
 
     // Don't bother refining
@@ -2420,17 +2413,9 @@ fn match_song_titles(
     }
 
     match timestamp_for_song(
-        input_file,
-        temp_dir,
-        &artist_cmp,
-        &song_title,
-        frame_num,
-        video_info,
-        settings,
+        input_file, temp_dir, artist_cmp, song_title, frame_num, video_info, settings,
     ) {
-        Ok(timestamp) => {
-            return Ok(Some((song_title.to_string(), timestamp, *overlay)));
-        }
+        Ok(timestamp) => Ok(Some((song_title.to_string(), timestamp, *overlay))),
         Err(e) => Err(e),
     }
 }
@@ -2446,13 +2431,7 @@ fn timestamp_for_song(
 ) -> Result<f64> {
     // Extract additional frames around this timestamp for more accurate boundary detection
     let refined_timestamp = refine_song_start_time(
-        input_file,
-        temp_dir,
-        &artist_cmp,
-        song_title,
-        frame_num,
-        video_info,
-        settings,
+        input_file, temp_dir, artist_cmp, song_title, frame_num, video_info, settings,
     )?;
 
     // Use the refined timestamp if available, otherwise use the original
@@ -2461,7 +2440,7 @@ fn timestamp_for_song(
     } else {
         frame_num as f64
     };
-    return Ok(final_timestamp);
+    Ok(final_timestamp)
 }
 
 fn refine_song_start_time(
@@ -2531,8 +2510,8 @@ fn refine_song_start_time(
         // frame count used by `refined_match_to_source_frame`.
         let mut ffmpeg = ffmpeg::create_ffmpeg_command();
         ffmpeg
-            .from_to(start_time, end_timestamp)
-            .args(&["-i", input_file])
+            .time_range(start_time, end_timestamp)
+            .args(["-i", input_file])
             .png()
             .video_filter(
                 &format!("{}/%d.png", refined_dir), // Sequential numbering starting from 1
@@ -2602,15 +2581,13 @@ fn refine_song_start_time(
             let matched = *overlay
                 || matches_song_title_weighted(lines, song_title, *overlay, &candidate.weights)
                     .is_some();
-            if matched {
-                if earliest_match.is_none() || frame_num < earliest_match.unwrap() {
-                    earliest_match = Some(frame_num);
-                    earliest_match_found = true;
+            if matched && (earliest_match.is_none() || frame_num < earliest_match.unwrap()) {
+                earliest_match = Some(frame_num);
+                earliest_match_found = true;
 
-                    // If analyze_images flag is enabled, save the matched image
-                    if settings.analyze_images {
-                        save_matched_image(&frame_path, song_title, frame_num, "refined")?;
-                    }
+                // If analyze_images flag is enabled, save the matched image
+                if settings.analyze_images {
+                    save_matched_image(&frame_path, song_title, frame_num, "refined")?;
                 }
             }
         }
@@ -2656,7 +2633,7 @@ fn refine_song_start_time(
                 "Could not find earlier boundary for '{}', keeping original timestamp: {}s. zero={}",
                 song_title, initial_timestamp, earliest_match.is_some(),
             );
-            return Ok(0.0);
+            Ok(0.0)
         }
     }
 }

@@ -288,8 +288,7 @@ mod tests {
     use super::*;
 
     fn setup() -> Connection {
-        let conn = crate::db::open_in_memory().unwrap();
-        conn
+        crate::db::open_in_memory().unwrap()
     }
 
     fn seed(conn: &Connection) -> i64 {

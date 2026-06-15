@@ -257,6 +257,18 @@ pub fn song_timestamps_to_payload(ts: &[SongTimestamp]) -> Vec<TimestampPayloadS
         .collect()
 }
 
+// Helper for tests — cheap clone without deriving Clone on the whole type.
+#[cfg(test)]
+impl TimestampPayloadSong {
+    fn clone_for_test(&self) -> Self {
+        TimestampPayloadSong {
+            title: self.title.clone(),
+            start_time: self.start_time,
+            end_time: self.end_time,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -434,17 +446,5 @@ mod tests {
         assert_eq!(payload[0].title, "Alpha");
         assert_eq!(payload[0].start_time, 0.0);
         assert_eq!(payload[0].end_time, 100.0);
-    }
-}
-
-// Helper for tests — cheap clone without deriving Clone on the whole type.
-#[cfg(test)]
-impl TimestampPayloadSong {
-    fn clone_for_test(&self) -> Self {
-        TimestampPayloadSong {
-            title: self.title.clone(),
-            start_time: self.start_time,
-            end_time: self.end_time,
-        }
     }
 }
