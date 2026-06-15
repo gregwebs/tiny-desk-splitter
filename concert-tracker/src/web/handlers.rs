@@ -262,16 +262,18 @@ const FILTERS: &[(&str, &str)] = &[
     ("ignored", "Ignored"),
     ("downloaded", "Downloaded"),
     ("split", "Tracks"),
+    ("archived", "Archived"),
 ];
 
-fn matches_filter(c: &Concert, slug: &str) -> bool {
+fn matches_filter(c: &Concert, slug: &str, has_archive_location: bool) -> bool {
     match slug {
         "wanted" => !c.ignored && c.wanted,
         "ignored" => c.ignored,
         "available" => !c.ignored && !c.wanted,
         "downloaded" => matches!(c.download_status(), DownloadStatus::Downloaded),
         "split" => matches!(c.split_status(), SplitStatus::Split),
-        _ => !c.ignored,
+        "archived" if has_archive_location => matches!(c.archive_status(), ArchiveStatus::Archived),
+        _ => !c.ignored, // default / unknown / gated-off slug: everything except ignored
     }
 }
 
@@ -549,7 +551,7 @@ pub async fn list(
 
     let filtered: Vec<&Concert> = concerts
         .iter()
-        .filter(|c| matches_filter(c, &filter))
+        .filter(|c| matches_filter(c, &filter, has_archive_location))
         .collect();
 
     let current = YearMonth::current();
@@ -583,6 +585,7 @@ pub async fn list(
         rows: items,
         filters: FILTERS
             .iter()
+            .filter(|(s, _)| *s != "archived" || has_archive_location)
             .map(|(s, l)| {
                 let active = *s == filter;
                 let href = if active {
@@ -3135,5 +3138,39 @@ mod tests {
 
         let reread = db::get_concert(&conn, id).unwrap();
         assert!(reread.metadata_scraped_at.is_none());
+    }
+
+    // ── matches_filter tests ──────────────────────────────────────────────────
+
+    fn archived_concert(conn: &Connection, url: &str) -> Concert {
+        let id = seed_listing(conn, url);
+        db::mark_archive_succeeded(conn, id).unwrap();
+        db::get_concert(conn, id).unwrap()
+    }
+
+    #[test]
+    fn matches_filter_archived_enabled_returns_true_for_archived_concert() {
+        let conn = db::open_in_memory().unwrap();
+        let c = archived_concert(&conn, "https://example.org/archived-a");
+        assert!(matches_filter(&c, "archived", true));
+    }
+
+    #[test]
+    fn matches_filter_archived_enabled_returns_false_for_non_archived_concert() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_listing(&conn, "https://example.org/not-archived");
+        let c = db::get_concert(&conn, id).unwrap();
+        assert!(!matches_filter(&c, "archived", true));
+    }
+
+    #[test]
+    fn matches_filter_archived_disabled_falls_back_to_default() {
+        // When the archive feature is gated off (has_archive_location = false),
+        // the "archived" slug must fall through to the default arm (!c.ignored),
+        // not silently hide archived concerts.
+        let conn = db::open_in_memory().unwrap();
+        let c = archived_concert(&conn, "https://example.org/archived-b");
+        // Falls through to default: not ignored → true.
+        assert!(matches_filter(&c, "archived", false));
     }
 }
