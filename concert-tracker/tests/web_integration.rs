@@ -1470,6 +1470,8 @@ async fn like_track_toggles_state_and_renders_star() {
         },
     )
     .unwrap();
+    // Mark both tracks present; starring is only allowed on available tracks.
+    db::set_tracks_present(&conn, 1, &[true, true]).unwrap();
     let app = router(test_state(conn));
 
     let resp = app
@@ -1493,6 +1495,40 @@ async fn like_track_toggles_state_and_renders_star() {
         "filled star class expected"
     );
     assert!(html.contains("★"), "filled star glyph expected");
+}
+
+#[tokio::test]
+async fn like_track_unavailable_returns_404() {
+    // Starring a deleted / unavailable track must be rejected.
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(&conn, "https://npr.org/c/2", "Concert");
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "Artist".to_string(),
+            album: "Album".to_string(),
+            description: None,
+            set_list: vec!["Song A".to_string(), "Song B".to_string()],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    // Track 0 present, track 1 absent (simulates deletion).
+    db::set_tracks_present(&conn, 1, &[true, false]).unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/tracks/1/like")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

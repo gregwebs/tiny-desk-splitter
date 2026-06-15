@@ -1547,6 +1547,14 @@ pub async fn like_track(
         if idx >= c.set_list.len() {
             return Err(AppError::NotFound);
         }
+        if !crate::model::is_track_available(&c.tracks_present, idx) {
+            tracing::debug!(
+                concert_id = id,
+                track_idx = idx,
+                "like_track: track unavailable, ignoring"
+            );
+            return Err(AppError::NotFound);
+        }
         db::toggle_track_liked(&conn, id, idx)?;
         db::get_concert(&conn, id)?
     };

@@ -409,6 +409,14 @@ impl Concert {
     }
 }
 
+/// Returns `true` when the track file is present and the track can be played
+/// or starred. A track is unavailable when its split file is missing (never
+/// split, deleted, or otherwise absent). This is the single source of truth
+/// used by both rendering and the like-track guard.
+pub fn is_track_available(tracks_present: &[bool], idx: usize) -> bool {
+    tracks_present.get(idx).copied().unwrap_or(false)
+}
+
 pub fn list_all_tracks_from_db(
     set_list: &[String],
     tracks_present: &[bool],
@@ -424,7 +432,7 @@ pub fn list_all_tracks_from_db(
         .iter()
         .enumerate()
         .map(|(index, title)| {
-            let available = tracks_present.get(index).copied().unwrap_or(false);
+            let available = is_track_available(tracks_present, index);
             let liked = tracks_liked.get(index).copied().unwrap_or(false);
             TrackInfo {
                 index,
@@ -1012,6 +1020,31 @@ mod tests {
         // threshold change is a deliberate one.
         assert_eq!(format_duration_summary(0.4, 0), "0:00");
     }
+
+    // ── is_track_available ────────────────────────────────────────────────────
+
+    #[test]
+    fn is_track_available_present() {
+        assert!(is_track_available(&[true, false], 0));
+    }
+
+    #[test]
+    fn is_track_available_absent() {
+        assert!(!is_track_available(&[true, false], 1));
+    }
+
+    #[test]
+    fn is_track_available_out_of_range() {
+        // Index beyond the slice: defaults to false (not available)
+        assert!(!is_track_available(&[true], 5));
+    }
+
+    #[test]
+    fn is_track_available_empty_slice() {
+        assert!(!is_track_available(&[], 0));
+    }
+
+    // ── list_all_tracks_from_db ───────────────────────────────────────────────
 
     #[test]
     fn list_all_tracks_from_db_maps_presence() {
