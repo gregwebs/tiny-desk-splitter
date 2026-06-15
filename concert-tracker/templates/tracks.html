@@ -12,14 +12,14 @@
     <button class="btn-delete" title="Delete track files" hx-post="/concerts/{{ id }}/tracks/{{ t.index }}/delete" hx-target="closest .card" hx-swap="outerHTML"><span class="icon-trash"></span></button>
     {% endif %}
     {% endif %}
+    <button class="btn-add-pl" title="Add to playlist"
+            data-label="{{ t.title }}"
+            onclick="window.Playlists&&Playlists.openAdd({type:'track',concertId:{{ id }},trackIndex:{{ t.index }},label:this.getAttribute('data-label')})">+</button>
     {% else %}
     {# Missing track file: still playable — clicking prepares the concert
        (download and/or split) and auto-plays the track when it appears. #}
     <button class="btn-track-listen track-title-unavailable" data-concert-id="{{ id }}" data-track-idx="{{ t.index }}" onclick="Player.playTrack(this, {{ id }}, {{ t.index }})"{% if tracks_busy %} disabled{% endif %}>{{ t.title }}</button>
     {% endif %}
-    <button class="btn-add-pl" title="Add to playlist"
-            data-label="{{ t.title }}"
-            onclick="window.Playlists&&Playlists.openAdd({type:'track',concertId:{{ id }},trackIndex:{{ t.index }},label:this.getAttribute('data-label')})">+</button>
   </li>
   {% endfor %}
 </ol>
