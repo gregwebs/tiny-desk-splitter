@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# pre-commit: verify Rust formatting (near-instant — runs on every commit).
+# Clippy runs on pre-push instead (slower; gates what leaves the machine).
+set -euo pipefail
+
+echo "pre-commit: checking Rust formatting..."
+if ! cargo fmt --all -- --check; then
+    echo ""
+    echo "  Formatting check failed. Run 'just fmt' (or 'cargo fmt --all') to fix."
+    exit 1
+fi
+echo "pre-commit: formatting OK"

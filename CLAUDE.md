@@ -2,8 +2,15 @@ See README.md for an overview of the project
 
 ## Code Style Guidelines
 - **Imports**: Group standard library, external crates/packages, then local modules
-- **Rust**: Use standard Rust formatting (`cargo fmt`)
+- **Rust**: Use standard Rust formatting (`cargo fmt --all`). Toolchain pinned at 1.87 via `rust-toolchain.toml`.
 - **Naming**: snake_case for variables/functions, CamelCase for types
+
+## Linting
+- `just lint` — run the full standard lint suite (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D warnings`)
+- `just fmt` — auto-format the workspace
+- `just clippy-all` — opt-in: also lints the `leptess-ocr` code path (needs Tesseract/leptonica installed; run before touching OCR code)
+- `just install-hooks` — one-time setup: wires the version-controlled git hooks from `.githooks/` (pre-commit: fmt check; pre-push: clippy)
+- Lint policy is declared in `[workspace.lints.clippy]` in the root `Cargo.toml` for IDE alignment.
 
 ## Code Quality Guidelines
 - **DRY**: Avoid code duplication. Use variables, functions, and modules to share code
@@ -33,12 +40,14 @@ See README.md for an overview of the project
   * When deviating from the plan, ask for approval
   * Write tests before writing code and run tests frequently
   * Check the code using `cargo check` as frequently as possible
+  * Run `just lint` and resolve all warnings before code review (the pre-push hook enforces this automatically)
   * Documentation
     * Update technical documentation
     * Add state change diagrams to documentation
     * Create any new documentation files that are needed
     * Put information from this change into a file in ./docs/change
 - Code review
+  * Confirm `just lint` is clean before requesting review
   * Have engineeering-lead do a code review before verification
     * Do a follow up review of the changes made during verification
 - Verification

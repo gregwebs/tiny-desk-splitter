@@ -4,6 +4,13 @@ members = ["scraper", "live-set-song-splitter", "concert-tracker", "concert-type
 # vendor/ocr-rs is a vendored fork used as a path dependency, not a workspace member.
 exclude = ["vendor"]
 
+[workspace.lints.clippy]
+# Declare the standard lint policy for all workspace members.
+# This does not enable a new lint set — clippy::all is already warn-by-default;
+# the value here is declarative, discoverable policy + IDE/rust-analyzer alignment.
+# The lint command uses -D warnings to escalate warns to errors.
+all = "warn"
+
 [profile.release]
 opt-level = 3           # Maximum optimization
 lto = true              # Link-time optimization

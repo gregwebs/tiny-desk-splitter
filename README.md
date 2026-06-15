@@ -241,6 +241,30 @@ These aren't deleted anymore.
 
 ---
 
+## Development
+
+The workspace uses `rust-toolchain.toml` to pin the toolchain to Rust **1.87**, which matches the `Containerfile`. `rustup` will install it automatically on first use.
+
+### Linting
+
+A root `justfile` provides the standard lint targets:
+
+```sh
+just fmt          # auto-format
+just lint         # fmt --check + clippy (the full standard suite)
+just clippy-all   # also lint the leptess-ocr code path (needs Tesseract/leptonica)
+```
+
+#### One-time hook setup (per clone)
+
+```sh
+just install-hooks
+```
+
+This sets `core.hooksPath = .githooks` so that:
+- **pre-commit** runs `cargo fmt --check` (fast)
+- **pre-push** runs `just clippy` (gates what leaves the machine)
+
 ## Building
 
 ```sh

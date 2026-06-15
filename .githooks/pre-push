@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+# pre-push: run clippy before any push (gates what leaves the machine).
+# Formatting is checked in the pre-commit hook; this only runs clippy.
+set -euo pipefail
+
+if ! command -v just &>/dev/null; then
+    echo "pre-push: 'just' is not installed."
+    echo "  Install with: cargo install just  OR  brew install just"
+    echo "  Then re-run: just install-hooks"
+    exit 1
+fi
+
+echo "pre-push: running clippy..."
+if ! just clippy; then
+    echo ""
+    echo "  Clippy found warnings/errors. Fix them before pushing."
+    echo "  Run 'just clippy' for the full output."
+    exit 1
+fi
+echo "pre-push: clippy OK"

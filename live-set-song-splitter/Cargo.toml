@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["Audio Analysis Tool <example@example.com>"]
 description = "A tool for splitting live music recordings into individual songs"
 
+[lints]
+workspace = true
+
 [dependencies]
 # Command line argument parsing
 clap = { version = "4.4", features = ["derive"] }

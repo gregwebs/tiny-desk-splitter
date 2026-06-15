@@ -11,6 +11,9 @@ path = "src/bin/concert_db.rs"
 name = "concert-web"
 path = "src/bin/concert_web.rs"
 
+[lints]
+workspace = true
+
 [dependencies]
 rusqlite = { version = "0.31", features = ["bundled"] }
 axum = "0.7"
