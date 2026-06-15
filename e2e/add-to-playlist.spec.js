@@ -3,6 +3,9 @@
 // Phase 2b — Add-to-playlist affordances: hover "+" on track rows, concert
 // cards, and playlist rows; sidebar add panel; membership indicators; create-
 // and-add flow; 422 error surface for cycle detection.
+//
+// Phase 2e — Add-to-playlist button in the player bar: the "+" (#player-add-pl)
+// opens the same panel for the currently-playing track.
 
 const { test, expect } = require("./fixtures");
 
@@ -361,5 +364,124 @@ test.describe("Add-to-playlist (2b)", () => {
     // Add panel should be gone but sidebar must remain open.
     await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
     await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+  });
+});
+
+// ── Phase 2e specs ────────────────────────────────────────────────────────────
+
+async function waitForPlaying(page) {
+  await page.waitForFunction(() => {
+    const a = document.getElementById("player-audio");
+    return a && !a.paused;
+  });
+}
+
+test.describe("Player bar add-to-playlist (2e)", () => {
+  test("#player-add-pl is hidden when nothing is playing", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+    await expect(page.locator("#player-add-pl")).toBeHidden();
+  });
+
+  test("#player-add-pl appears when a track starts and disappears on stopPlayback", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    // Start a track.
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-add-pl")).toBeVisible();
+
+    // Stop playback.
+    await page.evaluate(() => Player.stopPlayback());
+
+    await expect(page.locator("#player-add-pl")).toBeHidden();
+  });
+
+  test("#player-add-pl is hidden during whole-album playback (track-only)", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    // Start whole-album playback (trackIdx will be null).
+    await page.evaluate(() => Player.startAlbum(null, 1, false));
+    await waitForPlaying(page);
+
+    await expect(page.locator("#player-add-pl")).toBeHidden();
+  });
+
+  test("clicking the player-bar '+' opens the add panel for the current track", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    // Keep the track from ending during the test.
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    await expect(page.locator("#player-add-pl")).toBeVisible();
+    await page.locator("#player-add-pl").evaluate(el => el.click());
+
+    // The add panel must open in the sidebar.
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    // Context label should mention the track title.
+    await expect(page.locator(".add-pl-context")).toContainText("Adding");
+    await expect(page.locator(".add-pl-context")).toContainText("Celular");
+  });
+
+  test("player-bar '+' opens add panel even when queue sidebar was already open", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    // Open the queue sidebar first.
+    await page.evaluate(() => Player.openSidebar());
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+
+    // Click the player-bar "+".
+    await page.locator("#player-add-pl").evaluate(el => el.click());
+
+    // Add panel should appear over the queue.
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    await expect(page.locator("#player-sidebar")).toHaveClass(/showing-add/);
+
+    // Closing the add panel should restore the sidebar open state.
+    await page.locator(".add-pl-close").click();
+    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).toHaveClass(/sidebar-open/);
+  });
+
+  test("player-bar '+' can add the current track to a playlist", async ({ page }) => {
+    await page.goto("/");
+    await page.waitForFunction(() => !!window.Player);
+
+    const pid = await createPlaylist(page, "Bar Target");
+
+    await page.evaluate(() => Player.startTrack(null, 1, 0));
+    await waitForPlaying(page);
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    await page.locator("#player-add-pl").evaluate(el => el.click());
+    await expect(page.locator("#sidebar-add-section")).toBeVisible();
+    await waitForAddList(page);
+
+    // Click "Bar Target" row to add.
+    const row = page.locator(".add-pl-row:not(.add-pl-row-member)", { hasText: "Bar Target" });
+    await jsClick(page, row);
+
+    // Row should flip to member.
+    await expect(page.locator(".add-pl-row-member", { hasText: "Bar Target" })).toBeVisible();
+
+    // Confirm via API.
+    const items = await page.evaluate(async (id) => {
+      return (await (await fetch(`/api/playlists/${id}`)).json()).items;
+    }, pid);
+    expect(items.length).toBe(1);
+    expect(items[0].item_type).toBe("track");
+    expect(items[0].concert_id).toBe(1);
+    expect(items[0].track_index).toBe(0);
   });
 });

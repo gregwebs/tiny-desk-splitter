@@ -220,6 +220,7 @@ const Player = (() => {
     reapplyPlaying();
     updateLikeStar();
     updateDeleteButton();
+    updateAddButton();
     // A card swap replaces the buttons of a concert whose prepare chain is in
     // flight; re-apply the pending mark and the disabled state (the server
     // also renders them disabled once its job state catches up).
@@ -703,6 +704,27 @@ const Player = (() => {
     else showVideoPanel();
   }
 
+  // Show the add-to-playlist "+" button only while an individual track is playing
+  // (whole-album playback has no single-track target). Mirrors updateLikeStar.
+  function updateAddButton() {
+    const btn = document.getElementById("player-add-pl");
+    if (!btn) return;
+    btn.style.display = state.trackIdx == null ? "none" : "inline-block";
+  }
+
+  // Open the add-to-playlist sidebar panel for the currently-playing track.
+  // Reads state directly (same as toggleLike). No-op for whole-album playback.
+  function addToPlaylist() {
+    if (state.trackIdx == null) return;
+    if (!window.Playlists || !Playlists.openAdd) {
+      tracing("addToPlaylist: Playlists not available", {});
+      return;
+    }
+    const label = (document.getElementById("player-title")?.textContent || "").trim();
+    tracing("addToPlaylist", { concertId: state.concertId, trackIdx: state.trackIdx, label });
+    Playlists.openAdd({ type: "track", concertId: state.concertId, trackIndex: state.trackIdx, label });
+  }
+
   // Show the like star only while an individual track is playing (whole-album
   // playback has no per-track like), and reflect the current liked state.
   function updateLikeStar() {
@@ -790,6 +812,7 @@ const Player = (() => {
     state.liked = !!liked;
     updateLikeStar();
     updateDeleteButton();
+    updateAddButton();
     updateMediaButtons(isVideo);
     // An audio-only track can't be watched; collapse the panel if it was open.
     // A video track keeps the panel open so auto-advance keeps showing video.
@@ -1397,6 +1420,7 @@ const Player = (() => {
     setPlayPauseIcon(false);
     updateLikeStar();
     updateDeleteButton();
+    updateAddButton();
     updateMediaButtons(false);
     updateNextButton();
     updatePrevButton();
@@ -1492,7 +1516,7 @@ const Player = (() => {
   const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
     openConcert, openSidebar, closeSidebar, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow,
-    dequeue, enqueue, playAlbumAt, nowPlaying, playPlaylist };
+    dequeue, enqueue, playAlbumAt, nowPlaying, playPlaylist, addToPlaylist, stopPlayback };
   // Expose on window so other scripts (splitter.js) can access it via window.Player —
   // `const Player` at script top-level is not automatically a window property.
   if (typeof window !== "undefined") window.Player = api;

@@ -568,6 +568,11 @@
       flex: none; color: #aaa; font-size: 1em;
     }
     #player-like.liked { color: var(--like-color); }
+    #player-add-pl {
+      flex: none; background: none; border: none; color: #aaa;
+      font-size: 1.1em; line-height: 1; padding: 0 0.2rem; cursor: pointer;
+    }
+    #player-add-pl:hover { color: var(--accent); }
     #player-title {
       flex: 1; font-weight: 600; white-space: nowrap;
       overflow: hidden; text-overflow: ellipsis;
@@ -923,6 +928,7 @@
       <div id="player-info">
         <span class="player-title-line">
           <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
+          <button id="player-add-pl" onclick="Player.addToPlaylist()" title="Add to playlist" style="display:none">+</button>
           <span id="player-track" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
           <span id="player-title" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
         </span>
