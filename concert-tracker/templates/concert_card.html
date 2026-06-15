@@ -17,9 +17,6 @@
     <div class="card-head">
       <div class="card-head-text">
         <h3 class="card-title"><a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ title }}</a></h3>
-        <button class="btn-add-pl-concert" title="Add concert to playlist"
-                data-label="{{ title }}"
-                onclick="window.Playlists&&Playlists.openAdd({type:'concert',concertId:{{ id }},label:this.getAttribute('data-label')})">+ playlist</button>
         {% if !teaser.is_empty() %}
           <p class="card-teaser">
             <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
@@ -90,6 +87,9 @@
         {% if can_delete_download %}
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML"><span class="icon-trash"></span></button>
         {% endif %}
+        <button class="btn-add-pl-concert" title="Add to playlist"
+                data-label="{{ title }}"
+                onclick="window.Playlists&&Playlists.openAdd({type:'concert',concertId:{{ id }},label:this.getAttribute('data-label')})">+</button>
       </span>
 
     </div>
