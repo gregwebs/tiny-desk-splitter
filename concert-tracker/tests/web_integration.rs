@@ -2735,11 +2735,31 @@ async fn playlist_api_crud_and_resolution() {
     assert_eq!(list.as_array().unwrap().len(), 1);
     assert_eq!(list[0]["summary"]["track_count"], 3);
 
-    // Membership of a track.
+    // Membership of a track — response now includes item_id for sidebar remove.
     let (s, m) = get_json(&app, &format!("/api/concerts/{cid}/tracks/0/playlists")).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(m.as_array().unwrap().len(), 1);
     assert_eq!(m[0]["id"].as_i64().unwrap(), pid);
+    // item_id lets the sidebar call DELETE /api/playlists/{pid}/items/{item_id}.
+    let track_item_id = m[0]["item_id"].as_i64().unwrap();
+    assert!(track_item_id > 0);
+    // Confirm the round-trip: remove via item_id, membership disappears.
+    let (s, _) = delete_req(&app, &format!("/api/playlists/{pid}/items/{track_item_id}")).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, m2) = get_json(&app, &format!("/api/concerts/{cid}/tracks/0/playlists")).await;
+    assert_eq!(s, StatusCode::OK);
+    assert!(m2.as_array().unwrap().is_empty(), "removed from playlist");
+    // Re-add so the rest of the test (reorder / delete) still has an item.
+    let (s, _) = post_body_json(
+        &app,
+        &format!("/api/playlists/{pid}/items"),
+        serde_json::json!({"type": "track", "concert_id": cid, "track_index": 0}),
+    )
+    .await;
+    assert_eq!(s, StatusCode::OK);
+
+    // Re-fetch detail after the remove/re-add above so item ids are current.
+    let (_, detail) = get_json(&app, &format!("/api/playlists/{pid}")).await;
 
     // Reorder the two items (reverse), then remove the first.
     let ids: Vec<i64> = detail["items"]

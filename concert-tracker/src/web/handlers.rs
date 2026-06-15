@@ -2263,6 +2263,25 @@ impl From<crate::model::Playlist> for PlaylistJson {
     }
 }
 
+/// Intentionally narrower than `PlaylistJson`: the add-to-playlist sidebar only
+/// needs id, name, and the representative item_id used to issue a DELETE.
+#[derive(serde::Serialize)]
+pub struct MembershipJson {
+    id: i64,
+    name: String,
+    item_id: i64,
+}
+
+impl From<crate::db::PlaylistMembership> for MembershipJson {
+    fn from(m: crate::db::PlaylistMembership) -> Self {
+        MembershipJson {
+            id: m.playlist.id,
+            name: m.playlist.name,
+            item_id: m.item_id,
+        }
+    }
+}
+
 #[derive(serde::Serialize)]
 pub struct ResolvedTrackJson {
     concert_id: i64,
@@ -2532,7 +2551,7 @@ pub async fn reorder_playlist_items(
 pub async fn track_playlists(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
-) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
     let out = db::playlists_containing_track(&conn, id, idx)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))
@@ -2541,7 +2560,7 @@ pub async fn track_playlists(
 pub async fn concert_playlists(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
     let out = db::playlists_containing_concert(&conn, id)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))
@@ -2550,7 +2569,7 @@ pub async fn concert_playlists(
 pub async fn playlist_nested_in(
     State(state): State<AppState>,
     Path(id): Path<i64>,
-) -> Result<Json<Vec<PlaylistJson>>, AppError> {
+) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
     let out = db::playlists_nesting_playlist(&conn, id)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))

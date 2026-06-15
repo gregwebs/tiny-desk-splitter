@@ -5,7 +5,7 @@
 //
 // The app uses hx-boost, so page bodies are swapped into #content rather than
 // reloaded. All interaction is therefore wired via event delegation on `document`
-// (so it survives swaps) or via inline onclick/onsubmit in the templates — never
+// (so it survives swaps) or via inline onclick/onsubmit in the templates -- never
 // via one-shot DOMContentLoaded listeners that a boost swap would bypass.
 (function () {
   "use strict";
@@ -23,7 +23,7 @@
     return resp;
   }
 
-  // ── /playlists list page ────────────────────────────────────────────────────
+  // -- /playlists list page ----------------------------------------------------
 
   async function createFromForm(event) {
     event.preventDefault();
@@ -45,7 +45,7 @@
     return false;
   }
 
-  // ── /playlists/:id detail page ──────────────────────────────────────────────
+  // -- /playlists/:id detail page ----------------------------------------------
 
   function editDetails() {
     const form = document.getElementById("playlist-edit-form");
@@ -123,7 +123,7 @@
     navigate("/playlists/" + id);
   }
 
-  // ── Drag-and-drop reorder (event-delegated, survives hx-boost swaps) ─────────
+  // -- Drag-and-drop reorder (event-delegated, survives hx-boost swaps) --------
 
   let dragSrc = null;
 
@@ -192,21 +192,41 @@
     persistOrder(list);
   });
 
-  // ── Add-to-playlist sidebar panel ──────────────────────────────────────────
+  // -- Add-to-playlist sidebar panel -------------------------------------------
 
   let currentAddTarget = null;
-  let allPlaylists = [];    // [{id, name}]
-  let memberSet = new Set(); // playlist ids that already contain the target
+  let allPlaylists = [];     // [{id, name}]
+  let memberMap = new Map(); // playlist id -> item_id (from membership endpoint)
   // Monotonic counter; incremented on each openAdd call. Each fetch closure
   // captures the token at call time and discards its result if the token has
   // changed (i.e. a newer openAdd was called before the fetch resolved).
   let addPanelToken = 0;
   // The action Enter should invoke in the current filter state, or null if
-  // Enter is a no-op (ambiguous results — let the user click explicitly).
+  // Enter is a no-op (ambiguous results -- let the user click explicitly).
+  // Only consulted when activeId is null (no arrow-key highlight active).
   let enterAction = null;
   // Whether the sidebar was open before openAdd was called. Used by closeAdd
   // to decide whether to close the sidebar when the add panel is dismissed.
   let sidebarWasOpen = false;
+  // The playlist id (or "new" for the Create row) of the currently highlighted
+  // row, or null when no row is highlighted (focus stays in the filter input).
+  // Tracked by id rather than ordinal so the highlight survives re-renders.
+  let activeId = null;
+  // Ordered list of actionable rows built by renderAddList.
+  // Each entry: { id: <playlist id or "new">, el: <li element>, action: fn }
+  let actionableRows = [];
+
+  // Reset all add-panel state. Called by both closeAdd and the MutationObserver
+  // that detects an external sidebar close.
+  function resetAddState() {
+    currentAddTarget = null;
+    allPlaylists = [];
+    memberMap = new Map();
+    enterAction = null;
+    sidebarWasOpen = false;
+    activeId = null;
+    actionableRows = [];
+  }
 
   // Detect sidebar close (player.js removes sidebar-open from body) while the
   // add panel is showing, and clear our state so reopening shows the queue.
@@ -217,10 +237,7 @@
         // showing-add so reopening the sidebar shows the queue normally.
         const sidebar = document.getElementById("player-sidebar");
         if (sidebar) sidebar.classList.remove("showing-add");
-        currentAddTarget = null;
-        allPlaylists = [];
-        memberSet = new Set();
-        sidebarWasOpen = false;
+        resetAddState();
       }
     });
     obs.observe(document.body, { attributes: true, attributeFilter: ["class"] });
@@ -238,9 +255,9 @@
 
   function targetLabel(target) {
     const n = target.label || "";
-    if (target.type === "track")    return n ? "Adding \u201c" + n + "\u201d to\u2026" : "Adding track to\u2026";
-    if (target.type === "concert")  return n ? "Adding \u201c" + n + "\u201d to\u2026" : "Adding concert to\u2026";
-    if (target.type === "playlist") return n ? "Nesting \u201c" + n + "\u201d into\u2026" : "Nesting playlist into\u2026";
+    if (target.type === "track")    return n ? "Adding “" + n + "” to…" : "Adding track to…";
+    if (target.type === "concert")  return n ? "Adding “" + n + "” to…" : "Adding concert to…";
+    if (target.type === "playlist") return n ? "Nesting “" + n + "” into…" : "Nesting playlist into…";
     return "";
   }
 
@@ -254,12 +271,36 @@
     return null;
   }
 
+  // Re-fetch membership from the server and rebuild memberMap.
+  // Returns true on success, false on network/server error.
+  // Guarded by addPanelToken so stale responses from a superseded openAdd are
+  // discarded.
+  async function reloadMembership(token) {
+    if (!currentAddTarget) return false;
+    const url = membershipUrl(currentAddTarget);
+    if (!url) { memberMap = new Map(); return true; }
+    try {
+      const resp = await fetch(url);
+      if (token !== addPanelToken) return false; // superseded
+      if (!resp.ok) throw new Error("membership fetch failed: " + resp.status);
+      const data = await resp.json();
+      if (token !== addPanelToken) return false; // superseded
+      memberMap = new Map(data.map(function (m) { return [m.id, m.item_id]; }));
+      return true;
+    } catch (e) {
+      trace("reloadMembership failed", e);
+      return false;
+    }
+  }
+
   async function openAdd(target) {
     trace("openAdd", target);
     const token = ++addPanelToken;
     currentAddTarget = target;
     allPlaylists = [];
-    memberSet = new Set();
+    memberMap = new Map();
+    activeId = null;
+    actionableRows = [];
 
     // Record whether the sidebar was already open so closeAdd can restore that state.
     sidebarWasOpen = document.body.classList.contains("sidebar-open");
@@ -277,7 +318,7 @@
 
     // Reset filter, focus it so the user can type immediately.
     const filter = document.getElementById("add-pl-filter");
-    if (filter) { filter.value = ""; filter.focus(); }
+    if (filter) { filter.value = ""; filter.removeAttribute("aria-activedescendant"); filter.focus(); }
     const error = document.getElementById("add-pl-error");
     if (error) error.style.display = "none";
 
@@ -311,7 +352,7 @@
       if (token !== addPanelToken) return; // recheck after json parsing
 
       allPlaylists = plData.map(function (e) { return { id: e.playlist.id, name: e.playlist.name }; });
-      memberSet = new Set(memData.map(function (m) { return m.id; }));
+      memberMap = new Map(memData.map(function (m) { return [m.id, m.item_id]; }));
 
       renderAddList(filter ? filter.value : "");
     } catch (e) {
@@ -329,44 +370,75 @@
     const qRaw = (query || "").trim(); // preserve case for create / label
     list.replaceChildren();
     enterAction = null; // reset; re-computed below
+    actionableRows = []; // rebuilt below
+
+    // ARIA listbox role on the container.
+    list.setAttribute("role", "listbox");
 
     const filtered = allPlaylists.filter(function (p) {
       return !q || p.name.toLowerCase().indexOf(q) !== -1;
     });
 
-    // Build non-member rows and track candidates for Enter-key logic.
-    const nonMemberRows = []; // [{li, id, name, nameLower}]
+    // Build rows (member and non-member) and record actionable ones.
+    const nonMemberRows = []; // [{li, id, name, nameLower}] for enterAction logic
     for (const pl of filtered) {
-      const isMember = memberSet.has(pl.id);
+      const isMember = memberMap.has(pl.id);
+      const rowId = "add-pl-opt-" + pl.id;
       const li = document.createElement("li");
       li.className = "add-pl-row" + (isMember ? " add-pl-row-member" : "");
+      li.id = rowId;
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", "false");
 
       const check = document.createElement("span");
       check.className = "add-pl-check";
+      check.setAttribute("aria-hidden", "true");
       check.textContent = isMember ? "✓" : "";
 
       const nameEl = document.createElement("span");
       nameEl.className = "add-pl-name";
-      nameEl.textContent = pl.name; // textContent — never innerHTML for untrusted data
+      nameEl.textContent = pl.name; // textContent -- never innerHTML for untrusted data
 
       li.appendChild(check);
       li.appendChild(nameEl);
-      if (!isMember) {
+
+      if (isMember) {
+        // Member row: trash button removes; row click is a deliberate no-op.
+        const trashBtn = document.createElement("button");
+        trashBtn.type = "button";
+        trashBtn.className = "add-pl-trash";
+        trashBtn.setAttribute("aria-label", "Remove from playlist");
+        trashBtn.title = "Remove from playlist";
+        const trashIcon = document.createElement("span");
+        trashIcon.className = "icon-trash";
+        trashBtn.appendChild(trashIcon);
+        (function (id) {
+          trashBtn.addEventListener("click", function (e) {
+            e.stopPropagation(); // don't bubble to the no-op row handler
+            removeFromPlaylist(id);
+          });
+        }(pl.id));
+        li.appendChild(trashBtn);
+        actionableRows.push({ id: pl.id, el: li, action: (function (id) {
+          return function () { removeFromPlaylist(id); };
+        }(pl.id)) });
+      } else {
         const handler = (function (id, n) {
           return function () { addToPlaylist(id, n); };
         }(pl.id, pl.name));
-        li.setAttribute("role", "button");
         li.setAttribute("tabindex", "0");
         li.addEventListener("click", handler);
         li.addEventListener("keydown", function (e) {
           if (e.key === "Enter" || e.key === " ") { e.preventDefault(); handler(); }
         });
         nonMemberRows.push({ li: li, id: pl.id, name: pl.name, nameLower: pl.name.toLowerCase() });
+        actionableRows.push({ id: pl.id, el: li, action: handler });
       }
+
       list.appendChild(li);
     }
 
-    // "Create new 'query'" row — shown when there is a filter term that does NOT
+    // "Create new 'query'" row -- shown when there is a filter term that does NOT
     // exactly match an existing playlist name (exact match means the user is adding
     // to that playlist, not creating a new one).
     const exactNameExists = allPlaylists.some(function (p) { return p.name.toLowerCase() === q; });
@@ -374,34 +446,41 @@
     if (q && !exactNameExists) {
       createLi = document.createElement("li");
       createLi.className = "add-pl-row add-pl-row-new";
+      createLi.id = "add-pl-opt-new";
+      createLi.setAttribute("role", "option");
+      createLi.setAttribute("aria-selected", "false");
       const check = document.createElement("span");
       check.className = "add-pl-check";
+      check.setAttribute("aria-hidden", "true");
       check.textContent = "+";
       const label = document.createElement("span");
       label.className = "add-pl-name";
-      label.textContent = "Create \u201c" + qRaw + "\u201d"; // textContent — no XSS
+      label.textContent = "Create “" + qRaw + "”"; // textContent -- no XSS
       createLi.appendChild(check);
       createLi.appendChild(label);
-      createLi.setAttribute("role", "button");
       createLi.setAttribute("tabindex", "0");
       createLi.addEventListener("click", function () { createAndAdd(qRaw); });
       createLi.addEventListener("keydown", function (e) {
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createAndAdd(qRaw); }
       });
       list.appendChild(createLi);
+      actionableRows.push({ id: "new", el: createLi, action: function () { createAndAdd(qRaw); } });
     } else if (filtered.length === 0) {
       // Empty state: no playlists at all.
       const li = document.createElement("li");
       li.className = "add-pl-row add-pl-row-new";
+      li.id = "add-pl-opt-new";
+      li.setAttribute("role", "option");
+      li.setAttribute("aria-selected", "false");
       const check = document.createElement("span");
       check.className = "add-pl-check";
+      check.setAttribute("aria-hidden", "true");
       check.textContent = "+";
       const nameEl = document.createElement("span");
       nameEl.className = "add-pl-name";
       nameEl.textContent = "Create a new playlist";
       li.appendChild(check);
       li.appendChild(nameEl);
-      li.setAttribute("role", "button");
       li.setAttribute("tabindex", "0");
       const createEmpty = function () {
         const n = prompt("New playlist name:");
@@ -412,49 +491,110 @@
         if (e.key === "Enter" || e.key === " ") { e.preventDefault(); createEmpty(); }
       });
       list.appendChild(li);
+      actionableRows.push({ id: "new", el: li, action: createEmpty });
     }
 
-    // Determine which row (if any) gets the active highlight and owns Enter.
+    // Apply the active highlight (tracked by playlist id across re-renders).
+    applyActiveHighlight();
+
+    // Determine which row (if any) owns Enter when no row is arrow-highlighted.
     //
-    // Rule 1 — exact name match with a non-member row: highlight that row and
+    // Rule 1 -- exact name match with a non-member row: highlight that row and
     //   make Enter add to that playlist. (An exact match to a *member* is a
     //   no-op; the track is already there.)
-    // Rule 2 — no non-member rows are shown but a Create row is present (query
+    // Rule 2 -- no non-member rows are shown but a Create row is present (query
     //   typed, all matches are members or there are none): highlight the Create
     //   row and make Enter create-and-add.
-    // Otherwise: no highlight, Enter does nothing (multiple choices → user must
-    //   click).
+    // Otherwise: no highlight, Enter does nothing (multiple choices -> user must
+    //   click or arrow-down to select).
     if (q) {
       const exactMatch = nonMemberRows.find(function (r) { return r.nameLower === q; });
       if (exactMatch) {
-        exactMatch.li.classList.add("add-pl-row-active");
         const matchId = exactMatch.id, matchName = exactMatch.name;
         enterAction = function () { addToPlaylist(matchId, matchName); };
       } else if (nonMemberRows.length === 0 && createLi) {
-        // Only the Create row is actionable.
-        createLi.classList.add("add-pl-row-active");
         enterAction = function () { createAndAdd(qRaw); };
       }
     }
   }
 
+  // Apply (or remove) the active highlight based on activeId.
+  // Updates aria-selected and aria-activedescendant on the filter input.
+  function applyActiveHighlight() {
+    const filter = document.getElementById("add-pl-filter");
+    let found = false;
+    for (let i = 0; i < actionableRows.length; i++) {
+      const row = actionableRows[i];
+      const isActive = (row.id === activeId);
+      row.el.classList.toggle("add-pl-row-active", isActive);
+      row.el.setAttribute("aria-selected", isActive ? "true" : "false");
+      if (isActive) {
+        found = true;
+        if (filter) filter.setAttribute("aria-activedescendant", row.el.id);
+        row.el.scrollIntoView({ block: "nearest" });
+      }
+    }
+    if (!found) {
+      activeId = null;
+      if (filter) filter.removeAttribute("aria-activedescendant");
+    }
+  }
+
   function filterPlaylists(query) {
+    // Typing clears the arrow-key highlight so the user is back in filter mode.
+    activeId = null;
     renderAddList(query);
   }
 
-  function filterKeydown(event) {
-    if (event.key !== "Enter") return;
+  // Explicit Enter-dispatch so precedence is clear and easy to follow:
+  // 1. Arrow-highlighted row action (add or remove), filter NOT cleared.
+  // 2. enterAction (exact-name add / create), filter cleared (original behavior).
+  // 3. Empty filter -> close the panel.
+  function dispatchEnter(filterEl) {
+    if (activeId !== null) {
+      const row = actionableRows.find(function (r) { return r.id === activeId; });
+      if (row) { row.action(); return; }
+    }
     if (enterAction) {
-      event.preventDefault();
-      const action = enterAction; // capture before renderAddList resets it
-      const filter = document.getElementById("add-pl-filter");
-      if (filter) filter.value = "";
-      renderAddList(""); // clear highlight, show full list
-      action();          // async; re-renders again when fetch resolves
-    } else if (!(event.target.value || "").trim()) {
-      // Empty filter, no action → close the add panel (and sidebar if needed).
-      event.preventDefault();
+      const action = enterAction;
+      if (filterEl) filterEl.value = "";
+      renderAddList("");
+      action();
+      return;
+    }
+    if (!(filterEl ? filterEl.value : "").trim()) {
       closeAdd();
+    }
+  }
+
+  function filterKeydown(event) {
+    const filter = event.target;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (actionableRows.length === 0) return;
+      if (activeId === null) {
+        activeId = actionableRows[0].id;
+      } else {
+        const idx = actionableRows.findIndex(function (r) { return r.id === activeId; });
+        if (idx < actionableRows.length - 1) activeId = actionableRows[idx + 1].id;
+        // else already at the bottom -- clamp
+      }
+      applyActiveHighlight();
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (activeId === null) return;
+      const idx = actionableRows.findIndex(function (r) { return r.id === activeId; });
+      if (idx <= 0) {
+        // Already at or before the first row: return focus to filter-only mode.
+        activeId = null;
+        applyActiveHighlight();
+      } else {
+        activeId = actionableRows[idx - 1].id;
+        applyActiveHighlight();
+      }
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      dispatchEnter(filter);
     }
   }
 
@@ -465,16 +605,14 @@
     if (!sidebarWasOpen && window.Player && window.Player.closeSidebar) {
       window.Player.closeSidebar();
     }
-    currentAddTarget = null;
-    allPlaylists = [];
-    memberSet = new Set();
-    sidebarWasOpen = false;
+    resetAddState();
   }
 
   async function addToPlaylist(playlistId, playlistName) {
     if (!currentAddTarget) return;
     const body = addItemBody(currentAddTarget);
     if (!body) return;
+    const token = addPanelToken;
     const error = document.getElementById("add-pl-error");
     if (error) error.style.display = "none";
     trace("addToPlaylist", { playlistId, playlistName, target: currentAddTarget });
@@ -485,12 +623,41 @@
         if (error) { error.textContent = "Couldn't add: " + msg; error.style.display = ""; }
         return;
       }
-      memberSet.add(playlistId);
+      // Re-fetch membership so memberMap is authoritative (handles duplicates).
+      const ok = await reloadMembership(token);
+      if (!ok) return; // superseded or network error
       const filter = document.getElementById("add-pl-filter");
       renderAddList(filter ? filter.value : "");
     } catch (e) {
       trace("addToPlaylist failed", e);
       if (error) { error.textContent = "Couldn't add to playlist."; error.style.display = ""; }
+    }
+  }
+
+  async function removeFromPlaylist(playlistId) {
+    if (!currentAddTarget) return;
+    const itemId = memberMap.get(playlistId);
+    if (itemId == null) return;
+    const token = addPanelToken;
+    const error = document.getElementById("add-pl-error");
+    if (error) error.style.display = "none";
+    trace("removeFromPlaylist", { playlistId, itemId, target: currentAddTarget });
+    try {
+      const resp = await postJson("/api/playlists/" + playlistId + "/items/" + itemId, null, "DELETE");
+      // 404 is treated as success (concurrent removal).
+      if (!resp.ok && resp.status !== 404) {
+        const msg = await resp.text();
+        if (error) { error.textContent = "Couldn't remove: " + msg; error.style.display = ""; }
+        return;
+      }
+      // Re-fetch membership so memberMap is authoritative.
+      const ok = await reloadMembership(token);
+      if (!ok) return; // superseded or network error
+      const filter = document.getElementById("add-pl-filter");
+      renderAddList(filter ? filter.value : "");
+    } catch (e) {
+      trace("removeFromPlaylist failed", e);
+      if (error) { error.textContent = "Couldn't remove from playlist."; error.style.display = ""; }
     }
   }
 
@@ -527,4 +694,4 @@
     filterPlaylists: filterPlaylists,
     filterKeydown: filterKeydown,
   };
-})();
+}());

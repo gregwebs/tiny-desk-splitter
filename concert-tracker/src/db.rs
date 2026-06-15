@@ -1451,50 +1451,87 @@ pub fn track_durations(conn: &Connection, concert_id: i64) -> Result<Vec<Option<
     })
 }
 
+/// A playlist that contains the queried target, together with a representative
+/// `playlist_items.id` used by the sidebar to issue a `DELETE` without a
+/// separate lookup.
+pub struct PlaylistMembership {
+    pub playlist: Playlist,
+    /// `MIN(i.id)` over all items matching the target in this playlist.
+    /// If the target appears more than once, this selects the oldest entry;
+    /// each remove re-fetches membership so successive removes peel off copies.
+    pub item_id: i64,
+}
+
+/// Deserialize a `PlaylistMembership` from a row that has all `playlists`
+/// columns plus an `item_id` aggregate column appended.
+fn membership_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<PlaylistMembership> {
+    let playlist = playlist_from_row(row)?;
+    let item_id: i64 = row.get("item_id")?;
+    Ok(PlaylistMembership { playlist, item_id })
+}
+
 /// Playlists that directly contain a given track item.
+///
+/// Uses `GROUP BY p.id` + bare `p.*`; safe because `p.id` is the primary key
+/// so all `p.*` columns are functionally dependent on it (SQLite extension).
 pub fn playlists_containing_track(
     conn: &Connection,
     concert_id: i64,
     track_index: usize,
-) -> Result<Vec<Playlist>> {
+) -> Result<Vec<PlaylistMembership>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT p.* FROM playlists p
+        "SELECT p.*, MIN(i.id) AS item_id FROM playlists p
          JOIN playlist_items i ON i.playlist_id = p.id
          WHERE i.item_type = 'track' AND i.concert_id = ?1 AND i.track_index = ?2
+         GROUP BY p.id
          ORDER BY p.name COLLATE NOCASE, p.id",
     )?;
     let out = stmt
-        .query_map(params![concert_id, track_index as i64], playlist_from_row)?
+        .query_map(params![concert_id, track_index as i64], membership_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("Failed to query playlists containing track")?;
     Ok(out)
 }
 
 /// Playlists that directly contain a given concert item.
-pub fn playlists_containing_concert(conn: &Connection, concert_id: i64) -> Result<Vec<Playlist>> {
+///
+/// Uses `GROUP BY p.id` + bare `p.*`; safe because `p.id` is the primary key
+/// so all `p.*` columns are functionally dependent on it (SQLite extension).
+pub fn playlists_containing_concert(
+    conn: &Connection,
+    concert_id: i64,
+) -> Result<Vec<PlaylistMembership>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT p.* FROM playlists p
+        "SELECT p.*, MIN(i.id) AS item_id FROM playlists p
          JOIN playlist_items i ON i.playlist_id = p.id
          WHERE i.item_type = 'concert' AND i.concert_id = ?1
+         GROUP BY p.id
          ORDER BY p.name COLLATE NOCASE, p.id",
     )?;
     let out = stmt
-        .query_map(params![concert_id], playlist_from_row)?
+        .query_map(params![concert_id], membership_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("Failed to query playlists containing concert")?;
     Ok(out)
 }
 
 /// Playlists that directly nest a given playlist as an item.
-pub fn playlists_nesting_playlist(conn: &Connection, child_id: i64) -> Result<Vec<Playlist>> {
+///
+/// Uses `GROUP BY p.id` + bare `p.*`; safe because `p.id` is the primary key
+/// so all `p.*` columns are functionally dependent on it (SQLite extension).
+pub fn playlists_nesting_playlist(
+    conn: &Connection,
+    child_id: i64,
+) -> Result<Vec<PlaylistMembership>> {
     let mut stmt = conn.prepare(
-        "SELECT DISTINCT p.* FROM playlists p
+        "SELECT p.*, MIN(i.id) AS item_id FROM playlists p
          JOIN playlist_items i ON i.playlist_id = p.id
          WHERE i.item_type = 'playlist' AND i.child_playlist_id = ?1
+         GROUP BY p.id
          ORDER BY p.name COLLATE NOCASE, p.id",
     )?;
     let out = stmt
-        .query_map(params![child_id], playlist_from_row)?
+        .query_map(params![child_id], membership_from_row)?
         .collect::<rusqlite::Result<Vec<_>>>()
         .context("Failed to query playlists nesting playlist")?;
     Ok(out)
@@ -3181,7 +3218,7 @@ pub mod tests {
         let child = create_playlist(&conn, "Child", None).unwrap();
         let p1 = create_playlist(&conn, "P1", None).unwrap();
         let p2 = create_playlist(&conn, "P2", None).unwrap();
-        add_playlist_item(
+        let i_track_p1 = add_playlist_item(
             &conn,
             p1,
             &PlaylistItemKind::Track {
@@ -3190,7 +3227,7 @@ pub mod tests {
             },
         )
         .unwrap();
-        add_playlist_item(
+        let i_track_p2 = add_playlist_item(
             &conn,
             p2,
             &PlaylistItemKind::Track {
@@ -3199,7 +3236,7 @@ pub mod tests {
             },
         )
         .unwrap();
-        add_playlist_item(
+        let i_concert_p1 = add_playlist_item(
             &conn,
             p1,
             &PlaylistItemKind::Concert {
@@ -3207,7 +3244,7 @@ pub mod tests {
             },
         )
         .unwrap();
-        add_playlist_item(
+        let i_nested_p1 = add_playlist_item(
             &conn,
             p1,
             &PlaylistItemKind::Playlist {
@@ -3216,27 +3253,65 @@ pub mod tests {
         )
         .unwrap();
 
-        let track_in: Vec<_> = playlists_containing_track(&conn, concert, 0)
-            .unwrap()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(track_in, vec![p1, p2]);
+        let track_in = playlists_containing_track(&conn, concert, 0).unwrap();
+        assert_eq!(
+            track_in.iter().map(|m| m.playlist.id).collect::<Vec<_>>(),
+            vec![p1, p2]
+        );
+        assert_eq!(track_in[0].item_id, i_track_p1);
+        assert_eq!(track_in[1].item_id, i_track_p2);
         assert!(playlists_containing_track(&conn, concert, 1)
             .unwrap()
             .is_empty());
-        let concert_in: Vec<_> = playlists_containing_concert(&conn, concert)
-            .unwrap()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(concert_in, vec![p1]);
-        let nested_in: Vec<_> = playlists_nesting_playlist(&conn, child)
-            .unwrap()
-            .into_iter()
-            .map(|p| p.id)
-            .collect();
-        assert_eq!(nested_in, vec![p1]);
+
+        let concert_in = playlists_containing_concert(&conn, concert).unwrap();
+        assert_eq!(
+            concert_in.iter().map(|m| m.playlist.id).collect::<Vec<_>>(),
+            vec![p1]
+        );
+        assert_eq!(concert_in[0].item_id, i_concert_p1);
+
+        let nested_in = playlists_nesting_playlist(&conn, child).unwrap();
+        assert_eq!(
+            nested_in.iter().map(|m| m.playlist.id).collect::<Vec<_>>(),
+            vec![p1]
+        );
+        assert_eq!(nested_in[0].item_id, i_nested_p1);
+    }
+
+    #[test]
+    fn membership_queries_duplicate_item_returns_min_item_id() {
+        // A target added to the same playlist twice: MIN(item_id) is returned.
+        // The sidebar removes one copy per trash click via re-fetch, so this
+        // behaviour must stay stable.
+        let conn = open_in_memory().unwrap();
+        let concert = seed_concert(&conn, "https://npr.org/b", "B", &["t0"]);
+        let p1 = create_playlist(&conn, "P1", None).unwrap();
+        let first_id = add_playlist_item(
+            &conn,
+            p1,
+            &PlaylistItemKind::Track {
+                concert_id: concert,
+                track_index: 0,
+            },
+        )
+        .unwrap();
+        let _second_id = add_playlist_item(
+            &conn,
+            p1,
+            &PlaylistItemKind::Track {
+                concert_id: concert,
+                track_index: 0,
+            },
+        )
+        .unwrap();
+
+        let memberships = playlists_containing_track(&conn, concert, 0).unwrap();
+        assert_eq!(memberships.len(), 1, "deduplicated to one row per playlist");
+        assert_eq!(
+            memberships[0].item_id, first_id,
+            "MIN(item_id) selects the oldest copy"
+        );
     }
 
     // ── list_resplit_candidates ──────────────────────────────────────────────
