@@ -865,7 +865,10 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
 
-        let key = JobKey { concert_id: 1, kind: JobKind::Split };
+        let key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Split,
+        };
         for _ in 0..100 {
             if !registry.is_running(&key) {
                 break;
@@ -914,7 +917,10 @@ mod tests {
             .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
 
-        let key = JobKey { concert_id: 1, kind: JobKind::Split };
+        let key = JobKey {
+            concert_id: 1,
+            kind: JobKind::Split,
+        };
         for _ in 0..100 {
             if !registry.is_running(&key) {
                 break;

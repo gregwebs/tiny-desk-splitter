@@ -1972,7 +1972,10 @@ mod tests_cluster_overlay_frames {
     #[test]
     fn collapses_consecutive_run_to_earliest() {
         // The yeule VV overlay: frames 262..=265 -> one cluster at 262.
-        assert_eq!(cluster_overlay_frames(&[262, 263, 264, 265], 10.0), vec![262.0]);
+        assert_eq!(
+            cluster_overlay_frames(&[262, 263, 264, 265], 10.0),
+            vec![262.0]
+        );
     }
 
     #[test]
@@ -2002,7 +2005,10 @@ mod tests_cluster_overlay_frames {
         // 262 and 272 are exactly 10s apart; `> max_gap` splits, so this stays one.
         assert_eq!(cluster_overlay_frames(&[262, 272], 10.0), vec![262.0]);
         // 11s apart -> two clusters.
-        assert_eq!(cluster_overlay_frames(&[262, 273], 10.0), vec![262.0, 273.0]);
+        assert_eq!(
+            cluster_overlay_frames(&[262, 273], 10.0),
+            vec![262.0, 273.0]
+        );
     }
 }
 

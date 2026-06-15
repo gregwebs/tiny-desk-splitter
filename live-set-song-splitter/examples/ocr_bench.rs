@@ -76,8 +76,12 @@ fn main() -> Result<()> {
     env_logger::init();
     let opts = Opts::parse();
 
-    let raw = std::fs::read_to_string(SETLISTS)
-        .with_context(|| format!("reading {} (generate it from concerts.db, see plan)", SETLISTS))?;
+    let raw = std::fs::read_to_string(SETLISTS).with_context(|| {
+        format!(
+            "reading {} (generate it from concerts.db, see plan)",
+            SETLISTS
+        )
+    })?;
     let concerts: Vec<ConcertSet> = serde_json::from_str(&raw).context("parsing setlists.json")?;
 
     let mut song_index: HashMap<String, Vec<(String, String)>> = HashMap::new();
@@ -88,9 +92,15 @@ fn main() -> Result<()> {
             if key.is_empty() {
                 continue;
             }
-            song_index.entry(key).or_default().push((c.artist.clone(), s.clone()));
+            song_index
+                .entry(key)
+                .or_default()
+                .push((c.artist.clone(), s.clone()));
         }
-        artist_songs.entry(c.artist.clone()).or_default().extend(c.songs.iter().cloned());
+        artist_songs
+            .entry(c.artist.clone())
+            .or_default()
+            .extend(c.songs.iter().cloned());
     }
 
     let mut engines = Engines::new(SCRATCH_DIR, opts.paddle_only)?;
@@ -170,13 +180,21 @@ fn run_positives(
         let mut song_hit = [false; NV];
         for i in 0..NV {
             overlay_hit[i] = overlay_detected(&runs[i]);
-            let is_overlay = if artist.is_some() { overlay_hit[i] } else { true };
+            let is_overlay = if artist.is_some() {
+                overlay_hit[i]
+            } else {
+                true
+            };
             song_hit[i] = song_matched(&runs[i], &match_song, is_overlay);
         }
 
         for i in 0..NV {
             song_all[i].n += 1;
-            let bucket = if phase == Phase::Initial { &mut song_initial } else { &mut song_refined };
+            let bucket = if phase == Phase::Initial {
+                &mut song_initial
+            } else {
+                &mut song_refined
+            };
             bucket[i].n += 1;
             if song_hit[i] {
                 song_all[i].song += 1;
@@ -252,24 +270,47 @@ fn run_positives(
         n_scored, total_found, n_skip, n_unresolved, n_ambiguous
     );
     println!();
-    println!("  PER-SONG SONG recall (>=1 frame matched the title) over {} songs:", total_songs);
+    println!(
+        "  PER-SONG SONG recall (>=1 frame matched the title) over {} songs:",
+        total_songs
+    );
     for &i in shown {
-        println!("    {}   {:>4}/{:<4}  ({:.0}%)", LABELS[i], per_song[i], total_songs, pct(per_song[i], total_songs));
+        println!(
+            "    {}   {:>4}/{:<4}  ({:.0}%)",
+            LABELS[i],
+            per_song[i],
+            total_songs,
+            pct(per_song[i], total_songs)
+        );
     }
     // Songs missed entirely (0 frames matched) by the key paddle configs.
-    let mut miss_clr: Vec<&str> = song_seen.values().filter(|r| !r.song[2]).map(|r| r.title.as_str()).collect();
-    let mut miss_cb: Vec<&str> = song_seen.values().filter(|r| !r.song[4]).map(|r| r.title.as_str()).collect();
+    let mut miss_clr: Vec<&str> = song_seen
+        .values()
+        .filter(|r| !r.song[2])
+        .map(|r| r.title.as_str())
+        .collect();
+    let mut miss_cb: Vec<&str> = song_seen
+        .values()
+        .filter(|r| !r.song[4])
+        .map(|r| r.title.as_str())
+        .collect();
     miss_clr.sort();
     miss_cb.sort();
     println!("  PER-SONG MISSES paddle(clr): {:?}", miss_clr);
     println!("  PER-SONG MISSES paddle(c+b): {:?}", miss_cb);
     println!();
     println!("  PER-SONG ARTIST-overlay recall (>=1 frame found the overlay) over {} known-artist songs:", known_songs);
-    println!("  [the anchor for refinement: if we find the overlay we can refine to read the title]");
+    println!(
+        "  [the anchor for refinement: if we find the overlay we can refine to read the title]"
+    );
     for &i in shown {
         println!(
             "    {}   {:>4}/{:<4}  ({:.0}%)   [overlay-found-but-title-unread: {}]",
-            LABELS[i], per_song_artist[i], known_songs, pct(per_song_artist[i], known_songs), artist_not_song[i]
+            LABELS[i],
+            per_song_artist[i],
+            known_songs,
+            pct(per_song_artist[i], known_songs),
+            artist_not_song[i]
         );
     }
     println!();
@@ -277,26 +318,46 @@ fn run_positives(
     for &i in shown {
         println!(
             "    {}   {:>4}/{:<4}   {:>3}/{:<3}     {:>4}/{:<4}",
-            LABELS[i], song_all[i].song, song_all[i].n,
-            song_initial[i].song, song_initial[i].n, song_refined[i].song, song_refined[i].n,
+            LABELS[i],
+            song_all[i].song,
+            song_all[i].n,
+            song_initial[i].song,
+            song_initial[i].n,
+            song_refined[i].song,
+            song_refined[i].n,
         );
     }
     println!();
-    println!("  artist-overlay detected (over {} frames with known artist):", artist_tally[0].n);
+    println!(
+        "  artist-overlay detected (over {} frames with known artist):",
+        artist_tally[0].n
+    );
     for &i in shown {
-        println!("    {}   {:>4}/{:<4}  ({:.0}%)", LABELS[i], artist_tally[i].artist, artist_tally[i].n, pct(artist_tally[i].artist, artist_tally[i].n));
+        println!(
+            "    {}   {:>4}/{:<4}  ({:.0}%)",
+            LABELS[i],
+            artist_tally[i].artist,
+            artist_tally[i].n,
+            pct(artist_tally[i].artist, artist_tally[i].n)
+        );
     }
     // Tesseract-vs-paddle residual comparisons are meaningless without tesseract.
     if !opts.paddle_only {
         println!();
-        println!("  RESIDUAL REGRESSIONS — tess(full) matched, paddle(c+b) did NOT (up to {}):", LIST_CAP);
+        println!(
+            "  RESIDUAL REGRESSIONS — tess(full) matched, paddle(c+b) did NOT (up to {}):",
+            LIST_CAP
+        );
         if regressions.is_empty() {
             println!("    (none in this sample)");
         }
         for (frame, song) in &regressions {
             println!("    {}  ->  {}", frame, song);
         }
-        println!("  PADDLE-ONLY — paddle(c+b) matched, tess(full) did NOT (up to {}):", LIST_CAP);
+        println!(
+            "  PADDLE-ONLY — paddle(c+b) matched, tess(full) did NOT (up to {}):",
+            LIST_CAP
+        );
         if paddle_only.is_empty() {
             println!("    (none in this sample)");
         }
@@ -322,20 +383,32 @@ fn run_negatives(
 
     let shown_labels: Vec<&str> = shown.iter().map(|&i| LABELS[i].trim()).collect();
     println!("=== NEGATIVES (temp_frames sample): FALSE POSITIVES ===");
-    println!("  per concert: frames | artist-FP/song-FP for [{}]", shown_labels.join(" "));
+    println!(
+        "  per concert: frames | artist-FP/song-FP for [{}]",
+        shown_labels.join(" ")
+    );
 
     let mut concert_dirs = list_subdirs(Path::new(TEMP_FRAMES_DIR))?;
     concert_dirs.sort();
 
     for dir in &concert_dirs {
         let dir_name = dir.file_name().and_then(|s| s.to_str()).unwrap_or("");
-        let artist = dir_name.strip_suffix(CONCERT_SUFFIX).unwrap_or(dir_name).to_string();
+        let artist = dir_name
+            .strip_suffix(CONCERT_SUFFIX)
+            .unwrap_or(dir_name)
+            .to_string();
         let Some(songs) = artist_songs.get(&artist) else {
-            println!("  [{}] no setlist in DB for artist {:?}; skipping", dir_name, artist);
+            println!(
+                "  [{}] no setlist in DB for artist {:?}; skipping",
+                dir_name, artist
+            );
             continue;
         };
 
-        let mut frames: Vec<PathBuf> = list_pngs(dir)?.into_iter().filter(|p| is_source_frame(p)).collect();
+        let mut frames: Vec<PathBuf> = list_pngs(dir)?
+            .into_iter()
+            .filter(|p| is_source_frame(p))
+            .collect();
         frames.sort_by_key(|p| frame_num(p).unwrap_or(u64::MAX));
 
         let mut candidates = Vec::new();
@@ -386,13 +459,24 @@ fn run_negatives(
         }
     }
 
-    println!("  TOTALS (excluded {} frames that md5-match analysis overlays):", excluded_overlap);
+    println!(
+        "  TOTALS (excluded {} frames that md5-match analysis overlays):",
+        excluded_overlap
+    );
     println!("    variant       frames   artist-FP   song-FP");
     for &i in shown {
-        println!("    {}   {:>5}    {:>4}       {:>4}", LABELS[i], totals[i].n, totals[i].artist, totals[i].song);
+        println!(
+            "    {}   {:>5}    {:>4}       {:>4}",
+            LABELS[i], totals[i].n, totals[i].artist, totals[i].song
+        );
     }
-    println!("  PADDLE-ONLY CANDIDATES — paddle(c+b) flagged overlay/song on a frame tesseract did");
-    println!("  NOT save (real overlay tesseract missed = paddle win, else paddle FP; up to {}):", LIST_CAP);
+    println!(
+        "  PADDLE-ONLY CANDIDATES — paddle(c+b) flagged overlay/song on a frame tesseract did"
+    );
+    println!(
+        "  NOT save (real overlay tesseract missed = paddle win, else paddle FP; up to {}):",
+        LIST_CAP
+    );
     if paddle_candidates.is_empty() {
         println!("    (none in this sample)");
     }
@@ -442,7 +526,11 @@ impl Opts {
             }
             i += 1;
         }
-        Opts { limit, neg_per_concert, paddle_only }
+        Opts {
+            limit,
+            neg_per_concert,
+            paddle_only,
+        }
     }
 }
 
@@ -470,7 +558,11 @@ fn parse_analysis_name(name: &str) -> Option<(Phase, String)> {
     } else {
         return None;
     };
-    let digits: String = rest.chars().rev().take_while(|c| c.is_ascii_digit()).collect();
+    let digits: String = rest
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
     if digits.is_empty() {
         return None;
     }
@@ -527,7 +619,9 @@ fn is_source_frame(p: &Path) -> bool {
 }
 
 fn frame_num(p: &Path) -> Option<u64> {
-    p.file_stem().and_then(|s| s.to_str()).and_then(|s| s.parse().ok())
+    p.file_stem()
+        .and_then(|s| s.to_str())
+        .and_then(|s| s.parse().ok())
 }
 
 fn hash_file(p: &Path) -> Result<u64> {

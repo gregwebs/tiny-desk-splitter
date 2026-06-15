@@ -86,7 +86,10 @@ impl Engines {
     /// Threshold a color frame to B/W in the scratch dir; returns the temp path.
     /// Caller may delete it when done.
     pub fn make_bw(&self, color: &Path) -> Result<PathBuf> {
-        let stem = color.file_stem().and_then(|s| s.to_str()).unwrap_or("frame");
+        let stem = color
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("frame");
         // Include parent dir name so identically-numbered frames from different
         // concerts don't collide in the shared scratch dir.
         let parent = color
@@ -111,9 +114,8 @@ pub fn overlay_detected(runs: &Runs) -> bool {
 /// run's own overlay flag drives artist-line exclusion (mirrors the production detection
 /// path — `song_title_candidate_lines` drops line 0 when that run detected the artist).
 pub fn song_matched(runs: &Runs, song: &str, is_overlay: bool) -> bool {
-    runs.iter().any(|run| {
-        matches_song_title(song_title_candidate_lines(run), song, is_overlay).is_some()
-    })
+    runs.iter()
+        .any(|run| matches_song_title(song_title_candidate_lines(run), song, is_overlay).is_some())
 }
 
 /// Production-semantics score: overlay derived from the runs, then song matched using
@@ -144,6 +146,12 @@ pub fn yn(b: bool) -> char {
 /// Minimal filename sanitizer for scratch paths (keep alnum, dash, dot; rest -> '_').
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '.' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }

@@ -6,10 +6,10 @@ use std::time::Duration;
 
 use concert_tracker::db;
 use concert_tracker::import::import_dir;
+use concert_tracker::jobs::split::{start_split, StartOutcome};
 use concert_tracker::jobs::{
     check_dependencies, default_splitter_bin, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
 };
-use concert_tracker::jobs::split::{start_split, StartOutcome};
 use concert_tracker::model::{sanitize_album, Concert};
 use concert_tracker::scan::scan;
 use concert_tracker::scrape::{ensure_thumbnail, scrape_url, ThumbOutcome};
@@ -431,11 +431,8 @@ fn main() -> Result<()> {
             // open_cmd "true" is a no-op placeholder; splitting never invokes the open command.
             let db = Arc::new(Mutex::new(conn));
             let registry = Arc::new(JobRegistry::new());
-            let config = JobConfig::production(
-                cli.workdir.clone(),
-                splitter_bin,
-                "true".to_string(),
-            );
+            let config =
+                JobConfig::production(cli.workdir.clone(), splitter_bin, "true".to_string());
 
             let rt = tokio::runtime::Runtime::new()?;
             let (succeeded, failed, skipped_no_source, skipped_in_progress, errored) =

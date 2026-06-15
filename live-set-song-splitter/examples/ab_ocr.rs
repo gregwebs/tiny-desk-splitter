@@ -65,7 +65,11 @@ fn main() -> Result<()> {
     let mut agg = [(0u32, 0u32); 3];
     let labels = ["tess(color)", "tess(full) ", "paddle     "];
     // Which variants to compute/report. Paddle-only collapses to just paddle.
-    let shown: &[usize] = if paddle_only { &[PADDLE] } else { &[0, 1, PADDLE] };
+    let shown: &[usize] = if paddle_only {
+        &[PADDLE]
+    } else {
+        &[0, 1, PADDLE]
+    };
     let n = cases.len() as u32;
 
     for case in &cases {
@@ -104,7 +108,13 @@ fn main() -> Result<()> {
         );
         for &i in shown {
             let (overlay, song, text) = outcomes[i].as_ref().expect("shown variant computed");
-            println!("  {}  artist={} song={}  | {}", labels[i], yn(*overlay), yn(*song), text);
+            println!(
+                "  {}  artist={} song={}  | {}",
+                labels[i],
+                yn(*overlay),
+                yn(*song),
+                text
+            );
             if *overlay {
                 agg[i].0 += 1;
             }
@@ -118,7 +128,10 @@ fn main() -> Result<()> {
     println!("SUMMARY  (N = {} frames)", n);
     println!("  variant        artist-overlay   song-matched");
     for &i in shown {
-        println!("  {}    {:>3}/{:<3}          {:>3}/{:<3}", labels[i], agg[i].0, n, agg[i].1, n);
+        println!(
+            "  {}    {:>3}/{:<3}          {:>3}/{:<3}",
+            labels[i], agg[i].0, n, agg[i].1, n
+        );
     }
     Ok(())
 }
