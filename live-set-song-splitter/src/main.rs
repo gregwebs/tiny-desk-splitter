@@ -14,7 +14,9 @@ mod io;
 mod video;
 use crate::cut::VideoCutMode;
 use crate::video::VideoInfo;
-use concert_types::{ConcertInfo, Song, SongTimestamp, TimestampsFile};
+use concert_types::{
+    derive_interludes, interlude_filename_stem, ConcertInfo, Song, SongTimestamp, TimestampsFile,
+};
 
 use anyhow::{anyhow, Context, Result};
 use clap::{Parser, ValueEnum};
@@ -93,6 +95,20 @@ struct Cli {
     /// compiled in is an error.
     #[arg(long, value_enum)]
     ocr_engine: Option<OcrChoice>,
+
+    /// Cut and save interlude (gap) files for every span between song tracks that
+    /// is not covered by a song. Interlude files are named `interlude_NN.mp4|.m4a`
+    /// and share the output directory with song tracks. Any previously written
+    /// `interlude_NN.*` files in the output directory are removed before writing.
+    /// Requires either `--media-duration` or that the source file is present for
+    /// ffprobe-based duration detection.
+    #[arg(long)]
+    emit_interludes: bool,
+
+    /// Total duration of the source media in seconds, used when `--emit-interludes`
+    /// is set. When omitted, the splitter ffprobes the input file.
+    #[arg(long)]
+    media_duration: Option<f64>,
 }
 
 #[derive(Clone, Debug)]
@@ -399,13 +415,41 @@ fn main() -> Result<()> {
     // Process each detected segment (skip if --no-save-songs is provided)
     if !cli.no_save_songs {
         fs::create_dir_all(&output_dir)?;
+
+        // Resolve the media duration needed for interlude derivation. Prefer the
+        // explicit `--media-duration` flag (avoids a second ffprobe), fall back to
+        // the duration already obtained above.
+        let emit_interludes = cli.emit_interludes;
+        let resolved_media_duration = if emit_interludes {
+            match cli.media_duration {
+                Some(d) => d,
+                None => video_info.duration,
+            }
+        } else {
+            0.0 // unused when emit_interludes is false
+        };
+
+        // Smart cutting probes the source's stream properties once for the run.
+        let source_params = match (cli.output_format, cli.video_cut_mode) {
+            (OutputFormat::Video | OutputFormat::Both, VideoCutMode::Smart) => {
+                Some(cut::probe_source_video_params(&input_file)?)
+            }
+            _ => None,
+        };
+        let ctx = CutContext {
+            input_file: &input_file,
+            output_dir: &output_dir,
+            output_format: cli.output_format,
+            source_params,
+            video_cut_mode: cli.video_cut_mode,
+            concert: &concert,
+        };
         process_segments(
-            &input_file,
             &segments,
-            concert,
-            &output_dir,
-            cli.output_format,
-            cli.video_cut_mode,
+            &concert,
+            ctx,
+            emit_interludes,
+            resolved_media_duration,
         )?;
     }
 
@@ -1055,13 +1099,121 @@ fn create_song_timestamps(segments: &[SongSegment], song_list: &[Song]) -> Vec<S
     song_timestamps
 }
 
-fn process_segments(
-    input_file: &str,
-    segments: &[SongSegment],
-    concert: ConcertInfo,
-    output_dir: &str,
+/// Parameters shared by every track cut within a single splitter run. Grouping
+/// them avoids threading seven scalar args through every call.
+struct CutContext<'a> {
+    input_file: &'a str,
+    output_dir: &'a str,
     output_format: OutputFormat,
+    source_params: Option<cut::SourceVideoParams>,
     video_cut_mode: VideoCutMode,
+    concert: &'a ConcertInfo,
+}
+
+/// Cut a single track (song or interlude) using the shared [`CutContext`].
+///
+/// `stem` is the filename without extension (already sanitized).
+/// `track_number` is `Some(n)` for songs (embedded as ffmpeg metadata) and
+/// `None` for interludes.
+fn extract_track(
+    ctx: &CutContext<'_>,
+    stem: &str,
+    start_time: f64,
+    end_time: f64,
+    title: &str,
+    track_number: Option<usize>,
+) -> Result<()> {
+    match ctx.output_format {
+        OutputFormat::Video | OutputFormat::Both => {
+            let output_file = format!("{}/{}.mp4", ctx.output_dir, stem);
+            match &ctx.source_params {
+                Some(params) => cut::extract_segment_smart(
+                    ctx.input_file,
+                    &output_file,
+                    start_time,
+                    end_time,
+                    params,
+                    Some(title),
+                    ctx.concert,
+                    track_number,
+                )?,
+                None => cut::extract_segment(
+                    ctx.input_file,
+                    &output_file,
+                    start_time,
+                    end_time,
+                    ctx.video_cut_mode,
+                    Some(title),
+                    ctx.concert,
+                    track_number,
+                )?,
+            }
+        }
+        _ => {}
+    }
+
+    match ctx.output_format {
+        OutputFormat::Audio | OutputFormat::Both => {
+            let output_file = format!("{}/{}.m4a", ctx.output_dir, stem);
+            ffmpeg::extract_audio_segment(
+                ctx.input_file,
+                &output_file,
+                start_time,
+                end_time,
+                Some(title),
+                ctx.concert,
+                track_number,
+            )?;
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Remove any previously written interlude files from `output_dir` before
+/// (re-)cutting interludes, to avoid stale orphans when the number of interludes
+/// changes.  Only files whose names match the anchored pattern
+/// `interlude_NN.mp4|.m4a` are removed.
+fn remove_stale_interlude_files(output_dir: &str) -> Result<()> {
+    let pattern =
+        regex::Regex::new(r"^interlude_\d{2}\.(mp4|m4a)$").expect("static regex is valid");
+    let dir = match fs::read_dir(output_dir) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => {
+            return Err(anyhow!(
+                "failed to read output directory {}: {}",
+                output_dir,
+                e
+            ))
+        }
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if pattern.is_match(&name_str) {
+            let path = entry.path();
+            if let Err(e) = fs::remove_file(&path) {
+                eprintln!(
+                    "warning: could not remove stale interlude file {}: {}",
+                    path.display(),
+                    e
+                );
+            } else {
+                println!("removed stale interlude file: {}", path.display());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn process_segments(
+    segments: &[SongSegment],
+    concert: &ConcertInfo,
+    ctx: CutContext<'_>,
+    emit_interludes: bool,
+    media_duration: f64,
 ) -> Result<()> {
     let songs = &concert.set_list;
     println!("Processing {} segments...", segments.len());
@@ -1073,30 +1225,22 @@ fn process_segments(
         ));
     }
 
-    // Smart cutting matches the head re-encode to the source's stream properties;
-    // probe them once for the whole run.
-    let source_params = match (output_format, video_cut_mode) {
-        (OutputFormat::Video | OutputFormat::Both, VideoCutMode::Smart) => {
-            Some(cut::probe_source_video_params(input_file)?)
-        }
-        _ => None,
-    };
-
     let mut song_counter = 0;
     let mut gap_counter = 0;
 
+    // Track song timestamps so we can derive interludes after song extraction.
+    let mut song_timestamps: Vec<SongTimestamp> = Vec::new();
+
     for segment in segments.iter() {
         if !segment.segment.is_song {
-            // Optionally process gaps
+            // Gaps between songs that came from the legacy is_song=false path.
+            // In --timestamps-file mode all segments are songs so this branch is
+            // unreachable; kept for backwards-compatibility with analysis mode.
             gap_counter += 1;
-            // let output_file = format!("gap_{:02}.mp4", gap_counter);
-
             println!(
                 "ignoring gap {}: {:.2}s to {:.2}s",
                 gap_counter, segment.segment.start_time, segment.segment.end_time
             );
-
-            // extract_segment(input_file, &output_file, segment.segment.start_time, segment.segment.end_time, None, None, None)?;
             continue;
         }
 
@@ -1108,7 +1252,9 @@ fn process_segments(
             &songs[song_counter - 1].title
         } else {
             // Fallback if we have more segments than songs
-            println!("Warning: More song segments detected than provided in setlist. Using default naming.");
+            println!(
+                "Warning: More song segments detected than provided in setlist. Using default naming."
+            );
             &format!("song_{}", song_counter)
         };
 
@@ -1117,7 +1263,7 @@ fn process_segments(
 
         println!(
             "Extracting {:#?} for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
-            &output_format,
+            &ctx.output_format,
             song_counter,
             song_title,
             segment.segment.start_time,
@@ -1125,58 +1271,56 @@ fn process_segments(
             segment.segment.end_time - segment.segment.start_time
         );
 
-        match output_format {
-            OutputFormat::Video | OutputFormat::Both => {
-                let output_file = format!("{}/{}.mp4", output_dir, safe_title);
+        extract_track(
+            &ctx,
+            &safe_title,
+            segment.segment.start_time,
+            segment.segment.end_time,
+            song_title,
+            Some(song_counter),
+        )?;
 
-                match &source_params {
-                    Some(params) => cut::extract_segment_smart(
-                        input_file,
-                        &output_file,
-                        segment.segment.start_time,
-                        segment.segment.end_time,
-                        params,
-                        Some(song_title),
-                        &concert,
-                        Some(song_counter), // Add song number as track metadata
-                    )?,
-                    None => cut::extract_segment(
-                        input_file,
-                        &output_file,
-                        segment.segment.start_time,
-                        segment.segment.end_time,
-                        video_cut_mode,
-                        Some(song_title),
-                        &concert,
-                        Some(song_counter), // Add song number as track metadata
-                    )?,
-                }
-            }
-            _ => {}
-        }
-
-        match output_format {
-            OutputFormat::Audio | OutputFormat::Both => {
-                let output_file = format!("{}/{}.m4a", output_dir, safe_title);
-
-                ffmpeg::extract_audio_segment(
-                    input_file,
-                    &output_file,
-                    segment.segment.start_time,
-                    segment.segment.end_time,
-                    Some(song_title),
-                    &concert,
-                    Some(song_counter), // Add song number as track metadata
-                )?;
-            }
-            _ => {}
-        }
+        song_timestamps.push(SongTimestamp {
+            title: song_title.to_string(),
+            start_time: segment.segment.start_time,
+            end_time: segment.segment.end_time,
+            duration: segment.segment.end_time - segment.segment.start_time,
+        });
     }
 
     println!(
         "Successfully extracted {} songs and {} gaps",
         song_counter, gap_counter
     );
+
+    // Emit interlude tracks for every uncovered span in [0, media_duration].
+    if emit_interludes {
+        remove_stale_interlude_files(ctx.output_dir)?;
+        let interludes = derive_interludes(&song_timestamps, media_duration);
+        println!(
+            "Emitting {} interlude track(s) to cover the full timeline",
+            interludes.len()
+        );
+        for interlude in &interludes {
+            let stem = interlude_filename_stem(interlude.index);
+            println!(
+                "Extracting interlude {}: {:.2}s to {:.2}s (duration: {:.2}s)",
+                interlude.index,
+                interlude.start_time,
+                interlude.end_time,
+                interlude.end_time - interlude.start_time,
+            );
+            extract_track(
+                &ctx,
+                &stem,
+                interlude.start_time,
+                interlude.end_time,
+                "interlude",
+                None, // no track number for interludes
+            )?;
+        }
+    }
+
     Ok(())
 }
 

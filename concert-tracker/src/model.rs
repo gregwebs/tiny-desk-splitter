@@ -55,6 +55,53 @@ pub fn find_track_file(working_dir: &Path, album: &str, title: &str) -> Option<S
     None
 }
 
+/// Return true if an interlude file for `index` exists on disk (either `.mp4`
+/// or `.m4a`). Uses [`concert_types::interlude_filename_stem`] so the name
+/// always matches what the splitter writes.
+pub fn find_interlude_file(working_dir: &Path, album: &str, index: usize) -> bool {
+    let stem = concert_types::interlude_filename_stem(index);
+    let dir = concert_dir(working_dir, album);
+    for ext in &["mp4", "m4a"] {
+        if dir.join(format!("{stem}.{ext}")).exists() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Determine whether the original source file is **fully redundant** — every
+/// second of `[0, media_duration]` is covered by a present song track or an
+/// interlude file on disk, so the source can be safely deleted.
+///
+/// Returns `false` (fails closed) when:
+/// - `media_duration` is absent (not yet persisted),
+/// - `user_split_timestamps` are absent (no user split has been done),
+/// - any song track is missing (`tracks_present` has a `false`),
+/// - any required interlude file is not on disk.
+///
+/// `working_dir` and `album` are needed to probe interlude files on disk.
+pub fn source_redundant(
+    working_dir: &Path,
+    album: &str,
+    tracks_present: &[bool],
+    user_split_timestamps: Option<&[concert_types::SongTimestamp]>,
+    media_duration: Option<f64>,
+) -> bool {
+    let Some(duration) = media_duration else {
+        return false;
+    };
+    let Some(songs) = user_split_timestamps else {
+        return false;
+    };
+    if tracks_present.iter().any(|&p| !p) {
+        return false;
+    }
+    let interludes = concert_types::derive_interludes(songs, duration);
+    interludes
+        .iter()
+        .all(|il| find_interlude_file(working_dir, album, il.index))
+}
+
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
     pub index: usize,
@@ -316,6 +363,9 @@ pub struct Concert {
     pub metadata_scraped_at: Option<String>,
     pub tracks_present: Vec<bool>,
     pub tracks_liked: Vec<bool>,
+    /// Persisted source duration in seconds (from ffprobe at user-split time).
+    /// Survives source-file deletion so the coverage gate remains functional.
+    pub media_duration: Option<f64>,
 }
 
 impl Concert {
@@ -578,6 +628,7 @@ mod tests {
             metadata_scraped_at: None,
             tracks_present: vec![],
             tracks_liked: vec![],
+            media_duration: None,
         }
     }
 
@@ -1275,5 +1326,125 @@ mod tests {
     fn find_track_file_returns_none_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(find_track_file(dir.path(), "No Album", "No Song"), None);
+    }
+
+    // ---------- source_redundant tests ----------
+
+    fn make_song(start: f64, end: f64) -> concert_types::SongTimestamp {
+        concert_types::SongTimestamp {
+            title: "s".to_string(),
+            start_time: start,
+            end_time: end,
+            duration: end - start,
+        }
+    }
+
+    #[test]
+    fn source_redundant_fails_closed_when_no_media_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let songs = vec![make_song(0.0, 100.0)];
+        assert!(!source_redundant(
+            dir.path(),
+            "Album",
+            &[true],
+            Some(&songs),
+            None
+        ));
+    }
+
+    #[test]
+    fn source_redundant_fails_closed_when_no_user_timestamps() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!source_redundant(
+            dir.path(),
+            "Album",
+            &[true],
+            None,
+            Some(100.0)
+        ));
+    }
+
+    #[test]
+    fn source_redundant_false_when_a_song_track_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let songs = vec![make_song(0.0, 50.0), make_song(50.0, 100.0)];
+        // tracks_present says second track is missing
+        assert!(!source_redundant(
+            dir.path(),
+            "Album",
+            &[true, false],
+            Some(&songs),
+            Some(100.0)
+        ));
+    }
+
+    #[test]
+    fn source_redundant_true_when_full_coverage_no_gaps() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Full Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        // Songs cover [0, 200] with no gaps — no interlude files needed.
+        let songs = vec![make_song(0.0, 100.0), make_song(100.0, 200.0)];
+        assert!(source_redundant(
+            dir.path(),
+            album,
+            &[true, true],
+            Some(&songs),
+            Some(200.0)
+        ));
+    }
+
+    #[test]
+    fn source_redundant_false_when_interlude_file_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Gap Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        // Song covers [5, 100]; head gap [0, 5) needs an interlude file.
+        let songs = vec![make_song(5.0, 100.0)];
+        assert!(!source_redundant(
+            dir.path(),
+            album,
+            &[true],
+            Some(&songs),
+            Some(100.0)
+        ));
+    }
+
+    #[test]
+    fn source_redundant_true_when_all_interlude_files_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Gap Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        // Head gap [0, 5] + tail gap [95, 100] — two interlude files needed.
+        let songs = vec![make_song(5.0, 95.0)];
+        // Write interlude_01.mp4 (head) and interlude_02.mp4 (tail).
+        std::fs::write(cd.join("interlude_01.mp4"), b"data").unwrap();
+        std::fs::write(cd.join("interlude_02.mp4"), b"data").unwrap();
+
+        assert!(source_redundant(
+            dir.path(),
+            album,
+            &[true],
+            Some(&songs),
+            Some(100.0)
+        ));
+    }
+
+    #[test]
+    fn find_interlude_file_finds_mp4_and_m4a() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        assert!(!find_interlude_file(dir.path(), album, 1));
+        std::fs::write(cd.join("interlude_01.m4a"), b"audio").unwrap();
+        assert!(find_interlude_file(dir.path(), album, 1));
     }
 }

@@ -42,6 +42,7 @@ stringmetrics = "2.2.2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 anyhow = "1.0.97"
 concert-types = { path = "../concert-types" }
+regex = "1"
 unidecode = "0.3.0"
 leptess = { version = "0.14", optional = true }
 

@@ -60,6 +60,10 @@ pub fn router(state: AppState) -> Router {
             "/concerts/:id/split-timestamps/reset",
             post(handlers::reset_split_timestamps),
         )
+        .route(
+            "/concerts/:id/delete-redundant-source",
+            post(handlers::delete_redundant_source),
+        )
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/watch", post(handlers::watch))
         .route("/concerts/:id/media-info", get(handlers::media_info))

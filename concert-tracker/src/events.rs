@@ -29,6 +29,9 @@ pub enum Event {
     SplitTimestampsUser,
     /// User timestamps cleared; tracks reset to automated boundaries.
     SplitTimestampsReset,
+    /// The original source file was deleted after full interlude coverage was
+    /// confirmed (distinct from DownloadDelete for a clean audit trail).
+    SourceRedundantDelete,
 }
 
 impl Event {
@@ -59,6 +62,7 @@ impl Event {
             Event::Watch => "watch",
             Event::SplitTimestampsUser => "split_timestamps_user",
             Event::SplitTimestampsReset => "split_timestamps_reset",
+            Event::SourceRedundantDelete => "source_redundant_delete",
         }
     }
 }

@@ -191,7 +191,13 @@ pub struct DownloadJob {
 #[derive(Clone)]
 pub enum SplitMode {
     Analyze,
-    UserTimestamps(crate::split_timestamps::ValidatedTimestamps),
+    /// User-supplied timestamps plus the source media duration (from ffprobe at
+    /// handler time). The duration is needed so the splitter can derive and cut
+    /// interlude files that cover the full `[0, media_duration]` timeline.
+    UserTimestamps {
+        ts: crate::split_timestamps::ValidatedTimestamps,
+        media_duration: f64,
+    },
     /// Reset to automated timestamps; the ValidatedTimestamps were resolved by the handler.
     ResetToAuto(crate::split_timestamps::ValidatedTimestamps),
 }
@@ -200,7 +206,7 @@ impl SplitMode {
     pub fn name(&self) -> &'static str {
         match self {
             SplitMode::Analyze => "analyze",
-            SplitMode::UserTimestamps(_) => "user-timestamps",
+            SplitMode::UserTimestamps { .. } => "user-timestamps",
             SplitMode::ResetToAuto(_) => "reset-to-auto",
         }
     }
@@ -339,6 +345,13 @@ impl JobConfig {
                 // rewrite timestamps.json, preserving the automated record.
                 if let Some(ts_path) = &job.timestamps_path {
                     cmd.arg("--timestamps-file").arg(ts_path);
+                }
+                // For user-timestamps splits, also cut interlude files so the
+                // full [0, media_duration] timeline is covered on disk.
+                if let SplitMode::UserTimestamps { media_duration, .. } = &job.mode {
+                    cmd.arg("--emit-interludes")
+                        .arg("--media-duration")
+                        .arg(media_duration.to_string());
                 }
                 cmd
             }),

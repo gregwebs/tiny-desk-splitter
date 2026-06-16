@@ -78,6 +78,9 @@ fn run_migrations(conn: &Connection) -> Result<()> {
     add_column_if_missing(conn, "concerts", "downloaded_extension", "TEXT")?;
     add_column_if_missing(conn, "concerts", "auto_split_timestamps_json", "TEXT")?;
     add_column_if_missing(conn, "concerts", "user_split_timestamps_json", "TEXT")?;
+    // Persisted source duration in seconds (from ffprobe at user-split time).
+    // Survives source-file deletion so the coverage gate stays functional.
+    add_column_if_missing(conn, "concerts", "media_duration", "REAL")?;
     add_column_if_missing(
         conn,
         "settings",
@@ -322,6 +325,7 @@ fn concert_from_row(row: &Row) -> rusqlite::Result<Concert> {
         tracks_liked: tracks_liked_json
             .and_then(|j| serde_json::from_str(&j).ok())
             .unwrap_or_default(),
+        media_duration: row.get("media_duration")?,
     })
 }
 
@@ -672,6 +676,27 @@ pub fn clear_user_split_timestamps(conn: &Connection, id: i64) -> Result<()> {
     if was_set {
         events::record_now(conn, id, Event::SplitTimestampsReset, None);
     }
+    Ok(())
+}
+
+/// Persist the source-file duration in seconds. This is set at user-split time
+/// and survives source-file deletion so the coverage gate stays functional.
+/// Only stores a new value when it is a finite, positive number, and **never
+/// overwrites an existing good value with NULL or a bad value** (fail-closed).
+pub fn set_media_duration(conn: &Connection, id: i64, duration: f64) -> Result<()> {
+    if !duration.is_finite() || duration <= 0.0 {
+        return Err(anyhow::anyhow!(
+            "set_media_duration: invalid duration {duration}"
+        ));
+    }
+    conn.execute(
+        "UPDATE concerts
+         SET media_duration = ?1
+         WHERE id = ?2
+           AND (media_duration IS NULL OR media_duration <= 0)",
+        params![duration, id],
+    )
+    .context("Failed to set media_duration")?;
     Ok(())
 }
 
@@ -3485,6 +3510,48 @@ pub mod tests {
         // No split state at all
         let candidates = list_resplit_candidates(&conn).unwrap();
         assert!(candidates.is_empty());
+    }
+
+    #[test]
+    fn set_media_duration_roundtrip() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+
+        // Initial value is None.
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.media_duration.is_none());
+
+        // Persist a valid duration.
+        set_media_duration(&conn, id, 180.5).unwrap();
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(c.media_duration, Some(180.5));
+    }
+
+    #[test]
+    fn set_media_duration_rejects_invalid() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        assert!(set_media_duration(&conn, id, f64::NAN).is_err());
+        assert!(set_media_duration(&conn, id, -1.0).is_err());
+        assert!(set_media_duration(&conn, id, 0.0).is_err());
+    }
+
+    #[test]
+    fn set_media_duration_never_overwrites_good_value_with_bad() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+
+        // Write a good value first.
+        set_media_duration(&conn, id, 200.0).unwrap();
+        // A second write (simulating a best-effort GET-path persist) should not
+        // overwrite the existing good value.
+        set_media_duration(&conn, id, 150.0).unwrap(); // silently no-ops
+        let c = get_concert(&conn, id).unwrap();
+        assert_eq!(
+            c.media_duration,
+            Some(200.0),
+            "original value must be preserved"
+        );
     }
 
     #[test]

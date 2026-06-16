@@ -122,7 +122,11 @@ pub async fn start_split(
     // For user/reset modes, validate that the provided timestamps still match the
     // current set_list (a concurrent re-scrape may have changed it since the handler
     // read it). This check is advisory — validation already ran in the handler.
-    if let SplitMode::UserTimestamps(ts) | SplitMode::ResetToAuto(ts) = &mode {
+    let mode_ts = match &mode {
+        SplitMode::UserTimestamps { ts, .. } | SplitMode::ResetToAuto(ts) => Some(ts),
+        SplitMode::Analyze => None,
+    };
+    if let Some(ts) = mode_ts {
         if ts.songs().len() != concert.set_list.len() {
             let e = anyhow::anyhow!(
                 "Timestamp count {} does not match set_list length {} for concert {}",
@@ -162,7 +166,7 @@ pub async fn start_split(
             // For user/reset modes, write the timestamps to a temp file for --timestamps-file.
             let (ts_temp, ts_path) = match &mode {
                 SplitMode::Analyze => (None, None),
-                SplitMode::UserTimestamps(ts) | SplitMode::ResetToAuto(ts) => {
+                SplitMode::UserTimestamps { ts, .. } | SplitMode::ResetToAuto(ts) => {
                     let file = write_timestamps_file(ts)?;
                     let path = file.path().to_path_buf();
                     (Some(file), Some(path))
@@ -247,6 +251,38 @@ pub async fn start_split(
     Ok(StartOutcome::Spawned)
 }
 
+/// Remove any interlude files (`interlude_NN.mp4|.m4a`) from `output_dir`.
+/// Called before a split that will NOT emit interludes (Analyze / ResetToAuto)
+/// so stale files from a previous user-split do not mislead the coverage gate.
+fn remove_stale_interlude_files(output_dir: &std::path::Path) {
+    let pattern =
+        regex::Regex::new(r"^interlude_\d{2}\.(mp4|m4a)$").expect("static regex is valid");
+    let dir = match std::fs::read_dir(output_dir) {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(e) => {
+            tracing::warn!(
+                "could not open {} to purge stale interludes: {}",
+                output_dir.display(),
+                e
+            );
+            return;
+        }
+    };
+    for entry in dir.flatten() {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if pattern.is_match(&name_str) {
+            let path = entry.path();
+            if let Err(e) = std::fs::remove_file(&path) {
+                tracing::warn!("could not remove stale interlude {}: {}", path.display(), e);
+            } else {
+                tracing::info!("removed stale interlude file: {}", path.display());
+            }
+        }
+    }
+}
+
 fn write_timestamps_file(ts: &ValidatedTimestamps) -> Result<NamedTempFile> {
     let file_data = ts.to_timestamps_file();
     let json = serde_json::to_string(&file_data)?;
@@ -318,6 +354,17 @@ async fn run_split(
         concert_id,
         kind: JobKind::Split,
     };
+
+    // For modes that do NOT emit interludes (Analyze and ResetToAuto), purge any
+    // interlude files left over from a previous user split. This keeps the output
+    // directory consistent: after a Reset or re-Analysis the source is no longer
+    // "fully covered", so stale interludes must not mislead the coverage gate.
+    // The UserTimestamps splitter invocation handles its own stale cleanup via
+    // `--emit-interludes` (which calls `remove_stale_interlude_files` internally).
+    if !matches!(job.mode, SplitMode::UserTimestamps { .. }) {
+        remove_stale_interlude_files(&job.output_dir);
+    }
+
     let cmd = (config.split_cmd)(&job);
 
     let log_dir = config.log_dir();
@@ -389,11 +436,20 @@ async fn run_split(
                             }
                         }
                     }
-                    SplitMode::UserTimestamps(ts) => {
+                    SplitMode::UserTimestamps { ts, media_duration } => {
                         if let Err(e) = db::set_user_split_timestamps(&conn, concert_id, ts.songs())
                         {
                             tracing::warn!(
                                 "failed to store user timestamps for concert {}: {}",
+                                concert_id,
+                                e
+                            );
+                        }
+                        // Persist media_duration so the coverage gate survives
+                        // source-file deletion. Never overwrites a good value.
+                        if let Err(e) = db::set_media_duration(&conn, concert_id, *media_duration) {
+                            tracing::warn!(
+                                "failed to store media_duration for concert {}: {}",
                                 concert_id,
                                 e
                             );
@@ -756,7 +812,10 @@ mod tests {
             registry.clone(),
             config,
             1,
-            SplitMode::UserTimestamps(ts),
+            SplitMode::UserTimestamps {
+                ts,
+                media_duration: 200.0,
+            },
         )
         .await
         .unwrap();
@@ -810,7 +869,10 @@ mod tests {
             registry,
             config,
             1,
-            SplitMode::UserTimestamps(ts),
+            SplitMode::UserTimestamps {
+                ts,
+                media_duration: 90.0,
+            },
         )
         .await
         .unwrap_err();

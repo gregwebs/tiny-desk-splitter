@@ -106,6 +106,9 @@ struct RowTemplate {
     /// `toggleTracks()` expects; non-empty is used by `delete_track` so the
     /// card swap keeps the list open and the tracks-button count fresh.
     tracks: Vec<TrackInfo>,
+    /// True when the original source file is fully redundant and can be safely
+    /// deleted (all song tracks + all interlude files present on disk).
+    source_redundant: bool,
 }
 
 #[derive(Template)]
@@ -366,14 +369,26 @@ fn split_queued(state: &AppState, id: i64) -> bool {
 /// (hx-preserve'd) JS player. Embedding the tracks keeps a hover-visible track
 /// list populated across the swap. Mirrors `status_row`.
 fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
-    let concert = {
+    let (concert, stored_ts) = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::get_split_timestamps(&conn, id)
+            .map(|s| s.user)
+            .unwrap_or(None);
+        (concert, stored_ts)
     };
     let tracks = crate::model::list_all_tracks_from_db(
         &concert.set_list,
         &concert.tracks_present,
         &concert.tracks_liked,
+    );
+    let album = concert.album.as_deref().unwrap_or("");
+    let source_redundant = crate::model::source_redundant(
+        &state.jobs.working_dir,
+        album,
+        &concert.tracks_present,
+        stored_ts.as_deref(),
+        concert.media_duration,
     );
     render_row_inner(
         &concert,
@@ -382,6 +397,7 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         scrape_pending(state, id),
         split_queued(state, id),
         tracks,
+        source_redundant,
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
@@ -397,6 +413,8 @@ fn render_row(
     scrape_pending: bool,
     split_queued: bool,
 ) -> Result<String, askama::Error> {
+    // Listing cards don't show the delete-redundant-source button;
+    // compute source_redundant as false to avoid the extra DB read.
     render_row_inner(
         c,
         has_archive_location,
@@ -404,6 +422,7 @@ fn render_row(
         scrape_pending,
         split_queued,
         vec![],
+        false,
     )
 }
 
@@ -417,9 +436,19 @@ fn render_detail_card(
     c: &Concert,
     has_archive_location: bool,
     split_queued: bool,
+    stored_user_ts: Option<&[concert_types::SongTimestamp]>,
+    working_dir: &std::path::Path,
 ) -> Result<String, askama::Error> {
     let tracks =
         crate::model::list_all_tracks_from_db(&c.set_list, &c.tracks_present, &c.tracks_liked);
+    let album = c.album.as_deref().unwrap_or("");
+    let source_redundant = crate::model::source_redundant(
+        working_dir,
+        album,
+        &c.tracks_present,
+        stored_user_ts,
+        c.media_duration,
+    );
     render_row_inner(
         c,
         has_archive_location,
@@ -427,6 +456,7 @@ fn render_detail_card(
         false,
         split_queued,
         tracks,
+        source_redundant,
     )
 }
 
@@ -437,6 +467,7 @@ fn render_row_inner(
     scrape_pending: bool,
     split_queued: bool,
     tracks: Vec<TrackInfo>,
+    source_redundant: bool,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
@@ -503,6 +534,7 @@ fn render_row_inner(
         card_image_url,
         scrape_pending,
         tracks,
+        source_redundant,
     }
     .render()
 }
@@ -635,10 +667,23 @@ pub async fn detail(
 
     let has_al = has_archive_location(&state);
     let queued = split_queued(&state, id);
+    // Fetch user split timestamps for the source-redundant gate.
+    let stored_user_ts = {
+        let conn = state.db.lock().unwrap();
+        db::get_split_timestamps(&conn, id)
+            .map(|s| s.user)
+            .unwrap_or(None)
+    };
     // The card embeds the track list (always visible on the detail page), so
     // there is no separate tracks section to populate.
-    let card_html = render_detail_card(&concert, has_al, queued)
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let card_html = render_detail_card(
+        &concert,
+        has_al,
+        queued,
+        stored_user_ts.as_deref(),
+        &state.jobs.working_dir,
+    )
+    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
     let notes_value = concert.notes.clone().unwrap_or_default();
     let events = {
         let conn = state.db.lock().unwrap();
@@ -1020,6 +1065,101 @@ pub async fn delete_download(
     // so the persistent JS player keeps playing. The initial trash button targets
     // `this` and the confirm button targets `.delete-confirm`, so retarget both to
     // the whole card by id.
+    let body = render_card(&state, id)?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "content-type",
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(
+        "HX-Retarget",
+        HeaderValue::from_str(&format!("#concert-{id}"))
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
+    );
+    headers.insert("HX-Reswap", HeaderValue::from_static("outerHTML"));
+    Ok((headers, body).into_response())
+}
+
+/// Delete the original source (downloaded concert) file once it is fully
+/// redundant — every second of `[0, media_duration]` is covered by song tracks
+/// + interlude files on disk.
+///
+/// Returns 409 Conflict when the coverage gate fails (gate is re-checked
+/// server-side, not trusted from the client). On success, clears download state
+/// and refreshes the concert card like `delete_download` does.
+pub async fn delete_redundant_source(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Response, AppError> {
+    let (concert, source_path) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let source_path = concert
+            .album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
+        (concert, source_path)
+    };
+
+    // Re-check gate server-side (fail closed).
+    let album = concert.album.as_deref().unwrap_or("");
+    let stored_ts = {
+        let conn = state.db.lock().unwrap();
+        db::get_split_timestamps(&conn, id)
+            .map_err(AppError::Internal)?
+            .user
+    };
+    let is_redundant = crate::model::source_redundant(
+        &state.jobs.working_dir,
+        album,
+        &concert.tracks_present,
+        stored_ts.as_deref(),
+        concert.media_duration,
+    );
+    if !is_redundant {
+        return Ok((
+            StatusCode::CONFLICT,
+            "Source file is not yet fully covered by song and interlude tracks; cannot delete.",
+        )
+            .into_response());
+    }
+
+    tracing::info!(
+        "delete-redundant-source: source is fully covered for concert {} ({})",
+        id,
+        concert.title
+    );
+
+    if let Some(p) = source_path {
+        if let Err(e) = std::fs::remove_file(&p) {
+            tracing::warn!(
+                "delete-redundant-source failed to remove {} for concert {}: {}",
+                p.display(),
+                id,
+                e
+            );
+            return Err(AppError::Internal(anyhow::anyhow!(
+                "Failed to remove {}: {}",
+                p.display(),
+                e
+            )));
+        }
+        tracing::info!(
+            "delete-redundant-source removed {} for concert {}",
+            p.display(),
+            id
+        );
+    }
+
+    {
+        let conn = state.db.lock().unwrap();
+        db::clear_download_state(&conn, id)?;
+        // Record a distinct event for auditing (separate from DownloadDelete).
+        crate::events::record_now(&conn, id, crate::events::Event::SourceRedundantDelete, None);
+    }
+
+    tracing::info!("delete-redundant-source completed for concert {}", id);
+
     let body = render_card(&state, id)?;
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -2010,7 +2150,7 @@ pub async fn get_split_timestamps(
 ) -> Result<Json<SplitTimestampsResponse>, AppError> {
     // Gather everything that needs the DB lock first, then release it before the
     // async ffprobe call (the MutexGuard must not be held across an await).
-    let (set_list, auto, user, source_path) = {
+    let (set_list, auto, user, source_path, stored_media_duration) = {
         let conn = state.db.lock().unwrap();
         let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         let auto = auto_timestamps_with_backfill(&conn, &state.jobs.working_dir, &concert)
@@ -2020,20 +2160,32 @@ pub async fn get_split_timestamps(
             .album
             .as_deref()
             .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
-        (concert.set_list, auto, stored.user, source_path)
+        (
+            concert.set_list,
+            auto,
+            stored.user,
+            source_path,
+            concert.media_duration,
+        )
     };
 
-    // Best-effort duration: degrade to None (editor falls back to the last end
-    // time) rather than failing the whole request if ffprobe is missing/errors.
+    // Best-effort duration: prefer a fresh ffprobe of the source (most accurate),
+    // then fall back to the persisted value from the last user-split (survives
+    // source-file deletion), then degrade to None (editor falls back to the last
+    // end time) rather than failing the whole request.
     let media_duration = match source_path {
         Some(path) => match ffprobe_duration(&path).await {
             Ok(d) => Some(d),
             Err(e) => {
-                tracing::warn!("ffprobe failed for {}: {}", path.display(), e);
-                None
+                tracing::warn!(
+                    "ffprobe failed for {}: {}; falling back to stored duration",
+                    path.display(),
+                    e
+                );
+                stored_media_duration
             }
         },
-        None => None,
+        None => stored_media_duration,
     };
 
     Ok(Json(SplitTimestampsResponse {
@@ -2120,7 +2272,10 @@ pub async fn set_split_timestamps(
         state.registry.clone(),
         state.jobs.clone(),
         id,
-        SplitMode::UserTimestamps(validated),
+        SplitMode::UserTimestamps {
+            ts: validated,
+            media_duration,
+        },
     )
     .await
     .map_err(AppError::Internal)?;
@@ -2845,7 +3000,8 @@ mod tests {
         assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
 
         // Detail-page card uses the full-size preview image instead.
-        let detail_html = render_detail_card(&concert, false, false).unwrap();
+        let detail_html =
+            render_detail_card(&concert, false, false, None, std::path::Path::new("/tmp")).unwrap();
         assert!(
             detail_html.contains("class=\"card-thumb\""),
             "html: {detail_html}"
@@ -2937,7 +3093,7 @@ mod tests {
 
         // has_archive_location = true: the delete-path card render must keep
         // the archive context (Archive button) alongside the embedded list.
-        let html = render_row_inner(&concert, true, None, false, false, tracks).unwrap();
+        let html = render_row_inner(&concert, true, None, false, false, tracks, false).unwrap();
         assert!(html.contains("card-tracks-box"), "html: {html}");
         assert!(html.contains("track-list"), "html: {html}");
         assert!(html.contains("(3/4)"), "html: {html}");

@@ -87,6 +87,12 @@
         {% if can_delete_download %}
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML"><span class="icon-trash"></span></button>
         {% endif %}
+        {% if source_redundant && can_listen %}
+          <button class="btn-delete btn-delete-redundant" title="Delete redundant source file (all content preserved in song + interlude tracks)"
+                  hx-post="/concerts/{{ id }}/delete-redundant-source"
+                  hx-target="#concert-{{ id }}"
+                  hx-swap="outerHTML">🗑️ Source redundant</button>
+        {% endif %}
         <button class="btn-add-pl-concert" title="Add to playlist"
                 data-label="{{ title }}"
                 onclick="window.Playlists&&Playlists.openAdd({type:'concert',concertId:{{ id }},label:this.getAttribute('data-label')})">+</button>

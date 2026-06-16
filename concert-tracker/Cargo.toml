@@ -33,6 +33,7 @@ tiny-desk-scraper = { path = "../scraper" }
 concert-types = { path = "../concert-types" }
 which = "7"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
+regex = "1"
 
 [dev-dependencies]
 tower = { version = "0.4", features = ["util"] }
