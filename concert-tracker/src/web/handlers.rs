@@ -1884,9 +1884,35 @@ pub async fn unarchive(
     Ok((headers, "").into_response())
 }
 
+/// Build the `path` component for the post-sync `HX-Location` redirect,
+/// preserving any `filter` query param that was active when the user clicked
+/// Sync. htmx sends the page URL via the `HX-Current-URL` request header.
+///
+/// Returns `"/"` when no active filter, `"/?filter={val}"` otherwise.
+fn sync_location_path(current_url: Option<&str>) -> String {
+    let filter = current_url
+        .and_then(|url| url.find('?').map(|pos| &url[pos + 1..]))
+        .and_then(|query| {
+            query.split('&').find_map(|pair| {
+                let mut parts = pair.splitn(2, '=');
+                let key = parts.next()?;
+                let val = parts.next().unwrap_or("");
+                (key == "filter" && !val.is_empty()).then(|| val.to_owned())
+            })
+        })
+        .unwrap_or_default();
+
+    if filter.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/?filter={filter}")
+    }
+}
+
 pub async fn sync_month_handler(
     State(state): State<AppState>,
     Path((year, month)): Path<(i32, u32)>,
+    request_headers: HeaderMap,
 ) -> Result<impl IntoResponse, AppError> {
     tracing::info!("sync started for {}/{:02}", year, month);
 
@@ -1906,7 +1932,7 @@ pub async fn sync_month_handler(
     //    right away. The worker scrapes one concert at a time (no parallel NPR
     //    requests); each queued card renders a "loading…" placeholder and polls
     //    /concerts/:id/status until its thumbnail is ready. Enqueue happens BEFORE
-    //    we respond, so the post-HX-Refresh GET / sees these ids as pending.
+    //    we respond, so the post-sync GET / sees these ids as pending.
     let to_scrape = concerts_needing_scrape(&synced);
     let mut queued = 0usize;
     for (id, url) in to_scrape {
@@ -1923,12 +1949,29 @@ pub async fn sync_month_handler(
         queued
     );
 
+    // Swap only #content so the persistent music player keeps playing. We use
+    // HX-Location (htmx 1.9+) instead of HX-Refresh, which would force a full
+    // page reload and destroy #player-container outside #content.
+    //
+    // htmx sends the current page URL via HX-Current-URL so we can preserve
+    // any active ?filter= param in the location path.
+    let current_url = request_headers
+        .get("HX-Current-URL")
+        .and_then(|v| v.to_str().ok());
+    let path = sync_location_path(current_url);
+    let location = serde_json::json!({
+        "path": path,
+        "target": "#content",
+        "select": "#content",
+        "swap": "outerHTML show:window:top"
+    });
     let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((
-        headers,
-        format!("Synced {} concerts for {}/{:02}", synced_count, year, month),
-    ))
+    headers.insert(
+        "HX-Location",
+        HeaderValue::from_str(&location.to_string())
+            .expect("HX-Location value is always valid ASCII"),
+    );
+    Ok((headers, ""))
 }
 
 pub async fn player_js() -> impl IntoResponse {
@@ -3198,5 +3241,43 @@ mod tests {
         let c = archived_concert(&conn, "https://example.org/archived-b");
         // Falls through to default: not ignored → true.
         assert!(matches_filter(&c, "archived", false));
+    }
+
+    // ── sync_location_path ────────────────────────────────────────────────────
+
+    #[test]
+    fn sync_location_path_none_returns_root() {
+        assert_eq!(sync_location_path(None), "/");
+    }
+
+    #[test]
+    fn sync_location_path_no_query_returns_root() {
+        assert_eq!(sync_location_path(Some("http://localhost:3000/")), "/");
+    }
+
+    #[test]
+    fn sync_location_path_with_filter_preserves_it() {
+        assert_eq!(
+            sync_location_path(Some("http://localhost:3000/?filter=archived")),
+            "/?filter=archived"
+        );
+    }
+
+    #[test]
+    fn sync_location_path_filter_among_multiple_params() {
+        // filter= appears after another param
+        assert_eq!(
+            sync_location_path(Some("http://localhost:3000/?foo=bar&filter=liked")),
+            "/?filter=liked"
+        );
+    }
+
+    #[test]
+    fn sync_location_path_empty_filter_returns_root() {
+        // ?filter= with no value should not produce /?filter=
+        assert_eq!(
+            sync_location_path(Some("http://localhost:3000/?filter=")),
+            "/"
+        );
     }
 }

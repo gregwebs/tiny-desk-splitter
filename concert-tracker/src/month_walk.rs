@@ -6,7 +6,7 @@ fn render_month_divider(ym: &YearMonth, show_sync: bool) -> String {
     let label = ym.display_label();
     let sync_button = if show_sync {
         format!(
-            " <button hx-post='/sync/{}/{}' hx-target='#banner' hx-swap='innerHTML' hx-disabled-elt='this'>Sync</button>",
+            " <button hx-post='/sync/{}/{}' hx-disabled-elt='this'>Sync</button>",
             ym.year, ym.month
         )
     } else {
