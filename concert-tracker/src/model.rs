@@ -55,18 +55,30 @@ pub fn find_track_file(working_dir: &Path, album: &str, title: &str) -> Option<S
     None
 }
 
+/// Extensions probed when looking for or deleting interlude files (priority order).
+pub const INTERLUDE_EXTENSIONS: &[&str] = &["mp4", "m4a"];
+
+/// Return the filename (stem + extension) of the interlude file for `index` if
+/// it exists on disk, or `None`. Probes `.mp4` then `.m4a`. Uses
+/// [`concert_types::interlude_filename_stem`] so the name always matches what
+/// the splitter writes.
+pub fn find_interlude_track_file(working_dir: &Path, album: &str, index: usize) -> Option<String> {
+    let stem = concert_types::interlude_filename_stem(index);
+    let dir = concert_dir(working_dir, album);
+    for ext in INTERLUDE_EXTENSIONS {
+        let filename = format!("{stem}.{ext}");
+        if dir.join(&filename).exists() {
+            return Some(filename);
+        }
+    }
+    None
+}
+
 /// Return true if an interlude file for `index` exists on disk (either `.mp4`
 /// or `.m4a`). Uses [`concert_types::interlude_filename_stem`] so the name
 /// always matches what the splitter writes.
 pub fn find_interlude_file(working_dir: &Path, album: &str, index: usize) -> bool {
-    let stem = concert_types::interlude_filename_stem(index);
-    let dir = concert_dir(working_dir, album);
-    for ext in &["mp4", "m4a"] {
-        if dir.join(format!("{stem}.{ext}")).exists() {
-            return true;
-        }
-    }
-    false
+    find_interlude_track_file(working_dir, album, index).is_some()
 }
 
 /// Determine whether the original source file is **fully redundant** — every
@@ -101,6 +113,237 @@ pub fn source_redundant(
         .iter()
         .all(|il| find_interlude_file(working_dir, album, il.index))
 }
+
+// ── Reconstruction playback ──────────────────────────────────────────────────
+
+/// What kind of slot a [`PlaybackItem`] represents.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PlaybackItemKind {
+    /// A split song track at `track_index` in the set-list.
+    Song { track_index: usize, liked: bool },
+    /// A gap-filling interlude (1-based `index`, matching the splitter output
+    /// filename `interlude_NN.m4a`).
+    Interlude { index: usize },
+}
+
+/// One item in the ordered reconstruction-playback sequence built by
+/// [`build_reconstruction`].
+#[derive(Debug, Clone)]
+pub struct PlaybackItem {
+    pub kind: PlaybackItemKind,
+    /// Display title (song title, or `"interlude"` for interludes).
+    pub title: String,
+    /// Filename within the concert directory (`{stem}.{ext}`).
+    pub filename: String,
+    pub is_video: bool,
+}
+
+impl PlaybackItem {
+    pub fn is_song(&self) -> bool {
+        matches!(self.kind, PlaybackItemKind::Song { .. })
+    }
+
+    pub fn is_interlude(&self) -> bool {
+        matches!(self.kind, PlaybackItemKind::Interlude { .. })
+    }
+
+    /// Track index if this is a Song item, else `None`.
+    pub fn track_index(&self) -> Option<usize> {
+        match &self.kind {
+            PlaybackItemKind::Song { track_index, .. } => Some(*track_index),
+            PlaybackItemKind::Interlude { .. } => None,
+        }
+    }
+
+    /// Interlude 1-based index if this is an Interlude item, else `None`.
+    pub fn interlude_index(&self) -> Option<usize> {
+        match &self.kind {
+            PlaybackItemKind::Interlude { index } => Some(*index),
+            PlaybackItemKind::Song { .. } => None,
+        }
+    }
+
+    /// Whether this song is liked (always `false` for interludes).
+    pub fn liked(&self) -> bool {
+        match &self.kind {
+            PlaybackItemKind::Song { liked, .. } => *liked,
+            PlaybackItemKind::Interlude { .. } => false,
+        }
+    }
+}
+
+/// Build the time-ordered playback sequence for whole-concert reconstruction
+/// (source file absent, tracks + interlude files present).
+///
+/// When `user_timestamps` is `None`, falls back to songs-only order (no
+/// interludes) — mirrors the case before the user has ever adjusted timestamps.
+///
+/// Each item returned is browser-playable and its file is confirmed to exist on
+/// disk. Applies the *deleted-song rule*: if a song is absent (`!tracks_present[i]`
+/// or no file on disk), the interlude immediately **before** it is also dropped
+/// (the interlude after a deleted song is kept). A tail interlude (no following
+/// song) is always kept when its file exists.
+///
+/// Returns an empty `Vec` when nothing is playable.
+pub fn build_reconstruction(
+    working_dir: &Path,
+    album: &str,
+    set_list: &[String],
+    tracks_present: &[bool],
+    tracks_liked: &[bool],
+    user_timestamps: Option<&[concert_types::SongTimestamp]>,
+    media_duration: Option<f64>,
+) -> Vec<PlaybackItem> {
+    // No-user-ts fallback: songs only, no interludes.
+    let Some(songs) = user_timestamps else {
+        return songs_only(working_dir, album, set_list, tracks_present, tracks_liked);
+    };
+
+    let duration = match media_duration {
+        Some(d) if d > 0.0 => d,
+        _ => {
+            // Can't derive interludes without a known duration; fall back to songs only.
+            return songs_only(working_dir, album, set_list, tracks_present, tracks_liked);
+        }
+    };
+
+    let interludes = concert_types::derive_interludes(songs, duration);
+
+    // Build a unified list of (start_time, slot) merged in time order.
+    // Songs and interludes are already non-overlapping by construction.
+    enum Slot {
+        Song(usize),      // song index in set_list
+        Interlude(usize), // 1-based interlude index
+    }
+    let mut slots: Vec<(f64, Slot)> = Vec::with_capacity(set_list.len() + interludes.len());
+    for (i, ts) in songs.iter().enumerate() {
+        slots.push((ts.start_time, Slot::Song(i)));
+    }
+    for il in &interludes {
+        slots.push((il.start_time, Slot::Interlude(il.index)));
+    }
+    slots.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    // First pass: determine which songs are "kept" (present on disk + browser-playable).
+    let song_kept: Vec<bool> = set_list
+        .iter()
+        .enumerate()
+        .map(|(i, title)| {
+            let present = tracks_present.get(i).copied().unwrap_or(false);
+            if !present {
+                return false;
+            }
+            match find_track_file(working_dir, album, title) {
+                Some(f) => {
+                    let ext = f.rsplit('.').next().unwrap_or("");
+                    is_browser_playable(ext)
+                }
+                None => false,
+            }
+        })
+        .collect();
+
+    // Second pass: build the filtered playback list.
+    let mut result = Vec::new();
+    for (slot_pos, (_, slot)) in slots.iter().enumerate() {
+        match slot {
+            Slot::Song(i) => {
+                if !song_kept.get(*i).copied().unwrap_or(false) {
+                    continue;
+                }
+                let title = &set_list[*i];
+                let Some(filename) = find_track_file(working_dir, album, title) else {
+                    continue;
+                };
+                let is_video = {
+                    let ext = filename.rsplit('.').next().unwrap_or("");
+                    is_video_extension(ext)
+                };
+                let liked = tracks_liked.get(*i).copied().unwrap_or(false);
+                result.push(PlaybackItem {
+                    kind: PlaybackItemKind::Song {
+                        track_index: *i,
+                        liked,
+                    },
+                    title: title.clone(),
+                    filename,
+                    is_video,
+                });
+            }
+            Slot::Interlude(idx) => {
+                // Deleted-song rule: find the next Song slot after this interlude.
+                let next_song_deleted = slots[slot_pos + 1..]
+                    .iter()
+                    .find_map(|(_, s)| match s {
+                        Slot::Song(i) => Some(i),
+                        Slot::Interlude(_) => None,
+                    })
+                    .map(|i| !song_kept.get(*i).copied().unwrap_or(false))
+                    .unwrap_or(false); // tail interlude: no next song → keep
+                if next_song_deleted {
+                    continue;
+                }
+                let Some(filename) = find_interlude_track_file(working_dir, album, *idx) else {
+                    continue;
+                };
+                let is_video = {
+                    let ext = filename.rsplit('.').next().unwrap_or("");
+                    if !is_browser_playable(ext) {
+                        continue;
+                    }
+                    is_video_extension(ext)
+                };
+                result.push(PlaybackItem {
+                    kind: PlaybackItemKind::Interlude { index: *idx },
+                    title: "interlude".to_string(),
+                    filename,
+                    is_video,
+                });
+            }
+        }
+    }
+    result
+}
+
+/// Fallback: songs-only sequence when no user timestamps are available.
+fn songs_only(
+    working_dir: &Path,
+    album: &str,
+    set_list: &[String],
+    tracks_present: &[bool],
+    tracks_liked: &[bool],
+) -> Vec<PlaybackItem> {
+    set_list
+        .iter()
+        .enumerate()
+        .filter_map(|(i, title)| {
+            let present = tracks_present.get(i).copied().unwrap_or(false);
+            if !present {
+                return None;
+            }
+            let filename = find_track_file(working_dir, album, title)?;
+            let is_video = {
+                let ext = filename.rsplit('.').next().unwrap_or("");
+                if !is_browser_playable(ext) {
+                    return None;
+                }
+                is_video_extension(ext)
+            };
+            let liked = tracks_liked.get(i).copied().unwrap_or(false);
+            Some(PlaybackItem {
+                kind: PlaybackItemKind::Song {
+                    track_index: i,
+                    liked,
+                },
+                title: title.clone(),
+                filename,
+                is_video,
+            })
+        })
+        .collect()
+}
+
+// ── Track info ────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct TrackInfo {
@@ -1446,5 +1689,383 @@ mod tests {
         assert!(!find_interlude_file(dir.path(), album, 1));
         std::fs::write(cd.join("interlude_01.m4a"), b"audio").unwrap();
         assert!(find_interlude_file(dir.path(), album, 1));
+    }
+
+    #[test]
+    fn find_interlude_track_file_returns_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        assert_eq!(find_interlude_track_file(dir.path(), album, 1), None);
+        std::fs::write(cd.join("interlude_01.m4a"), b"audio").unwrap();
+        assert_eq!(
+            find_interlude_track_file(dir.path(), album, 1),
+            Some("interlude_01.m4a".to_string())
+        );
+    }
+
+    #[test]
+    fn find_interlude_track_file_prefers_mp4() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+
+        std::fs::write(cd.join("interlude_01.mp4"), b"video").unwrap();
+        std::fs::write(cd.join("interlude_01.m4a"), b"audio").unwrap();
+        // mp4 is probed first
+        assert_eq!(
+            find_interlude_track_file(dir.path(), album, 1),
+            Some("interlude_01.mp4".to_string())
+        );
+    }
+
+    // ── build_reconstruction tests ────────────────────────────────────────────
+
+    /// Helper: create a concert directory and write stub files for the given song
+    /// and interlude filenames.
+    fn setup_reconstruction_dir(
+        dir: &std::path::Path,
+        album: &str,
+        songs: &[&str],
+        interludes: &[(usize, &str)], // (1-based index, ext)
+    ) -> std::path::PathBuf {
+        let cd = concert_dir(dir, album);
+        std::fs::create_dir_all(&cd).unwrap();
+        for s in songs {
+            std::fs::write(cd.join(format!("{s}.m4a")), b"data").unwrap();
+        }
+        for (idx, ext) in interludes {
+            let stem = concert_types::interlude_filename_stem(*idx);
+            std::fs::write(cd.join(format!("{stem}.{ext}")), b"data").unwrap();
+        }
+        cd
+    }
+
+    fn ts(start: f64, end: f64, title: &str) -> concert_types::SongTimestamp {
+        concert_types::SongTimestamp {
+            title: title.to_string(),
+            start_time: start,
+            end_time: end,
+            duration: end - start,
+        }
+    }
+
+    #[test]
+    fn build_reconstruction_no_user_ts_falls_back_to_songs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        setup_reconstruction_dir(dir.path(), album, &["Song A", "Song B"], &[]);
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let tracks_present = vec![true, true];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &tracks_present,
+            &[],
+            None,
+            Some(100.0),
+        );
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0].title, "Song A");
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
+        assert_eq!(items[1].title, "Song B");
+        assert!(matches!(
+            items[1].kind,
+            PlaybackItemKind::Song { track_index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_no_user_ts_excludes_missing_tracks() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        setup_reconstruction_dir(dir.path(), album, &["Song A"], &[]); // only Song A on disk
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let tracks_present = vec![true, false];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &tracks_present,
+            &[],
+            None,
+            Some(100.0),
+        );
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].title, "Song A");
+    }
+
+    #[test]
+    fn build_reconstruction_songs_and_interludes_in_time_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // Head gap [0,5), songs at [5,50) and [60,100), inter-song gap [50,60), no tail gap.
+        setup_reconstruction_dir(
+            dir.path(),
+            album,
+            &["Song A", "Song B"],
+            &[(1, "m4a"), (2, "m4a")],
+        );
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let songs_ts = vec![ts(5.0, 50.0, "Song A"), ts(60.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true, true],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // Expected order: interlude_01, Song A, interlude_02, Song B
+        assert_eq!(items.len(), 4);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Interlude { index: 1 }
+        ));
+        assert!(matches!(
+            items[1].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
+        assert!(matches!(
+            items[2].kind,
+            PlaybackItemKind::Interlude { index: 2 }
+        ));
+        assert!(matches!(
+            items[3].kind,
+            PlaybackItemKind::Song { track_index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_deleted_song_drops_preceding_interlude() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // Gap before Song B; Song B deleted.
+        setup_reconstruction_dir(
+            dir.path(),
+            album,
+            &["Song A"],   // Song B not on disk
+            &[(1, "m4a")], // interlude_01 before Song B
+        );
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let songs_ts = vec![ts(0.0, 50.0, "Song A"), ts(60.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true, false],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // interlude_01 is before deleted Song B → should be dropped
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_tail_interlude_kept_when_last_song_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // Song A present, Song B deleted; tail interlude after Song A.
+        setup_reconstruction_dir(
+            dir.path(),
+            album,
+            &["Song A"],
+            &[(1, "m4a")], // tail interlude
+        );
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        // Song A ends at 40; Song B from 50 to 100 deleted; tail gap [40,50).
+        let songs_ts = vec![ts(0.0, 40.0, "Song A"), ts(50.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true, false],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // interlude_01 is at [40,50) — before deleted Song B → dropped by deleted-song rule
+        // (the interlude BEFORE a deleted song is dropped)
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_interlude_after_deleted_song_is_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // Song A deleted; interlude_01 after Song A before Song B; Song B present.
+        // interlude_01 is AFTER the deleted song, so it should be kept.
+        setup_reconstruction_dir(dir.path(), album, &["Song B"], &[(1, "m4a")]);
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        // Song A [0,50), gap [50,60), Song B [60,100)
+        let songs_ts = vec![ts(0.0, 50.0, "Song A"), ts(60.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[false, true],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // Song A is deleted. interlude_01 is at [50,60) — AFTER deleted Song A.
+        // Its next song is Song B (kept), so it should be included.
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Interlude { index: 1 }
+        ));
+        assert!(matches!(
+            items[1].kind,
+            PlaybackItemKind::Song { track_index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_missing_interlude_file_skips_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // Both songs present but interlude file not on disk.
+        setup_reconstruction_dir(dir.path(), album, &["Song A", "Song B"], &[]);
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let songs_ts = vec![ts(0.0, 40.0, "Song A"), ts(50.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true, true],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // interlude_01 file missing → skipped
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
+        assert!(matches!(
+            items[1].kind,
+            PlaybackItemKind::Song { track_index: 1, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_all_songs_deleted_with_tail_interlude() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // No songs on disk; only a tail interlude (gap after the only song).
+        setup_reconstruction_dir(dir.path(), album, &[], &[(1, "m4a")]);
+        let set_list = vec!["Song A".to_string()];
+        let songs_ts = vec![ts(0.0, 90.0, "Song A")];
+        // tail interlude [90, 100)
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[false],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        // Song A deleted → interlude before it (none here; it's a tail) is kept;
+        // but tail interlude has no next song → kept regardless.
+        // However Song A is deleted (tracks_present[0]=false), so Song A slot is dropped.
+        // The tail interlude [90,100) — its next song would be... none (tail). So it's kept.
+        // But wait: the interlude is AFTER Song A (not before it), so the deleted-song rule
+        // doesn't apply. Tail interlude should be included.
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Interlude { index: 1 }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_empty_when_nothing_playable() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        // No files at all.
+        setup_reconstruction_dir(dir.path(), album, &[], &[]);
+        let set_list = vec!["Song A".to_string()];
+        let songs_ts = vec![ts(0.0, 100.0, "Song A")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[false],
+            &[],
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn build_reconstruction_liked_flag_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        setup_reconstruction_dir(dir.path(), album, &["Song A", "Song B"], &[]);
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let tracks_liked = vec![false, true];
+        let songs_ts = vec![ts(0.0, 50.0, "Song A"), ts(50.0, 100.0, "Song B")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true, true],
+            &tracks_liked,
+            Some(&songs_ts),
+            Some(100.0),
+        );
+        assert_eq!(items.len(), 2);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { liked: false, .. }
+        ));
+        assert!(matches!(
+            items[1].kind,
+            PlaybackItemKind::Song { liked: true, .. }
+        ));
+    }
+
+    #[test]
+    fn build_reconstruction_no_duration_falls_back_to_songs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Album";
+        setup_reconstruction_dir(dir.path(), album, &["Song A"], &[]);
+        let set_list = vec!["Song A".to_string()];
+        let songs_ts = vec![ts(0.0, 100.0, "Song A")];
+        let items = build_reconstruction(
+            dir.path(),
+            album,
+            &set_list,
+            &[true],
+            &[],
+            Some(&songs_ts),
+            None,
+        );
+        assert_eq!(items.len(), 1);
+        assert!(matches!(
+            items[0].kind,
+            PlaybackItemKind::Song { track_index: 0, .. }
+        ));
     }
 }

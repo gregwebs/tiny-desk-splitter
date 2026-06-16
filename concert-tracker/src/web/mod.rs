@@ -64,6 +64,14 @@ pub fn router(state: AppState) -> Router {
             "/concerts/:id/delete-redundant-source",
             post(handlers::delete_redundant_source),
         )
+        .route(
+            "/concerts/:id/concert-playback",
+            get(handlers::concert_playback),
+        )
+        .route(
+            "/concerts/:id/interludes/:idx/delete",
+            post(handlers::delete_interlude),
+        )
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/watch", post(handlers::watch))
         .route("/concerts/:id/media-info", get(handlers::media_info))

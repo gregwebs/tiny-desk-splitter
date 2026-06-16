@@ -77,17 +77,17 @@ test.describe("interlude tracks and source-redundant gate", () => {
     const deleteBtn = page.locator(`#concert-${ID} .btn-delete-redundant`);
     await expect(deleteBtn).toBeVisible({ timeout: 5000 });
 
-    // "Play album" is visible because the source file is still present.
-    const playAlbum = page.locator(`#concert-${ID} button.btn-listen`);
-    await expect(playAlbum).toBeVisible();
+    // "Play concert" is visible because the source file is still present.
+    const playConcert = page.locator(`#concert-${ID} button.btn-play-concert`);
+    await expect(playConcert).toBeVisible();
 
     // Click the gated delete button.
     await deleteBtn.click();
 
-    // After deletion the card is swapped: source-redundant button disappears
-    // and "Play album" disappears (clear_download_state nulls downloaded_at).
+    // After deletion the card is swapped: source-redundant button disappears.
+    // "Play concert" stays visible — reconstruction mode kicks in since tracks remain.
     await expect(deleteBtn).toHaveCount(0);
-    await expect(playAlbum).toHaveCount(0);
+    await expect(playConcert).toBeVisible();
 
     // Song tracks are still present and playable.
     await expect(

@@ -3,7 +3,8 @@
 const Player = (() => {
   let audio = null;
   let bar = null;
-  let state = { concertId: null, trackIdx: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false };
+  let state = { concertId: null, trackIdx: null, isVideo: false, watchUrl: null, hasNext: false, hasPrev: false, liked: false, concert: null };
+  // state.concert = { id, items: [{kind, title, url, is_video, artist, track_index?, interlude_index?, liked}], pos } | null
   let queue = [];
   // Monotonic id minted once per playPlaylist call so a playlist's queued tracks
   // form one visually-grouped, separately-removable block. Lifetime-only — never
@@ -372,6 +373,11 @@ const Player = (() => {
   // its frozen last frame doesn't cover the page and block selecting another
   // track. Shared by the natural end-of-track and load-error dead ends.
   async function advanceOrCollapse() {
+    // Concert reconstruction mode: advance within the concert item list first.
+    if (state.concert) {
+      await advanceConcert();
+      return;
+    }
     if (await playFromQueue()) return;
     if (await playNextTrack()) return;
     hideVideoPanel();
@@ -677,9 +683,25 @@ const Player = (() => {
     findTrackButtons(concertId, trackIdx).forEach(b => b.classList.add("playing"));
   }
 
+  function markPlayingInterlude(concertId, interludeIdx) {
+    document.querySelectorAll(
+      `[data-concert-id="${concertId}"][data-interlude-idx="${interludeIdx}"]`
+    ).forEach(b => b.classList.add("playing"));
+  }
+
   function reapplyPlaying() {
     if (state.concertId == null) return;
-    if (!audio.paused) markPlaying(state.concertId, state.trackIdx);
+    if (!audio.paused) {
+      if (state.concert) {
+        const item = state.concert.items[state.concert.pos];
+        if (item && item.kind === "interlude") {
+          markPlaying(state.concertId, null); // clears without marking album btn
+          markPlayingInterlude(state.concert.id, item.interlude_index);
+          return;
+        }
+      }
+      markPlaying(state.concertId, state.trackIdx);
+    }
   }
 
   // The Watch (toggle inline video) and Open (launch system player) buttons only
@@ -837,21 +859,29 @@ const Player = (() => {
     }
   }
 
-  // There is "something next" when the queue is non-empty or the current track
-  // has a following track to auto-advance to. Disable the Next button otherwise
-  // so clicking it cannot stop the current track with nothing to replace it.
+  // There is "something next" when in concert mode with a next item, the queue
+  // is non-empty, or the current track has a following track to auto-advance to.
+  // Disable the Next button otherwise so clicking it cannot stop the current
+  // track with nothing to replace it.
   function updateNextButton() {
     const btn = document.getElementById("player-next");
     if (!btn) return;
-    btn.disabled = queue.length === 0 && !state.hasNext;
+    if (state.concert) {
+      btn.disabled = state.concert.pos + 1 >= state.concert.items.length;
+    } else {
+      btn.disabled = queue.length === 0 && !state.hasNext;
+    }
   }
 
-  // Disable the Back button when there is no earlier playable track to go to
-  // (the first track, or whole-album playback which has no per-track nav).
+  // Disable the Back button when there is no earlier item to go back to.
   function updatePrevButton() {
     const btn = document.getElementById("player-prev");
     if (!btn) return;
-    btn.disabled = !state.hasPrev;
+    if (state.concert) {
+      btn.disabled = state.concert.pos <= 0;
+    } else {
+      btn.disabled = !state.hasPrev;
+    }
   }
 
   async function play(btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev, recordListen = true, playlistName = null) {
@@ -863,6 +893,9 @@ const Player = (() => {
     showBar();
     updateInfo(title, artist, trackIdx, concertId);
     updatePlaylistLabel(playlistName);
+    // Clear concert mode first so non-concert callers always get a clean slate.
+    // playConcertItem restores state.concert immediately after play() returns.
+    state.concert = null;
     markPlaying(concertId, trackIdx);
 
     state.concertId = concertId;
@@ -1170,6 +1203,14 @@ const Player = (() => {
 
   async function skipToNext() {
     if (!audio) return;
+    // Concert reconstruction mode: advance within the concert item list.
+    if (state.concert) {
+      cancelAutoAdvance();
+      audio.pause();
+      tracing("skipToNext concert", { pos: state.concert.pos });
+      await advanceConcert();
+      return;
+    }
     // Defensive guard mirroring updateNextButton(): never pause the current
     // track when there is nothing queued and nothing to auto-advance to.
     if (queue.length === 0 && !state.hasNext) {
@@ -1189,6 +1230,18 @@ const Player = (() => {
   // replace it. The queue (a forward play-ahead list) is left untouched.
   async function skipToPrev() {
     if (!audio) return;
+    // Concert reconstruction mode: go back within the concert item list.
+    if (state.concert) {
+      if (state.concert.pos <= 0) {
+        tracing("skipToPrev concert: at start", {});
+        return;
+      }
+      cancelAutoAdvance();
+      audio.pause();
+      tracing("skipToPrev concert", { pos: state.concert.pos });
+      await playConcertItem(state.concert.pos - 1);
+      return;
+    }
     if (!state.hasPrev) {
       tracing("skipToPrev ignored: nothing previous", {});
       return;
@@ -1375,9 +1428,10 @@ const Player = (() => {
     startTrack(null, entry.concertId, entry.trackIdx);
   }
 
-  // Fetch `/concerts/:id/tracks?context=sidebar` and inject into the sidebar's
-  // concert-tracks section. A generation counter guards against races when the
-  // concert changes while a fetch is in flight.
+  // Fetch `/concerts/:id/tracks?context=sidebar` (or `&playback=concert` in
+  // concert reconstruction mode) and inject into the sidebar's concert-tracks
+  // section. A generation counter guards against races when the concert changes
+  // while a fetch is in flight.
   async function loadSidebarTracks(concertId) {
     if (concertId == null) return;
     const gen = ++sidebarLoadGen;
@@ -1389,8 +1443,12 @@ const Player = (() => {
       heading.textContent = document.getElementById("player-artist")?.textContent || "Concert tracks";
     }
 
+    // In concert reconstruction mode, show the interleaved song+interlude list.
+    const playbackParam = state.concert && state.concert.id === concertId
+      ? "&playback=concert" : "";
+
     try {
-      const resp = await fetch(`/concerts/${concertId}/tracks?context=sidebar`);
+      const resp = await fetch(`/concerts/${concertId}/tracks?context=sidebar${playbackParam}`);
       if (gen !== sidebarLoadGen) return;
       if (!resp.ok) {
         sidebarConcertId = null;
@@ -1477,6 +1535,7 @@ const Player = (() => {
     state.hasNext = false;
     state.hasPrev = false;
     state.liked = false;
+    state.concert = null;
     if (bar) bar.classList.remove("active");
     document.body.classList.remove("player-active");
     setPlayPauseIcon(false);
@@ -1559,13 +1618,228 @@ const Player = (() => {
 
     const success = await postDeleteTrack(concertId, trackIdx);
 
+    // If in concert reconstruction mode for this concert, refresh the items
+    // array so advanceConcert navigates to the correct next item.
+    if (success && state.concert && state.concert.id === concertId) {
+      await refreshConcertItems(concertId);
+    }
+
     // Sidebar bypasses htmx card events, so refresh it explicitly.
     if (isSidebarOpen()) await loadSidebarTracks(concertId);
 
     if (!success) return;
 
     if (state.concertId === concertId && state.trackIdx === trackIdx) {
-      await advanceAfterDelete();
+      // In concert reconstruction mode the items list was already refreshed above;
+      // pos now points at the next item (or past the end). Play it directly rather
+      // than using advanceAfterDelete() which is not concert-aware.
+      if (state.concert && state.concert.id === concertId) {
+        await playConcertPosOrEnd();
+      } else {
+        await advanceAfterDelete();
+      }
+    }
+  }
+
+  // ── Concert reconstruction playback ─────────────────────────────────────────
+
+  // After a delete+refresh where the currently-playing item was removed:
+  // pos still points at the same index (refreshConcertItems found no URL match
+  // and left it unchanged), which is now the "next" item in the refreshed list.
+  // Play it, or end the concert if nothing remains at that position.
+  async function playConcertPosOrEnd() {
+    const concert = state.concert;
+    if (!concert) return;
+    if (concert.pos < concert.items.length) {
+      await playConcertItem(concert.pos);
+    } else {
+      state.concert = null;
+      hideVideoPanel();
+    }
+  }
+
+  // Re-fetch the items array for the current concert-playback state and update
+  // state.concert.items + pos so advanceConcert navigates to the right item.
+  async function refreshConcertItems(concertId) {
+    if (!state.concert || state.concert.id !== concertId) return;
+    try {
+      const resp = await fetch(`/concerts/${concertId}/concert-playback`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      if (data.mode !== "reconstruction") return;
+      if (!state.concert || state.concert.id !== concertId) return; // raced
+      const currentUrl = state.concert.items[state.concert.pos] && state.concert.items[state.concert.pos].url;
+      state.concert.items = data.items;
+      // Re-find pos by URL so navigation stays correct after items shift.
+      if (currentUrl) {
+        const newPos = data.items.findIndex(item => item.url === currentUrl);
+        if (newPos >= 0) state.concert.pos = newPos;
+      }
+      updateNextButton();
+      updatePrevButton();
+    } catch (e) {
+      tracing("refreshConcertItems failed", e);
+    }
+  }
+
+  // Play a single item within the concert reconstruction sequence (by position).
+  // Saves and restores state.concert because play() clears it.
+  async function playConcertItem(pos) {
+    if (!state.concert) return;
+    const concert = state.concert;
+    const item = concert.items[pos];
+    if (!item) return;
+
+    const isInterlude = item.kind === "interlude";
+    const trackIdx = isInterlude ? null : item.track_index;
+    const listenUrl = isInterlude ? null : `/concerts/${concert.id}/tracks/${trackIdx}/listen`;
+    const has_prev = pos > 0;
+    const has_next = pos + 1 < concert.items.length;
+
+    // play() will clear state.concert; save it so we can restore it after.
+    const savedConcert = { id: concert.id, items: concert.items, pos };
+
+    await play(
+      null, item.url, item.title, item.artist || "", concert.id, trackIdx,
+      listenUrl, item.is_video, null, has_next, item.liked || false, has_prev
+    );
+
+    // Restore concert mode and fix interlude highlighting (play() marks via
+    // findTrackButtons which falls back to album buttons for trackIdx=null).
+    state.concert = savedConcert;
+    if (isInterlude) {
+      clearPlaying();
+      markPlayingInterlude(concert.id, item.interlude_index);
+    }
+    updateNextButton();
+    updatePrevButton();
+
+    // Refresh sidebar in concert mode so it shows interludes.
+    if (isSidebarOpen()) {
+      await loadSidebarTracks(concert.id);
+    }
+  }
+
+  // Advance to the next concert item, or clear concert mode + hide video at end.
+  async function advanceConcert() {
+    const concert = state.concert;
+    if (!concert) return;
+    const next = concert.pos + 1;
+    if (next >= concert.items.length) {
+      state.concert = null;
+      hideVideoPanel();
+      return;
+    }
+    concert.pos = next;
+    await playConcertItem(next);
+  }
+
+  // Fetch /concerts/:id/concert-playback and start playback:
+  // - source present → whole-album play (existing path, no concert state)
+  // - reconstruction → set state.concert and start from item 0
+  async function playConcert(id) {
+    cancelAutoAdvance();
+    try {
+      const resp = await fetch(`/concerts/${id}/concert-playback`);
+      if (!resp.ok) {
+        showError("Couldn't start concert");
+        tracing("playConcert non-ok", { id, status: resp.status });
+        return;
+      }
+      const data = await resp.json();
+
+      if (data.mode === "source") {
+        // Source file present: whole-album play via existing startAlbum path.
+        // state.concert will be null (play() clears it), which is correct here.
+        if (!data.source.playable) {
+          window.open(data.source.url, "_blank");
+          return;
+        }
+        const info = data.source;
+        await play(null, info.url, info.title, info.artist, id, null,
+          `/concerts/${id}/listen`, info.is_video,
+          `/concerts/${id}/watch`, info.has_next, info.liked, info.has_prev);
+        return;
+      }
+
+      if (data.mode === "reconstruction" && data.items && data.items.length > 0) {
+        // Set up concert state before playConcertItem (which saves + restores it).
+        state.concert = { id, items: data.items, pos: 0 };
+        await playConcertItem(0);
+        return;
+      }
+
+      showError("Nothing to play");
+    } catch (e) {
+      showError("Couldn't start concert");
+      tracing("playConcert failed", e);
+    }
+  }
+
+  // Jump to a specific position in the reconstruction sidebar (called by
+  // onclick in concert_playback_tracks.html).
+  async function playConcertFrom(id, pos) {
+    if (!state.concert || state.concert.id !== id) {
+      // Not in concert mode for this concert: start fresh.
+      try {
+        const resp = await fetch(`/concerts/${id}/concert-playback`);
+        if (!resp.ok) { showError("Couldn't load concert"); return; }
+        const data = await resp.json();
+        if (data.mode !== "reconstruction" || !data.items || data.items.length === 0) {
+          showError("Nothing to play"); return;
+        }
+        state.concert = { id, items: data.items, pos };
+      } catch (e) {
+        showError("Couldn't load concert");
+        tracing("playConcertFrom fetch failed", e);
+        return;
+      }
+    } else {
+      state.concert.pos = pos;
+    }
+    await playConcertItem(pos);
+  }
+
+  // Delete an interlude file from the reconstruction sidebar, then re-sync.
+  async function sidebarDeleteInterlude(concertId, interludeIdx) {
+    tracing("sidebarDeleteInterlude", { concertId, interludeIdx });
+    const btn = document.querySelector(
+      `#sidebar-concert-tracks .btn-delete[onclick*="sidebarDeleteInterlude(${concertId}, ${interludeIdx})"]`
+    );
+    if (btn) btn.disabled = true;
+
+    let wasPlayingThis = false;
+    if (state.concert && state.concert.id === concertId) {
+      const cur = state.concert.items[state.concert.pos];
+      wasPlayingThis = cur && cur.kind === "interlude" && cur.interlude_index === interludeIdx;
+    }
+
+    try {
+      const resp = await fetch(`/concerts/${concertId}/interludes/${interludeIdx}/delete`, { method: "POST" });
+      if (!resp.ok) {
+        showError("Delete failed");
+        if (btn) btn.disabled = false;
+        return;
+      }
+    } catch (e) {
+      showError("Delete failed");
+      tracing("sidebarDeleteInterlude fetch failed", e);
+      if (btn) btn.disabled = false;
+      return;
+    }
+
+    // Refresh items so navigation stays consistent.
+    if (state.concert && state.concert.id === concertId) {
+      await refreshConcertItems(concertId);
+    }
+
+    // Refresh sidebar HTML.
+    if (isSidebarOpen()) await loadSidebarTracks(concertId);
+
+    // If this interlude was playing, play the next item (pos now points at it
+    // after the refresh — advancing with advanceConcert() would skip it).
+    if (wasPlayingThis) {
+      await playConcertPosOrEnd();
     }
   }
 
@@ -1578,7 +1852,8 @@ const Player = (() => {
   const api = { playAlbum, playTrack, playTracks, startAlbum, startTrack, togglePause, seek,
     skipToNext, skipToPrev, watch, openExternal, watchTrackDirect, toggleLike, deleteTrack,
     openConcert, openSidebar, closeSidebar, toggleSidebar, sidebarDeleteTrack, playQueueEntryNow,
-    dequeue, enqueue, playAlbumAt, nowPlaying, playPlaylist, addToPlaylist, stopPlayback };
+    dequeue, enqueue, playAlbumAt, nowPlaying, playPlaylist, addToPlaylist, stopPlayback,
+    playConcert, playConcertFrom, sidebarDeleteInterlude };
   // Expose on window so other scripts (splitter.js) can access it via window.Player —
   // `const Player` at script top-level is not automatically a window property.
   if (typeof window !== "undefined") window.Player = api;

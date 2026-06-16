@@ -678,14 +678,21 @@ async fn play_button_visible_after_successful_split() {
     // DownloadStatus / SplitStatus split, it is gated only on
     // DownloadStatus == Downloaded. (seed_downloaded uses an mp4 — a video —
     // so this also guards that there is no separate album Watch button.)
+    // Create a workdir with a real source mp4 so can_play_concert is true.
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Some Album";
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::create_dir_all(&cd).unwrap();
+    std::fs::write(cd.join(format!("{}.mp4", album)), b"fake mp4 bytes").unwrap();
+
     let conn = db::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/split-listen", "Some Album");
+    seed_downloaded(&conn, "https://npr.org/d/split-listen", album);
     db::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
             artist: "X".to_string(),
-            album: "Some Album".to_string(),
+            album: album.to_string(),
             description: None,
             set_list: vec!["Song A".to_string(), "Song B".to_string()],
             musicians: vec![],
@@ -695,7 +702,7 @@ async fn play_button_visible_after_successful_split() {
     db::try_mark_split_started(&conn, 1).unwrap();
     db::mark_split_succeeded(&conn, 1).unwrap();
     db::set_tracks_present(&conn, 1, &[true, true]).unwrap();
-    let app = router(test_state(conn));
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
     let response = app
         .oneshot(
@@ -713,13 +720,13 @@ async fn play_button_visible_after_successful_split() {
         .unwrap();
     let html = String::from_utf8_lossy(&body);
     assert!(
-        html.contains("Player.playAlbum(this, 1)"),
-        "Play button must remain visible after split; got: {}",
+        html.contains("Player.playConcert(1)"),
+        "Play concert button must remain visible after split; got: {}",
         html
     );
     assert!(
-        html.contains(">Play</button>"),
-        "the album button is labelled Play; got: {}",
+        html.contains(">Play concert</button>"),
+        "the play-concert button is labelled 'Play concert'; got: {}",
         html
     );
     // The album-level Watch button was removed — video is chosen from the player.
@@ -740,10 +747,11 @@ async fn play_button_visible_after_successful_split() {
         "embedded track list must have per-track play buttons; got: {}",
         html
     );
-    // The download-slot Play button comes before the delete-download trash.
+    // The download-slot Play concert button comes before the delete-download trash.
     assert!(
-        html.find("Player.playAlbum").unwrap() < html.find("/concerts/1/delete-download").unwrap(),
-        "download-slot Play must come before the delete-download trash; got: {}",
+        html.find("Player.playConcert").unwrap()
+            < html.find("/concerts/1/delete-download").unwrap(),
+        "download-slot 'Play concert' must come before the delete-download trash; got: {}",
         html
     );
     // The Split and delete-split buttons are gone: splitting is automated via
@@ -2925,4 +2933,228 @@ async fn playlist_detail_page_unknown_id_is_404() {
     let app = router(test_state(conn));
     let (s, _) = get_html(&app, "/playlists/999").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+// ── concert_playback endpoint tests ──────────────────────────────────────────
+
+fn seed_split_concert_with_files(
+    album: &str,
+    songs: &[&str],
+    workdir: &std::path::Path,
+) -> rusqlite::Connection {
+    let conn = db::open_in_memory().unwrap();
+    db::upsert_listing(
+        &conn,
+        &NewListing {
+            source_url: "https://npr.org/d/recon".to_string(),
+            title: "Recon Concert".to_string(),
+            concert_date: Some("2024-03-01".to_string()),
+            teaser: None,
+        },
+    )
+    .unwrap();
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "X".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: songs.iter().map(|s| s.to_string()).collect(),
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    db::try_mark_download_started(&conn, 1).unwrap();
+    db::mark_download_succeeded(&conn, 1, "mp4").unwrap();
+    db::try_mark_split_started(&conn, 1).unwrap();
+    db::mark_split_succeeded(&conn, 1).unwrap();
+    db::set_tracks_present(&conn, 1, &vec![true; songs.len()]).unwrap();
+
+    let cd = concert_dir(workdir, album);
+    std::fs::create_dir_all(&cd).unwrap();
+    for song in songs {
+        let stem = sanitize_filename(song);
+        std::fs::write(cd.join(format!("{stem}.m4a")), b"fake audio").unwrap();
+    }
+    conn
+}
+
+#[tokio::test]
+async fn concert_playback_source_mode_when_file_present() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Recon Album";
+    let conn = seed_split_concert_with_files(album, &["Song A", "Song B"], workdir.path());
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::write(cd.join(format!("{album}.mp4")), b"fake source").unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+    let (status, json) = get_json(&app, "/concerts/1/concert-playback").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["mode"], "source", "expected source mode: {json}");
+    assert!(json["source"].is_object(), "source key must be MediaInfo");
+}
+
+#[tokio::test]
+async fn concert_playback_reconstruction_mode_when_source_gone() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Recon Album";
+    let conn = seed_split_concert_with_files(album, &["Song A", "Song B"], workdir.path());
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+    let (status, json) = get_json(&app, "/concerts/1/concert-playback").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["mode"], "reconstruction",
+        "expected reconstruction mode: {json}"
+    );
+    let items = json["items"].as_array().expect("items must be array");
+    assert_eq!(items.len(), 2, "two songs in reconstruction: {json}");
+    assert_eq!(items[0]["kind"], "song");
+    assert_eq!(items[1]["kind"], "song");
+}
+
+#[tokio::test]
+async fn concert_playback_reconstruction_includes_interlude() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Recon Album";
+    let conn = seed_split_concert_with_files(album, &["Song A", "Song B"], workdir.path());
+
+    let cd = concert_dir(workdir.path(), album);
+    std::fs::write(cd.join("interlude_01.m4a"), b"fake interlude").unwrap();
+    // Song A at 0–55s, Song B at 60–115s, gap at 55–60s → interlude_01.
+    let ts = vec![
+        concert_types::SongTimestamp {
+            title: "Song A".to_string(),
+            start_time: 0.0,
+            end_time: 55.0,
+            duration: 55.0,
+        },
+        concert_types::SongTimestamp {
+            title: "Song B".to_string(),
+            start_time: 60.0,
+            end_time: 115.0,
+            duration: 55.0,
+        },
+    ];
+    set_user_split_timestamps(&conn, 1, &ts).unwrap();
+    db::set_media_duration(&conn, 1, 120.0).unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+    let (status, json) = get_json(&app, "/concerts/1/concert-playback").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["mode"], "reconstruction");
+    let items = json["items"].as_array().expect("items array");
+    assert_eq!(items.len(), 3, "song + interlude + song: {json}");
+    assert_eq!(items[0]["kind"], "song");
+    assert_eq!(items[1]["kind"], "interlude");
+    assert_eq!(items[2]["kind"], "song");
+}
+
+#[tokio::test]
+async fn concert_playback_returns_404_when_nothing_playable() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Empty Album";
+    let conn = db::open_in_memory().unwrap();
+    db::upsert_listing(
+        &conn,
+        &NewListing {
+            source_url: "https://npr.org/d/empty".to_string(),
+            title: "Empty Concert".to_string(),
+            concert_date: None,
+            teaser: None,
+        },
+    )
+    .unwrap();
+    db::update_metadata(
+        &conn,
+        1,
+        &MetadataUpdate {
+            artist: "X".to_string(),
+            album: album.to_string(),
+            description: None,
+            set_list: vec!["Song A".to_string()],
+            musicians: vec![],
+        },
+    )
+    .unwrap();
+    db::try_mark_download_started(&conn, 1).unwrap();
+    db::mark_download_succeeded(&conn, 1, "mp4").unwrap();
+    db::try_mark_split_started(&conn, 1).unwrap();
+    db::mark_split_succeeded(&conn, 1).unwrap();
+    db::set_tracks_present(&conn, 1, &[false]).unwrap();
+    std::fs::create_dir_all(concert_dir(workdir.path(), album)).unwrap();
+
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+    let (status, _) = get_json(&app, "/concerts/1/concert-playback").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_interlude_removes_file_records_event_returns_fragment() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Recon Album";
+    let conn = seed_split_concert_with_files(album, &["Song A", "Song B"], workdir.path());
+
+    let cd = concert_dir(workdir.path(), album);
+    let interlude_path = cd.join("interlude_01.m4a");
+    std::fs::write(&interlude_path, b"fake interlude").unwrap();
+    let ts = vec![
+        concert_types::SongTimestamp {
+            title: "Song A".to_string(),
+            start_time: 0.0,
+            end_time: 55.0,
+            duration: 55.0,
+        },
+        concert_types::SongTimestamp {
+            title: "Song B".to_string(),
+            start_time: 60.0,
+            end_time: 115.0,
+            duration: 55.0,
+        },
+    ];
+    set_user_split_timestamps(&conn, 1, &ts).unwrap();
+    db::set_media_duration(&conn, 1, 120.0).unwrap();
+    let db_arc = Arc::new(Mutex::new(conn));
+    let state = AppState {
+        db: db_arc.clone(),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: idle_scrape_queue(),
+        jobs: JobConfig::test(workdir.path().to_path_buf()),
+    };
+    let app = router(state);
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/concerts/1/interludes/1/delete")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+
+    assert_eq!(status, StatusCode::OK, "response: {body}");
+    assert!(!interlude_path.exists(), "interlude file must be deleted");
+    assert!(
+        body.contains("track-list"),
+        "response must be sidebar HTML fragment: {body}"
+    );
+
+    let conn = db_arc.lock().unwrap();
+    let events = concert_tracker::events::list_for_concert(&conn, 1);
+    assert!(
+        events.iter().any(|e| e.event == "interlude_delete"),
+        "interlude_delete event must be recorded: {events:?}"
+    );
+    assert!(
+        !events.iter().any(|e| e.event == "track_delete"),
+        "track_delete must NOT be recorded for interlude: {events:?}"
+    );
 }

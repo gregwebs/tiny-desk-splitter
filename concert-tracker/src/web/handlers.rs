@@ -18,7 +18,7 @@ use crate::jobs::split::{auto_timestamps_with_backfill, start_split};
 use crate::jobs::{JobKey, JobKind, SplitMode};
 use crate::model::{
     concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
-    SplitStatus, TrackInfo,
+    PlaybackItemKind, SplitStatus, TrackInfo,
 };
 use crate::split_timestamps::{song_timestamps_to_payload, TimestampPayload, ValidatedTimestamps};
 use crate::sync::{concerts_needing_scrape, sync_month, synced_months_set, YearMonth};
@@ -75,7 +75,6 @@ struct RowTemplate {
     wanted: bool,
     can_download: bool,
     can_delete_download: bool,
-    can_listen: bool,
     /// Whether the concert has a scraped set list: gates the tracks row (the
     /// tracks button + track list render even before the concert is split).
     has_set_list: bool,
@@ -109,6 +108,10 @@ struct RowTemplate {
     /// True when the original source file is fully redundant and can be safely
     /// deleted (all song tracks + all interlude files present on disk).
     source_redundant: bool,
+    /// True when "Play concert" is meaningful: either the source file is present
+    /// (whole-album mode) or `build_reconstruction` produced at least one item
+    /// (reconstruction mode). False only when there is truly nothing to play.
+    can_play_concert: bool,
 }
 
 #[derive(Template)]
@@ -144,6 +147,13 @@ struct TracksTemplate {
     /// ancestor, so the delete button calls Player.sidebarDeleteTrack() via
     /// onclick instead of using hx-target="closest .card".
     sidebar: bool,
+}
+
+#[derive(Template)]
+#[template(path = "concert_playback_tracks.html")]
+struct ConcertPlaybackTracksTemplate {
+    id: i64,
+    items: Vec<crate::model::PlaybackItem>,
 }
 
 #[derive(Template)]
@@ -390,6 +400,8 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         stored_ts.as_deref(),
         concert.media_duration,
     );
+    let can_play_concert =
+        compute_can_play_concert(&state.jobs.working_dir, &concert, stored_ts.as_deref());
     render_row_inner(
         &concert,
         has_archive_location(state),
@@ -398,6 +410,7 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         split_queued(state, id),
         tracks,
         source_redundant,
+        can_play_concert,
     )
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
@@ -413,8 +426,13 @@ fn render_row(
     scrape_pending: bool,
     split_queued: bool,
 ) -> Result<String, askama::Error> {
-    // Listing cards don't show the delete-redundant-source button;
-    // compute source_redundant as false to avoid the extra DB read.
+    // Listing cards don't show the delete-redundant-source button.
+    // For can_play_concert use the downloaded status as a cheap proxy (avoids
+    // a filesystem probe per card). Known limitation: once the source is deleted
+    // as redundant, download_status() becomes NotDownloaded and the listing
+    // hides "Play concert" even though reconstruction would succeed. The
+    // detail/single-card paths use compute_can_play_concert for the real check.
+    let can_play_concert = matches!(c.download_status(), DownloadStatus::Downloaded);
     render_row_inner(
         c,
         has_archive_location,
@@ -423,6 +441,7 @@ fn render_row(
         split_queued,
         vec![],
         false,
+        can_play_concert,
     )
 }
 
@@ -449,6 +468,7 @@ fn render_detail_card(
         stored_user_ts,
         c.media_duration,
     );
+    let can_play_concert = compute_can_play_concert(working_dir, c, stored_user_ts);
     render_row_inner(
         c,
         has_archive_location,
@@ -457,9 +477,11 @@ fn render_detail_card(
         split_queued,
         tracks,
         source_redundant,
+        can_play_concert,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_row_inner(
     c: &Concert,
     has_archive_location: bool,
@@ -468,6 +490,7 @@ fn render_row_inner(
     split_queued: bool,
     tracks: Vec<TrackInfo>,
     source_redundant: bool,
+    can_play_concert: bool,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
     let ss = c.split_status();
@@ -477,7 +500,6 @@ fn render_row_inner(
         DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
     );
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
-    let can_listen = matches!(&ds, DownloadStatus::Downloaded);
     let track_count = c.track_count();
     let track_total = c.track_total();
     let has_set_list = track_total > 0;
@@ -519,7 +541,6 @@ fn render_row_inner(
         wanted: c.wanted,
         can_download,
         can_delete_download,
-        can_listen,
         has_set_list,
         tracks_busy,
         track_count,
@@ -535,6 +556,7 @@ fn render_row_inner(
         scrape_pending,
         tracks,
         source_redundant,
+        can_play_concert,
     }
     .render()
 }
@@ -542,6 +564,35 @@ fn render_row_inner(
 /// Whether `id` is currently queued/in-flight in the background scrape worker.
 fn scrape_pending(state: &AppState, id: i64) -> bool {
     state.scrape_queue.is_pending(id)
+}
+
+/// True when "Play concert" is meaningful for this concert: either the source
+/// file is present on disk (whole-album mode) or at least one reconstruction
+/// item exists (tracks + interludes cover something playable).
+fn compute_can_play_concert(
+    working_dir: &std::path::Path,
+    concert: &Concert,
+    user_ts: Option<&[concert_types::SongTimestamp]>,
+) -> bool {
+    if let Some(album) = concert.album.as_deref() {
+        // Source present → can always play it as a whole album.
+        if crate::jobs::find_downloaded_file(working_dir, album).is_some() {
+            return true;
+        }
+        // Source gone → check whether reconstruction has anything.
+        !crate::model::build_reconstruction(
+            working_dir,
+            album,
+            &concert.set_list,
+            &concert.tracks_present,
+            &concert.tracks_liked,
+            user_ts,
+            concert.media_duration,
+        )
+        .is_empty()
+    } else {
+        false
+    }
 }
 
 fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -> Vec<TrackInfo> {
@@ -1239,6 +1290,209 @@ pub async fn listen(
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
+// ── Concert playback ─────────────────────────────────────────────────────────
+
+/// JSON payload for a single item in the reconstruction sequence.
+#[derive(serde::Serialize)]
+pub struct PlaybackItemJson {
+    pub kind: &'static str,
+    pub title: String,
+    pub url: String,
+    pub is_video: bool,
+    pub artist: String,
+    pub track_index: Option<usize>,
+    pub interlude_index: Option<usize>,
+    pub liked: bool,
+}
+
+/// Tagged-union response for `GET /concerts/:id/concert-playback`.
+#[derive(serde::Serialize)]
+#[serde(tag = "mode", rename_all = "snake_case")]
+pub enum ConcertPlaybackResponse {
+    /// Source file is present; client should play it as a whole album.
+    Source { source: MediaInfo },
+    /// Source file is absent; client plays items in order.
+    Reconstruction { items: Vec<PlaybackItemJson> },
+}
+
+pub async fn concert_playback(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<ConcertPlaybackResponse>, AppError> {
+    let (concert, stored_ts, working_dir) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::get_split_timestamps(&conn, id)
+            .map(|s| s.user)
+            .unwrap_or(None);
+        let working_dir = state.jobs.working_dir.clone();
+        (concert, stored_ts, working_dir)
+    };
+
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let sanitized_album = crate::model::sanitize_album(album);
+
+    // If the source file is present, return source mode.
+    if let Some(path) = find_downloaded_file(&working_dir, album) {
+        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+        let filename = path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("invalid filename")))?;
+        let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+        return Ok(Json(ConcertPlaybackResponse::Source {
+            source: MediaInfo {
+                url,
+                title: album.to_string(),
+                artist: concert.artist.unwrap_or_default(),
+                is_video: is_video_extension(ext),
+                playable: is_browser_playable(ext),
+                track_index: None,
+                has_next: false,
+                has_prev: false,
+                liked: false,
+            },
+        }));
+    }
+
+    // Source absent: build reconstruction.
+    let items = crate::model::build_reconstruction(
+        &working_dir,
+        album,
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+        stored_ts.as_deref(),
+        concert.media_duration,
+    );
+    if items.is_empty() {
+        return Err(AppError::NotFound);
+    }
+    let artist = concert.artist.unwrap_or_default();
+    let json_items: Vec<PlaybackItemJson> = items
+        .into_iter()
+        .map(|item| {
+            let url = format!("/concert-files/{}/{}", sanitized_album, item.filename);
+            match item.kind {
+                PlaybackItemKind::Song { track_index, liked } => PlaybackItemJson {
+                    kind: "song",
+                    title: item.title,
+                    url,
+                    is_video: item.is_video,
+                    artist: artist.clone(),
+                    track_index: Some(track_index),
+                    interlude_index: None,
+                    liked,
+                },
+                PlaybackItemKind::Interlude { index } => PlaybackItemJson {
+                    kind: "interlude",
+                    title: item.title,
+                    url,
+                    is_video: item.is_video,
+                    artist: artist.clone(),
+                    track_index: None,
+                    interlude_index: Some(index),
+                    liked: false,
+                },
+            }
+        })
+        .collect();
+    Ok(Json(ConcertPlaybackResponse::Reconstruction {
+        items: json_items,
+    }))
+}
+
+pub async fn delete_interlude(
+    State(state): State<AppState>,
+    Path((id, idx)): Path<(i64, usize)>,
+) -> Result<impl IntoResponse, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
+    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
+    let stem = concert_types::interlude_filename_stem(idx);
+
+    let mut removed = false;
+    for ext in crate::model::INTERLUDE_EXTENSIONS {
+        let path = dir.join(format!("{stem}.{ext}"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    "delete_interlude: removed {} for concert {}",
+                    path.display(),
+                    id
+                );
+                removed = true;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(AppError::Internal(anyhow::anyhow!(
+                    "delete_interlude: failed to remove {}: {}",
+                    path.display(),
+                    e
+                )));
+            }
+        }
+    }
+
+    if !removed {
+        tracing::warn!(
+            "delete_interlude: no file found for interlude {} concert {}",
+            idx,
+            id
+        );
+        // File was already absent — desired end-state holds; skip the event so
+        // the audit trail reflects a real deletion, not a no-op.
+    } else {
+        let conn = state.db.lock().unwrap();
+        let json = serde_json::json!({"interlude_index": idx}).to_string();
+        crate::events::record_now(
+            &conn,
+            id,
+            crate::events::Event::InterludeDelete,
+            Some(&json),
+        );
+    }
+
+    tracing::info!(
+        "delete_interlude completed for concert {} interlude {} (removed={})",
+        id,
+        idx,
+        removed
+    );
+
+    // Return the refreshed concert-playback sidebar fragment.
+    concert_playback_tracks_fragment(&state, id).await
+}
+
+/// Render the `?playback=concert` sidebar fragment (used by the tracks handler
+/// and as the delete_interlude response). Returns an HTML string.
+async fn concert_playback_tracks_fragment(state: &AppState, id: i64) -> Result<String, AppError> {
+    let (concert, stored_ts) = {
+        let conn = state.db.lock().unwrap();
+        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::get_split_timestamps(&conn, id)
+            .map(|s| s.user)
+            .unwrap_or(None);
+        (concert, stored_ts)
+    };
+    let album = concert.album.as_deref().unwrap_or("");
+    let items = crate::model::build_reconstruction(
+        &state.jobs.working_dir,
+        album,
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+        stored_ts.as_deref(),
+        concert.media_duration,
+    );
+    ConcertPlaybackTracksTemplate { id, items }
+        .render()
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
 #[derive(serde::Serialize)]
 pub struct MediaInfo {
     pub url: String,
@@ -1543,6 +1797,16 @@ pub async fn tracks(
         .get("context")
         .map(|v| v == "sidebar")
         .unwrap_or(false);
+    let playback_concert = params
+        .get("playback")
+        .map(|v| v == "concert")
+        .unwrap_or(false);
+
+    // Concert reconstruction sidebar: returns the interleaved song+interlude list.
+    if sidebar && playback_concert {
+        return concert_playback_tracks_fragment(&state, id).await;
+    }
+
     let concert = {
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
@@ -3093,7 +3357,8 @@ mod tests {
 
         // has_archive_location = true: the delete-path card render must keep
         // the archive context (Archive button) alongside the embedded list.
-        let html = render_row_inner(&concert, true, None, false, false, tracks, false).unwrap();
+        let html =
+            render_row_inner(&concert, true, None, false, false, tracks, false, false).unwrap();
         assert!(html.contains("card-tracks-box"), "html: {html}");
         assert!(html.contains("track-list"), "html: {html}");
         assert!(html.contains("(3/4)"), "html: {html}");

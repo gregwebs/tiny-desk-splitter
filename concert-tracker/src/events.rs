@@ -32,6 +32,10 @@ pub enum Event {
     /// The original source file was deleted after full interlude coverage was
     /// confirmed (distinct from DownloadDelete for a clean audit trail).
     SourceRedundantDelete,
+    /// An interlude track file was deleted. Distinct from TrackDelete so that
+    /// `tracks_from_events` (which parses `track_index` from every `track_delete`
+    /// row) is not corrupted by interlude deletions.
+    InterludeDelete,
 }
 
 impl Event {
@@ -63,6 +67,7 @@ impl Event {
             Event::SplitTimestampsUser => "split_timestamps_user",
             Event::SplitTimestampsReset => "split_timestamps_reset",
             Event::SourceRedundantDelete => "source_redundant_delete",
+            Event::InterludeDelete => "interlude_delete",
         }
     }
 }

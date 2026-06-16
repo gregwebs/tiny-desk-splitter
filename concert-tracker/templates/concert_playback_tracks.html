@@ -1,0 +1,26 @@
+<ol class="track-list track-list-concert-playback">
+  {% for (pos, item) in items.iter().enumerate() %}
+  {% if item.is_song() %}
+  {% let track_index = item.track_index().unwrap() %}
+  <li>
+    {% let index = track_index %}{% let liked = item.liked() %}{% include "like_button.html" %}
+    <button class="btn-track-listen" data-concert-id="{{ id }}" data-track-idx="{{ track_index }}"
+            onclick="Player.playConcertFrom({{ id }}, {{ pos }})">{{ item.title }}</button>
+    <button class="btn-delete" title="Delete track files"
+            onclick="Player.sidebarDeleteTrack({{ id }}, {{ track_index }})"><span class="icon-trash"></span></button>
+    <button class="btn-add-pl" title="Add to playlist"
+            data-label="{{ item.title }}"
+            onclick="window.Playlists&&Playlists.openAdd({type:'track',concertId:{{ id }},trackIndex:{{ track_index }},label:this.getAttribute('data-label')})">+</button>
+  </li>
+  {% else %}
+  {% let interlude_index = item.interlude_index().unwrap() %}
+  <li data-interlude-pos="{{ pos }}">
+    <button class="btn-track-listen btn-interlude"
+            data-concert-id="{{ id }}" data-interlude-idx="{{ interlude_index }}"
+            onclick="Player.playConcertFrom({{ id }}, {{ pos }})">{{ item.title }}</button>
+    <button class="btn-delete" title="Delete interlude file"
+            onclick="Player.sidebarDeleteInterlude({{ id }}, {{ interlude_index }})"><span class="icon-trash"></span></button>
+  </li>
+  {% endif %}
+  {% endfor %}
+</ol>

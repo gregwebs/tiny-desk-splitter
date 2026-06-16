@@ -67,14 +67,14 @@
         {% endif %}
       </span>
 
-      {# Download slot: NotDownloaded shows Download button; Downloading shows badge; DownloadError shows badge + retry; Downloaded shows badge + ✕ + Listen #}
+      {# Download slot: shows download badge (non-clickable), download/delete buttons, and
+         always-on "Play concert" button when there is anything to play. #}
       <span class="card-slot card-slot-download">
         {% if show_download_badge %}
-          {% if can_listen %}
-            <button class="btn-listen badge badge-{{ download_status }}" data-concert-id="{{ id }}" data-role="listen-album" onclick="Player.playAlbum(this, {{ id }})">{{ download_status_label }}</button>
-          {% else %}
-            <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
-          {% endif %}
+          <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
+        {% endif %}
+        {% if can_play_concert %}
+          <button class="btn-play-concert" onclick="Player.playConcert({{ id }})">Play concert</button>
         {% endif %}
         {% if can_download %}
           <button hx-post="/concerts/{{ id }}/download" hx-target="closest .card" hx-swap="outerHTML"
@@ -87,7 +87,7 @@
         {% if can_delete_download %}
           <button class="btn-delete" title="Delete downloaded file" hx-post="/concerts/{{ id }}/delete-download" hx-target="this" hx-swap="outerHTML"><span class="icon-trash"></span></button>
         {% endif %}
-        {% if source_redundant && can_listen %}
+        {% if source_redundant %}
           <button class="btn-delete btn-delete-redundant" title="Delete redundant source file (all content preserved in song + interlude tracks)"
                   hx-post="/concerts/{{ id }}/delete-redundant-source"
                   hx-target="#concert-{{ id }}"
