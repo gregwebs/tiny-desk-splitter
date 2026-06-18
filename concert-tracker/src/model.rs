@@ -114,6 +114,82 @@ pub fn source_redundant(
         .all(|il| find_interlude_file(working_dir, album, il.index))
 }
 
+// ── media_duration backfill ───────────────────────────────────────────────────
+//
+// `source_redundant` above derives a tail interlude `[max_song_end,
+// media_duration]` (see `concert_types::derive_interludes`). If `media_duration`
+// is ever set *below* the true source length, that tail gap shrinks or vanishes
+// and `source_redundant` can wrongly authorize deleting a source file that still
+// covers audio past the stored duration. So: **a persisted `media_duration` for a
+// present source must never be less than the true source length.** ffprobe of the
+// source file is the true length; estimates from timestamps or summed track
+// durations only undercount, so they are only safe once the source is gone.
+
+/// Where a backfilled `media_duration` value came from, for reporting/auditing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DurationSource {
+    /// ffprobe of the still-present source file. Accurate.
+    Ffprobe,
+    /// `max(end_time)` over stored/on-disk timestamps. Only used when the source
+    /// is gone — undercounts the tail past the last song, which is otherwise unsafe.
+    Timestamps,
+    /// Sum of ffprobe'd durations of every present song track. Only used when the
+    /// source is gone and no timestamps exist — undercounts inter-song gaps.
+    TrackSum,
+}
+
+/// The source file's presence, coupled to its ffprobe outcome so "present but
+/// ffprobe failed" is a single explicit state rather than a separately-tracked
+/// bool that could disagree with the probe result.
+pub enum SourceState {
+    /// The source file exists on disk; `Ok` is its ffprobed duration, `Err` means
+    /// the probe failed (corrupt file, ffprobe missing, etc.).
+    Present(anyhow::Result<f64>),
+    /// No source file — there's nothing left to delete, so an undercounted
+    /// estimate is safe.
+    Absent,
+}
+
+/// Decide the `media_duration` value (and its provenance) to backfill for a
+/// concert, given already-gathered inputs. Pure — no I/O — so the safety rule is
+/// unit-testable without spawning `ffprobe`.
+///
+/// `track_durations` must be `Some` **only** when every set-list track resolved
+/// to a file on disk and was successfully ffprobed (all-or-nothing: a partial sum
+/// would silently undercount further than the gaps already accepted by design).
+///
+/// Returns `None` when no safe duration can be determined (caller should leave
+/// `media_duration` untouched and report a skip reason).
+pub fn decide_backfill_duration(
+    source: SourceState,
+    timestamps: Option<&[concert_types::SongTimestamp]>,
+    track_durations: Option<&[f64]>,
+) -> Option<(f64, DurationSource)> {
+    let (duration, source_kind) = match source {
+        // The source is still deletable: only an accurate probe is acceptable.
+        // A failed probe must not fall through to an estimate that could
+        // undercount the true length.
+        SourceState::Present(Ok(d)) => (d, DurationSource::Ffprobe),
+        SourceState::Present(Err(_)) => return None,
+        SourceState::Absent => {
+            let from_timestamps = timestamps
+                .filter(|ts| !ts.is_empty())
+                .map(|ts| ts.iter().map(|t| t.end_time).fold(f64::MIN, f64::max));
+            if let Some(max_end) = from_timestamps {
+                (max_end, DurationSource::Timestamps)
+            } else if let Some(durations) = track_durations {
+                (durations.iter().sum(), DurationSource::TrackSum)
+            } else {
+                return None;
+            }
+        }
+    };
+    if !duration.is_finite() || duration <= 0.0 {
+        return None;
+    }
+    Some((duration, source_kind))
+}
+
 // ── Reconstruction playback ──────────────────────────────────────────────────
 
 /// What kind of slot a [`PlaybackItem`] represents.
@@ -1719,6 +1795,111 @@ mod tests {
         assert_eq!(
             find_interlude_track_file(dir.path(), album, 1),
             Some("interlude_01.mp4".to_string())
+        );
+    }
+
+    // ── decide_backfill_duration tests ────────────────────────────────────────
+
+    fn bf_ts(start: f64, end: f64) -> concert_types::SongTimestamp {
+        concert_types::SongTimestamp {
+            title: "Song".to_string(),
+            start_time: start,
+            end_time: end,
+            duration: end - start,
+        }
+    }
+
+    #[test]
+    fn decide_backfill_duration_present_ok_uses_ffprobe() {
+        let result = decide_backfill_duration(SourceState::Present(Ok(123.4)), None, None);
+        assert_eq!(result, Some((123.4, DurationSource::Ffprobe)));
+    }
+
+    #[test]
+    fn decide_backfill_duration_present_err_skips_never_undercounts() {
+        // The load-bearing safety case: a present source whose ffprobe failed
+        // must be skipped, never fall through to an undercounting estimate —
+        // even when timestamps/track_durations are available.
+        let timestamps = vec![bf_ts(0.0, 50.0)];
+        let result = decide_backfill_duration(
+            SourceState::Present(Err(anyhow::anyhow!("ffprobe failed"))),
+            Some(&timestamps),
+            Some(&[50.0]),
+        );
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn decide_backfill_duration_present_never_selects_estimate_sources() {
+        // Guard test: regardless of what timestamps/track_durations say, a
+        // Present source can only ever resolve to Ffprobe or None.
+        let timestamps = vec![bf_ts(0.0, 999.0)];
+        let track_durations = [999.0];
+        for probe in [Ok(10.0), Err(anyhow::anyhow!("boom"))] {
+            let is_ok = probe.is_ok();
+            let result = decide_backfill_duration(
+                SourceState::Present(probe),
+                Some(&timestamps),
+                Some(&track_durations),
+            );
+            match result {
+                Some((_, source)) => {
+                    assert!(is_ok);
+                    assert_eq!(source, DurationSource::Ffprobe);
+                }
+                None => assert!(!is_ok),
+            }
+        }
+    }
+
+    #[test]
+    fn decide_backfill_duration_absent_prefers_timestamps_max_end() {
+        let timestamps = vec![bf_ts(0.0, 50.0), bf_ts(60.0, 90.0), bf_ts(95.0, 70.0)];
+        // max(end_time), not the last element — defensive against unordered input.
+        let result = decide_backfill_duration(SourceState::Absent, Some(&timestamps), Some(&[1.0]));
+        assert_eq!(result, Some((90.0, DurationSource::Timestamps)));
+    }
+
+    #[test]
+    fn decide_backfill_duration_absent_empty_timestamps_falls_back_to_track_sum() {
+        let result = decide_backfill_duration(SourceState::Absent, Some(&[]), Some(&[30.0, 25.0]));
+        assert_eq!(result, Some((55.0, DurationSource::TrackSum)));
+    }
+
+    #[test]
+    fn decide_backfill_duration_absent_no_timestamps_uses_track_sum() {
+        let result = decide_backfill_duration(SourceState::Absent, None, Some(&[30.0, 25.0, 10.0]));
+        assert_eq!(result, Some((65.0, DurationSource::TrackSum)));
+    }
+
+    #[test]
+    fn decide_backfill_duration_absent_no_sources_skips() {
+        let result = decide_backfill_duration(SourceState::Absent, None, None);
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn decide_backfill_duration_rejects_non_finite_and_nonpositive() {
+        assert_eq!(
+            decide_backfill_duration(SourceState::Present(Ok(f64::NAN)), None, None),
+            None
+        );
+        assert_eq!(
+            decide_backfill_duration(SourceState::Present(Ok(f64::INFINITY)), None, None),
+            None
+        );
+        assert_eq!(
+            decide_backfill_duration(SourceState::Present(Ok(0.0)), None, None),
+            None
+        );
+        assert_eq!(
+            decide_backfill_duration(SourceState::Present(Ok(-5.0)), None, None),
+            None
+        );
+        let zero_track = [0.0];
+        assert_eq!(
+            decide_backfill_duration(SourceState::Absent, None, Some(&zero_track)),
+            None
         );
     }
 

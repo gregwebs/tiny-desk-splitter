@@ -855,6 +855,19 @@ pub fn list_concerts_needing_tracks_backfill(conn: &Connection) -> Result<Vec<Co
     Ok(concerts)
 }
 
+/// Concerts split before the `media_duration` column existed (or whose value was
+/// never persisted). Candidates for the `concert_db backfill-media-duration` CLI.
+pub fn list_concerts_missing_media_duration(conn: &Connection) -> Result<Vec<Concert>> {
+    let mut stmt = conn
+        .prepare("SELECT * FROM concerts WHERE media_duration IS NULL")
+        .context("Failed to prepare media_duration backfill query")?;
+    let concerts = stmt
+        .query_map([], concert_from_row)?
+        .filter_map(|r| r.ok())
+        .collect();
+    Ok(concerts)
+}
+
 /// Concerts eligible for automated re-splitting: successfully split or
 /// previously split-errored, with no user-edited timestamps, and not
 /// currently mid-split. Includes concerts whose download may no longer be

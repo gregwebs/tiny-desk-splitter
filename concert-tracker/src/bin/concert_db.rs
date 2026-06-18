@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -108,6 +108,21 @@ enum Command {
         /// Required to actually mutate the database. Re-splitting rewrites
         /// split_at, tracks_present, and auto_split_timestamps_json across many
         /// rows. Run --dry-run first and back up the database before using this.
+        #[arg(long)]
+        confirm: bool,
+    },
+    /// Backfill media_duration for concerts split before the column existed.
+    /// ffprobes the source file when it's still present (accurate); otherwise
+    /// estimates from stored/on-disk timestamps or summed track durations —
+    /// only safe because there's no source left to delete. See
+    /// docs/change/2026-06-17-backfill-media-duration.md.
+    BackfillMediaDuration {
+        /// List the concerts that would be updated, with the value and source
+        /// of each, without making any changes.
+        #[arg(long)]
+        dry_run: bool,
+        /// Required to actually write to the database. Backs up the database
+        /// file first (alongside the original, suffixed `.bak-<timestamp>`).
         #[arg(long)]
         confirm: bool,
     },
@@ -508,9 +523,79 @@ fn main() -> Result<()> {
                 succeeded, failed, skipped_no_source, skipped_in_progress, errored
             );
         }
+
+        Command::BackfillMediaDuration { dry_run, confirm } => {
+            let report =
+                concert_tracker::scan::backfill_media_duration(&conn, &cli.workdir, false)?;
+            println!(
+                "Found {} concert(s) eligible for media_duration backfill",
+                report.planned.len()
+            );
+            for row in &report.planned {
+                println!(
+                    "  [{}] {} -> {:.1}s ({:?})",
+                    row.id, row.title, row.duration, row.source
+                );
+            }
+            if !report.skipped.is_empty() {
+                println!("Skipped {} concert(s):", report.skipped.len());
+                for (id, title, reason) in &report.skipped {
+                    println!("  [{}] {} — {}", id, title, reason);
+                }
+            }
+
+            if dry_run {
+                return Ok(());
+            }
+            if !confirm {
+                eprintln!(
+                    "WARNING: This will write media_duration for {} concert(s) in the \
+                     database {:?}.\n\
+                     Run with --dry-run first to preview the affected concerts.\n\
+                     Re-run with --confirm to back up the database and apply.",
+                    report.planned.len(),
+                    cli.db
+                );
+                return Ok(());
+            }
+
+            // Back up the database before mutating it (project rule: always back
+            // up before changing database data). The connection runs in WAL mode
+            // (see db::open), so checkpoint first — otherwise a plain file copy
+            // can miss writes still sitting in the `-wal` file and the backup
+            // would silently omit recent data.
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+                .context("Failed to checkpoint WAL before backing up the database")?;
+            let backup_path = backup_db_path(&cli.db);
+            std::fs::copy(&cli.db, &backup_path).with_context(|| {
+                format!(
+                    "Failed to back up database to {} — aborting without writing",
+                    backup_path.display()
+                )
+            })?;
+            println!("Backed up database to {}", backup_path.display());
+
+            let applied =
+                concert_tracker::scan::backfill_media_duration(&conn, &cli.workdir, true)?;
+            println!(
+                "Wrote media_duration for {} concert(s)",
+                applied.planned.len()
+            );
+        }
     }
 
     Ok(())
+}
+
+/// Path for a pre-backfill database backup: alongside the original, suffixed
+/// with `.bak-<UTC timestamp>` so repeated runs never collide or overwrite.
+fn backup_db_path(db_path: &std::path::Path) -> std::path::PathBuf {
+    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
+    let file_name = db_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("concerts.db");
+    db_path.with_file_name(format!("{file_name}.bak-{ts}"))
 }
 
 fn backfill_teaser(conn: &rusqlite::Connection, concert: &Concert) -> Result<bool> {

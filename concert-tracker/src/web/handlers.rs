@@ -2656,35 +2656,15 @@ pub async fn reset_split_timestamps(
     }
 }
 
-/// Returns the duration in seconds of a media file using ffprobe.
+/// Returns the duration in seconds of a media file using ffprobe. The actual
+/// subprocess logic lives in [`crate::scan::ffprobe_duration_sync`] (shared
+/// with the synchronous `concert_db` CLI backfill); here it just runs on a
+/// blocking-pool thread since handlers must stay async.
 async fn ffprobe_duration(path: &std::path::Path) -> anyhow::Result<f64> {
-    let output = tokio::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_entries",
-            "format=duration",
-        ])
-        .arg(path)
-        .output()
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::scan::ffprobe_duration_sync(&path))
         .await
-        .context("ffprobe not found")?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("ffprobe exited non-zero: {}", stderr);
-    }
-
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).context("ffprobe output not valid JSON")?;
-    let duration_str = json["format"]["duration"]
-        .as_str()
-        .context("ffprobe JSON missing format.duration")?;
-    duration_str
-        .parse::<f64>()
-        .context("ffprobe duration not a float")
+        .context("ffprobe task panicked")?
 }
 
 // Vendored htmx, served locally instead of from a CDN so the UI works offline
