@@ -15,6 +15,7 @@ const handle = "#splitter .splitter-handle";
 const gap = "#splitter .splitter-gap";
 const detachBtn = "#splitter .splitter-detach";
 const submit = "#splitter .splitter-submit";
+const revert = "#splitter .splitter-revert";
 const reset = "#splitter .splitter-reset";
 const status = "#splitter .splitter-status";
 const rows = "#splitter .splitter-table tbody tr";
@@ -55,6 +56,30 @@ test.describe("track splitter", () => {
     await endInput(page, 0).blur();
     // Linked: track 1's start follows track 0's end.
     await expect(startInput(page, 1)).toHaveValue("0:05.0");
+  });
+
+  test("discard my edits restores the last saved times without splitting", async ({ page }) => {
+    await openSplitter(page);
+    const original = await endInput(page, 0).inputValue();
+
+    // Make an in-editor edit, but don't submit it.
+    await endInput(page, 0).fill("0:05.0");
+    await endInput(page, 0).blur();
+    await expect(endInput(page, 0)).toHaveValue("0:05.0");
+
+    await expect(page.locator(revert)).toBeEnabled();
+    await page.click(revert);
+
+    // The edit is discarded — back to the value loaded from the DB — and no
+    // split job was spawned (status reports a restore, not a running split).
+    await expect(page.locator(status)).toContainText("Restored the last saved times.");
+    await expect(endInput(page, 0)).toHaveValue(original);
+
+    // Confirm no split job ran: the DB's user column is untouched (still the
+    // seeded auto split, no user override persisted).
+    const r = await page.request.get(`/concerts/${ID}/split-timestamps`);
+    const j = await r.json();
+    expect(j.user).toBeNull();
   });
 
   test("detach opens a gap, submit re-cuts with the gap, reset returns to auto", async ({
