@@ -245,7 +245,8 @@
                    letter-spacing: 0.06em; color: var(--accent); margin-bottom: 0.2rem; }
 
     .card-head { display: flex; gap: 0.6rem; align-items: flex-start; }
-    .card-head-text { flex: 1; min-width: 0; }
+    .card-head-text { min-width: 0; }
+      
     .card-thumb {
       display: block;
       width: 100%;
@@ -273,7 +274,6 @@
        together, always. */
     .card-media { display: flex; flex-direction: column; }
     .card-thumb-link { display: block; }
-    .card-tracks-box { padding: 0.25rem 1rem; }
     /* The loading placeholder carries .card-thumb too, so it reserves the
        same footprint. Cards with no image at all get no fixed footprint. */
     #concert-list .card-media:has(.card-thumb) { aspect-ratio: 16 / 9 }
@@ -301,12 +301,8 @@
       font-size: 0.82em;
       color: var(--fg-muted);
       line-height: 1.5;
-      margin: 1rem 0 0.75rem;
+      margin: 0.5rem 0 0.5rem;
       flex: 1;
-      display: -webkit-box;
-      -webkit-line-clamp: 3;
-      -webkit-box-orient: vertical;
-      overflow: hidden;
     }
 
     .card-actions {
