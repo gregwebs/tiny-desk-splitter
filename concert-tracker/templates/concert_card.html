@@ -17,17 +17,9 @@
     <div class="card-head">
       <div class="card-head-text">
         <h3 class="card-title"><a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top">{{ title }}</a></h3>
-        {% if !teaser.is_empty() %}
-          <p class="card-teaser">
-            <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
-              {{ teaser }}
-            </a>
-          </p>
-        {% endif %}
       </div>
     </div>
     <div class="card-actions">
-
       {# Concert-status slot: Available shows action buttons; Wanted/Ignored show badge + ✕ #}
       <span class="card-slot card-slot-concert">
         {% if is_available %}
@@ -70,7 +62,9 @@
       {# Download slot: shows download badge (non-clickable), download/delete buttons, and
          always-on "Play concert" button when there is anything to play. #}
       <span class="card-slot card-slot-download">
-        {% if show_download_badge %}
+        {% if split_status == "splitting" %}
+          <button class="btn-tracks badge badge-{{ split_status }}" onclick="Player.playTracks(this, {{ id }})"{% if tracks_busy %} disabled{% endif %}>{{ split_status_label }} ({% if track_count == track_total %}{{ track_count }}{% else %}{{ track_count }}/{{ track_total }}{% endif %})</button>
+        {% else if show_download_badge %}
           <span class="badge badge-{{ download_status }}">{{ download_status_label }}</span>
         {% endif %}
         {% if can_play_concert %}
@@ -99,6 +93,17 @@
       </span>
 
     </div>
+
+    {% if !teaser.is_empty() %}
+        <div class="card-slot card-head-text">
+          <p class="card-teaser">
+            <a href="/concerts/{{ id }}" hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top" style="text-decoration:none;">
+              {{ teaser }}
+            </a>
+          </p>
+        </div>
+    {% endif %}
+
     {% if has_set_list %}
     {# Tracks row: the button carries the split status (badge class + label)
        and plays the tracks — preparing (download+split) them first if needed.
