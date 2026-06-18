@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 /// The `{"songs":[...]}` wire format consumed by `live-set-splitter --timestamps-file`.
 /// Shared between the splitter (which writes it) and concert-tracker (which produces it).
@@ -18,7 +19,7 @@ pub struct Song {
     pub title: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, ToSchema)]
 pub struct SongTimestamp {
     pub title: String,
     pub start_time: f64,

@@ -10,6 +10,7 @@ use axum::{
     Json,
 };
 use rusqlite::Connection;
+use utoipa::ToSchema;
 
 use crate::db;
 use crate::jobs::download::start_download;
@@ -940,7 +941,7 @@ pub async fn download(
 
 /// JSON shape returned by `POST /concerts/:id/prepare` and polled via
 /// `GET /concerts/:id/prepare-status` while the player waits for a track.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PrepareStatus {
     /// `DownloadStatus` slug, e.g. "downloading" / "download-error".
     download: String,
@@ -988,6 +989,18 @@ fn prepare_status_payload(state: &AppState, id: i64) -> Result<PrepareStatus, Ap
 /// Idempotent "make every track playable": scrape if needed, then ensure the
 /// download → split chain is running. Returns the same JSON as
 /// `prepare_status` so the client can start polling from the response.
+#[utoipa::path(
+    post,
+    path = "/concerts/{id}/prepare",
+    tag = "playback",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Prepare kicked off; current status", body = PrepareStatus),
+        (status = 404, description = "Concert not found"),
+        (status = 422, description = "Concert has no set list (scrape metadata first)", content_type = "text/plain"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn prepare_concert(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1019,6 +1032,16 @@ pub async fn prepare_concert(
     Ok(Json(prepare_status_payload(&state, id)?).into_response())
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/prepare-status",
+    tag = "playback",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Current prepare status", body = PrepareStatus),
+        (status = 404, description = "Concert not found"),
+    )
+)]
 pub async fn prepare_status(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1295,7 +1318,7 @@ pub async fn listen(
 // ── Concert playback ─────────────────────────────────────────────────────────
 
 /// JSON payload for a single item in the reconstruction sequence.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaybackItemJson {
     pub kind: &'static str,
     pub title: String,
@@ -1308,7 +1331,7 @@ pub struct PlaybackItemJson {
 }
 
 /// Tagged-union response for `GET /concerts/:id/concert-playback`.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 #[serde(tag = "mode", rename_all = "snake_case")]
 pub enum ConcertPlaybackResponse {
     /// Source file is present; client should play it as a whole album.
@@ -1317,6 +1340,17 @@ pub enum ConcertPlaybackResponse {
     Reconstruction { items: Vec<PlaybackItemJson> },
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/concert-playback",
+    tag = "playback",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Playback plan: whole-source or reconstructed from tracks", body = ConcertPlaybackResponse),
+        (status = 404, description = "Concert not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn concert_playback(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1495,7 +1529,7 @@ async fn concert_playback_tracks_fragment(state: &AppState, id: i64) -> Result<S
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct MediaInfo {
     pub url: String,
     pub title: String,
@@ -1562,6 +1596,17 @@ fn find_prev_playable_track(
     None
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/media-info",
+    tag = "playback",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Whole-album playback info", body = MediaInfo),
+        (status = 404, description = "Concert, album, or source file not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn media_info(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -1603,6 +1648,19 @@ pub async fn media_info(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/tracks/{idx}/media-info",
+    tag = "playback",
+    params(
+        ("id" = i64, Path, description = "Concert ID"),
+        ("idx" = usize, Path, description = "0-based set-list track index"),
+    ),
+    responses(
+        (status = 200, description = "Track playback info", body = MediaInfo),
+        (status = 404, description = "Concert, track, or track file not found"),
+    )
+)]
 pub async fn track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
@@ -1637,6 +1695,19 @@ pub async fn track_media_info(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/tracks/{idx}/next-media-info",
+    tag = "playback",
+    params(
+        ("id" = i64, Path, description = "Concert ID"),
+        ("idx" = usize, Path, description = "0-based set-list index to advance from"),
+    ),
+    responses(
+        (status = 200, description = "Next playable track's playback info", body = MediaInfo),
+        (status = 404, description = "No later playable track (or concert/track not found)"),
+    )
+)]
 pub async fn next_track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
@@ -1675,6 +1746,19 @@ pub async fn next_track_media_info(
 
 /// Media info for the nearest playable track *before* `idx` (the Back button).
 /// 404 when there is no earlier playable track. Mirrors [`next_track_media_info`].
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/tracks/{idx}/prev-media-info",
+    tag = "playback",
+    params(
+        ("id" = i64, Path, description = "Concert ID"),
+        ("idx" = usize, Path, description = "0-based set-list index to go back from"),
+    ),
+    responses(
+        (status = 200, description = "Previous playable track's playback info", body = MediaInfo),
+        (status = 404, description = "No earlier playable track (or concert/track not found)"),
+    )
+)]
 pub async fn prev_track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
@@ -2397,7 +2481,7 @@ pub async fn splitter_js() -> impl IntoResponse {
 // ── Split-timestamp API ───────────────────────────────────────────────────────
 
 /// Response body for GET /concerts/:id/split-timestamps.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct SplitTimestampsResponse {
     pub set_list: Vec<String>,
     pub auto: Option<Vec<concert_types::SongTimestamp>>,
@@ -2410,6 +2494,17 @@ pub struct SplitTimestampsResponse {
     pub media_duration: Option<f64>,
 }
 
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/split-timestamps",
+    tag = "splitting",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Auto and user split timestamps plus source duration", body = SplitTimestampsResponse),
+        (status = 404, description = "Concert not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn get_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2462,6 +2557,38 @@ pub async fn get_split_timestamps(
     }))
 }
 
+/// Success body for the split-start endpoints (`POST .../split-timestamps`,
+/// `POST .../split-timestamps/reset`). Replaces what used to be ad-hoc
+/// `serde_json::json!({"status": ...})` literals at each call site; the
+/// `{"status": "..."}` wire shape is unchanged, only the value is now typed.
+#[derive(serde::Serialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitStartStatus {
+    /// A split job was spawned and is running in the background.
+    Splitting,
+    /// Reset no-op: the concert was already using the automatic split.
+    AlreadyAuto,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct SplitStartResponse {
+    pub status: SplitStartStatus,
+}
+
+#[utoipa::path(
+    post,
+    path = "/concerts/{id}/split-timestamps",
+    tag = "splitting",
+    params(("id" = i64, Path, description = "Concert ID")),
+    request_body = TimestampPayload,
+    responses(
+        (status = 202, description = "Split job spawned", body = SplitStartResponse),
+        (status = 404, description = "Concert not found"),
+        (status = 409, description = "Source file not downloaded, or a split is already running", content_type = "text/plain"),
+        (status = 422, description = "Timestamp count/title/ordering validation failed", content_type = "text/plain"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn set_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2549,7 +2676,9 @@ pub async fn set_split_timestamps(
     match outcome {
         crate::jobs::split::StartOutcome::Spawned => Ok((
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "splitting"})),
+            Json(SplitStartResponse {
+                status: SplitStartStatus::Splitting,
+            }),
         )
             .into_response()),
         crate::jobs::split::StartOutcome::AlreadyRunning => Ok((
@@ -2563,12 +2692,28 @@ pub async fn set_split_timestamps(
         // Should not happen for user mode (AlreadySplit branch is Analyze-only).
         crate::jobs::split::StartOutcome::AlreadySplit => Ok((
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "splitting"})),
+            Json(SplitStartResponse {
+                status: SplitStartStatus::Splitting,
+            }),
         )
             .into_response()),
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/concerts/{id}/split-timestamps/reset",
+    tag = "splitting",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Already using the automatic split (no-op)", body = SplitStartResponse),
+        (status = 202, description = "Split job spawned to reset to automatic timestamps", body = SplitStartResponse),
+        (status = 404, description = "Concert not found"),
+        (status = 409, description = "Source file not downloaded, or a split is already running", content_type = "text/plain"),
+        (status = 422, description = "No automated timestamps available, or set list changed since analysis", content_type = "text/plain"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn reset_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2599,7 +2744,10 @@ pub async fn reset_split_timestamps(
         stored.user.is_none()
     };
     if user_is_null {
-        return Ok(Json(serde_json::json!({"status": "already-auto"})).into_response());
+        return Ok(Json(SplitStartResponse {
+            status: SplitStartStatus::AlreadyAuto,
+        })
+        .into_response());
     }
 
     let payload_songs = song_timestamps_to_payload(&auto_ts);
@@ -2639,7 +2787,9 @@ pub async fn reset_split_timestamps(
     match outcome {
         crate::jobs::split::StartOutcome::Spawned => Ok((
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "splitting"})),
+            Json(SplitStartResponse {
+                status: SplitStartStatus::Splitting,
+            }),
         )
             .into_response()),
         crate::jobs::split::StartOutcome::AlreadyRunning => Ok((
@@ -2652,7 +2802,9 @@ pub async fn reset_split_timestamps(
         }
         crate::jobs::split::StartOutcome::AlreadySplit => Ok((
             StatusCode::ACCEPTED,
-            Json(serde_json::json!({"status": "splitting"})),
+            Json(SplitStartResponse {
+                status: SplitStartStatus::Splitting,
+            }),
         )
             .into_response()),
     }
@@ -2685,7 +2837,7 @@ pub async fn htmx_js() -> impl IntoResponse {
 // htmx HTML the rest of the app serves (and avoiding a collision with the Phase-2
 // HTML pages that will live at `/playlists` and `/playlists/:id`).
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaylistJson {
     id: i64,
     name: String,
@@ -2708,7 +2860,7 @@ impl From<crate::model::Playlist> for PlaylistJson {
 
 /// Intentionally narrower than `PlaylistJson`: the add-to-playlist sidebar only
 /// needs id, name, and the representative item_id used to issue a DELETE.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct MembershipJson {
     id: i64,
     name: String,
@@ -2725,7 +2877,7 @@ impl From<crate::db::PlaylistMembership> for MembershipJson {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct ResolvedTrackJson {
     concert_id: i64,
     track_index: usize,
@@ -2746,7 +2898,7 @@ impl From<crate::model::ResolvedTrack> for ResolvedTrackJson {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaylistSummaryJson {
     track_count: usize,
     known_duration_secs: f64,
@@ -2765,7 +2917,7 @@ impl From<crate::model::PlaylistSummary> for PlaylistSummaryJson {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaylistListEntry {
     playlist: PlaylistJson,
     summary: PlaylistSummaryJson,
@@ -2773,7 +2925,7 @@ pub struct PlaylistListEntry {
 
 /// One raw playlist item (the un-flattened reference). `item_type` is "track" |
 /// "concert" | "playlist"; the other fields are populated per kind.
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaylistItemJson {
     id: i64,
     position: i64,
@@ -2806,21 +2958,21 @@ impl From<crate::model::PlaylistItem> for PlaylistItemJson {
     }
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct PlaylistDetailJson {
     playlist: PlaylistJson,
     items: Vec<PlaylistItemJson>,
     resolved_tracks: Vec<ResolvedTrackJson>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct CreatePlaylistReq {
     name: String,
     #[serde(default)]
     description: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct UpdatePlaylistReq {
     #[serde(default)]
     name: Option<String>,
@@ -2828,7 +2980,7 @@ pub struct UpdatePlaylistReq {
     description: Option<String>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct AddItemReq {
     #[serde(rename = "type")]
     item_type: String,
@@ -2840,17 +2992,17 @@ pub struct AddItemReq {
     child_playlist_id: Option<i64>,
 }
 
-#[derive(serde::Deserialize)]
+#[derive(serde::Deserialize, ToSchema)]
 pub struct ReorderReq {
     item_ids: Vec<i64>,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct CreatedPlaylistJson {
     id: i64,
 }
 
-#[derive(serde::Serialize)]
+#[derive(serde::Serialize, ToSchema)]
 pub struct CreatedItemJson {
     item_id: i64,
 }
@@ -2889,6 +3041,17 @@ fn parse_item_kind(req: &AddItemReq) -> Result<crate::model::PlaylistItemKind, A
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playlists",
+    tag = "playlists",
+    request_body = CreatePlaylistReq,
+    responses(
+        (status = 200, description = "Playlist created", body = CreatedPlaylistJson),
+        (status = 422, description = "Validation error (e.g. empty name)"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn create_playlist(
     State(state): State<AppState>,
     Json(req): Json<CreatePlaylistReq>,
@@ -2899,6 +3062,15 @@ pub async fn create_playlist(
     Ok(Json(CreatedPlaylistJson { id }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/playlists",
+    tag = "playlists",
+    responses(
+        (status = 200, description = "All playlists with summaries", body = Vec<PlaylistListEntry>),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn list_playlists(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PlaylistListEntry>>, AppError> {
@@ -2915,6 +3087,17 @@ pub async fn list_playlists(
     Ok(Json(out))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/playlists/{id}",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    responses(
+        (status = 200, description = "Playlist detail with items and resolved tracks", body = PlaylistDetailJson),
+        (status = 404, description = "Playlist not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn get_playlist(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2930,6 +3113,19 @@ pub async fn get_playlist(
     }))
 }
 
+#[utoipa::path(
+    patch,
+    path = "/api/playlists/{id}",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    request_body = UpdatePlaylistReq,
+    responses(
+        (status = 204, description = "Playlist updated"),
+        (status = 404, description = "Playlist not found"),
+        (status = 422, description = "Validation error"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn update_playlist(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2946,6 +3142,17 @@ pub async fn update_playlist(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/playlists/{id}",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    responses(
+        (status = 204, description = "Playlist deleted"),
+        (status = 404, description = "Playlist not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn delete_playlist(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2958,6 +3165,19 @@ pub async fn delete_playlist(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playlists/{id}/items",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    request_body = AddItemReq,
+    responses(
+        (status = 200, description = "Item added", body = CreatedItemJson),
+        (status = 404, description = "Playlist (or referenced concert/track/playlist) not found"),
+        (status = 422, description = "Invalid item reference or would create a cycle"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn add_playlist_item(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2969,6 +3189,20 @@ pub async fn add_playlist_item(
     Ok(Json(CreatedItemJson { item_id }))
 }
 
+#[utoipa::path(
+    delete,
+    path = "/api/playlists/{id}/items/{item_id}",
+    tag = "playlists",
+    params(
+        ("id" = i64, Path, description = "Playlist ID"),
+        ("item_id" = i64, Path, description = "Playlist item ID"),
+    ),
+    responses(
+        (status = 204, description = "Item removed"),
+        (status = 404, description = "Playlist or item not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn remove_playlist_item(
     State(state): State<AppState>,
     Path((id, item_id)): Path<(i64, i64)>,
@@ -2981,6 +3215,19 @@ pub async fn remove_playlist_item(
     }
 }
 
+#[utoipa::path(
+    post,
+    path = "/api/playlists/{id}/items/reorder",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    request_body = ReorderReq,
+    responses(
+        (status = 204, description = "Items reordered"),
+        (status = 404, description = "Playlist not found"),
+        (status = 422, description = "item_ids do not match the playlist's current items"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn reorder_playlist_items(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -2991,6 +3238,19 @@ pub async fn reorder_playlist_items(
     Ok(StatusCode::NO_CONTENT)
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/concerts/{id}/tracks/{idx}/playlists",
+    tag = "playlists",
+    params(
+        ("id" = i64, Path, description = "Concert ID"),
+        ("idx" = usize, Path, description = "0-based set-list track index"),
+    ),
+    responses(
+        (status = 200, description = "Playlists containing this track", body = Vec<MembershipJson>),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn track_playlists(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
@@ -3000,6 +3260,16 @@ pub async fn track_playlists(
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/concerts/{id}/playlists",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Playlists containing this concert", body = Vec<MembershipJson>),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn concert_playlists(
     State(state): State<AppState>,
     Path(id): Path<i64>,
@@ -3009,6 +3279,16 @@ pub async fn concert_playlists(
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/api/playlists/{id}/nested-in",
+    tag = "playlists",
+    params(("id" = i64, Path, description = "Playlist ID")),
+    responses(
+        (status = 200, description = "Parent playlists that nest this playlist", body = Vec<MembershipJson>),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
 pub async fn playlist_nested_in(
     State(state): State<AppState>,
     Path(id): Path<i64>,
