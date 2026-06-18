@@ -1,16 +1,17 @@
 use concert_types::{SongTimestamp, TimestampsFile};
 use serde::Deserialize;
 use std::fmt;
+use utoipa::ToSchema;
 
 const MIN_SONG_DURATION_SECONDS: f64 = 1.0;
 
 /// Per-song payload from the POST /concerts/:id/split-timestamps request body.
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TimestampPayload {
     pub songs: Vec<TimestampPayloadSong>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, ToSchema)]
 pub struct TimestampPayloadSong {
     pub title: String,
     pub start_time: f64,

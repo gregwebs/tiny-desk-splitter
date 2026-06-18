@@ -1,4 +1,5 @@
 pub mod handlers;
+pub mod openapi;
 
 use std::sync::{Arc, Mutex};
 
@@ -6,15 +7,18 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
     Router,
 };
 use rusqlite::Connection;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::jobs::scrape_queue::ScrapeQueue;
 use crate::jobs::{JobConfig, JobRegistry};
+use openapi::ApiDoc;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -47,6 +51,7 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
     let concerts_dir = state.jobs.working_dir.join("concerts");
     let thumbnails_dir = state.jobs.working_dir.join("thumbnails");
+
     let router = Router::new()
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
@@ -156,7 +161,7 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         )
         .route(
             "/api/playlists/:id/items/:item_id",
-            axum::routing::delete(handlers::remove_playlist_item),
+            delete(handlers::remove_playlist_item),
         )
         .route(
             "/api/playlists/:id/nested-in",
@@ -172,6 +177,12 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
         .merge(static_js_router(opts.dev))
+        // Always-on (not gated by `opts.dev`): this is a self-hosted, single-user
+        // tool, so exposing the JSON API's shape carries no real risk, and having
+        // the docs handy in prod is worth more than hiding them. Mounted before
+        // the trace/error-logging layers so Swagger UI's own requests are traced
+        // like everything else.
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
         .layer(middleware::from_fn(log_error_responses))
