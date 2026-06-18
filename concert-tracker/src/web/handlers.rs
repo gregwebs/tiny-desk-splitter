@@ -655,12 +655,14 @@ pub async fn list(
         }
     }
 
+    let hide_empty_months = !filter.is_empty();
     let items = crate::month_walk::build_month_items(
         &current,
         earliest_date.as_deref(),
         &synced,
         by_month,
         no_date_rows,
+        hide_empty_months,
     );
 
     Ok(ListTemplate {

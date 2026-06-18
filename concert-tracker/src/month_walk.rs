@@ -24,6 +24,7 @@ pub fn build_month_items(
     synced: &HashSet<YearMonth>,
     mut by_month: HashMap<YearMonth, Vec<String>>,
     no_date_rows: Vec<String>,
+    hide_empty_months: bool,
 ) -> Vec<String> {
     let earliest_ym = earliest_date
         .and_then(YearMonth::from_date_str)
@@ -39,10 +40,14 @@ pub fn build_month_items(
     let mut items: Vec<String> = Vec::new();
     let mut ym = current.clone();
     loop {
-        let show_sync = ym == *current || !synced.contains(&ym);
-        items.push(render_month_divider(&ym, show_sync));
-        if let Some(rows) = by_month.remove(&ym) {
-            items.extend(rows);
+        let rows = by_month.remove(&ym);
+        let has_rows = rows.as_ref().is_some_and(|r| !r.is_empty());
+        if !hide_empty_months || has_rows {
+            let show_sync = ym == *current || !synced.contains(&ym);
+            items.push(render_month_divider(&ym, show_sync));
+            if let Some(rows) = rows {
+                items.extend(rows);
+            }
         }
         if ym == stop_at {
             break;
@@ -89,6 +94,7 @@ mod tests {
             &HashSet::new(),
             HashMap::new(),
             Vec::new(),
+            false,
         );
         // May, Apr, Mar, Feb (stop_at = Feb = earliest.previous())
         assert_eq!(count_dividers(&items), 4);
@@ -103,6 +109,7 @@ mod tests {
             &HashSet::new(),
             HashMap::new(),
             Vec::new(),
+            false,
         );
         // May, Apr (stop_at = Apr = earliest.previous())
         assert_eq!(count_dividers(&items), 2);
@@ -111,7 +118,14 @@ mod tests {
     #[test]
     fn no_earliest_defaults_to_current() {
         let current = ym(2026, 5);
-        let items = build_month_items(&current, None, &HashSet::new(), HashMap::new(), Vec::new());
+        let items = build_month_items(
+            &current,
+            None,
+            &HashSet::new(),
+            HashMap::new(),
+            Vec::new(),
+            false,
+        );
         assert_eq!(count_dividers(&items), 2);
     }
 
@@ -131,6 +145,7 @@ mod tests {
             &HashSet::new(),
             by_month,
             Vec::new(),
+            false,
         );
 
         let march_div = items.iter().position(|s| s.contains("March 2026")).unwrap();
@@ -155,6 +170,7 @@ mod tests {
             &HashSet::new(),
             HashMap::new(),
             no_date,
+            false,
         );
 
         let unknown_div = items
@@ -169,7 +185,14 @@ mod tests {
     #[test]
     fn no_unknown_date_section_when_empty() {
         let current = ym(2026, 5);
-        let items = build_month_items(&current, None, &HashSet::new(), HashMap::new(), Vec::new());
+        let items = build_month_items(
+            &current,
+            None,
+            &HashSet::new(),
+            HashMap::new(),
+            Vec::new(),
+            false,
+        );
         assert!(!items.iter().any(|s| s.contains("Unknown date")));
     }
 
@@ -186,6 +209,7 @@ mod tests {
             &synced,
             HashMap::new(),
             Vec::new(),
+            false,
         );
 
         // Current month always shows sync button even if synced
@@ -205,8 +229,97 @@ mod tests {
             &HashSet::new(),
             HashMap::new(),
             Vec::new(),
+            false,
         );
         // 2026-05 to 1999-12 inclusive = 318 months
         assert_eq!(count_dividers(&items), 318);
+    }
+
+    #[test]
+    fn hide_empty_months_skips_dividers_with_no_rows() {
+        let current = ym(2026, 5);
+        let mut by_month = HashMap::new();
+        by_month.insert(ym(2026, 3), vec!["row-march".to_string()]);
+
+        let items = build_month_items(
+            &current,
+            Some("2026-01-01"),
+            &HashSet::new(),
+            by_month,
+            Vec::new(),
+            true,
+        );
+
+        // Only March has rows; May, Apr, Feb, Jan should be skipped entirely.
+        assert_eq!(count_dividers(&items), 1);
+        assert!(items.iter().any(|s| s.contains("March 2026")));
+        assert!(items.iter().any(|s| s == "row-march"));
+    }
+
+    #[test]
+    fn hide_empty_months_keeps_dividers_with_rows() {
+        let current = ym(2026, 3);
+        let mut by_month = HashMap::new();
+        by_month.insert(ym(2026, 3), vec!["row-march".to_string()]);
+        by_month.insert(
+            ym(2026, 1),
+            vec!["row-jan-1".to_string(), "row-jan-2".to_string()],
+        );
+
+        let items = build_month_items(
+            &current,
+            Some("2026-01-01"),
+            &HashSet::new(),
+            by_month,
+            Vec::new(),
+            true,
+        );
+
+        // March and January have rows; February is empty and should be skipped.
+        assert_eq!(count_dividers(&items), 2);
+        assert!(items.iter().any(|s| s.contains("March 2026")));
+        assert!(items.iter().any(|s| s.contains("January 2026")));
+        assert!(!items.iter().any(|s| s.contains("February 2026")));
+    }
+
+    #[test]
+    fn hide_empty_months_omits_current_month_when_empty() {
+        let current = ym(2026, 5);
+        let mut by_month = HashMap::new();
+        by_month.insert(ym(2026, 3), vec!["row-march".to_string()]);
+
+        let items = build_month_items(
+            &current,
+            Some("2026-03-01"),
+            &HashSet::new(),
+            by_month,
+            Vec::new(),
+            true,
+        );
+
+        assert!(!items.iter().any(|s| s.contains("May 2026")));
+        assert!(items.iter().any(|s| s.contains("March 2026")));
+    }
+
+    #[test]
+    fn hide_empty_months_still_appends_no_date_rows() {
+        let current = ym(2026, 5);
+        let no_date = vec!["undated-row".to_string()];
+
+        let items = build_month_items(
+            &current,
+            Some("2026-05-01"),
+            &HashSet::new(),
+            HashMap::new(),
+            no_date,
+            true,
+        );
+
+        // No month has rows, so no month dividers should appear; the only
+        // divider-class element left is the "Unknown date" section, which is
+        // independent of hide_empty_months.
+        assert_eq!(count_dividers(&items), 1);
+        assert!(items.iter().any(|s| s.contains("Unknown date")));
+        assert!(items.iter().any(|s| s == "undated-row"));
     }
 }

@@ -6,8 +6,12 @@
   {% endfor %}
 </div>
 <div class="card-grid" id="concert-list">
+  {% if rows.is_empty() %}
+  <p class="empty-state">No matching concerts.</p>
+  {% else %}
   {% for row in rows %}
   {{ row|safe }}
   {% endfor %}
+  {% endif %}
 </div>
 {% endblock %}
