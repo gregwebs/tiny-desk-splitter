@@ -35,7 +35,10 @@ concert-types = { path = "../concert-types" }
 which = "7"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 regex = "1"
+# Pinned exactly: 0.1.4+ require axum ^0.8, but this crate is on axum 0.7.
+# Revisit this pin together with any future axum 0.8 migration.
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
+utoipa-axum = "=0.1.3"
 utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }
 
 [dev-dependencies]

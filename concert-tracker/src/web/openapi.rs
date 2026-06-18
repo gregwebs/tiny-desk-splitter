@@ -6,6 +6,12 @@
 //!
 //! Served at runtime via `/api-docs/openapi.json` and an interactive Swagger UI
 //! at `/swagger-ui` (wired in [`super::router_with_opts`]).
+//!
+//! Paths are NOT listed here: each JSON handler's `#[utoipa::path]` attribute
+//! is the single source of truth for both its axum route and its OpenAPI path,
+//! registered via `.routes(routes!(handlers::foo))` in `router_with_opts`. This
+//! struct only seeds the doc's info/components/tags; `OpenApiRouter` merges in
+//! the actual paths at router-build time.
 
 use utoipa::OpenApi;
 
@@ -20,29 +26,6 @@ use crate::web::handlers;
         description = "JSON endpoints for playlists, playback, and split-timestamp \
                         editing. The rest of the app is htmx-rendered HTML and is \
                         not represented here."
-    ),
-    paths(
-        handlers::prepare_concert,
-        handlers::prepare_status,
-        handlers::concert_playback,
-        handlers::media_info,
-        handlers::track_media_info,
-        handlers::next_track_media_info,
-        handlers::prev_track_media_info,
-        handlers::get_split_timestamps,
-        handlers::set_split_timestamps,
-        handlers::reset_split_timestamps,
-        handlers::create_playlist,
-        handlers::list_playlists,
-        handlers::get_playlist,
-        handlers::update_playlist,
-        handlers::delete_playlist,
-        handlers::add_playlist_item,
-        handlers::remove_playlist_item,
-        handlers::reorder_playlist_items,
-        handlers::track_playlists,
-        handlers::concert_playlists,
-        handlers::playlist_nested_in,
     ),
     components(schemas(
         handlers::PrepareStatus,
@@ -83,8 +66,10 @@ mod tests {
 
     /// The set of JSON paths we expect to be documented. Hardcoded rather than
     /// derived from the router so this test actually catches the "added a JSON
-    /// handler, forgot to add it to `paths(...)` above" mistake. One-directional:
-    /// adding a new JSON route also requires adding a line here.
+    /// handler, forgot to wire its `.routes(routes!(...))` into `api_router`"
+    /// mistake — which would otherwise drop the route entirely, not just its
+    /// docs. One-directional: adding a new JSON route also requires adding a
+    /// line here.
     const EXPECTED_PATHS: &[&str] = &[
         "/concerts/{id}/prepare-status",
         "/concerts/{id}/prepare",
@@ -114,7 +99,9 @@ mod tests {
 
     #[test]
     fn documents_all_expected_json_paths() {
-        let doc = ApiDoc::openapi();
+        // Paths aren't in `ApiDoc::openapi()` itself (see module doc comment) —
+        // they're contributed by `routes!` when the router is actually built.
+        let doc = crate::web::built_api_doc();
         let documented: Vec<&str> = doc.paths.paths.keys().map(String::as_str).collect();
         for expected in EXPECTED_PATHS {
             assert!(

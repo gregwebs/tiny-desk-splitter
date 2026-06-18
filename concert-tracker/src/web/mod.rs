@@ -7,13 +7,14 @@ use axum::{
     extract::Request,
     middleware::{self, Next},
     response::Response,
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use rusqlite::Connection;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
+use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_swagger_ui::SwaggerUi;
 
 use crate::jobs::scrape_queue::ScrapeQueue;
@@ -51,8 +52,39 @@ pub fn router(state: AppState) -> Router {
 pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
     let concerts_dir = state.jobs.working_dir.join("concerts");
     let thumbnails_dir = state.jobs.working_dir.join("thumbnails");
+    let (router, api) = api_router();
 
-    let router = Router::new()
+    let router = router
+        .merge(static_js_router(opts.dev))
+        // Always-on (not gated by `opts.dev`): this is a self-hosted, single-user
+        // tool, so exposing the JSON API's shape carries no real risk, and having
+        // the docs handy in prod is worth more than hiding them. Mounted before
+        // the trace/error-logging layers so Swagger UI's own requests are traced
+        // like everything else.
+        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
+        .nest_service("/concert-files", ServeDir::new(concerts_dir))
+        .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
+        .layer(middleware::from_fn(log_error_responses))
+        .layer(TraceLayer::new_for_http());
+    let router = if opts.dev {
+        router.layer(tower_livereload::LiveReloadLayer::new())
+    } else {
+        router
+    };
+    router.with_state(state)
+}
+
+/// Builds the full route table (HTML/htmx pages + JSON API) and the OpenAPI
+/// doc for the JSON subset, split apart. Doesn't need an `AppState` *value* —
+/// only its type — so [`crate::web::openapi::tests`] can call this directly to
+/// inspect the doc actually served, without standing up a database.
+///
+/// Annotated JSON-API handlers use `.routes(routes!(...))`: the handler's
+/// `#[utoipa::path]` attribute (in handlers.rs) is the single source of truth
+/// for both the axum route and the OpenAPI doc entry — see web/openapi.rs.
+/// Plain HTML/htmx handlers (no utoipa annotation) keep using `.route(...)`.
+pub(crate) fn api_router() -> (Router<AppState>, utoipa::openapi::OpenApi) {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
         .route("/concerts/:id/ignore", post(handlers::ignore))
@@ -69,52 +101,34 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         // routed deliberately, as curl-able escape hatches for manual
         // recovery/administration.
         .route("/concerts/:id/split", post(handlers::split))
-        .route("/concerts/:id/prepare", post(handlers::prepare_concert))
-        .route(
-            "/concerts/:id/prepare-status",
-            get(handlers::prepare_status),
-        )
+        .routes(routes!(handlers::prepare_concert))
+        .routes(routes!(handlers::prepare_status))
         .route("/concerts/:id/delete-split", post(handlers::delete_split))
-        .route(
-            "/concerts/:id/split-timestamps",
-            get(handlers::get_split_timestamps).post(handlers::set_split_timestamps),
-        )
-        .route(
-            "/concerts/:id/split-timestamps/reset",
-            post(handlers::reset_split_timestamps),
-        )
+        .routes(routes!(
+            handlers::get_split_timestamps,
+            handlers::set_split_timestamps
+        ))
+        .routes(routes!(handlers::reset_split_timestamps))
         .route(
             "/concerts/:id/delete-redundant-source",
             post(handlers::delete_redundant_source),
         )
-        .route(
-            "/concerts/:id/concert-playback",
-            get(handlers::concert_playback),
-        )
+        .routes(routes!(handlers::concert_playback))
         .route(
             "/concerts/:id/interludes/:idx/delete",
             post(handlers::delete_interlude),
         )
         .route("/concerts/:id/listen", post(handlers::listen))
         .route("/concerts/:id/watch", post(handlers::watch))
-        .route("/concerts/:id/media-info", get(handlers::media_info))
+        .routes(routes!(handlers::media_info))
         .route("/concerts/:id/tracks", get(handlers::tracks))
         .route(
             "/concerts/:id/tracks/:idx/listen",
             post(handlers::listen_track),
         )
-        .route(
-            "/concerts/:id/tracks/:idx/media-info",
-            get(handlers::track_media_info),
-        )
-        .route(
-            "/concerts/:id/tracks/:idx/next-media-info",
-            get(handlers::next_track_media_info),
-        )
-        .route(
-            "/concerts/:id/tracks/:idx/prev-media-info",
-            get(handlers::prev_track_media_info),
-        )
+        .routes(routes!(handlers::track_media_info))
+        .routes(routes!(handlers::next_track_media_info))
+        .routes(routes!(handlers::prev_track_media_info))
         .route(
             "/concerts/:id/tracks/:idx/watch",
             post(handlers::watch_track),
@@ -140,59 +154,32 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         .route("/playlists", get(handlers::playlists_page))
         .route("/playlists/:id", get(handlers::playlist_detail_page))
         // Playlists JSON API (Phase 1). Mounted under /api so it doesn't collide
-        // with the Phase-2 HTML pages at /playlists and /playlists/:id.
-        .route(
-            "/api/playlists",
-            get(handlers::list_playlists).post(handlers::create_playlist),
-        )
-        .route(
-            "/api/playlists/:id",
-            get(handlers::get_playlist)
-                .patch(handlers::update_playlist)
-                .delete(handlers::delete_playlist),
-        )
-        .route(
-            "/api/playlists/:id/items",
-            post(handlers::add_playlist_item),
-        )
-        .route(
-            "/api/playlists/:id/items/reorder",
-            post(handlers::reorder_playlist_items),
-        )
-        .route(
-            "/api/playlists/:id/items/:item_id",
-            delete(handlers::remove_playlist_item),
-        )
-        .route(
-            "/api/playlists/:id/nested-in",
-            get(handlers::playlist_nested_in),
-        )
-        .route(
-            "/api/concerts/:id/playlists",
-            get(handlers::concert_playlists),
-        )
-        .route(
-            "/api/concerts/:id/tracks/:idx/playlists",
-            get(handlers::track_playlists),
-        )
+        // with the Phase-2 HTML pages at /playlists and /playlists/:id. Routes +
+        // OpenAPI paths both come from each handler's #[utoipa::path].
+        .routes(routes!(handlers::list_playlists, handlers::create_playlist))
+        .routes(routes!(
+            handlers::get_playlist,
+            handlers::update_playlist,
+            handlers::delete_playlist
+        ))
+        .routes(routes!(handlers::add_playlist_item))
+        .routes(routes!(handlers::reorder_playlist_items))
+        .routes(routes!(handlers::remove_playlist_item))
+        .routes(routes!(handlers::playlist_nested_in))
+        .routes(routes!(handlers::concert_playlists))
+        .routes(routes!(handlers::track_playlists))
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
-        .merge(static_js_router(opts.dev))
-        // Always-on (not gated by `opts.dev`): this is a self-hosted, single-user
-        // tool, so exposing the JSON API's shape carries no real risk, and having
-        // the docs handy in prod is worth more than hiding them. Mounted before
-        // the trace/error-logging layers so Swagger UI's own requests are traced
-        // like everything else.
-        .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi()))
-        .nest_service("/concert-files", ServeDir::new(concerts_dir))
-        .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
-        .layer(middleware::from_fn(log_error_responses))
-        .layer(TraceLayer::new_for_http());
-    let router = if opts.dev {
-        router.layer(tower_livereload::LiveReloadLayer::new())
-    } else {
-        router
-    };
-    router.with_state(state)
+        .split_for_parts()
+}
+
+/// The OpenAPI doc as actually served, paths included. Used by
+/// `openapi`'s tests in place of `ApiDoc::openapi()`, which only carries
+/// info/tags/components — paths are contributed by [`api_router`] at
+/// router-build time via `routes!`, not by the `#[derive(OpenApi)]` macro
+/// alone.
+#[cfg(test)]
+pub(crate) fn built_api_doc() -> utoipa::openapi::OpenApi {
+    api_router().1
 }
 
 /// `/static/*.js` routes. In prod, JS is embedded via `include_str!` so the
