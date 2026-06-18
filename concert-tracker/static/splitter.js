@@ -271,12 +271,16 @@ const Splitter = (() => {
     const submitBtn = el("button", "splitter-submit", "Split with these times");
     submitBtn.type = "button";
     submitBtn.addEventListener("click", submit);
+    const revertBtn = el("button", "splitter-revert", "Discard my edits");
+    revertBtn.type = "button";
+    revertBtn.addEventListener("click", revert);
     const resetBtn = el("button", "splitter-reset", "Reset to auto");
     resetBtn.type = "button";
     resetBtn.addEventListener("click", reset);
-    toolbar.append(status, submitBtn, resetBtn);
+    toolbar.append(status, submitBtn, revertBtn, resetBtn);
     S.statusEl = status;
     S.submitBtn = submitBtn;
+    S.revertBtn = revertBtn;
     S.resetBtn = resetBtn;
 
     // Timeline.
@@ -444,6 +448,7 @@ const Splitter = (() => {
     const errors = validate(S.state);
     const busy = S.busy;
     if (S.submitBtn) S.submitBtn.disabled = busy || errors.length > 0;
+    if (S.revertBtn) S.revertBtn.disabled = busy;
     if (S.resetBtn) S.resetBtn.disabled = busy;
     if (!busy) {
       if (errors.length > 0) setStatus(errors[0], "error");
@@ -545,6 +550,42 @@ const Splitter = (() => {
     await postJob(`/concerts/${S.id}/split-timestamps/reset`, null, "Resetting to auto…");
   }
 
+  // Re-fetch the saved timestamps and build editor state from them (or null if
+  // there's nothing to split yet). Shared by revert() and resync().
+  async function fetchState() {
+    const resp = await fetch(`/concerts/${S.id}/split-timestamps`).then(okJson);
+    return initState(resp);
+  }
+
+  // Rebuild the editor from the saved timestamps, throwing away the user's
+  // unsaved in-editor edits. initState chooses resp.user || resp.auto (see
+  // initState above), so this lands on the last *saved* times — NOT the
+  // automated baseline that "Reset to auto" re-splits to.
+  async function revert() {
+    setBusy(true);
+    setStatus("Discarding edits…");
+    try {
+      const state = await fetchState();
+      if (!state) {
+        setStatus("No saved times to restore.", "error");
+        setBusy(false);
+        return;
+      }
+      S.state = state;
+      // Order is deliberate: render() runs syncDom → refreshValidity while
+      // S.busy is still true, so refreshValidity's `if (!busy)` guard does not
+      // overwrite the success status set below. Then clear busy (re-enables
+      // the freshly-built buttons), then set the status.
+      render();
+      setBusy(false);
+      setStatus("Restored the last saved times.", "ok");
+    } catch (e) {
+      setStatus("Could not load saved times — please retry.", "error");
+      setBusy(false);
+      console.warn("[Splitter] revert failed", e);
+    }
+  }
+
   async function postJob(url, body, runningMsg) {
     setBusy(true);
     setStatus(runningMsg);
@@ -582,6 +623,7 @@ const Splitter = (() => {
   function setBusy(busy) {
     S.busy = busy;
     if (S.submitBtn) S.submitBtn.disabled = busy || validate(S.state).length > 0;
+    if (S.revertBtn) S.revertBtn.disabled = busy;
     if (S.resetBtn) S.resetBtn.disabled = busy;
   }
 
@@ -600,8 +642,7 @@ const Splitter = (() => {
   // job is producing.
   async function resync() {
     try {
-      const resp = await fetch(`/concerts/${S.id}/split-timestamps`).then(okJson);
-      const state = initState(resp);
+      const state = await fetchState();
       if (state) {
         S.state = state;
         render();
