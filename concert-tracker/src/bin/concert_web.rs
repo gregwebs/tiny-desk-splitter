@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
 use concert_tracker::jobs::{check_dependencies, default_splitter_bin, JobConfig, JobRegistry};
-use concert_tracker::web::{router, AppState};
+use concert_tracker::web::{router_with_opts, AppState, RouterOpts};
 
 #[derive(Parser)]
 #[command(name = "concert-web", about = "Tiny Desk concert web UI")]
@@ -51,6 +51,13 @@ struct Cli {
     /// block that lookup. Mutually exclusive with `--no-proxy`.
     #[arg(long, default_value_t = false, conflicts_with = "no_proxy")]
     proxy_from_env: bool,
+
+    /// Dev mode: serve static/*.js from disk (no recompile needed for JS edits)
+    /// and inject a livereload script so the browser auto-refreshes whenever
+    /// this process restarts (e.g. under `just dev` / cargo-watch). Templates
+    /// and CSS are compiled in via askama, so they still require a recompile.
+    #[arg(long, default_value_t = false)]
+    dev: bool,
 }
 
 #[tokio::main]
@@ -128,7 +135,7 @@ async fn main() -> Result<()> {
         scrape_queue,
     };
 
-    let app = router(state.clone());
+    let app = router_with_opts(state.clone(), RouterOpts { dev: cli.dev });
     let addr = SocketAddr::from((cli.host, cli.port));
     let listener = tokio::net::TcpListener::bind(addr).await?;
     // Always print the *bound* local_addr (not cli.host) so callers learn the

@@ -23,3 +23,11 @@ lint: fmt-check clippy
 install-hooks:
     git config core.hooksPath .githooks
     @echo "Git hooks installed from .githooks/"
+
+# Hot-reload dev server. Requires: cargo install cargo-watch
+# Recompiles + restarts on src/templates (incl. inline CSS) changes; on
+# static/*.js changes, cargo finds nothing to compile so it just restarts the
+# binary, which still triggers a livereload refresh. See --dev in concert_web.rs.
+dev *ARGS:
+    cargo watch -w concert-tracker/src -w concert-tracker/templates -w concert-tracker/static \
+        -x 'run --bin concert-web -- --dev {{ARGS}}'

@@ -265,6 +265,30 @@ This sets `core.hooksPath = .githooks` so that:
 - **pre-commit** runs `cargo fmt --check` (fast)
 - **pre-push** runs `just clippy` (gates what leaves the machine)
 
+### Hot-reload dev server
+
+```sh
+cargo install cargo-watch   # one-time
+just dev --db test.db --workdir /tmp/tds-dev --port 3001
+```
+
+Watches `concert-tracker/{src,templates,static}` and rebuilds/restarts
+`concert-web --dev` on change, with the browser auto-refreshing via
+[`tower-livereload`](https://docs.rs/tower-livereload) whenever the process
+restarts. `--dev` also serves `static/*.js` from disk instead of the
+compiled-in copy, so JS edits show up instantly without a recompile:
+
+| Edit                          | Recompile? |
+|-------------------------------|------------|
+| `templates/*.html` (incl. inline CSS) | yes — askama compiles templates in |
+| `src/**/*.rs`                 | yes |
+| `static/*.js`                 | no — served from disk in `--dev` |
+
+Use a scratch `--db`/`--workdir` (never the real `concerts.db`) — copy data
+from `concerts.db` into the test db first if you need real data to work
+against. Without `--dev`, `concert-web` behaves exactly as before: JS is
+compiled in and no livereload script is injected.
+
 ## Building
 
 ```sh

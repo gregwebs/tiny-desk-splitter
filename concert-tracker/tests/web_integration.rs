@@ -3158,3 +3158,54 @@ async fn delete_interlude_removes_file_records_event_returns_fragment() {
         "track_delete must NOT be recorded for interlude: {events:?}"
     );
 }
+
+/// `router(state)` (the production path, used by every other test in this file
+/// and by `concert_web.rs` without `--dev`) must keep serving JS from the
+/// `include_str!`-embedded copy and must never inject the dev-mode livereload
+/// script. This pins the dev/prod divergence introduced by `RouterOpts::dev` —
+/// see `web::router_with_opts`.
+#[tokio::test]
+async fn prod_router_serves_embedded_js_without_livereload() {
+    let conn = db::open_in_memory().unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/static/player.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .unwrap(),
+        "application/javascript"
+    );
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        body.contains("const Player = (() => {"),
+        "must serve the embedded static/player.js, got: {body}"
+    );
+
+    let resp = app
+        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body = String::from_utf8_lossy(&bytes);
+    assert!(
+        !body.to_lowercase().contains("livereload"),
+        "production responses must not include the dev-mode livereload script: {body}"
+    );
+}

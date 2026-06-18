@@ -26,10 +26,28 @@ pub struct AppState {
     pub scrape_queue: ScrapeQueue,
 }
 
+/// Options controlling dev-only wiring. See [`router_with_opts`].
+#[derive(Clone, Copy, Default)]
+pub struct RouterOpts {
+    /// Serve `static/*.js` from disk instead of the `include_str!`-embedded
+    /// copies, and inject a livereload script so the browser refreshes
+    /// whenever this process restarts. Templates and CSS are askama
+    /// compile-time templates, so they still require a recompile to change —
+    /// this only makes JS edits instant. Intended for `concert-web --dev`
+    /// under a file watcher (see `just dev`); never set in production.
+    pub dev: bool,
+}
+
+/// Production router: embedded JS, no livereload. Equivalent to
+/// `router_with_opts(state, RouterOpts::default())`.
 pub fn router(state: AppState) -> Router {
+    router_with_opts(state, RouterOpts::default())
+}
+
+pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
     let concerts_dir = state.jobs.working_dir.join("concerts");
     let thumbnails_dir = state.jobs.working_dir.join("thumbnails");
-    Router::new()
+    let router = Router::new()
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
         .route("/concerts/:id/ignore", post(handlers::ignore))
@@ -153,15 +171,38 @@ pub fn router(state: AppState) -> Router {
             get(handlers::track_playlists),
         )
         .route("/sync/:year/:month", post(handlers::sync_month_handler))
-        .route("/static/player.js", get(handlers::player_js))
-        .route("/static/playlists.js", get(handlers::playlists_js))
-        .route("/static/splitter.js", get(handlers::splitter_js))
-        .route("/static/htmx.min.js", get(handlers::htmx_js))
+        .merge(static_js_router(opts.dev))
         .nest_service("/concert-files", ServeDir::new(concerts_dir))
         .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
         .layer(middleware::from_fn(log_error_responses))
-        .layer(TraceLayer::new_for_http())
-        .with_state(state)
+        .layer(TraceLayer::new_for_http());
+    let router = if opts.dev {
+        router.layer(tower_livereload::LiveReloadLayer::new())
+    } else {
+        router
+    };
+    router.with_state(state)
+}
+
+/// `/static/*.js` routes. In prod, JS is embedded via `include_str!` so the
+/// binary is self-contained. In dev, it's served from disk so edits show up
+/// without a recompile — see [`RouterOpts::dev`].
+fn static_js_router(dev: bool) -> Router<AppState> {
+    if !dev {
+        return Router::new()
+            .route("/static/player.js", get(handlers::player_js))
+            .route("/static/playlists.js", get(handlers::playlists_js))
+            .route("/static/splitter.js", get(handlers::splitter_js))
+            .route("/static/htmx.min.js", get(handlers::htmx_js));
+    }
+    let static_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/static");
+    if !std::path::Path::new(static_dir).is_dir() {
+        tracing::error!(
+            dir = static_dir,
+            "dev mode: static dir not found, JS routes will 404"
+        );
+    }
+    Router::new().nest_service("/static", ServeDir::new(static_dir))
 }
 
 /// Log any response with a 4xx/5xx status at info level or above so that
