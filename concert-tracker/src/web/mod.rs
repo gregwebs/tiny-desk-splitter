@@ -172,13 +172,14 @@ pub(crate) fn api_router() -> (Router<AppState>, utoipa::openapi::OpenApi) {
         .split_for_parts()
 }
 
-/// The OpenAPI doc as actually served, paths included. Used by
-/// `openapi`'s tests in place of `ApiDoc::openapi()`, which only carries
-/// info/tags/components — paths are contributed by [`api_router`] at
-/// router-build time via `routes!`, not by the `#[derive(OpenApi)]` macro
-/// alone.
-#[cfg(test)]
-pub(crate) fn built_api_doc() -> utoipa::openapi::OpenApi {
+/// The OpenAPI doc as actually served, paths included. `ApiDoc::openapi()`
+/// alone only carries info/tags/components — paths are contributed by
+/// [`api_router`] at router-build time via `routes!`, not by the
+/// `#[derive(OpenApi)]` macro. Used by `openapi`'s tests, and by the
+/// `openapi-dump` binary to print the spec without standing up a database
+/// (this needs only `AppState`'s *type*, not a value — `api_router` is
+/// generic over the router's state type, never constructs one).
+pub fn built_api_doc() -> utoipa::openapi::OpenApi {
     api_router().1
 }
 

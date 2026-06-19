@@ -4,6 +4,7 @@
 /thumbnails/
 /log/
 /node_modules/
+/concert-tracker/frontend/node_modules/
 
 /target/
 /temp_frames/

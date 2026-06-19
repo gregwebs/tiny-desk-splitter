@@ -8,7 +8,8 @@
   },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:unit": "node --test js-tests/*.test.js"
+    "test:unit": "node --import tsx --test js-tests/*.test.ts",
+    "test:unit:check": "tsc --noEmit -p js-tests/tsconfig.json"
   },
   "repository": {
     "type": "git",
@@ -22,6 +23,9 @@
   },
   "homepage": "https://github.com/gregwebs/tiny-desk-splitter#readme",
   "devDependencies": {
-    "@playwright/test": "^1.60.0"
+    "@playwright/test": "^1.60.0",
+    "tsx": "4.22.4",
+    "typescript": "5.9.3",
+    "@types/node": "24.13.2"
   }
 }
