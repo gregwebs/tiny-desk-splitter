@@ -182,16 +182,18 @@ pub(crate) fn built_api_doc() -> utoipa::openapi::OpenApi {
     api_router().1
 }
 
-/// `/static/*.js` routes. In prod, JS is embedded via `include_str!` so the
-/// binary is self-contained. In dev, it's served from disk so edits show up
-/// without a recompile — see [`RouterOpts::dev`].
+/// `/static/*` routes (JS + CSS). In prod, assets are embedded via
+/// `include_str!` so the binary is self-contained. In dev, they're served
+/// from disk so edits show up on a browser refresh without a recompile —
+/// see [`RouterOpts::dev`].
 fn static_js_router(dev: bool) -> Router<AppState> {
     if !dev {
         return Router::new()
             .route("/static/player.js", get(handlers::player_js))
             .route("/static/playlists.js", get(handlers::playlists_js))
             .route("/static/splitter.js", get(handlers::splitter_js))
-            .route("/static/htmx.min.js", get(handlers::htmx_js));
+            .route("/static/htmx.min.js", get(handlers::htmx_js))
+            .route("/static/style.css", get(handlers::style_css));
     }
     let static_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/static");
     if !std::path::Path::new(static_dir).is_dir() {

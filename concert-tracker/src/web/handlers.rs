@@ -2478,6 +2478,13 @@ pub async fn splitter_js() -> impl IntoResponse {
     )
 }
 
+pub async fn style_css() -> impl IntoResponse {
+    (
+        [(axum::http::header::CONTENT_TYPE, "text/css")],
+        include_str!("../../static/style.css"),
+    )
+}
+
 // ── Split-timestamp API ───────────────────────────────────────────────────────
 
 /// Response body for GET /concerts/:id/split-timestamps.
