@@ -11,6 +11,10 @@ path = "src/bin/concert_db.rs"
 name = "concert-web"
 path = "src/bin/concert_web.rs"
 
+[[bin]]
+name = "openapi-dump"
+path = "src/bin/openapi_dump.rs"
+
 [lints]
 workspace = true
 

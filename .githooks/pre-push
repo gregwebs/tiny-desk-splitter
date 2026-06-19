@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# pre-push: run clippy before any push (gates what leaves the machine).
-# Formatting is checked in the pre-commit hook; this only runs clippy.
+# pre-push: run clippy + the TypeScript checks before any push (gates what
+# leaves the machine). Formatting is checked in the pre-commit hook.
 set -euo pipefail
 
 if ! command -v just &>/dev/null; then
@@ -18,3 +18,24 @@ if ! just clippy; then
     exit 1
 fi
 echo "pre-push: clippy OK"
+
+echo "pre-push: running TypeScript type-check..."
+if ! just ts-check; then
+    echo ""
+    echo "  TypeScript type errors found. Fix them before pushing."
+    echo "  Run 'just ts-check' for the full output."
+    exit 1
+fi
+echo "pre-push: ts-check OK"
+
+echo "pre-push: verifying static/*.js matches frontend/src..."
+if ! just ts-verify; then
+    echo ""
+    echo "  concert-tracker/static/{player,playlists,splitter}.js don't match a"
+    echo "  fresh build of concert-tracker/frontend/src — either a source file"
+    echo "  changed without rebuilding, or the generated .js was hand-edited"
+    echo "  (don't — see its \"@generated\" banner)."
+    echo "  Run 'just ts-build', review the diff, and commit the result."
+    exit 1
+fi
+echo "pre-push: ts-verify OK"
