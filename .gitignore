@@ -1,0 +1,14 @@
+node_modules
+dist
+*.tsbuildinfo
+*.tgz
+*.cpuprofile
+.vercel
+**/.claude/*
+!/.claude/commands/
+!/.claude/settings.json
+packages/website/src/generated/
+.playwright-mcp/
+playwright-report/
+test-results/
+.DS_Store
