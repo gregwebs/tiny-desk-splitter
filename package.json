@@ -23,7 +23,7 @@
   },
   "homepage": "https://github.com/gregwebs/tiny-desk-splitter#readme",
   "devDependencies": {
-    "@foldkit/devtools-mcp": "^0.12.0",
+    "@foldkit/devtools-mcp": "0.12.0",
     "@playwright/test": "^1.60.0",
     "@types/node": "24.13.2",
     "tsx": "4.22.4",
