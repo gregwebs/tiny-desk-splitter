@@ -19,6 +19,11 @@
 /vendor/ocr-rs/models/
 /vendor/ocr-rs/target/
 
+# Local-only reference clone of the foldkit framework source (not a build
+# dependency - the npm `foldkit` package is). Not committed; re-fetch with
+# `git clone https://github.com/foldkit/foldkit.git repos/foldkit` if needed.
+/repos/foldkit/
+
 concerts.db
 concerts.db-wal
 concerts.db-shm
