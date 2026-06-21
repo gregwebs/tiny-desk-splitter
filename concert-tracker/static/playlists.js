@@ -58,7 +58,7 @@
     return document.getElementById(id);
   }
 
-  // concert-tracker/frontend/src/playlists.ts
+  // concert-tracker/frontend/src/playlists/pages.ts
   function trace(...args) {
     if (window.PLAYLIST_DEBUG) console.debug("[playlists]", ...args);
   }
@@ -217,6 +217,8 @@
     e.preventDefault();
     persistOrder(list);
   });
+
+  // concert-tracker/frontend/src/playlists/index.ts
   var currentAddTarget = null;
   var allPlaylists = [];
   var memberMap = /* @__PURE__ */ new Map();

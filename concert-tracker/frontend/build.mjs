@@ -45,7 +45,7 @@ const reviewableOptions = {
   ...sharedOptions,
   entryPoints: {
     player: path.join(__dirname, "src/player.ts"),
-    playlists: path.join(__dirname, "src/playlists.ts"),
+    playlists: path.join(__dirname, "src/playlists/index.ts"),
   },
   target: "es2020",
   minify: false,
