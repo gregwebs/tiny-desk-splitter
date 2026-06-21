@@ -1,0 +1,4 @@
+{
+  "extends": "../concert-tracker/frontend/tsconfig.json",
+  "include": ["*.test.ts"]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "concert-tracker-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TypeScript sources for concert-tracker's frontend. Compiles to ../static/*.js (committed build artifacts) via esbuild.",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "watch": "node build.mjs --watch",
+    "check": "tsc --noEmit",
+    "openapi-types": "openapi-typescript /tmp/concert-tracker-openapi.json -o src/generated/openapi.d.ts"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "openapi-typescript": "7.13.0",
+    "typescript": "5.9.3",
+    "tsx": "4.22.4"
+  }
+}
