@@ -34,20 +34,10 @@
         <div id="sidebar-concert-tracks"></div>
       </section>
       <section id="sidebar-add-section" aria-label="Add to playlist">
-        <div class="add-pl-header">
-          <h2>Add to playlist</h2>
-          <button class="add-pl-close" title="Close" aria-label="Close"
-                  onclick="window.Playlists&&Playlists.closeAdd()">&times;</button>
-        </div>
-        <p class="add-pl-context" id="add-pl-context"></p>
-        <input type="text" id="add-pl-filter" class="add-pl-filter"
-               placeholder="Filter playlists&#x2026;" autocomplete="off"
-               role="combobox" aria-expanded="true" aria-haspopup="listbox"
-               aria-controls="add-pl-list"
-               oninput="window.Playlists&&Playlists.filterPlaylists(this.value)"
-               onkeydown="window.Playlists&&Playlists.filterKeydown(event)">
-        <ul id="add-pl-list" class="add-pl-list" role="listbox"></ul>
-        <p id="add-pl-error" class="add-pl-error" style="display:none"></p>
+        <!-- The add-to-playlist panel is a Foldkit widget (playlists.js,
+             src/playlists/widget); it renders the header / filter / list /
+             error into this mount point. See src/playlists/index.ts. -->
+        <div id="add-pl-widget-root"></div>
       </section>
     </aside>
     <div id="player-video-panel">
