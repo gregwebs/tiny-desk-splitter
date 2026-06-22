@@ -46,6 +46,13 @@ ts-watch:
 ts-verify: ts-build
     git diff --exit-code -- concert-tracker/static/player.js
 
+# All TypeScript/JS tests: the pure node:test unit suites (js-tests/) plus the
+# Foldkit Story/Scene tests for the widgets (vitest + happy-dom, since they need
+# a DOM). The Playwright e2e suite (e2e/) is separate — run it with `npx playwright test`.
+test-ts:
+    npm run test:unit
+    cd concert-tracker/frontend && npm run test:story
+
 # Run fmt-check + clippy + ts-check + ts-verify (the full standard lint suite).
 lint: fmt-check clippy ts-check ts-verify
 

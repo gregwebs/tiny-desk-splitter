@@ -81,8 +81,14 @@ the route are unchanged).
 
 ## Verification
 
-- `just lint` clean (fmt, clippy, tsc ×2, `ts-verify`); `node --test js-tests/*` — 32 unit
-  tests (12 splitter + 20 add-panel core).
+- `just lint` clean (fmt, clippy, tsc ×2, `ts-verify`); `just test-ts` runs all TS/JS tests:
+  `node --test js-tests/*` — 32 unit tests (12 splitter + 20 add-panel core) — plus the Foldkit
+  **Story/Scene** tests for the widget (vitest + happy-dom; 10 Story cases over `update` and 4
+  Scene cases over `view`). Story exercises the MVU `update` with foldkit's own harness
+  (model + Message sequence → assert Model + emitted Commands, including the staleness rule and
+  the `ClickedRow` member-no-op); Scene renders `view` in happy-dom and asserts/interacts through
+  the accessible DOM (filter narrowing, the loading/error rows, the member checkmark). See
+  `concert-tracker/frontend/src/playlists/widget/{update.story,view.scene}.test.ts`.
 - Playwright: `add-to-playlist.spec.js`, `add-to-playlist-ordering.spec.js`,
   `sidebar-close-resize.spec.js`, `sidebar.spec.js`, `playlists.spec.js` all green (membership
   ✓/trash, click-to-add, filter, arrow-key nav, exact-name + Enter clears filter, create-and-add,
