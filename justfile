@@ -32,20 +32,26 @@ ts-build:
 ts-watch:
     node concert-tracker/frontend/build.mjs --watch
 
-# Drift guard: static/player.js and static/playlists.js must be exactly what
-# `ts-build` produces from the current frontend/src. A diff here means someone
-# hand-edited the generated .js (forbidden — see its "@generated" banner) or
-# forgot to rebuild after a source change. Blocking: wired into `lint` and the
-# pre-push hook.
+# Drift guard: static/player.js must be exactly what `ts-build` produces from
+# the current frontend/src. A diff here means someone hand-edited the generated
+# .js (forbidden — see its "@generated" banner) or forgot to rebuild after a
+# source change. Blocking: wired into `lint` and the pre-push hook.
 #
-# static/splitter.js is deliberately NOT diff-guarded here: it's a Foldkit
-# (Effect-TS) bundle, built minified (unlike the other two, which stay
-# unminified and reviewable) because the bundled Effect-TS runtime is too
-# large to review as a plain-text diff. It's still a committed build artifact
-# (cargo build stays Node-free via include_str!) — just not one a human is
-# expected to read. See docs/change/2026-06-19-foldkit-eval.md.
+# static/splitter.js and static/playlists.js are deliberately NOT diff-guarded
+# here: they're Foldkit (Effect-TS) bundles, built minified (unlike player.js,
+# which stays unminified and reviewable) because the bundled Effect-TS runtime
+# is too large to review as a plain-text diff. They're still committed build
+# artifacts (cargo build stays Node-free via include_str!) — just not ones a
+# human is expected to read. See docs/change/2026-06-19-foldkit-eval.md.
 ts-verify: ts-build
-    git diff --exit-code -- concert-tracker/static/player.js concert-tracker/static/playlists.js
+    git diff --exit-code -- concert-tracker/static/player.js
+
+# All TypeScript/JS tests: the pure node:test unit suites (js-tests/) plus the
+# Foldkit Story/Scene tests for the widgets (vitest + happy-dom, since they need
+# a DOM). The Playwright e2e suite (e2e/) is separate — run it with `npx playwright test`.
+test-ts:
+    npm run test:unit
+    cd concert-tracker/frontend && npm run test:story
 
 # Run fmt-check + clippy + ts-check + ts-verify (the full standard lint suite).
 lint: fmt-check clippy ts-check ts-verify

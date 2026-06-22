@@ -106,26 +106,19 @@ test.describe("Add-to-playlist sidebar: member ordering", () => {
       return rows.length >= 3;
     });
 
-    const rows = await page.locator("#add-pl-list li.add-pl-row").all();
-    expect(rows.length).toBeGreaterThanOrEqual(3);
-
-    // With filter: non-members should come first, member at the bottom.
-    const texts = await Promise.all(rows.map((r) => r.locator(".add-pl-name").textContent()));
-    const memberIdx = texts.findIndex((t) => t === "Beta Playlist");
-    expect(memberIdx).toBeGreaterThanOrEqual(0);
-
-    // All rows BEFORE the member row should be non-members.
-    for (let i = 0; i < memberIdx; i++) {
-      const isMember = await rows[i].evaluate((el) =>
-        el.classList.contains("add-pl-row-member")
-      );
-      expect(isMember).toBe(false);
-    }
-
-    // The member row itself should have the member class.
-    expect(
-      await rows[memberIdx].evaluate((el) => el.classList.contains("add-pl-row-member"))
-    ).toBe(true);
+    // With filter: non-members first, the single member ("Beta Playlist") sinks
+    // to the bottom. The widget re-renders asynchronously (MVU), so use
+    // auto-retrying assertions on the final reordered state rather than reading
+    // a mid-reorder snapshot.
+    await expect(
+      page.locator("#add-pl-list li.add-pl-row-member", { hasText: "Beta Playlist" })
+    ).toBeVisible();
+    // Exactly one member row, and it is the last playlist row (so everything
+    // above it is a non-member).
+    await expect(page.locator("#add-pl-list li.add-pl-row-member")).toHaveCount(1);
+    await expect(page.locator("#add-pl-list li.add-pl-row").last()).toHaveClass(
+      /add-pl-row-member/
+    );
   });
 
   test("clearing the filter moves members back to the top", async ({ page }) => {
@@ -171,23 +164,19 @@ test.describe("Add-to-playlist sidebar: member ordering", () => {
     await filter.focus();
 
     // First ArrowDown should highlight the first row — which should be the member "Beta".
+    // The widget re-renders asynchronously (MVU), so use auto-retrying assertions.
+    const activeName = page.locator("#add-pl-list .add-pl-row-active .add-pl-name");
     await filter.press("ArrowDown");
-    const highlighted = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const highlightedText = await highlighted.locator(".add-pl-name").textContent();
-    expect(highlightedText).toBe("Beta");
-    expect(await highlighted.evaluate((el) => el.classList.contains("add-pl-row-member"))).toBe(true);
+    await expect(activeName).toHaveText("Beta");
+    await expect(page.locator("#add-pl-list .add-pl-row-active")).toHaveClass(/add-pl-row-member/);
 
     // Second ArrowDown -> "Alpha" (first non-member).
     await filter.press("ArrowDown");
-    const highlighted2 = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const text2 = await highlighted2.locator(".add-pl-name").textContent();
-    expect(text2).toBe("Alpha");
+    await expect(activeName).toHaveText("Alpha");
 
     // Third ArrowDown -> "Gamma".
     await filter.press("ArrowDown");
-    const highlighted3 = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const text3 = await highlighted3.locator(".add-pl-name").textContent();
-    expect(text3).toBe("Gamma");
+    await expect(activeName).toHaveText("Gamma");
   });
 
   test("arrow-key navigation follows display order (with filter: members-last)", async ({ page }) => {
@@ -204,25 +193,90 @@ test.describe("Add-to-playlist sidebar: member ordering", () => {
     await page.waitForFunction(() => document.querySelectorAll("#add-pl-list li.add-pl-row").length >= 2);
 
     // Focus the filter and press ArrowDown — first highlight should be non-member "Alpha".
+    // The widget re-renders asynchronously (MVU), so use auto-retrying assertions.
+    const activeName = page.locator("#add-pl-list .add-pl-row-active .add-pl-name");
     await filter.focus();
     await filter.press("ArrowDown");
-
-    const highlighted = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const text = await highlighted.locator(".add-pl-name").textContent();
-    expect(text).toBe("Alpha");
-    expect(await highlighted.evaluate((el) => el.classList.contains("add-pl-row-member"))).toBe(false);
+    await expect(activeName).toHaveText("Alpha");
+    await expect(page.locator("#add-pl-list .add-pl-row-active")).not.toHaveClass(/add-pl-row-member/);
 
     // Second ArrowDown -> Create "a" row (positioned between non-members and members).
     await filter.press("ArrowDown");
-    const highlighted2 = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const text2 = await highlighted2.locator(".add-pl-name").textContent();
-    expect(text2).toContain("Create");
+    await expect(activeName).toContainText("Create");
 
     // Third ArrowDown -> member "Beta" (now at the bottom, after the Create row).
     await filter.press("ArrowDown");
-    const highlighted3 = await page.locator("#add-pl-list .add-pl-row-active").first();
-    const text3 = await highlighted3.locator(".add-pl-name").textContent();
-    expect(text3).toBe("Beta");
-    expect(await highlighted3.evaluate((el) => el.classList.contains("add-pl-row-member"))).toBe(true);
+    await expect(activeName).toHaveText("Beta");
+    await expect(page.locator("#add-pl-list .add-pl-row-active")).toHaveClass(/add-pl-row-member/);
+  });
+
+  test("Enter on an arrow-highlighted member row removes it (unlike a row click, which is a no-op)", async ({
+    page,
+  }) => {
+    const betaId = await createPlaylist(page, "Beta"); // member
+    await addTrackToPlaylist(page, betaId, AUDIO, 0);
+
+    await openAddPanel(page, AUDIO, 0);
+
+    // Empty filter → the member "Beta" is the first row. ArrowDown highlights it.
+    const filter = page.locator("#add-pl-filter");
+    await filter.focus();
+    await filter.press("ArrowDown");
+    const activeName = page.locator("#add-pl-list .add-pl-row-active .add-pl-name");
+    await expect(activeName).toHaveText("Beta");
+    await expect(page.locator("#add-pl-list .add-pl-row-active")).toHaveClass(/add-pl-row-member/);
+
+    // Enter on an arrow-highlighted member toggles it off (commandsForRow member
+    // → RemoveItem), unlike a mouse click on a member row, which is a no-op.
+    await filter.press("Enter");
+
+    // The row flips to a non-member, and the track is gone from the playlist.
+    await expect(page.locator("#add-pl-list li.add-pl-row-member", { hasText: "Beta" })).toHaveCount(0);
+    await expect(page.locator("#add-pl-list .add-pl-name", { hasText: "Beta" })).toBeVisible();
+    const items = await page.evaluate(async (id) => {
+      const r = await fetch(`/api/playlists/${id}`);
+      return (await r.json()).items;
+    }, betaId);
+    expect(items.length).toBe(0);
+  });
+
+  test("a slow membership fetch for a superseded target does not clobber the current one", async ({
+    page,
+  }) => {
+    // "Shared" contains track 0 (Celular) but not track 1 (Limbo).
+    const pid = await createPlaylist(page, "Shared");
+    await addTrackToPlaylist(page, pid, AUDIO, 0);
+
+    await openTracks(page, AUDIO);
+
+    // Hold track 0's membership response until we release it; track 1's is normal.
+    let releaseTrack0;
+    const track0Held = new Promise((resolve) => (releaseTrack0 = resolve));
+    await page.route("**/api/concerts/1/tracks/0/playlists", async (route) => {
+      await track0Held;
+      await route.continue();
+    });
+
+    // Open the panel for track 0 (its load is now stuck), then immediately for
+    // track 1 (supersedes track 0; loads normally).
+    await page.evaluate(() => document.querySelector('.btn-add-pl[onclick*="trackIndex:0"]').click());
+    await page.evaluate(() => document.querySelector('.btn-add-pl[onclick*="trackIndex:1"]').click());
+
+    // Panel now shows track 1 ("Limbo"): "Shared" is a non-member.
+    await expect(page.locator("#add-pl-context")).toContainText("Limbo");
+    await expect(page.locator("#add-pl-list .add-pl-name", { hasText: "Shared" })).toBeVisible();
+    await expect(
+      page.locator("#add-pl-list li.add-pl-row-member", { hasText: "Shared" })
+    ).toHaveCount(0);
+
+    // Release the stale track-0 response — the forTarget staleness rule must
+    // drop it (it would otherwise show "Shared" as a member of track 1).
+    releaseTrack0();
+    await page.waitForTimeout(500);
+
+    await expect(page.locator("#add-pl-context")).toContainText("Limbo");
+    await expect(
+      page.locator("#add-pl-list li.add-pl-row-member", { hasText: "Shared" })
+    ).toHaveCount(0);
   });
 });

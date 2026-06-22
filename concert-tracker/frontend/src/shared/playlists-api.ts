@@ -18,8 +18,6 @@ export interface PlaylistsApi {
   removeItem(playlistId: number, itemId: number): Promise<void>;
   openAdd(target: AddTarget): Promise<void>;
   closeAdd(): void;
-  filterPlaylists(query: string): void;
-  filterKeydown(event: KeyboardEvent): void;
 }
 
 declare global {

@@ -141,12 +141,11 @@ test.describe("Add-to-playlist (2b)", () => {
     await waitForAddList(page);
 
     await page.fill("#add-pl-filter", "Alpha");
-    // Re-render is synchronous; just check the result.
-    const texts = await page.locator(".add-pl-row").allTextContents();
-    expect(texts.some((t) => t.includes("Beta"))).toBe(false);
-    expect(texts.some((t) => t.includes("Alpha"))).toBe(true);
+    // The widget re-renders asynchronously (MVU); wait for the filtered result.
+    await expect(page.locator(".add-pl-name", { hasText: "Beta List" })).toHaveCount(0);
+    await expect(page.locator(".add-pl-name", { hasText: "Alpha List" })).toBeVisible();
     // The "Create" row appears when there is filter text.
-    expect(texts.some((t) => t.includes("Create"))).toBe(true);
+    await expect(page.locator(".add-pl-row-new")).toBeVisible();
   });
 
   test("create-and-add flow creates a new playlist with the track", async ({ page }) => {

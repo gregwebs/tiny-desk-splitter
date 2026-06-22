@@ -10,13 +10,13 @@
 // client, generated types, DOM helpers) is duplicated into each bundle by
 // design, not imported across entry points.
 //
-// player.js and playlists.js are unminified with no sourcemap so the
-// committed .js stays reviewable and reproducible (see `just ts-verify`,
-// which fails CI if a rebuild produces a diff against the committed
-// artifacts). splitter.js is a Foldkit (Effect-TS) bundle — built minified,
-// on a newer target, and deliberately excluded from the `ts-verify` diff
-// guard (the bundled Effect-TS runtime is too large to review as plain text;
-// see docs/change/2026-06-19-foldkit-eval.md). It's still committed, so
+// player.js is unminified with no sourcemap so the committed .js stays
+// reviewable and reproducible (see `just ts-verify`, which fails CI if a
+// rebuild produces a diff against the committed artifact). splitter.js and
+// playlists.js are Foldkit (Effect-TS) bundles — built minified, on a newer
+// target, and deliberately excluded from the `ts-verify` diff guard (the
+// bundled Effect-TS runtime is too large to review as plain text; see
+// docs/change/2026-06-19-foldkit-eval.md). They're still committed, so
 // `cargo build` stays Node-free either way.
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
@@ -45,18 +45,21 @@ const reviewableOptions = {
   ...sharedOptions,
   entryPoints: {
     player: path.join(__dirname, "src/player.ts"),
-    playlists: path.join(__dirname, "src/playlists.ts"),
   },
   target: "es2020",
   minify: false,
 };
 
-// Effect-TS requires a newer target than the other two bundles; minified
-// because the bundled runtime is too large to keep reviewable unminified.
+// Effect-TS requires a newer target than the player bundle; minified because
+// the bundled runtime is too large to keep reviewable unminified. The
+// playlists bundle now carries the Foldkit add-to-playlist widget (and the
+// still-imperative list/detail/drag host glue rides along), joining splitter
+// here; player.js stays the lone reviewable, diff-guarded bundle.
 const foldkitOptions = {
   ...sharedOptions,
   entryPoints: {
     splitter: path.join(__dirname, "src/splitter/index.ts"),
+    playlists: path.join(__dirname, "src/playlists/index.ts"),
   },
   target: "es2022",
   minify: true,
