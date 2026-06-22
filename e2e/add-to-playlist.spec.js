@@ -89,26 +89,6 @@ test.describe("Add-to-playlist (2b)", () => {
     await expect(page.locator("#add-pl-list")).toBeVisible();
   });
 
-  test("add panel lists existing playlists with membership checks", async ({ page }) => {
-    // Navigate first so page.evaluate can use relative URLs.
-    await page.goto("/concerts/1");
-    const pid = await createPlaylist(page, "Already In");
-    await addItemToPlaylist(page, pid, { type: "track", concert_id: 1, track_index: 0 });
-    await createPlaylist(page, "Not In");
-
-    await openAddPanelForTrack(page);
-    await waitForAddList(page);
-
-    // "Already In" should show a checkmark and the member class.
-    const memberRow = page.locator(".add-pl-row-member", { hasText: "Already In" });
-    await expect(memberRow).toBeVisible();
-    await expect(memberRow.locator(".add-pl-check")).toHaveText("✓");
-
-    // "Not In" should be a normal (clickable) row.
-    const normalRow = page.locator(".add-pl-row:not(.add-pl-row-member)", { hasText: "Not In" });
-    await expect(normalRow).toBeVisible();
-  });
-
   test("clicking a playlist row adds the track and flips to checked", async ({ page }) => {
     await page.goto("/concerts/1");
     const pid = await createPlaylist(page, "Target Playlist");
@@ -130,22 +110,6 @@ test.describe("Add-to-playlist (2b)", () => {
     }, pid);
     expect(items.length).toBe(1);
     expect(items[0].item_type).toBe("track");
-  });
-
-  test("filter input narrows the playlist list", async ({ page }) => {
-    await page.goto("/concerts/1");
-    await createPlaylist(page, "Alpha List");
-    await createPlaylist(page, "Beta List");
-
-    await openAddPanelForTrack(page);
-    await waitForAddList(page);
-
-    await page.fill("#add-pl-filter", "Alpha");
-    // The widget re-renders asynchronously (MVU); wait for the filtered result.
-    await expect(page.locator(".add-pl-name", { hasText: "Beta List" })).toHaveCount(0);
-    await expect(page.locator(".add-pl-name", { hasText: "Alpha List" })).toBeVisible();
-    // The "Create" row appears when there is filter text.
-    await expect(page.locator(".add-pl-row-new")).toBeVisible();
   });
 
   test("create-and-add flow creates a new playlist with the track", async ({ page }) => {

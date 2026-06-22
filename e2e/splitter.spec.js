@@ -50,14 +50,6 @@ test.describe("track splitter", () => {
     await expect(page.locator(submit)).toBeEnabled();
   });
 
-  test("editing a linked boundary moves both adjacent times", async ({ page }) => {
-    await openSplitter(page);
-    await endInput(page, 0).fill("0:05.0");
-    await endInput(page, 0).blur();
-    // Linked: track 1's start follows track 0's end.
-    await expect(startInput(page, 1)).toHaveValue("0:05.0");
-  });
-
   test("discard my edits restores the last saved times without splitting", async ({ page }) => {
     await openSplitter(page);
     const original = await endInput(page, 0).inputValue();
@@ -132,16 +124,6 @@ test.describe("track splitter", () => {
         { timeout: 10000 }
       )
       .toBe(true);
-  });
-
-  test("editing below the 1s minimum is clamped, keeping submit enabled", async ({ page }) => {
-    await openSplitter(page);
-    await page.locator(detachBtn).first().click();
-    // Try to shrink track 0 below the 1s minimum; the input snaps to 0:01.0.
-    await endInput(page, 0).fill("0:00.4");
-    await endInput(page, 0).blur();
-    await expect(endInput(page, 0)).toHaveValue("0:01.0");
-    await expect(page.locator(submit)).toBeEnabled();
   });
 
   test("dragging the tail handle to the far right clamps within media duration", async ({

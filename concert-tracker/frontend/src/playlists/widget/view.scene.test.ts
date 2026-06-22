@@ -2,6 +2,8 @@ import { Option } from "effect";
 import { Scene } from "foldkit";
 import { describe, test } from "vitest";
 
+import { ScrollActiveIntoView } from "./command";
+import { CompletedScrollActiveIntoView } from "./message";
 import { type AddTarget, type Model, PhaseValue, type RowId } from "./model";
 import { update } from "./update";
 import { view } from "./view";
@@ -93,6 +95,25 @@ describe("add-panel view", () => {
       // A partial match to an existing non-member auto-highlights nothing, so no
       // scroll Command is emitted.
       Scene.Command.expectNone(),
+    );
+  });
+
+  test("ArrowDown on the filter highlights the first row in display order (members first)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(
+        loaded({
+          playlists: [
+            { id: 1, name: "Rock" },
+            { id: 2, name: "Jazz" },
+          ],
+          members: [{ playlistId: 1, itemId: 5 }], // Rock is a member, sorts first.
+        }),
+      ),
+      Scene.keydown(Scene.role("combobox"), "ArrowDown"),
+      Scene.expect(Scene.role("option", { selected: true })).toContainText("Rock"),
+      Scene.Command.expectHas(ScrollActiveIntoView),
+      Scene.Command.resolve(ScrollActiveIntoView, CompletedScrollActiveIntoView()),
     );
   });
 });
