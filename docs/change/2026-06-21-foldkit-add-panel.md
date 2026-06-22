@@ -81,9 +81,16 @@ the route are unchanged).
 
 ## Verification
 
-- `just lint` clean (fmt, clippy, tsc ×2, `ts-verify`); `node --test js-tests/*` — 28 unit
-  tests (12 splitter + 16 add-panel).
+- `just lint` clean (fmt, clippy, tsc ×2, `ts-verify`); `node --test js-tests/*` — 32 unit
+  tests (12 splitter + 20 add-panel core).
 - Playwright: `add-to-playlist.spec.js`, `add-to-playlist-ordering.spec.js`,
   `sidebar-close-resize.spec.js`, `sidebar.spec.js`, `playlists.spec.js` all green (membership
   ✓/trash, click-to-add, filter, arrow-key nav, exact-name + Enter clears filter, create-and-add,
   empty-state `prompt()` bridge, external sidebar-close reset, `sidebarWasOpen` restore).
+- The two MVU-specific behaviours added explicit specs (`add-to-playlist-ordering.spec.js`): the
+  **staleness rule** — a deliberately delayed membership fetch for a superseded target is dropped
+  rather than clobbering the current target (the scenario the old `addPanelToken` counter
+  existed for) — and the **Enter-toggles-member / click-is-no-op asymmetry** on a member row.
+- The full e2e suite has 8 failures that are **pre-existing on `origin/main`** (verified on a
+  clean worktree): `openapi` (page-navigation), `automate-splitting`, `concert-reconstruction`,
+  `interlude-tracks`, `sync-player-persistence` — none touch the add-to-playlist panel.

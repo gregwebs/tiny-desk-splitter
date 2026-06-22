@@ -106,6 +106,17 @@ test("buildRows when filtered: non-members, then create row, then members", () =
   assert.equal(rows[1]!.name, "rock");
 });
 
+test("buildRows: a filter exactly matching a member shows no create row, member stays a member row", () => {
+  const rows = C.buildRows({
+    playlists: pls([1, "Rock"], [2, "Jazz"]),
+    members: members(1), // Rock is a member
+    filter: "Rock",
+  });
+  // Exact match to a member → no create row; "Jazz" filtered out.
+  assert.deepEqual(kinds(rows), ["member"]);
+  assert.equal(rows[0]!.id, 1);
+});
+
 test("buildRows suppresses the create row on an exact name match", () => {
   const rows = C.buildRows({
     playlists: pls([1, "Rock"]),
@@ -144,6 +155,13 @@ test("autoHighlight does not fire with an empty filter", () => {
   assert.equal(C.autoHighlight({ rows, filter: "", currentActive: null }), null);
 });
 
+test("autoHighlight Rule 1 picks the exact non-member match, not just the first match", () => {
+  // Both "Rock" and "Rockabilly" match "rock"; Rule 1 highlights the exact
+  // match ("Rock", id 1), not the first row.
+  const rows = C.buildRows({ playlists: pls([1, "Rock"], [2, "Rockabilly"]), members: [], filter: "Rock" });
+  assert.equal(C.autoHighlight({ rows, filter: "Rock", currentActive: null }), 1);
+});
+
 test("autoHighlight does not highlight an exact match that is already a member", () => {
   const rows = C.buildRows({
     playlists: pls([1, "Rock"], [2, "Rockabilly"]),
@@ -166,6 +184,16 @@ test("nextRow: from null selects the first row, then advances, then clamps", () 
 
 test("nextRow with no rows leaves the highlight unchanged", () => {
   assert.equal(C.nextRow([], null), null);
+});
+
+test("nextRow with an active id no longer in the list leaves it unchanged", () => {
+  const rows = C.buildRows({ playlists: pls([1, "A"], [2, "B"]), members: [], filter: "" });
+  assert.equal(C.nextRow(rows, 999), 999);
+});
+
+test("prevRow with an active id no longer in the list returns null", () => {
+  const rows = C.buildRows({ playlists: pls([1, "A"], [2, "B"]), members: [], filter: "" });
+  assert.equal(C.prevRow(rows, 999), null);
 });
 
 test("prevRow: moving up past the first row returns null (back to filter)", () => {

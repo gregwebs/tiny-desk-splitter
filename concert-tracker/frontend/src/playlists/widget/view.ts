@@ -12,7 +12,7 @@ import {
   PressedEnter,
   type Message,
 } from "./message";
-import type { AddTarget, Model } from "./model";
+import type { Model } from "./model";
 
 // VIEW
 //
@@ -238,7 +238,7 @@ export const view = (model: Model): Html =>
     ),
     M.tag("Loading", (p) =>
       sectionView({
-        context: targetLabel(p.target as AddTarget),
+        context: targetLabel(p.target),
         filterValue: "",
         activeId: Option.none(),
         listChildren: [loadingRowView()],
@@ -247,7 +247,7 @@ export const view = (model: Model): Html =>
     ),
     M.tag("LoadFailed", (p) =>
       sectionView({
-        context: targetLabel(p.target as AddTarget),
+        context: targetLabel(p.target),
         filterValue: "",
         activeId: Option.none(),
         listChildren: [],
@@ -257,7 +257,7 @@ export const view = (model: Model): Html =>
     M.tag("Loaded", (l) => {
       const rows = buildRows({ playlists: l.playlists, members: l.members, filter: l.filter });
       return sectionView({
-        context: targetLabel(l.target as AddTarget),
+        context: targetLabel(l.target),
         filterValue: l.filter,
         activeId: l.activeId,
         listChildren: Arr.map(rows, (row) => rowView(row, rowIsActive(l.activeId, row.id))),
