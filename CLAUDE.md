@@ -10,7 +10,7 @@ See README.md for an overview of the project
 - **Testing**: Refactor code into small testable functions. Write lots of tests without using mocks.
 - **Error Handling**: Use Result/Option. Do not ignore errors. An error should be passed up callers until it reaches an error handler that properly handles the error by terminating the program in an exit state or returning an HTTP error code.
 - **Constants**: Define thresholds and parameters as named constants
-- **Documentation**: When the purpose of code is not easy to determine, document it. First try to make the code itself easier to understand.
+- **Documentation**: Document the purpose of code when it is not easy to determine. First try to make the code easier to understand.
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
 # Workflow
@@ -35,10 +35,12 @@ See README.md for an overview of the project
   * Check the code using `cargo check` as frequently as possible
   * Run `just lint` and resolve all warnings
   * Documentation
-    * Update technical documentation
+    * Update and add technical documentation. It should be accessible by following links from the README.md
+    * there should be one canonical place where something is documented (besides ./docs/change which is a snapshot in time)
+      * check for references between documentation
     * Add state change diagrams to documentation
-    * Create any new documentation files that are needed
     * Put information from this change into a file in ./docs/change
+      * If older change documentation is outdated, remove it.
 - Code review
   * Have engineeering-lead do a code review before verification
     * Do a follow up review of the changes made during verification
