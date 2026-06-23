@@ -3,9 +3,6 @@ See README.md for an overview of the project
 ## Linting
 - `just lint` — run the full standard lint suite (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D warnings`)
 - `just fmt` — auto-format the workspace
-- `just clippy-all` — opt-in: also lints the `leptess-ocr` code path (needs Tesseract/leptonica installed; run before touching OCR code)
-- `just install-hooks` — one-time setup: wires the version-controlled git hooks from `.githooks/` (pre-commit: fmt check; pre-push: clippy)
-- Lint policy is declared in `[workspace.lints.clippy]` in the root `Cargo.toml` for IDE alignment.
 
 ## Code Quality Guidelines
 - **DRY**: Avoid code duplication. Use variables, functions, and modules to share code
@@ -17,6 +14,7 @@ See README.md for an overview of the project
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
 # Workflow
+- update the local main to the latest from origin and branch from that.
 - Planning
   * Create a plan
     * Describe the changes at different levels of detail
