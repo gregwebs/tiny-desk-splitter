@@ -83,6 +83,124 @@
     return document.getElementById(id);
   }
 
+  // concert-tracker/frontend/src/player/core.ts
+  var SIDEBAR_WIDTH_KEY = "sidebarWidth";
+  var SIDEBAR_MIN_WIDTH = 240;
+  var SIDEBAR_MAX_WIDTH = 600;
+  var PREPARE_POLL_MS = 2e3;
+  var PREPARE_TIMEOUT_MS = 30 * 60 * 1e3;
+  var VIDEO_CONTROLS_IDLE_MS = 2500;
+  var INTERACTIVE_SELECTOR = 'a, button, input, select, textarea, label, [role="button"], [onclick]';
+  function clampSidebarWidth(px) {
+    return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
+  }
+  function makeQueueEntry(concertId, trackIdx, title, liked, playlistName = null, groupId = null) {
+    return {
+      concertId,
+      trackIdx,
+      title,
+      liked: !!liked,
+      playlistName: playlistName || null,
+      groupId: groupId || null
+    };
+  }
+  function enqueueDedupe(queue2, entry) {
+    if (queue2.some((q) => q.concertId === entry.concertId && q.trackIdx === entry.trackIdx)) {
+      return { queue: [...queue2], added: false };
+    }
+    return { queue: [...queue2, entry], added: true };
+  }
+  function playlistEntries(tracks, playlistName, groupId) {
+    const entries = [];
+    for (const t of tracks) {
+      if (t.track_index == null) continue;
+      entries.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, playlistName, groupId));
+    }
+    return entries;
+  }
+  function dequeueAt(queue2, pos) {
+    const next = [...queue2];
+    next.splice(pos, 1);
+    return next;
+  }
+  function removeGroup(queue2, groupId) {
+    return queue2.filter((q) => q.groupId !== groupId);
+  }
+  function takeFromQueue(queue2) {
+    if (queue2.length === 0) return { entry: null, queue: [] };
+    const [entry, ...rest] = queue2;
+    return { entry, queue: rest };
+  }
+  function buildQueueRows(queue2) {
+    const rows = [];
+    const nonContiguousGroups = [];
+    let prevGroupId = void 0;
+    const headeredGroups = /* @__PURE__ */ new Set();
+    for (let i = queue2.length - 1; i >= 0; i--) {
+      const entry = queue2[i];
+      if (entry.groupId !== null && entry.groupId !== prevGroupId) {
+        if (headeredGroups.has(entry.groupId)) {
+          nonContiguousGroups.push(entry.groupId);
+        }
+        headeredGroups.add(entry.groupId);
+        prevGroupId = entry.groupId;
+        rows.push({ kind: "group-header", groupId: entry.groupId, name: entry.playlistName || "Playlist" });
+      } else if (entry.groupId === null) {
+        prevGroupId = null;
+      }
+      rows.push({ kind: "song", pos: i, entry, nested: entry.groupId !== null });
+    }
+    return { rows, nonContiguousGroups };
+  }
+  function nextEnabled(s, queueLen) {
+    if (s.concert) {
+      return s.concert.pos + 1 < s.concert.items.length;
+    }
+    return queueLen > 0 || s.hasNext;
+  }
+  function prevEnabled(s) {
+    if (s.concert) {
+      return s.concert.pos > 0;
+    }
+    return s.hasPrev;
+  }
+  function concertItemNav(items, pos) {
+    return {
+      hasPrev: pos > 0,
+      hasNext: pos + 1 < items.length,
+      item: items[pos] ?? null
+    };
+  }
+  function concertAdvancePos(pos, len) {
+    const next = pos + 1;
+    return next >= len ? null : next;
+  }
+  function refindPosByUrl(items, currentUrl, fallbackPos) {
+    if (!currentUrl) return fallbackPos;
+    const idx = items.findIndex((item) => item.url === currentUrl);
+    return idx >= 0 ? idx : fallbackPos;
+  }
+  function formatTime(seconds) {
+    const m = Math.floor(seconds / 60);
+    const s = Math.floor(seconds % 60);
+    return m + ":" + (s < 10 ? "0" : "") + s;
+  }
+  function clickShouldDismiss(target, container) {
+    if (!container || !target) return false;
+    if (!(target instanceof Node)) return false;
+    if (container.contains(target)) return false;
+    if (target instanceof Element && target.closest && target.closest(INTERACTIVE_SELECTOR)) {
+      return false;
+    }
+    return true;
+  }
+  function isPlainSpaceKey(e) {
+    return (e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+  }
+  function isPlainEscapeKey(e) {
+    return (e.code === "Escape" || e.key === "Escape" || e.key === "Esc") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
+  }
+
   // concert-tracker/frontend/src/player.ts
   var audio = null;
   var bar = null;
@@ -115,12 +233,6 @@
     el.addEventListener("error", onError);
     el.addEventListener("play", onPlay);
     el.addEventListener("pause", onPause);
-  }
-  var SIDEBAR_WIDTH_KEY = "sidebarWidth";
-  var SIDEBAR_MIN_WIDTH = 240;
-  var SIDEBAR_MAX_WIDTH = 600;
-  function clampSidebarWidth(px) {
-    return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
   }
   function applySidebarWidth(px) {
     const w = clampSidebarWidth(px);
@@ -192,12 +304,6 @@
     if (keyboardShortcutsBound) return;
     document.addEventListener("keydown", onGlobalKeydown);
     keyboardShortcutsBound = true;
-  }
-  function isPlainSpaceKey(e) {
-    return (e.code === "Space" || e.key === " " || e.key === "Spacebar") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
-  }
-  function isPlainEscapeKey(e) {
-    return (e.code === "Escape" || e.key === "Escape" || e.key === "Esc") && !e.ctrlKey && !e.metaKey && !e.altKey && !e.shiftKey;
   }
   function isPlayerPlaybackShortcutTarget(target) {
     if (!target) return false;
@@ -392,8 +498,6 @@
     }
   }
   var pendingPlay = null;
-  var PREPARE_POLL_MS = 2e3;
-  var PREPARE_TIMEOUT_MS = 30 * 60 * 1e3;
   function setStatus(msg) {
     const el = byIdOrNull("player-status");
     if (!el) return;
@@ -600,11 +704,6 @@
   function tracing(label, obj) {
     if (obj) console.warn("[Player]", label, obj);
   }
-  function formatTime(seconds) {
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return m + ":" + (s < 10 ? "0" : "") + s;
-  }
   function findTrackButtons(concertId, trackIdx) {
     if (trackIdx != null) {
       return document.querySelectorAll(
@@ -651,7 +750,6 @@
     if (watchBtn) watchBtn.style.display = display;
     if (open) open.style.display = display;
   }
-  var VIDEO_CONTROLS_IDLE_MS = 2500;
   var videoControlsTimer = null;
   function isVideoPanelOpen() {
     const panel = byIdOrNull("player-video-panel");
@@ -663,16 +761,6 @@
     panel.classList.add("controls-visible");
     if (videoControlsTimer) clearTimeout(videoControlsTimer);
     videoControlsTimer = setTimeout(() => panel.classList.remove("controls-visible"), VIDEO_CONTROLS_IDLE_MS);
-  }
-  var INTERACTIVE_SELECTOR = 'a, button, input, select, textarea, label, [role="button"], [onclick]';
-  function clickShouldDismiss(target, container) {
-    if (!container || !target) return false;
-    if (!(target instanceof Node)) return false;
-    if (container.contains(target)) return false;
-    if (target instanceof Element && target.closest && target.closest(INTERACTIVE_SELECTOR)) {
-      return false;
-    }
-    return true;
   }
   function onOutsideVideoClick(e) {
     const container = byIdOrNull("player-container");
@@ -759,20 +847,12 @@
   function updateNextButton() {
     const btn = byIdOrNull("player-next");
     if (!btn) return;
-    if (state.concert) {
-      btn.disabled = state.concert.pos + 1 >= state.concert.items.length;
-    } else {
-      btn.disabled = queue.length === 0 && !state.hasNext;
-    }
+    btn.disabled = !nextEnabled(state, queue.length);
   }
   function updatePrevButton() {
     const btn = byIdOrNull("player-prev");
     if (!btn) return;
-    if (state.concert) {
-      btn.disabled = state.concert.pos <= 0;
-    } else {
-      btn.disabled = !state.hasPrev;
-    }
+    btn.disabled = !prevEnabled(state);
   }
   async function play(_btn, url, title, artist, concertId, trackIdx, listenUrl, isVideo, watchUrl, hasNext, liked, hasPrev, recordListen = true, playlistName = null) {
     if (!audio) init();
@@ -973,22 +1053,14 @@
   function nowPlaying() {
     return { concertId: state.concertId, trackIdx: state.trackIdx };
   }
-  function makeQueueEntry(concertId, trackIdx, title, liked, playlistName = null, groupId = null) {
-    return {
-      concertId,
-      trackIdx,
-      title,
-      liked: !!liked,
-      playlistName: playlistName || null,
-      groupId: groupId || null
-    };
-  }
   function enqueue(concertId, trackIdx, title, liked) {
-    if (queue.some((q) => q.concertId === concertId && q.trackIdx === trackIdx)) {
+    const entry = makeQueueEntry(concertId, trackIdx, title, liked);
+    const result = enqueueDedupe(queue, entry);
+    queue = result.queue;
+    if (!result.added) {
       tracing("enqueue duplicate skipped", { concertId, trackIdx });
       return;
     }
-    queue.push(makeQueueEntry(concertId, trackIdx, title, liked));
     tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
     queueChanged();
   }
@@ -1004,10 +1076,7 @@
         return;
       }
       const groupId = nextGroupId++;
-      for (const t of tracks) {
-        if (t.track_index == null) continue;
-        queue.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, name, groupId));
-      }
+      queue = [...queue, ...playlistEntries(tracks, name, groupId)];
       tracing("playPlaylist enqueued", {
         playlistId,
         name,
@@ -1024,7 +1093,9 @@
   }
   async function playFromQueue() {
     while (queue.length > 0) {
-      const entry = queue.shift();
+      const taken = takeFromQueue(queue);
+      queue = taken.queue;
+      const entry = taken.entry;
       queueChanged();
       cancelAutoAdvance();
       tracing("playFromQueue", { concertId: entry.concertId, trackIdx: entry.trackIdx });
@@ -1071,7 +1142,7 @@
       await advanceConcert();
       return;
     }
-    if (queue.length === 0 && !state.hasNext) {
+    if (!nextEnabled(state, queue.length)) {
       tracing("skipToNext ignored: nothing next", {});
       return;
     }
@@ -1094,7 +1165,7 @@
       await playConcertItem(state.concert.pos - 1);
       return;
     }
-    if (!state.hasPrev) {
+    if (!prevEnabled(state)) {
       tracing("skipToPrev ignored: nothing previous", {});
       return;
     }
@@ -1164,40 +1235,33 @@
       return;
     }
     if (empty) empty.style.display = "none";
-    let prevGroupId = void 0;
-    const headeredGroups = /* @__PURE__ */ new Set();
-    for (let i = queue.length - 1; i >= 0; i--) {
-      const entry = queue[i];
-      if (entry.groupId !== null && entry.groupId !== prevGroupId) {
-        if (headeredGroups.has(entry.groupId)) {
-          tracing("renderQueue non-contiguous group \u2014 group split across queue", {
-            groupId: entry.groupId
-          });
-        }
-        headeredGroups.add(entry.groupId);
-        prevGroupId = entry.groupId;
+    const { rows, nonContiguousGroups } = buildQueueRows(queue);
+    for (const groupId of nonContiguousGroups) {
+      tracing("renderQueue non-contiguous group \u2014 group split across queue", { groupId });
+    }
+    for (const row of rows) {
+      if (row.kind === "group-header") {
         const header = document.createElement("li");
         header.className = "queue-group";
         const nameSpan = document.createElement("span");
         nameSpan.className = "queue-group-name";
-        nameSpan.textContent = entry.playlistName || "Playlist";
-        const gid = entry.groupId;
+        nameSpan.textContent = row.name;
+        const gid = row.groupId;
         const groupRemoveBtn = makeIconButton(
           "btn-queue-remove",
           "Remove playlist from queue",
           "\u2715",
-          () => removeGroup(gid)
+          () => removeGroup2(gid)
         );
         header.append(nameSpan, groupRemoveBtn);
         list.appendChild(header);
-      } else if (entry.groupId === null) {
-        prevGroupId = null;
+        continue;
       }
+      const { pos, entry, nested } = row;
       const li = document.createElement("li");
-      li.className = entry.groupId !== null ? "queue-item nested" : "queue-item";
-      const idx = i;
-      const playBtn = makeIconButton("btn-queue-play", "Play now", "\u25B6", () => playQueueEntryNow(idx));
-      const removeBtn = makeIconButton("btn-queue-remove", "Remove from queue", "\u2715", () => dequeue(idx));
+      li.className = nested ? "queue-item nested" : "queue-item";
+      const playBtn = makeIconButton("btn-queue-play", "Play now", "\u25B6", () => playQueueEntryNow(pos));
+      const removeBtn = makeIconButton("btn-queue-remove", "Remove from queue", "\u2715", () => dequeue(pos));
       const titleSpan = document.createElement("span");
       titleSpan.className = "queue-title";
       titleSpan.textContent = entry.title;
@@ -1216,18 +1280,19 @@
     if (queueSection) queueSection.scrollTop = queueSection.scrollHeight;
   }
   function dequeue(pos) {
-    queue.splice(pos, 1);
+    queue = dequeueAt(queue, pos);
     tracing("dequeue", { pos, queueLength: queue.length });
     queueChanged();
   }
-  function removeGroup(groupId) {
-    queue = queue.filter((q) => q.groupId !== groupId);
+  function removeGroup2(groupId) {
+    queue = removeGroup(queue, groupId);
     tracing("removeGroup", { groupId, queueLength: queue.length });
     queueChanged();
   }
   function playQueueEntryNow(pos) {
-    const entry = queue.splice(pos, 1)[0];
+    const entry = queue[pos];
     if (!entry) return;
+    queue = dequeueAt(queue, pos);
     tracing("playQueueEntryNow", { pos, concertId: entry.concertId, trackIdx: entry.trackIdx });
     queueChanged();
     startTrack(null, entry.concertId, entry.trackIdx);
@@ -1411,12 +1476,9 @@
       if (isSourcePlayback(data)) return;
       if (!state.concert || state.concert.id !== concertId) return;
       const currentItem = state.concert.items[state.concert.pos];
-      const currentUrl = currentItem && currentItem.url;
+      const currentUrl = currentItem ? currentItem.url : null;
       state.concert.items = data.items;
-      if (currentUrl) {
-        const newPos = data.items.findIndex((item) => item.url === currentUrl);
-        if (newPos >= 0) state.concert.pos = newPos;
-      }
+      state.concert.pos = refindPosByUrl(data.items, currentUrl, state.concert.pos);
       updateNextButton();
       updatePrevButton();
     } catch (e) {
@@ -1431,8 +1493,7 @@
     const isInterlude = item.kind === "interlude";
     const trackIdx = isInterlude ? null : item.track_index ?? null;
     const listenUrl = isInterlude ? null : `/concerts/${concert.id}/tracks/${trackIdx}/listen`;
-    const hasPrevItem = pos > 0;
-    const hasNextItem = pos + 1 < concert.items.length;
+    const { hasPrev: hasPrevItem, hasNext: hasNextItem } = concertItemNav(concert.items, pos);
     const savedConcert = { id: concert.id, items: concert.items, pos };
     await play(
       null,
@@ -1462,8 +1523,8 @@
   async function advanceConcert() {
     const concert = state.concert;
     if (!concert) return;
-    const next = concert.pos + 1;
-    if (next >= concert.items.length) {
+    const next = concertAdvancePos(concert.pos, concert.items.length);
+    if (next === null) {
       state.concert = null;
       hideVideoPanel();
       return;

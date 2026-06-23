@@ -24,40 +24,41 @@ import {
   postLikeTrack,
   postPrepare,
   type ConcertPlaybackResponse,
-  type PlaybackItemJson,
   type PrepareStatus,
 } from "./api/client";
 import { byIdOrNull } from "./shared/dom";
 import type { PlayerApi, PlayerNowPlaying } from "./shared/player-api";
+import {
+  buildQueueRows,
+  clampSidebarWidth,
+  clickShouldDismiss,
+  concertAdvancePos,
+  concertItemNav,
+  dequeueAt,
+  enqueueDedupe,
+  formatTime,
+  INTERACTIVE_SELECTOR,
+  isPlainEscapeKey,
+  isPlainSpaceKey,
+  makeQueueEntry,
+  nextEnabled,
+  playlistEntries,
+  prevEnabled,
+  PREPARE_POLL_MS,
+  PREPARE_TIMEOUT_MS,
+  refindPosByUrl,
+  removeGroup as removeQueueGroup,
+  SIDEBAR_MIN_WIDTH,
+  SIDEBAR_WIDTH_KEY,
+  takeFromQueue,
+  VIDEO_CONTROLS_IDLE_MS,
+  type ConcertPlaybackState,
+  type PlaybackState,
+  type QueueEntry,
+} from "./player/core";
 // window.Playlists is declared ambiently by ./shared/playlists-api.ts.
 
 // ── State ────────────────────────────────────────────────────────────────────
-
-interface ConcertPlaybackState {
-  id: number;
-  items: PlaybackItemJson[];
-  pos: number;
-}
-
-interface PlayerState {
-  concertId: number | null;
-  trackIdx: number | null;
-  isVideo: boolean;
-  watchUrl: string | null;
-  hasNext: boolean;
-  hasPrev: boolean;
-  liked: boolean;
-  concert: ConcertPlaybackState | null;
-}
-
-interface QueueEntry {
-  concertId: number;
-  trackIdx: number;
-  title: string;
-  liked: boolean;
-  playlistName: string | null;
-  groupId: number | null;
-}
 
 interface PendingPlay {
   concertId: number;
@@ -73,7 +74,7 @@ interface PendingPlay {
 // own `if (!audio) return;` guard rely on that invariant via `audio!`/`bar!`.
 let audio: HTMLMediaElement | null = null;
 let bar: HTMLElement | null = null;
-let state: PlayerState = {
+let state: PlaybackState = {
   concertId: null,
   trackIdx: null,
   isVideo: false,
@@ -110,15 +111,8 @@ function bindAudioEvents(el: HTMLMediaElement): void {
 }
 
 // ── Sidebar resize + width persistence ──────────────────────────────────────
-
-const SIDEBAR_WIDTH_KEY = "sidebarWidth";
-const SIDEBAR_MIN_WIDTH = 240;
-const SIDEBAR_MAX_WIDTH = 600;
-
-// Pure + unit-testable: the 240/600 clamp with no DOM access.
-function clampSidebarWidth(px: number): number {
-  return Math.max(SIDEBAR_MIN_WIDTH, Math.min(SIDEBAR_MAX_WIDTH, Math.round(px)));
-}
+// SIDEBAR_WIDTH_KEY/SIDEBAR_MIN_WIDTH/SIDEBAR_MAX_WIDTH/clampSidebarWidth moved
+// to ./player/core.
 
 // Write the clamped width to the CSS variable that drives sidebar width,
 // body margin, and the video panel offset — one var reflows all three.
@@ -221,25 +215,7 @@ function bindKeyboardShortcuts(): void {
   keyboardShortcutsBound = true;
 }
 
-function isPlainSpaceKey(e: KeyboardEvent): boolean {
-  return (
-    (e.code === "Space" || e.key === " " || e.key === "Spacebar") &&
-    !e.ctrlKey &&
-    !e.metaKey &&
-    !e.altKey &&
-    !e.shiftKey
-  );
-}
-
-function isPlainEscapeKey(e: KeyboardEvent): boolean {
-  return (
-    (e.code === "Escape" || e.key === "Escape" || e.key === "Esc") &&
-    !e.ctrlKey &&
-    !e.metaKey &&
-    !e.altKey &&
-    !e.shiftKey
-  );
-}
+// isPlainSpaceKey/isPlainEscapeKey moved to ./player/core.
 
 function isPlayerPlaybackShortcutTarget(target: EventTarget | null): boolean {
   if (!target) return false;
@@ -521,10 +497,7 @@ function cancelAutoAdvance(): void {
 // the htmx card swaps driven by the card's own status polling.
 
 let pendingPlay: PendingPlay | null = null;
-const PREPARE_POLL_MS = 2000;
-// Downloads can take many minutes; give the whole chain a generous cap so
-// an abandoned poll loop can't run forever.
-const PREPARE_TIMEOUT_MS = 30 * 60 * 1000;
+// PREPARE_POLL_MS/PREPARE_TIMEOUT_MS moved to ./player/core.
 
 function setStatus(msg: string): void {
   const el = byIdOrNull("player-status");
@@ -781,11 +754,7 @@ function tracing(label: string, obj?: unknown): void {
   if (obj) console.warn("[Player]", label, obj);
 }
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60);
-  const s = Math.floor(seconds % 60);
-  return m + ":" + (s < 10 ? "0" : "") + s;
-}
+// formatTime moved to ./player/core.
 
 function findTrackButtons(concertId: number, trackIdx: number | null): NodeListOf<HTMLElement> {
   if (trackIdx != null) {
@@ -846,8 +815,7 @@ function updateMediaButtons(isVideo: boolean): void {
   if (open) open.style.display = display;
 }
 
-// How long the minimize button stays visible after the last mouse movement.
-const VIDEO_CONTROLS_IDLE_MS = 2500;
+// VIDEO_CONTROLS_IDLE_MS moved to ./player/core.
 let videoControlsTimer: ReturnType<typeof setTimeout> | null = null;
 
 // Reveal the minimize button on mouse movement (or a touch) while watching, then
@@ -865,24 +833,7 @@ function showVideoControls(): void {
   videoControlsTimer = setTimeout(() => panel.classList.remove("controls-visible"), VIDEO_CONTROLS_IDLE_MS);
 }
 
-// A click on an interactive element is the user trying to *do* that thing (navigate,
-// play, queue, like, …), not dismiss the video — so those clicks perform their action
-// and leave the panel open. Only clicks on "dead space" fold the video.
-// Recognizes native controls and inline onclick handlers (the project's convention); a
-// future control bound only via addEventListener would need adding here to be exempted.
-const INTERACTIVE_SELECTOR = 'a, button, input, select, textarea, label, [role="button"], [onclick]';
-
-// Pure: does a click on `target` fall on dead space outside the player, and so
-// dismiss the video? (false for clicks inside the player or on any interactive control)
-function clickShouldDismiss(target: EventTarget | null, container: Element | null): boolean {
-  if (!container || !target) return false;
-  if (!(target instanceof Node)) return false;
-  if (container.contains(target)) return false;
-  if (target instanceof Element && target.closest && target.closest(INTERACTIVE_SELECTOR)) {
-    return false;
-  }
-  return true;
-}
+// INTERACTIVE_SELECTOR/clickShouldDismiss moved to ./player/core.
 
 // While the video panel is open, a click on the empty page area above it folds it
 // back down, like clicking Watch.
@@ -998,29 +949,17 @@ async function toggleLike(): Promise<void> {
   }
 }
 
-// There is "something next" when in concert mode with a next item, the queue
-// is non-empty, or the current track has a following track to auto-advance to.
-// Disable the Next button otherwise so clicking it cannot stop the current
-// track with nothing to replace it.
+// Enablement rules (nextEnabled/prevEnabled) moved to ./player/core.
 function updateNextButton(): void {
   const btn = byIdOrNull<HTMLButtonElement>("player-next");
   if (!btn) return;
-  if (state.concert) {
-    btn.disabled = state.concert.pos + 1 >= state.concert.items.length;
-  } else {
-    btn.disabled = queue.length === 0 && !state.hasNext;
-  }
+  btn.disabled = !nextEnabled(state, queue.length);
 }
 
-// Disable the Back button when there is no earlier item to go back to.
 function updatePrevButton(): void {
   const btn = byIdOrNull<HTMLButtonElement>("player-prev");
   if (!btn) return;
-  if (state.concert) {
-    btn.disabled = state.concert.pos <= 0;
-  } else {
-    btn.disabled = !state.hasPrev;
-  }
+  btn.disabled = !prevEnabled(state);
 }
 
 async function play(
@@ -1303,35 +1242,17 @@ function nowPlaying(): PlayerNowPlaying {
   return { concertId: state.concertId, trackIdx: state.trackIdx };
 }
 
-// Shared entry constructor so enqueue and playPlaylist both produce the same shape.
-// playlistName is null for ad-hoc queued tracks and non-null when the entry came
-// from a playlist (used by play() to show/clear the bar label). groupId is non-null
-// only for playlist tracks; a contiguous run of entries sharing a groupId renders as
-// one grouped block in the queue sidebar (see renderQueue).
-function makeQueueEntry(
-  concertId: number,
-  trackIdx: number,
-  title: string,
-  liked: boolean,
-  playlistName: string | null = null,
-  groupId: number | null = null,
-): QueueEntry {
-  return {
-    concertId,
-    trackIdx,
-    title,
-    liked: !!liked,
-    playlistName: playlistName || null,
-    groupId: groupId || null,
-  };
-}
+// makeQueueEntry/enqueueDedupe/playlistEntries/takeFromQueue moved to
+// ./player/core.
 
 function enqueue(concertId: number, trackIdx: number, title: string, liked: boolean): void {
-  if (queue.some((q) => q.concertId === concertId && q.trackIdx === trackIdx)) {
+  const entry = makeQueueEntry(concertId, trackIdx, title, liked);
+  const result = enqueueDedupe(queue, entry);
+  queue = result.queue;
+  if (!result.added) {
     tracing("enqueue duplicate skipped", { concertId, trackIdx });
     return;
   }
-  queue.push(makeQueueEntry(concertId, trackIdx, title, liked));
   tracing("enqueue", { concertId, trackIdx, title, queueLength: queue.length });
   queueChanged();
 }
@@ -1351,12 +1272,9 @@ async function playPlaylist(playlistId: number): Promise<void> {
       return;
     }
     // Mint one groupId for this entire play action so all enqueued tracks form a
-    // single removable group in the queue sidebar (see renderQueue/removeGroup).
+    // single removable group in the queue sidebar (see buildQueueRows/removeGroup).
     const groupId = nextGroupId++;
-    for (const t of tracks) {
-      if (t.track_index == null) continue; // available implies a track index; guard for the type
-      queue.push(makeQueueEntry(t.concert_id, t.track_index, t.title, false, name, groupId));
-    }
+    queue = [...queue, ...playlistEntries(tracks, name, groupId)];
     tracing("playPlaylist enqueued", {
       playlistId,
       name,
@@ -1374,7 +1292,9 @@ async function playPlaylist(playlistId: number): Promise<void> {
 
 async function playFromQueue(): Promise<boolean> {
   while (queue.length > 0) {
-    const entry = queue.shift()!;
+    const taken = takeFromQueue(queue);
+    queue = taken.queue;
+    const entry = taken.entry!; // loop guarded by queue.length > 0
     queueChanged();
     cancelAutoAdvance();
     tracing("playFromQueue", { concertId: entry.concertId, trackIdx: entry.trackIdx });
@@ -1427,7 +1347,7 @@ async function skipToNext(): Promise<void> {
   }
   // Defensive guard mirroring updateNextButton(): never pause the current
   // track when there is nothing queued and nothing to auto-advance to.
-  if (queue.length === 0 && !state.hasNext) {
+  if (!nextEnabled(state, queue.length)) {
     tracing("skipToNext ignored: nothing next", {});
     return;
   }
@@ -1456,7 +1376,7 @@ async function skipToPrev(): Promise<void> {
     await playConcertItem(state.concert.pos - 1);
     return;
   }
-  if (!state.hasPrev) {
+  if (!prevEnabled(state)) {
     tracing("skipToPrev ignored: nothing previous", {});
     return;
   }
@@ -1564,53 +1484,40 @@ function renderQueue(): void {
   }
   if (empty) empty.style.display = "none";
 
-  // prevGroupId tracks the last seen groupId so we emit one header per contiguous run.
-  // Seeded to undefined (not null) because null is the meaningful "ad-hoc" value.
-  let prevGroupId: number | null | undefined = undefined;
-  // headeredGroups guards the load-bearing contiguity assumption: if a groupId
-  // reappears non-contiguously (future non-tail insert), log rather than silently
-  // splitting it into two headers.
-  const headeredGroups = new Set<number>();
+  // The contiguous-groupId grouping/contiguity-violation-detection logic lives
+  // in buildQueueRows (./player/core) — only DOM construction stays here.
+  const { rows, nonContiguousGroups } = buildQueueRows(queue);
+  for (const groupId of nonContiguousGroups) {
+    tracing("renderQueue non-contiguous group — group split across queue", { groupId });
+  }
 
-  for (let i = queue.length - 1; i >= 0; i--) {
-    const entry = queue[i]!;
-
-    // Emit a group header whenever we enter a new playlist group (groupId changes).
-    if (entry.groupId !== null && entry.groupId !== prevGroupId) {
-      if (headeredGroups.has(entry.groupId)) {
-        tracing("renderQueue non-contiguous group — group split across queue", {
-          groupId: entry.groupId,
-        });
-      }
-      headeredGroups.add(entry.groupId);
-      prevGroupId = entry.groupId;
-
+  for (const row of rows) {
+    if (row.kind === "group-header") {
       const header = document.createElement("li");
       header.className = "queue-group";
 
       const nameSpan = document.createElement("span");
       nameSpan.className = "queue-group-name";
-      nameSpan.textContent = entry.playlistName || "Playlist";
+      nameSpan.textContent = row.name;
 
       // Capture groupId in a const so the closure is stable across loop iterations.
-      const gid = entry.groupId;
+      const gid = row.groupId;
       const groupRemoveBtn = makeIconButton("btn-queue-remove", "Remove playlist from queue", "✕", () =>
         removeGroup(gid),
       );
 
       header.append(nameSpan, groupRemoveBtn);
       list.appendChild(header);
-    } else if (entry.groupId === null) {
-      prevGroupId = null;
+      continue;
     }
 
     // Song row — nested (indented) when it belongs to a group.
+    const { pos, entry, nested } = row;
     const li = document.createElement("li");
-    li.className = entry.groupId !== null ? "queue-item nested" : "queue-item";
+    li.className = nested ? "queue-item nested" : "queue-item";
 
-    const idx = i;
-    const playBtn = makeIconButton("btn-queue-play", "Play now", "▶", () => playQueueEntryNow(idx));
-    const removeBtn = makeIconButton("btn-queue-remove", "Remove from queue", "✕", () => dequeue(idx));
+    const playBtn = makeIconButton("btn-queue-play", "Play now", "▶", () => playQueueEntryNow(pos));
+    const removeBtn = makeIconButton("btn-queue-remove", "Remove from queue", "✕", () => dequeue(pos));
 
     const titleSpan = document.createElement("span");
     titleSpan.className = "queue-title";
@@ -1633,21 +1540,22 @@ function renderQueue(): void {
 }
 
 function dequeue(pos: number): void {
-  queue.splice(pos, 1);
+  queue = dequeueAt(queue, pos);
   tracing("dequeue", { pos, queueLength: queue.length });
   queueChanged();
 }
 
 // Remove all remaining queue entries belonging to a playlist group in one action.
 function removeGroup(groupId: number): void {
-  queue = queue.filter((q) => q.groupId !== groupId);
+  queue = removeQueueGroup(queue, groupId);
   tracing("removeGroup", { groupId, queueLength: queue.length });
   queueChanged();
 }
 
 function playQueueEntryNow(pos: number): void {
-  const entry = queue.splice(pos, 1)[0];
+  const entry = queue[pos];
   if (!entry) return;
+  queue = dequeueAt(queue, pos);
   tracing("playQueueEntryNow", { pos, concertId: entry.concertId, trackIdx: entry.trackIdx });
   queueChanged();
   startTrack(null, entry.concertId, entry.trackIdx);
@@ -1891,13 +1799,10 @@ async function refreshConcertItems(concertId: number): Promise<void> {
     if (isSourcePlayback(data)) return;
     if (!state.concert || state.concert.id !== concertId) return; // raced
     const currentItem = state.concert.items[state.concert.pos];
-    const currentUrl = currentItem && currentItem.url;
+    const currentUrl = currentItem ? currentItem.url : null;
     state.concert.items = data.items;
     // Re-find pos by URL so navigation stays correct after items shift.
-    if (currentUrl) {
-      const newPos = data.items.findIndex((item) => item.url === currentUrl);
-      if (newPos >= 0) state.concert.pos = newPos;
-    }
+    state.concert.pos = refindPosByUrl(data.items, currentUrl, state.concert.pos);
     updateNextButton();
     updatePrevButton();
   } catch (e) {
@@ -1916,8 +1821,7 @@ async function playConcertItem(pos: number): Promise<void> {
   const isInterlude = item.kind === "interlude";
   const trackIdx = isInterlude ? null : (item.track_index ?? null);
   const listenUrl = isInterlude ? null : `/concerts/${concert.id}/tracks/${trackIdx}/listen`;
-  const hasPrevItem = pos > 0;
-  const hasNextItem = pos + 1 < concert.items.length;
+  const { hasPrev: hasPrevItem, hasNext: hasNextItem } = concertItemNav(concert.items, pos);
 
   // play() will clear state.concert; save it so we can restore it after.
   const savedConcert: ConcertPlaybackState = { id: concert.id, items: concert.items, pos };
@@ -1957,8 +1861,8 @@ async function playConcertItem(pos: number): Promise<void> {
 async function advanceConcert(): Promise<void> {
   const concert = state.concert;
   if (!concert) return;
-  const next = concert.pos + 1;
-  if (next >= concert.items.length) {
+  const next = concertAdvancePos(concert.pos, concert.items.length);
+  if (next === null) {
     state.concert = null;
     hideVideoPanel();
     return;
