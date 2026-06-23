@@ -22,7 +22,7 @@ ARG DEBIAN_VERSION=bookworm-slim
 # yt-dlp breaks regularly as YouTube changes.  Rebuild the base/release image
 # when downloads stop working and bump this version.
 ARG YT_DLP_VERSION=2025.06.09
-ARG RUST_VERSION=1.87
+ARG RUST_VERSION=1.92
 
 
 # ─────────────────────────────────────────────────────────────────────────────
