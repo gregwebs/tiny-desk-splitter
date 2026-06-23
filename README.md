@@ -230,20 +230,10 @@ cut on a keyframe by up to one GOP. See
 
 ---
 
-## Shell scripts
-
-These aren't deleted anymore.
-
-| Script | Description |
-|---|---|
-| `download.sh <URL>` | Download a concert with yt-dlp |
-| `extract.sh <URL>` | Download + scrape + split in one step |
-
----
 
 ## Development
 
-The workspace uses `rust-toolchain.toml` to pin the toolchain to Rust **1.87**, which matches the `Containerfile`. `rustup` will install it automatically on first use.
+The workspace uses `rust-toolchain.toml` to pin the toolchain to Rust **1.92**, which matches the `Containerfile`. `rustup` will install it automatically on first use.
 
 ### Linting
 
