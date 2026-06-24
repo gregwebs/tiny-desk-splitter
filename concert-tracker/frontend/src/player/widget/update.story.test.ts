@@ -7,6 +7,9 @@ import {
   ClearAudioSrc,
   ClearPreparingExternal,
   DisableCardTracksExternal,
+  DrainQueue,
+  FetchAlbumInfo,
+  FetchNextTrackInfo,
   FetchTrackInfo,
   MarkPlayingExternal,
   MarkPlayingInterludeExternal,
@@ -16,6 +19,7 @@ import {
   PollPrepareStatus,
   RecordListenEvent,
   RefreshCardStatus,
+  SeekAudio,
   SyncNowPlayingMirrorCmd,
 } from "./command";
 import {
@@ -25,9 +29,11 @@ import {
   AudioPlaying,
   CommandReceived,
   FailedFetchInfo,
+  FailedNextTrackInfo,
   FailedPollPrepareStatus,
   ReceivedConcertItems,
   ReceivedConcertPlaybackItems,
+  ReceivedDeleteTrackResult,
   ReceivedMediaInfo,
   ReceivedPrepareStart,
   ReceivedPrepareStatus,
@@ -225,6 +231,66 @@ describe("player update — queue operations", () => {
       Story.message(ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 2, plan: "queue-only" })),
       Story.model((m) => expect(m.queue).toEqual([])),
       Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — delete and advance", () => {
+  test("ReceivedDeleteTrackResult bar-source for playing track pauses + drains queue", () => {
+    // advanceAfterDelete: emits [PauseAudio, DrainQueue({plan:"next-or-stop"})]
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: true, source: "bar" })),
+      Story.Command.expectHas(PauseAudio, DrainQueue),
+      Story.Command.resolve(PauseAudio, Acked()),
+      // Empty queue + "next-or-stop" → advanceToNextTrack → FetchNextTrackInfo for the deleted track.
+      // The server skips the deleted index and returns the next available track.
+      Story.Command.resolve(
+        DrainQueue,
+        ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 0, plan: "next-or-stop" }),
+      ),
+      Story.Command.expectHas(FetchNextTrackInfo),
+      // Resolve with failure to terminate the chain cleanly
+      Story.Command.resolve(FetchNextTrackInfo, FailedNextTrackInfo({ plan: "next-or-stop" })),
+      // next-or-stop after advance failure → stopPlaybackPure
+      Story.Command.resolve(ClearAudioSrc, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+    );
+  });
+
+  test("PlayAlbumAt seeks in-place when the same album is playing (trackIdx===null guard)", () => {
+    // B1 regression: the guard must check trackIdx===null, not concert._tag==="None".
+    // Album play has trackIdx=null; same concert + null trackIdx → seek, no fetch.
+    const albumPlaying: Model = {
+      ...initialModel,
+      playback: { ...initialPlayback, concertId: 5, trackIdx: null, title: "Album" },
+      isPlaying: true,
+    };
+    Story.story(
+      update,
+      Story.with(albumPlaying),
+      Story.message(CommandReceived({ command: PlayerCommandValue.PlayAlbumAt({ concertId: 5, seconds: 30 }) })),
+      // isPlaying=true → only SeekAudio emitted (no ResumeAudio)
+      Story.Command.expectHas(SeekAudio),
+      Story.Command.resolve(SeekAudio, Acked()),
+    );
+  });
+
+  test("PlayAlbumAt fetches album info when a track (not album) of the same concert is playing", () => {
+    // B1 regression: track plays have trackIdx!==null → must fetch, not seek in-place.
+    Story.story(
+      update,
+      Story.with(playingModel), // concertId=1, trackIdx=0
+      Story.message(CommandReceived({ command: PlayerCommandValue.PlayAlbumAt({ concertId: 1, seconds: 30 }) })),
+      Story.model((m) => expect(Option.isSome(m.pendingSeek)).toBe(true)),
+      Story.Command.expectHas(FetchAlbumInfo),
+      // Terminate FetchAlbumInfo cleanly with a failure
+      Story.Command.resolve(
+        FetchAlbumInfo,
+        FailedFetchInfo({ source: PlaySourceValue.Album({ concertId: 1 }), message: "test-terminal" }),
+      ),
+      Story.model((m) => expect(m.status._tag).toBe("Error")),
     );
   });
 });

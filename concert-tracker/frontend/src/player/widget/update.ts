@@ -59,6 +59,7 @@ import {
   type PlaySource,
   PlaySourceValue,
   type PlayTarget,
+  PlayTargetValue,
   StatusValue,
 } from "./model";
 import type { PlayerCommand } from "./port";
@@ -364,14 +365,14 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       TrackMissing: ({ source }) => {
         if (source._tag !== "Track") return [model, []]; // album/concert-item never reach prepare in practice
-        return [model, [PostPrepare({ target: PlaySourceValue.Track({ concertId: source.concertId, trackIdx: source.trackIdx }) as unknown as PlayTarget })]];
+        return [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId: source.concertId, trackIdx: source.trackIdx }) })]];
       },
 
       FailedFetchInfo: ({ message: msg }) => [withError(model, msg), []],
 
       ReceivedTrackInfoForEnqueue: ({ concertId, trackIdx, info }) =>
         Option.match(info, {
-          onNone: () => [model, [PostPrepare({ target: { _tag: "Track", concertId, trackIdx } })]],
+          onNone: () => [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId, trackIdx }) })]],
           onSome: ({ title, liked }) => {
             const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
             return [evo(model, { queue: () => result.queue }), []];
@@ -380,7 +381,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       ResolvedFirstAvailableTrack: ({ concertId, trackIdx }) =>
         Option.match(trackIdx, {
-          onNone: () => [model, [PostPrepare({ target: { _tag: "Track", concertId, trackIdx: 0 } })]],
+          onNone: () => [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId, trackIdx: 0 }) })]],
           onSome: (idx) => dispatchPlayTrack(model, concertId, idx),
         }),
 
@@ -388,13 +389,19 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         const playedCount = Option.isSome(played) ? skippedCount + 1 : skippedCount;
         const model1 = evo(model, { queue: (q) => q.slice(playedCount) });
         return Option.match(played, {
-          onSome: ({ info }) =>
-            withPlayback(...beginPlayback(model1, PlaySourceValue.Track(targetIdForQueueEntry(played)), info, defaultPlayOpts)),
+          onSome: ({ entry, info }) =>
+            withPlayback(...beginPlayback(model1, PlaySourceValue.Track({ concertId: entry.concertId, trackIdx: entry.trackIdx }), info, defaultPlayOpts)),
           onNone: () => (plan === "queue-only" ? [model1, []] : advanceToNextTrack(model1, plan)),
         });
       },
 
-      FailedNextTrackInfo: ({ plan }) => applyAdvanceFailure(evo(model, { isPlaying: () => false }), plan),
+      FailedNextTrackInfo: ({ plan }) => {
+        // "next-or-stop" calls stopPlaybackPure which clears status, so skip the error there.
+        const model1 = plan === "next-or-stop"
+          ? evo(model, { isPlaying: () => false })
+          : withError(evo(model, { isPlaying: () => false }), "Couldn't load next track");
+        return applyAdvanceFailure(model1, plan);
+      },
       FailedPrevTrackInfo: () => [evo(model, { isPlaying: () => false }), []],
 
       ReceivedPrepareStart: ({ target, seedStatus }) => {
@@ -452,7 +459,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         if (model.playback.concertId !== concertId || model.playback.trackIdx !== trackIdx) return [model, []];
         const reverted = !attempted;
         return [
-          withError(evo(model, { playback: (p) => ({ ...p, liked: reverted }) }), "Couldn't update like"),
+          withError(evo(model, { playback: (p) => ({ ...p, liked: reverted }) }), "Like failed"),
           [SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: reverted })],
         ];
       },
@@ -514,18 +521,6 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       Acked: () => [model, []],
     }),
   );
-
-// targetIdForQueueEntry pulls {concertId,trackIdx} off the played queue entry
-// without re-deriving it from `played` twice in the Option.match above.
-function targetIdForQueueEntry(played: Option.Option<{ entry: { concertId: number; trackIdx: number } }>): {
-  concertId: number;
-  trackIdx: number;
-} {
-  return Option.match(played, {
-    onNone: () => ({ concertId: -1, trackIdx: -1 }), // unreachable: only called from the onSome branch
-    onSome: ({ entry }) => ({ concertId: entry.concertId, trackIdx: entry.trackIdx }),
-  });
-}
 
 /** Local sameTarget over PlayTarget — model.ts already exports one, reused
  *  here under a distinct name to avoid colliding with PlaySource's own
@@ -625,7 +620,7 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       },
 
       PlayAlbumAt: ({ concertId, seconds }) => {
-        if (model.playback.concertId === concertId && model.playback.concert._tag === "None") {
+        if (model.playback.concertId === concertId && model.playback.trackIdx === null) {
           const cmds: Command<Message>[] = [SeekAudio({ seconds })];
           if (!model.isPlaying) cmds.push(ResumeAudio({}));
           return [model, cmds];
