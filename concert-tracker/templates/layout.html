@@ -33,13 +33,16 @@
         <h2 id="sidebar-concert-heading">Now playing</h2>
         <div id="sidebar-concert-tracks"></div>
       </section>
-      <section id="sidebar-add-section" aria-label="Add to playlist">
-        <!-- The add-to-playlist panel is a Foldkit widget (playlists.js,
-             src/playlists/widget); it renders the header / filter / list /
-             error into this mount point. See src/playlists/index.ts. -->
-        <div id="add-pl-widget-root"></div>
-      </section>
     </aside>
+    <!-- Overlay that covers the sidebar rect when body.showing-add is set.
+         Lives outside #player-sidebar so player re-renders don't wipe the
+         add-panel Foldkit runtime. CSS positions it identically to the sidebar. -->
+    <section id="sidebar-add-section" aria-label="Add to playlist">
+      <!-- The add-to-playlist panel is a Foldkit widget (playlists.js,
+           src/playlists/widget); it renders the header / filter / list /
+           error into this mount point. See src/playlists/index.ts. -->
+      <div id="add-pl-widget-root"></div>
+    </section>
     <div id="player-video-panel">
       <video id="player-audio" playsinline webkit-playsinline tabindex="0" onclick="Player.togglePause()"></video>
       <button id="player-video-close" onclick="Player.watch()" title="Minimize video" aria-label="Minimize video">&#10005;</button>
