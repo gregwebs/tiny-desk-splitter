@@ -231,7 +231,7 @@ const stopPlaybackPure = (model: Model): UpdateReturn =>
         playlistLabel: null,
       }),
       queue: () => [],
-      sidebar: () => ({ open: false }),
+      sidebar: () => ({ open: false, tracks: Option.none(), loadGen: 0 }),
       video: () => ({ open: false }),
       isPlaying: () => false,
       pendingSeek: () => Option.none(),
@@ -510,6 +510,13 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       },
       FailedPlaylistLoad: () => [withError(model, "Couldn't load playlist"), []],
 
+      ReceivedTrackDetails: ({ concertId, loadGen, tracksBusy, tracks }) => {
+        if (model.sidebar.loadGen !== loadGen) return [model, []]; // stale — newer fetch started
+        if (model.playback.concertId !== concertId) return [model, []]; // concert changed
+        return [evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ tracksBusy, tracks }) }) }), []];
+      },
+      FailedTrackDetails: () => [model, []], // sidebar stays at Option.none(); not user-visible
+
       FailedOpenExternal: () => [withError(model, "Couldn't open externally"), []],
 
       AudioPlaying: () => [evo(model, { isPlaying: () => true }), []],
@@ -602,9 +609,9 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
 
       OpenConcert: () =>
         model.playback.concertId === null ? [model, []] : [model, [NavigateToConcert({ concertId: model.playback.concertId })]],
-      OpenSidebar: () => [evo(model, { sidebar: () => ({ open: true }) }), []],
-      CloseSidebar: () => [evo(model, { sidebar: () => ({ open: false }) }), []],
-      ToggleSidebar: () => [evo(model, { sidebar: (s) => ({ open: !s.open }) }), []],
+      OpenSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: true }) }), []],
+      CloseSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: false }) }), []],
+      ToggleSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: !s.open }) }), []],
       SidebarDeleteTrack: ({ concertId, trackIdx }) => [model, [DeleteTrackRequest({ concertId, trackIdx, source: "sidebar" })]],
 
       PlayQueueEntryNow: ({ pos }) => {

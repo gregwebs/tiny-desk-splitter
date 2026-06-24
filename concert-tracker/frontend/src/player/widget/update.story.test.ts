@@ -31,6 +31,7 @@ import {
   FailedFetchInfo,
   FailedNextTrackInfo,
   FailedPollPrepareStatus,
+  FailedTrackDetails,
   ReceivedConcertItems,
   ReceivedConcertPlaybackItems,
   ReceivedDeleteTrackResult,
@@ -38,6 +39,7 @@ import {
   ReceivedPrepareStart,
   ReceivedPrepareStatus,
   ReceivedQueueDrainResult,
+  ReceivedTrackDetails,
 } from "./message";
 import {
   defaultPlayOpts,
@@ -529,6 +531,64 @@ describe("player update — concert-reconstruction advance", () => {
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
       Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+    );
+  });
+});
+
+describe("player update — sidebar track details", () => {
+  const concertModel: Model = {
+    ...initialModel,
+    playback: { ...initialPlayback, concertId: 1 },
+    sidebar: { open: true, tracks: Option.none(), loadGen: 1 },
+  };
+  const sampleTracks = [
+    { index: 0, title: "Track A", available: true, is_video: false, liked: false },
+    { index: 1, title: "Track B", available: false, is_video: false, liked: true },
+  ];
+
+  test("ReceivedTrackDetails stores tracks when loadGen matches", () => {
+    Story.story(
+      update,
+      Story.with(concertModel),
+      Story.message(ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
+      Story.model((m) => {
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks).toHaveLength(2);
+          expect(m.sidebar.tracks.value.tracksBusy).toBe(false);
+        }
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ReceivedTrackDetails is discarded when loadGen is stale", () => {
+    Story.story(
+      update,
+      Story.with(concertModel),
+      Story.message(ReceivedTrackDetails({ concertId: 1, loadGen: 0, tracksBusy: false, tracks: sampleTracks })),
+      Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ReceivedTrackDetails is discarded when concert has changed", () => {
+    Story.story(
+      update,
+      Story.with(concertModel),
+      Story.message(ReceivedTrackDetails({ concertId: 99, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
+      Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("FailedTrackDetails is a no-op", () => {
+    Story.story(
+      update,
+      Story.with(concertModel),
+      Story.message(FailedTrackDetails({ concertId: 1, loadGen: 1 })),
+      Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
+      Story.Command.expectNone(),
     );
   });
 });

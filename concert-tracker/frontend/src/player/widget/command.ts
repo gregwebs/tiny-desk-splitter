@@ -8,6 +8,7 @@ import {
   getPlaylist,
   getPrepareStatus,
   getPrevTrackMediaInfo,
+  getTrackDetails,
   getTrackMediaInfoOrNull,
   isSourcePlayback,
   postDeleteInterlude,
@@ -35,6 +36,7 @@ import {
   FailedPollPrepareStatus,
   FailedPrepareStart,
   FailedPrevTrackInfo,
+  FailedTrackDetails,
   NotPlayable,
   ReceivedConcertItems,
   ReceivedConcertPlaybackItems,
@@ -44,6 +46,7 @@ import {
   ReceivedPrepareStart,
   ReceivedPrepareStatus,
   ReceivedQueueDrainResult,
+  ReceivedTrackDetails,
   ReceivedTrackInfoForEnqueue,
   ResolvedFirstAvailableTrack,
   TrackMissing,
@@ -628,4 +631,28 @@ export const OpenAddToPlaylist = Command.define(
   Effect.sync(() => {
     window.Playlists?.openAdd({ type: "track", concertId, trackIndex: trackIdx, label });
   }).pipe(Effect.as(Acked())),
+);
+
+// ── Sidebar track details ─────────────────────────────────────────────────
+
+/** Fetches `GET /concerts/:id/track-details` for the player widget's sidebar
+ *  concert section (whole-album / normal mode).  `loadGen` is echoed back so
+ *  update.ts can discard stale responses when a newer fetch has already started. */
+export const FetchTrackDetails = Command.define(
+  "FetchTrackDetails",
+  { concertId: S.Number, loadGen: S.Number },
+  ReceivedTrackDetails,
+  FailedTrackDetails,
+)(({ concertId, loadGen }) =>
+  Effect.tryPromise(() => getTrackDetails(concertId)).pipe(
+    Effect.map((data) =>
+      ReceivedTrackDetails({
+        concertId,
+        loadGen,
+        tracksBusy: data.tracks_busy,
+        tracks: data.tracks,
+      }),
+    ),
+    Effect.catch(() => Effect.succeed(FailedTrackDetails({ concertId, loadGen }))),
+  ),
 );

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use utoipa::ToSchema;
 
 /// Strip colons from album names to produce safe filesystem paths.
 /// Mirrors the logic in scripts/download.sh and scripts/extract.sh.
@@ -430,6 +431,18 @@ pub struct TrackInfo {
     pub liked: bool,
 }
 
+/// One row in the `GET /concerts/:id/track-details` JSON response.  Combines
+/// DB-cached availability/liked with a filesystem probe for `is_video`
+/// (needed by the player widget's sidebar track-list view).
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct TrackDetailItem {
+    pub index: usize,
+    pub title: String,
+    pub available: bool,
+    pub is_video: bool,
+    pub liked: bool,
+}
+
 fn track_file_extension(dir: &Path, title: &str) -> Option<&'static str> {
     let stem = sanitize_filename(title);
     for ext in &[
@@ -808,6 +821,37 @@ pub fn list_all_tracks_from_db(
                 title: title.clone(),
                 available,
                 is_video: false,
+                liked,
+            }
+        })
+        .collect()
+}
+
+/// Like `list_all_tracks_from_db` but also probes the filesystem for
+/// `is_video` (DB-cached `tracks_present` has no file-type info).  Used by
+/// `GET /concerts/:id/track-details` which the player widget calls to render
+/// the whole-album sidebar track list.
+pub fn list_all_track_details(
+    working_dir: &std::path::Path,
+    album: &str,
+    set_list: &[String],
+    tracks_present: &[bool],
+    tracks_liked: &[bool],
+) -> Vec<TrackDetailItem> {
+    let dir = concert_dir(working_dir, album);
+    set_list
+        .iter()
+        .enumerate()
+        .map(|(index, title)| {
+            let available = is_track_available(tracks_present, index);
+            let is_video =
+                available && track_file_extension(&dir, title).is_some_and(is_video_extension);
+            let liked = tracks_liked.get(index).copied().unwrap_or(false);
+            TrackDetailItem {
+                index,
+                title: title.clone(),
+                available,
+                is_video,
                 liked,
             }
         })
@@ -2248,5 +2292,79 @@ mod tests {
             items[0].kind,
             PlaybackItemKind::Song { track_index: 0, .. }
         ));
+    }
+
+    #[test]
+    fn list_all_track_details_no_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let tracks_present = vec![false, false];
+        let tracks_liked = vec![true, false];
+        let items = list_all_track_details(
+            dir.path(),
+            "Album",
+            &set_list,
+            &tracks_present,
+            &tracks_liked,
+        );
+        assert_eq!(items.len(), 2);
+        assert!(!items[0].available);
+        assert!(!items[0].is_video);
+        assert!(items[0].liked);
+        assert!(!items[1].available);
+        assert!(!items[1].liked);
+    }
+
+    #[test]
+    fn list_all_track_details_with_audio_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let album_dir = dir.path().join("concerts").join(sanitize_album(album));
+        std::fs::create_dir_all(&album_dir).unwrap();
+        std::fs::write(album_dir.join("Song A.m4a"), b"").unwrap();
+        let set_list = vec!["Song A".to_string(), "Song B".to_string()];
+        let tracks_present = vec![true, false];
+        let tracks_liked = vec![false, true];
+        let items =
+            list_all_track_details(dir.path(), album, &set_list, &tracks_present, &tracks_liked);
+        assert_eq!(items.len(), 2);
+        assert!(items[0].available);
+        assert!(!items[0].is_video, "m4a is not video");
+        assert!(!items[0].liked);
+        assert!(!items[1].available);
+        assert!(items[1].liked);
+    }
+
+    #[test]
+    fn list_all_track_details_with_video_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Video Album";
+        let album_dir = dir.path().join("concerts").join(sanitize_album(album));
+        std::fs::create_dir_all(&album_dir).unwrap();
+        std::fs::write(album_dir.join("Song A.mp4"), b"").unwrap();
+        let set_list = vec!["Song A".to_string()];
+        let tracks_present = vec![true];
+        let items = list_all_track_details(dir.path(), album, &set_list, &tracks_present, &[]);
+        assert_eq!(items.len(), 1);
+        assert!(items[0].available);
+        assert!(items[0].is_video, "mp4 is video");
+    }
+
+    #[test]
+    fn list_all_track_details_is_video_false_when_unavailable() {
+        // Even if a file exists on disk, is_video is false when tracks_present says unavailable.
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Mixed Album";
+        let album_dir = dir.path().join("concerts").join(sanitize_album(album));
+        std::fs::create_dir_all(&album_dir).unwrap();
+        std::fs::write(album_dir.join("Song A.mp4"), b"").unwrap();
+        let set_list = vec!["Song A".to_string()];
+        let tracks_present = vec![false]; // DB says unavailable
+        let items = list_all_track_details(dir.path(), album, &set_list, &tracks_present, &[]);
+        assert!(!items[0].available);
+        assert!(
+            !items[0].is_video,
+            "is_video skips filesystem probe when unavailable"
+        );
     }
 }

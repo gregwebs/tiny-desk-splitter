@@ -122,6 +122,7 @@ pub(crate) fn api_router() -> (Router<AppState>, utoipa::openapi::OpenApi) {
         .route("/concerts/:id/watch", post(handlers::watch))
         .routes(routes!(handlers::media_info))
         .route("/concerts/:id/tracks", get(handlers::tracks))
+        .routes(routes!(handlers::track_details))
         .route(
             "/concerts/:id/tracks/:idx/listen",
             post(handlers::listen_track),

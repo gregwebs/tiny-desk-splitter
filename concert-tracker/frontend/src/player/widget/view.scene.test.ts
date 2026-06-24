@@ -258,7 +258,7 @@ describe("player-bar view", () => {
   test("sidebar toggle button aria-expanded reflects sidebar.open", () => {
     Scene.scene(
       { update, view },
-      Scene.with({ ...trackModel(), sidebar: { open: false } }),
+      Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "false"),
       Scene.click(Scene.selector("#player-queue-toggle")),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),

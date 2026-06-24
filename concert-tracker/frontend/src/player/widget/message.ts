@@ -10,6 +10,7 @@ import {
   PlayOpts,
   PrepareStatus,
   QueueEntry,
+  SidebarTrack,
 } from "./model";
 import { PlayerCommand } from "./port";
 
@@ -213,6 +214,23 @@ export const ReceivedPlaylistTracks = m("ReceivedPlaylistTracks", {
 });
 export const FailedPlaylistLoad = m("FailedPlaylistLoad", { playlistId: S.Number });
 
+// ── Sidebar track details (GET /concerts/:id/track-details) ──────────────
+
+/** FetchTrackDetails resolved successfully; `loadGen` is compared against
+ *  `model.sidebar.loadGen` in update.ts to discard stale responses. */
+export const ReceivedTrackDetails = m("ReceivedTrackDetails", {
+  concertId: S.Number,
+  loadGen: S.Number,
+  tracksBusy: S.Boolean,
+  tracks: S.mutable(S.Array(SidebarTrack)),
+});
+/** FetchTrackDetails fetch error; sidebar stays at Option.none() — not
+ *  user-visible (the sidebar just shows an empty list). */
+export const FailedTrackDetails = m("FailedTrackDetails", {
+  concertId: S.Number,
+  loadGen: S.Number,
+});
+
 // ── Audio element events ────────────────────────────────────────────────
 //
 // No Subscription dispatches these yet (that's a later commit, once the
@@ -285,6 +303,8 @@ export const Message = S.Union([
   FailedDeleteInterlude,
   ReceivedPlaylistTracks,
   FailedPlaylistLoad,
+  ReceivedTrackDetails,
+  FailedTrackDetails,
   FailedOpenExternal,
   AudioPlaying,
   AudioPaused,

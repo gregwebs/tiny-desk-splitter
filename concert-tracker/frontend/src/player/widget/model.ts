@@ -1,7 +1,7 @@
 import { Option, Schema as S } from "effect";
 import { ts } from "foldkit/schema";
 
-import type { MediaInfo as MediaInfoJson, PlaybackItemJson, PrepareStatus as PrepareStatusJson } from "../../api/client";
+import type { MediaInfo as MediaInfoJson, PlaybackItemJson, PrepareStatus as PrepareStatusJson, TrackDetailItem as TrackDetailItemJson } from "../../api/client";
 
 // MODEL
 //
@@ -14,6 +14,23 @@ import type { MediaInfo as MediaInfoJson, PlaybackItemJson, PrepareStatus as Pre
 // Effect Schema can't consume the generated `interface` types directly, and
 // keeping the Model schema-encodable is what lets it flow through Story's
 // harness and (eventually) survive a host Port boundary.
+
+// ── Sidebar track list (GET /concerts/:id/track-details response) ───────
+
+export const SidebarTrack = S.Struct({
+  index: S.Number,
+  title: S.String,
+  available: S.Boolean,
+  is_video: S.Boolean,
+  liked: S.Boolean,
+});
+export type SidebarTrack = typeof SidebarTrack.Type;
+
+export const SidebarTrackList = S.Struct({
+  tracksBusy: S.Boolean,
+  tracks: S.mutable(S.Array(SidebarTrack)),
+});
+export type SidebarTrackList = typeof SidebarTrackList.Type;
 
 // ── Wire-shape mirrors ──────────────────────────────────────────────────
 
@@ -56,6 +73,8 @@ export type PlaybackItem = typeof PlaybackItem.Type;
 type AssertAssignable<A, _B extends A> = true;
 export type _MediaInfoFromJson = AssertAssignable<MediaInfo, MediaInfoJson>;
 export type _MediaInfoToJson = AssertAssignable<MediaInfoJson, MediaInfo>;
+export type _SidebarTrackFromJson = AssertAssignable<SidebarTrack, TrackDetailItemJson>;
+export type _SidebarTrackToJson = AssertAssignable<TrackDetailItemJson, SidebarTrack>;
 export type _PrepareStatusFromJson = AssertAssignable<PrepareStatus, PrepareStatusJson>;
 export type _PrepareStatusToJson = AssertAssignable<PrepareStatusJson, PrepareStatus>;
 export type _PlaybackItemFromJson = AssertAssignable<PlaybackItem, PlaybackItemJson>;
@@ -208,7 +227,17 @@ export const Model = S.Struct({
   /** The track/album currently in the prepare→poll cycle, if any (mirrors
    *  player.ts's module-scoped `pendingPlay`). */
   pending: S.Option(PlayTarget),
-  sidebar: S.Struct({ open: S.Boolean }),
+  sidebar: S.Struct({
+    open: S.Boolean,
+    /** Loaded once when the sidebar opens for whole-album / normal mode;
+     *  None in reconstruction mode (items come from playback.concert instead).
+     *  Cleared on stopPlayback; refreshed by FetchTrackDetails (commit 5 wires
+     *  the dispatch). */
+    tracks: S.Option(SidebarTrackList),
+    /** Monotonic staleness guard: incremented each time FetchTrackDetails is
+     *  dispatched so a stale response arriving after a newer fetch is discarded. */
+    loadGen: S.Number,
+  }),
   video: S.Struct({ open: S.Boolean }),
   /** Mirrors the real `<audio>` element's play/pause state, driven by the
    *  AudioPlaying/AudioPaused/AudioEnded messages a later commit's
@@ -228,7 +257,7 @@ export const initialModel: Model = {
   queue: [],
   nextGroupId: 1,
   pending: Option.none(),
-  sidebar: { open: false },
+  sidebar: { open: false, tracks: Option.none(), loadGen: 0 },
   video: { open: false },
   isPlaying: false,
   pendingSeek: Option.none(),
