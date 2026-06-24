@@ -3,13 +3,12 @@ import { type Html, html } from "foldkit/html";
 
 import { nextEnabled, prevEnabled } from "../core";
 import { CommandReceived, type Message } from "./message";
-import type { Model } from "./model";
+import type { ConcertPlaybackState, Model, SidebarTrackList } from "./model";
 import { PlayerCommandValue } from "./port";
 
-// VIEW — player-bar section (commit 2).
-// Sidebar sections (queue list, concert track list) render from this same view
-// function once commits 5/6 fill them in.  Host embed wiring + layout.html
-// restructure land in commit 7.
+// VIEW — player bar + sidebar concert section (commits 2/5).
+// Queue section renders from this same view once commit 6 fills it in.
+// Host embed wiring + layout.html restructure land in commit 7.
 
 // Inline adapter: widget's Option-based Playback → core.PlaybackState nulls.
 // Kept local since only nextEnabled/prevEnabled need the core shape.
@@ -24,6 +23,263 @@ const toCorePb = (p: Model["playback"]) => ({
   concert: Option.getOrNull(p.concert),
 });
 
+// ── Concert section helpers ───────────────────────────────────────────────
+
+function reconstructionList(concert: ConcertPlaybackState, concertId: number): Html {
+  const h = html<Message>();
+  const liRow = h.keyed("li");
+  return h.ol(
+    [h.Class("track-list track-list-concert-playback")],
+    concert.items.map((item, pos) => {
+      const isPlaying = pos === concert.pos;
+      const isInterlude = item.kind === "interlude";
+      const trackIdx = item.track_index ?? null;
+
+      if (!isInterlude && trackIdx !== null) {
+        return liRow(
+          String(pos),
+          [h.Class(isPlaying ? "concert-item concert-item-playing" : "concert-item")],
+          [
+            h.button(
+              [
+                h.Class(item.liked ? "btn-like liked" : "btn-like"),
+                h.Title("Like"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarLikeTrack({ concertId, trackIdx }),
+                  }),
+                ),
+              ],
+              [item.liked ? "★" : "☆"],
+            ),
+            h.button(
+              [
+                h.Class(isPlaying ? "btn-track-listen playing" : "btn-track-listen"),
+                h.Attribute("data-concert-id", String(concertId)),
+                h.Attribute("data-track-idx", String(trackIdx)),
+                h.OnClick(
+                  CommandReceived({ command: PlayerCommandValue.PlayConcertFrom({ concertId, pos }) }),
+                ),
+              ],
+              [item.title],
+            ),
+            h.button(
+              [
+                h.Class("btn-delete"),
+                h.Title("Delete track files"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarDeleteTrack({ concertId, trackIdx }),
+                  }),
+                ),
+              ],
+              [h.span([h.Class("icon-trash")], [])],
+            ),
+            h.button(
+              [
+                h.Class("btn-add-pl"),
+                h.Title("Add to playlist"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarAddToPlaylist({
+                      concertId,
+                      trackIdx,
+                      label: item.title,
+                    }),
+                  }),
+                ),
+              ],
+              ["+"],
+            ),
+          ],
+        );
+      }
+
+      // Interlude row
+      const interludeIdx = item.interlude_index ?? 0;
+      return liRow(
+        String(pos),
+        [h.Class(isPlaying ? "concert-item concert-item-interlude concert-item-playing" : "concert-item concert-item-interlude")],
+        [
+          h.button(
+            [
+              h.Class(isPlaying ? "btn-track-listen btn-interlude playing" : "btn-track-listen btn-interlude"),
+              h.Attribute("data-concert-id", String(concertId)),
+              h.Attribute("data-interlude-idx", String(interludeIdx)),
+              h.OnClick(
+                CommandReceived({ command: PlayerCommandValue.PlayConcertFrom({ concertId, pos }) }),
+              ),
+            ],
+            [item.title],
+          ),
+          h.button(
+            [
+              h.Class("btn-delete"),
+              h.Title("Delete interlude file"),
+              h.OnClick(
+                CommandReceived({
+                  command: PlayerCommandValue.SidebarDeleteInterlude({ concertId, interludeIdx }),
+                }),
+              ),
+            ],
+            [h.span([h.Class("icon-trash")], [])],
+          ),
+        ],
+      );
+    }),
+  );
+}
+
+function wholeAlbumList(
+  trackList: SidebarTrackList,
+  concertId: number,
+  currentTrackIdx: number | null,
+): Html {
+  const h = html<Message>();
+  const liRow = h.keyed("li");
+  const { tracksBusy, tracks } = trackList;
+
+  return h.ol(
+    [h.Class("track-list")],
+    tracks.map((track) => {
+      const isPlaying = track.index === currentTrackIdx;
+
+      if (track.available) {
+        return liRow(
+          String(track.index),
+          [h.Class(isPlaying ? "concert-item concert-item-playing" : "concert-item")],
+          [
+            h.button(
+              [
+                h.Class(track.liked ? "btn-like liked" : "btn-like"),
+                h.Title("Like"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarLikeTrack({
+                      concertId,
+                      trackIdx: track.index,
+                    }),
+                  }),
+                ),
+              ],
+              [track.liked ? "★" : "☆"],
+            ),
+            h.button(
+              [
+                h.Class(isPlaying ? "btn-track-listen playing" : "btn-track-listen"),
+                h.Attribute("data-concert-id", String(concertId)),
+                h.Attribute("data-track-idx", String(track.index)),
+                h.Disabled(tracksBusy),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.PlayTrack({ concertId, trackIdx: track.index }),
+                  }),
+                ),
+              ],
+              [track.title],
+            ),
+            ...(track.is_video
+              ? [
+                  h.button(
+                    [
+                      h.Class("btn-watch"),
+                      h.OnClick(
+                        CommandReceived({
+                          command: PlayerCommandValue.WatchTrackDirect({
+                            concertId,
+                            trackIdx: track.index,
+                          }),
+                        }),
+                      ),
+                    ],
+                    ["Watch"],
+                  ),
+                ]
+              : []),
+            h.button(
+              [
+                h.Class("btn-delete"),
+                h.Title("Delete track files"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarDeleteTrack({
+                      concertId,
+                      trackIdx: track.index,
+                    }),
+                  }),
+                ),
+              ],
+              [h.span([h.Class("icon-trash")], [])],
+            ),
+            h.button(
+              [
+                h.Class("btn-add-pl"),
+                h.Title("Add to playlist"),
+                h.OnClick(
+                  CommandReceived({
+                    command: PlayerCommandValue.SidebarAddToPlaylist({
+                      concertId,
+                      trackIdx: track.index,
+                      label: track.title,
+                    }),
+                  }),
+                ),
+              ],
+              ["+"],
+            ),
+          ],
+        );
+      }
+
+      // Unavailable track: clicking triggers prepare via PlayTrack's missing-file path.
+      return liRow(
+        String(track.index),
+        [h.Class("concert-item track-unavailable")],
+        [
+          h.button(
+            [
+              h.Class("btn-track-listen track-title-unavailable"),
+              h.Attribute("data-concert-id", String(concertId)),
+              h.Attribute("data-track-idx", String(track.index)),
+              h.Disabled(tracksBusy),
+              h.OnClick(
+                CommandReceived({
+                  command: PlayerCommandValue.PlayTrack({ concertId, trackIdx: track.index }),
+                }),
+              ),
+            ],
+            [track.title],
+          ),
+        ],
+      );
+    }),
+  );
+}
+
+function concertSection(model: Model): Html {
+  const h = html<Message>();
+  const concertId = model.playback.concertId;
+
+  // No active concert: render empty but structurally stable section.
+  if (concertId === null) {
+    return h.section([h.Id("sidebar-concert-section")], []);
+  }
+
+  const inner = Option.match(model.playback.concert, {
+    onSome: (concert) => reconstructionList(concert, concertId),
+    onNone: () =>
+      Option.match(model.sidebar.tracks, {
+        onSome: (trackList) => wholeAlbumList(trackList, concertId, model.playback.trackIdx),
+        onNone: () => h.p([h.Class("sidebar-loading")], ["Loading…"]),
+      }),
+  });
+
+  return h.section(
+    [h.Id("sidebar-concert-section")],
+    [h.h2([h.Id("sidebar-concert-heading")], ["Now playing"]), inner],
+  );
+}
+
 export const view = (model: Model): Html => {
   const h = html<Message>();
   const p = model.playback;
@@ -37,171 +293,184 @@ export const view = (model: Model): Html => {
   const busyText = model.status._tag === "Busy" ? model.status.message : "";
 
   return h.div(
-    [h.Id("player-bar")],
+    [],
     [
-      // ── Queue/sidebar toggle ──────────────────────────────────────────
-      h.button(
-        [
-          h.Id("player-queue-toggle"),
-          h.AriaLabel("Toggle queue and tracks sidebar"),
-          h.AriaExpanded(model.sidebar.open),
-          h.Title("Show queue and tracks"),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
-        ],
-        ["☰", h.span([h.Id("player-queue-badge")], [queueCount > 0 ? String(queueCount) : ""])],
-      ),
-
-      // ── Info: title-line + artist + playlist ─────────────────────────
+      // ── Player bar ────────────────────────────────────────────────────
       h.div(
-        [h.Id("player-info")],
+        [h.Id("player-bar")],
         [
-          h.span(
-            [h.Class("player-title-line")],
+          // ── Queue/sidebar toggle ────────────────────────────────────
+          h.button(
             [
-              h.button(
+              h.Id("player-queue-toggle"),
+              h.AriaLabel("Toggle queue and tracks sidebar"),
+              h.AriaExpanded(model.sidebar.open),
+              h.Title("Show queue and tracks"),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+            ],
+            ["☰", h.span([h.Id("player-queue-badge")], [queueCount > 0 ? String(queueCount) : ""])],
+          ),
+
+          // ── Info: title-line + artist + playlist ────────────────────
+          h.div(
+            [h.Id("player-info")],
+            [
+              h.span(
+                [h.Class("player-title-line")],
                 [
-                  h.Id("player-like"),
-                  h.Class("btn-like"),
-                  h.Title("Like"),
-                  h.Style({ display: hasTrack ? "" : "none" }),
-                  h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleLike() })),
+                  h.button(
+                    [
+                      h.Id("player-like"),
+                      h.Class("btn-like"),
+                      h.Title("Like"),
+                      h.Style({ display: hasTrack ? "" : "none" }),
+                      h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleLike() })),
+                    ],
+                    [p.liked ? "★" : "☆"],
+                  ),
+                  h.button(
+                    [
+                      h.Id("player-add-pl"),
+                      h.Title("Add to playlist"),
+                      h.Style({ display: hasTrack ? "" : "none" }),
+                      h.OnClick(CommandReceived({ command: PlayerCommandValue.AddToPlaylist() })),
+                    ],
+                    ["+"],
+                  ),
+                  h.span(
+                    [
+                      h.Id("player-track"),
+                      h.Role("button"),
+                      h.Tabindex(0),
+                      h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                    ],
+                    [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
+                  ),
+                  h.span(
+                    [
+                      h.Id("player-title"),
+                      h.Role("button"),
+                      h.Tabindex(0),
+                      h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                    ],
+                    [p.title],
+                  ),
                 ],
-                [p.liked ? "★" : "☆"],
               ),
-              h.button(
+              // Concert navigation via hx-* — host shim intercepts modifier
+              // clicks before emitting OpenConcert (commit 7).
+              h.a(
                 [
-                  h.Id("player-add-pl"),
-                  h.Title("Add to playlist"),
-                  h.Style({ display: hasTrack ? "" : "none" }),
-                  h.OnClick(CommandReceived({ command: PlayerCommandValue.AddToPlaylist() })),
+                  h.Id("player-artist"),
+                  h.Attribute("hx-boost", "false"),
+                  h.Href(hasMedia ? `/concerts/${p.concertId}` : "#"),
+                  h.Attribute("hx-target", "#content"),
+                  h.Attribute("hx-select", "#content"),
+                  h.Attribute("hx-swap", "outerHTML show:window:top"),
+                  h.Attribute("hx-push-url", "true"),
+                  h.Title("View concert"),
                 ],
-                ["+"],
+                [p.artist],
               ),
-              // TODO(keyboard): the original layout.html:53-54 had onkeydown handlers
-              // for Enter on these spans so they behave like buttons.  core.ts
-              // has isPlainSpaceKey/isPlainEscapeKey but no Enter predicate, and
-              // message.ts lists keyboard shortcuts as out-of-scope for commit 2.
-              // A later Subscription commit should add h.OnKeyDown for Enter here.
               h.span(
                 [
-                  h.Id("player-track"),
-                  h.Role("button"),
-                  h.Tabindex(0),
-                  h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                  h.Id("player-playlist"),
+                  h.Style({ display: p.playlistLabel !== null ? "" : "none" }),
                 ],
-                [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
-              ),
-              h.span(
-                [
-                  h.Id("player-title"),
-                  h.Role("button"),
-                  h.Tabindex(0),
-                  h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
-                ],
-                [p.title],
+                [p.playlistLabel ?? ""],
               ),
             ],
           ),
-          // Concert navigation: htmx handles the routing via hx-* attributes.
-          // No h.OnClick here — the host shim (commit 7) intercepts modifier
-          // clicks on this element before emitting an OpenConcert command.
-          h.a(
+
+          // ── Status / error feedback ─────────────────────────────────
+          h.span([h.Id("player-error")], [errorText]),
+          h.span([h.Id("player-status")], [busyText]),
+
+          // ── Action buttons ──────────────────────────────────────────
+          h.button(
             [
-              h.Id("player-artist"),
-              h.Attribute("hx-boost", "false"),
-              h.Href(hasMedia ? `/concerts/${p.concertId}` : "#"),
-              h.Attribute("hx-target", "#content"),
-              h.Attribute("hx-select", "#content"),
-              h.Attribute("hx-swap", "outerHTML show:window:top"),
-              h.Attribute("hx-push-url", "true"),
-              h.Title("View concert"),
+              h.Id("player-watch"),
+              h.Title("Watch video in player"),
+              h.Style({ display: p.isVideo && p.watchUrl !== null ? "" : "none" }),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.Watch() })),
             ],
-            [p.artist],
+            ["Watch"],
           ),
-          h.span(
+          h.button(
             [
-              h.Id("player-playlist"),
-              h.Style({ display: p.playlistLabel !== null ? "" : "none" }),
+              h.Id("player-open"),
+              h.Title("Open in system player"),
+              h.Style({ display: p.watchUrl !== null ? "" : "none" }),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.OpenExternal() })),
             ],
-            [p.playlistLabel ?? ""],
+            ["⊞"],
           ),
+          h.button(
+            [
+              h.Id("player-delete"),
+              h.Title("Delete this track"),
+              h.AriaLabel("Delete this track"),
+              h.Style({ display: hasTrack ? "" : "none" }),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.DeleteTrack() })),
+            ],
+            [h.span([h.Class("icon-trash")], [])],
+          ),
+
+          // ── Transport ───────────────────────────────────────────────
+          h.button(
+            [
+              h.Id("player-prev"),
+              h.Title("Previous track"),
+              h.Disabled(!prevOn),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToPrev() })),
+            ],
+            ["⏮"],
+          ),
+          h.button(
+            [
+              h.Id("player-play-pause"),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
+            ],
+            [model.isPlaying ? "⏸" : "▶"],
+          ),
+          h.button(
+            [
+              h.Id("player-next"),
+              h.Title("Next track"),
+              h.Disabled(!nextOn),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToNext() })),
+            ],
+            ["⏭"],
+          ),
+          // Seek + time: static until audio Subscription adds currentTime/duration.
+          h.input([
+            h.Id("player-seek"),
+            h.Type("range"),
+            h.Min("0"),
+            h.Max("100"),
+            h.Value("0"),
+            h.Step("1"),
+          ]),
+          h.span([h.Id("player-time")], ["0:00 / 0:00"]),
         ],
       ),
 
-      // ── Status / error feedback ───────────────────────────────────────
-      h.span([h.Id("player-error")], [errorText]),
-      h.span([h.Id("player-status")], [busyText]),
-
-      // ── Action buttons (visibility gated on current media type) ───────
-      h.button(
+      // ── Sidebar ───────────────────────────────────────────────────────
+      // sidebar-close and sidebar-resize are host-rendered until commit 7
+      // (they sit in layout.html as static buttons calling Player.*).
+      h.aside(
+        [h.Id("player-sidebar")],
         [
-          h.Id("player-watch"),
-          h.Title("Watch video in player"),
-          h.Style({ display: p.isVideo && p.watchUrl !== null ? "" : "none" }),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.Watch() })),
+          h.div([h.Class("sidebar-top-spacer")], []),
+          // Queue section: rendered in commit 6.
+          h.section([h.Id("sidebar-queue-section")], [
+            h.h2([], ["Queue"]),
+            h.ol([h.Id("sidebar-queue-list"), h.Class("track-list")], []),
+            h.p([h.Id("sidebar-queue-empty")], ["Nothing queued"]),
+          ]),
+          concertSection(model),
         ],
-        ["Watch"],
       ),
-      h.button(
-        [
-          h.Id("player-open"),
-          h.Title("Open in system player"),
-          h.Style({ display: p.watchUrl !== null ? "" : "none" }),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.OpenExternal() })),
-        ],
-        ["⊞"],
-      ),
-      h.button(
-        [
-          h.Id("player-delete"),
-          h.Title("Delete this track"),
-          h.AriaLabel("Delete this track"),
-          h.Style({ display: hasTrack ? "" : "none" }),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.DeleteTrack() })),
-        ],
-        [h.span([h.Class("icon-trash")], [])],
-      ),
-
-      // ── Transport controls ────────────────────────────────────────────
-      h.button(
-        [
-          h.Id("player-prev"),
-          h.Title("Previous track"),
-          h.Disabled(!prevOn),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToPrev() })),
-        ],
-        ["⏮"],
-      ),
-      h.button(
-        [
-          h.Id("player-play-pause"),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
-        ],
-        [model.isPlaying ? "⏸" : "▶"],
-      ),
-      h.button(
-        [
-          h.Id("player-next"),
-          h.Title("Next track"),
-          h.Disabled(!nextOn),
-          h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToNext() })),
-        ],
-        ["⏭"],
-      ),
-
-      // Seek slider and time display: static at 0 until audio Subscription
-      // adds currentTime/duration to the Model (later commit).
-      // TODO(seek): original layout.html:70 had oninput="Player.seek(this.value)";
-      // hook it up when currentTime/duration enter the Model.
-      h.input([
-        h.Id("player-seek"),
-        h.Type("range"),
-        h.Min("0"),
-        h.Max("100"),
-        h.Value("0"),
-        h.Step("1"),
-      ]),
-      h.span([h.Id("player-time")], ["0:00 / 0:00"]),
     ],
   );
 };

@@ -25,6 +25,7 @@ import {
   FetchNextTrackInfo,
   FetchPlaylistForPlay,
   FetchPrevTrackInfo,
+  FetchTrackDetails,
   FetchTrackInfo,
   FetchTrackInfoForEnqueue,
   MarkPlayingExternal,
@@ -453,15 +454,28 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           },
         }),
 
-      CompletedLikeToggle: ({ liked }) => [evo(model, { playback: (p) => ({ ...p, liked }) }), []],
+      CompletedLikeToggle: ({ concertId, trackIdx, liked }) => {
+        // Confirm server value (should match the optimistic flip, but carry it through).
+        let model1 = model;
+        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
+          model1 = evo(model1, { playback: (p) => ({ ...p, liked }) });
+        }
+        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, liked);
+        model1 = flipConcertItemLiked(model1, concertId, trackIdx, liked);
+        return [model1, []];
+      },
 
       FailedLikeToggle: ({ concertId, trackIdx, attempted }) => {
-        if (model.playback.concertId !== concertId || model.playback.trackIdx !== trackIdx) return [model, []];
         const reverted = !attempted;
-        return [
-          withError(evo(model, { playback: (p) => ({ ...p, liked: reverted }) }), "Like failed"),
-          [SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: reverted })],
-        ];
+        let model1 = model;
+        const isCurrentTrack =
+          model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
+        if (isCurrentTrack) {
+          model1 = withError(evo(model1, { playback: (p) => ({ ...p, liked: reverted }) }), "Like failed");
+        }
+        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, reverted);
+        model1 = flipConcertItemLiked(model1, concertId, trackIdx, reverted);
+        return [model1, [SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: reverted })]];
       },
 
       ReceivedDeleteTrackResult: ({ concertId, trackIdx, ok, source }) => {
@@ -539,6 +553,38 @@ function sameTargetLocal(a: PlayTarget, b: PlayTarget): boolean {
   return false;
 }
 
+// ── Like-sync helpers ────────────────────────────────────────────────────
+//
+// Called from every like-toggle path (bar ToggleLike, sidebar SidebarLikeTrack,
+// and their respective FailedLikeToggle revert) so the liked field stays
+// consistent across all three copies: model.playback.liked (bar star),
+// model.sidebar.tracks[i].liked (whole-album list), and
+// model.playback.concert.items[pos].liked (reconstruction list).
+
+function flipSidebarTrackLiked(model: Model, concertId: number, trackIdx: number, liked: boolean): Model {
+  return Option.match(model.sidebar.tracks, {
+    onNone: () => model,
+    onSome: (sidebarTracks) => {
+      if (model.playback.concertId !== concertId) return model;
+      const updated = sidebarTracks.tracks.map((t) => (t.index === trackIdx ? { ...t, liked } : t));
+      return evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ ...sidebarTracks, tracks: updated }) }) });
+    },
+  });
+}
+
+function flipConcertItemLiked(model: Model, concertId: number, trackIdx: number, liked: boolean): Model {
+  return Option.match(model.playback.concert, {
+    onNone: () => model,
+    onSome: (concert) => {
+      if (concert.id !== concertId) return model;
+      const updated = concert.items.map((item) =>
+        item.track_index === trackIdx && item.kind !== "interlude" ? { ...item, liked } : item,
+      );
+      return evo(model, { playback: (p) => ({ ...p, concert: Option.some({ ...concert, items: updated }) }) });
+    },
+  });
+}
+
 // ── PlayerCommand dispatch (host calls in via the single inbound Port) ──
 
 function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
@@ -594,8 +640,11 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         if (model.playback.trackIdx === null || model.playback.concertId === null) return [model, []];
         const { concertId, trackIdx } = model.playback;
         const next = !model.playback.liked;
+        let model1 = evo(model, { playback: (p) => ({ ...p, liked: next }) });
+        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, next);
+        model1 = flipConcertItemLiked(model1, concertId, trackIdx, next);
         return [
-          evo(model, { playback: (p) => ({ ...p, liked: next }) }),
+          model1,
           [
             ToggleLikeRequest({ concertId, trackIdx, next }),
             SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: next }),
@@ -609,9 +658,34 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
 
       OpenConcert: () =>
         model.playback.concertId === null ? [model, []] : [model, [NavigateToConcert({ concertId: model.playback.concertId })]],
-      OpenSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: true }) }), []],
+      OpenSidebar: () => {
+        const model1 = evo(model, { sidebar: (s) => ({ ...s, open: true }) });
+        // Whole-album mode: fetch the track list. Reconstruction mode (concert
+        // Some) renders from model.playback.concert.items — no fetch needed.
+        const concertId = model.playback.concertId;
+        if (concertId !== null && Option.isNone(model.playback.concert)) {
+          const loadGen = model.sidebar.loadGen + 1;
+          return [
+            evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
+            [FetchTrackDetails({ concertId, loadGen })],
+          ];
+        }
+        return [model1, []];
+      },
       CloseSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: false }) }), []],
-      ToggleSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: !s.open }) }), []],
+      ToggleSidebar: () => {
+        const opening = !model.sidebar.open;
+        const model1 = evo(model, { sidebar: (s) => ({ ...s, open: opening }) });
+        const concertId = model.playback.concertId;
+        if (opening && concertId !== null && Option.isNone(model.playback.concert)) {
+          const loadGen = model.sidebar.loadGen + 1;
+          return [
+            evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
+            [FetchTrackDetails({ concertId, loadGen })],
+          ];
+        }
+        return [model1, []];
+      },
       SidebarDeleteTrack: ({ concertId, trackIdx }) => [model, [DeleteTrackRequest({ concertId, trackIdx, source: "sidebar" })]],
 
       PlayQueueEntryNow: ({ pos }) => {
@@ -674,6 +748,46 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         });
         return [model, [PostDeleteInterlude({ concertId, interludeIdx, wasPlayingThis })]];
       },
+
+      SidebarLikeTrack: ({ concertId, trackIdx }) => {
+        // Find current liked state from whichever list is active.
+        let currentLiked: boolean | null = null;
+        const sidebarTracks = Option.getOrNull(model.sidebar.tracks);
+        if (sidebarTracks && model.playback.concertId === concertId) {
+          const t = sidebarTracks.tracks.find((t) => t.index === trackIdx);
+          if (t) currentLiked = t.liked;
+        }
+        if (currentLiked === null) {
+          const concert = Option.getOrNull(model.playback.concert);
+          if (concert && concert.id === concertId) {
+            const item = concert.items.find(
+              (item) => item.track_index === trackIdx && item.kind !== "interlude",
+            );
+            if (item) currentLiked = item.liked;
+          }
+        }
+        if (currentLiked === null) return [model, []]; // track not in any loaded list
+
+        const next = !currentLiked;
+        let model1 = flipSidebarTrackLiked(model, concertId, trackIdx, next);
+        model1 = flipConcertItemLiked(model1, concertId, trackIdx, next);
+        // Also sync bar star if this is the currently-playing track.
+        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
+          model1 = evo(model1, { playback: (p) => ({ ...p, liked: next }) });
+        }
+        return [
+          model1,
+          [
+            ToggleLikeRequest({ concertId, trackIdx, next }),
+            SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: next }),
+          ],
+        ];
+      },
+
+      SidebarAddToPlaylist: ({ concertId, trackIdx, label }) => [
+        model,
+        [OpenAddToPlaylist({ concertId, trackIdx, label })],
+      ],
     }),
   );
 }

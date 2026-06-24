@@ -64,6 +64,17 @@ const StopPlayback = ts("StopPlayback");
 const PlayConcert = ts("PlayConcert", { concertId: S.Number });
 const PlayConcertFrom = ts("PlayConcertFrom", { concertId: S.Number, pos: S.Number });
 const SidebarDeleteInterlude = ts("SidebarDeleteInterlude", { concertId: S.Number, interludeIdx: S.Number });
+/** Like/unlike a specific track from the sidebar track list (whole-album or
+ *  reconstruction mode). Syncs bar star and concert items in the Model so all
+ *  copies stay in sync without an extra round trip. */
+const SidebarLikeTrack = ts("SidebarLikeTrack", { concertId: S.Number, trackIdx: S.Number });
+/** Open the add-to-playlist panel for a specific sidebar track row (distinct
+ *  from AddToPlaylist which uses the currently-playing track from playback). */
+const SidebarAddToPlaylist = ts("SidebarAddToPlaylist", {
+  concertId: S.Number,
+  trackIdx: S.Number,
+  label: S.String,
+});
 
 export const PlayerCommand = S.Union([
   PlayAlbum,
@@ -95,6 +106,8 @@ export const PlayerCommand = S.Union([
   PlayConcert,
   PlayConcertFrom,
   SidebarDeleteInterlude,
+  SidebarLikeTrack,
+  SidebarAddToPlaylist,
 ]);
 export type PlayerCommand = typeof PlayerCommand.Type;
 
@@ -128,6 +141,8 @@ export const PlayerCommandValue = {
   PlayConcert,
   PlayConcertFrom,
   SidebarDeleteInterlude,
+  SidebarLikeTrack,
+  SidebarAddToPlaylist,
 };
 
 export const ports = {

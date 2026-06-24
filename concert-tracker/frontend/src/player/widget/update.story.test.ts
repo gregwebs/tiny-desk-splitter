@@ -10,17 +10,21 @@ import {
   DrainQueue,
   FetchAlbumInfo,
   FetchNextTrackInfo,
+  FetchTrackDetails,
   FetchTrackInfo,
   MarkPlayingExternal,
   MarkPlayingInterludeExternal,
   MarkPreparingExternal,
+  OpenAddToPlaylist,
   PauseAudio,
   PlayAudio,
   PollPrepareStatus,
   RecordListenEvent,
   RefreshCardStatus,
   SeekAudio,
+  SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
+  ToggleLikeRequest,
 } from "./command";
 import {
   Acked,
@@ -28,7 +32,9 @@ import {
   AudioPaused,
   AudioPlaying,
   CommandReceived,
+  CompletedLikeToggle,
   FailedFetchInfo,
+  FailedLikeToggle,
   FailedNextTrackInfo,
   FailedPollPrepareStatus,
   FailedTrackDetails,
@@ -589,6 +595,285 @@ describe("player update — sidebar track details", () => {
       Story.message(FailedTrackDetails({ concertId: 1, loadGen: 1 })),
       Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
       Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch", () => {
+  test("OpenSidebar in whole-album mode dispatches FetchTrackDetails and bumps loadGen", () => {
+    const m: Model = {
+      ...initialModel,
+      playback: { ...initialPlayback, concertId: 5 },
+      sidebar: { open: false, tracks: Option.none(), loadGen: 0 },
+    };
+    Story.story(
+      update,
+      Story.with(m),
+      Story.message(CommandReceived({ command: PlayerCommandValue.OpenSidebar() })),
+      Story.model((m2) => {
+        expect(m2.sidebar.open).toBe(true);
+        expect(m2.sidebar.loadGen).toBe(1);
+      }),
+      Story.Command.expectHas(FetchTrackDetails),
+      Story.Command.resolve(
+        FetchTrackDetails,
+        ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
+      ),
+    );
+  });
+
+  test("ToggleSidebar opening in whole-album mode dispatches FetchTrackDetails", () => {
+    const m: Model = {
+      ...initialModel,
+      playback: { ...initialPlayback, concertId: 5 },
+      sidebar: { open: false, tracks: Option.none(), loadGen: 0 },
+    };
+    Story.story(
+      update,
+      Story.with(m),
+      Story.message(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+      Story.model((m2) => {
+        expect(m2.sidebar.open).toBe(true);
+        expect(m2.sidebar.loadGen).toBe(1);
+      }),
+      Story.Command.expectHas(FetchTrackDetails),
+      Story.Command.resolve(
+        FetchTrackDetails,
+        ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
+      ),
+    );
+  });
+
+  test("ToggleSidebar closing does NOT dispatch FetchTrackDetails", () => {
+    const m: Model = {
+      ...initialModel,
+      playback: { ...initialPlayback, concertId: 5 },
+      sidebar: { open: true, tracks: Option.none(), loadGen: 1 },
+    };
+    Story.story(
+      update,
+      Story.with(m),
+      Story.message(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+      Story.model((m2) => expect(m2.sidebar.open).toBe(false)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("OpenSidebar in reconstruction mode skips FetchTrackDetails", () => {
+    const concertState = { id: 5, items: [interludeItem("/c/0.mp3", 0)], pos: 0 };
+    const m: Model = {
+      ...initialModel,
+      playback: { ...initialPlayback, concertId: 5, concert: Option.some(concertState) },
+    };
+    Story.story(
+      update,
+      Story.with(m),
+      Story.message(CommandReceived({ command: PlayerCommandValue.OpenSidebar() })),
+      Story.model((m2) => {
+        expect(m2.sidebar.open).toBe(true);
+        expect(m2.sidebar.loadGen).toBe(0); // unchanged — reconstruction uses items, not a fetch
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("OpenSidebar with no active concert skips FetchTrackDetails", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(CommandReceived({ command: PlayerCommandValue.OpenSidebar() })),
+      Story.model((m) => expect(m.sidebar.open).toBe(true)),
+      Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — like-sync", () => {
+  const sampleTracks = [
+    { index: 0, title: "Track A", available: true, is_video: false, liked: false },
+    { index: 1, title: "Track B", available: false, is_video: false, liked: true },
+  ];
+
+  /** Model with concertId=1 trackIdx=0 playing, sidebar loaded. */
+  const withSidebarTracks: Model = {
+    ...initialModel,
+    playback: { ...initialPlayback, concertId: 1, trackIdx: 0, liked: false },
+    isPlaying: true,
+    sidebar: {
+      open: true,
+      tracks: Option.some({ tracksBusy: false, tracks: sampleTracks }),
+      loadGen: 1,
+    },
+  };
+
+  test("SidebarLikeTrack flips sidebar track liked and dispatches ToggleLikeRequest", () => {
+    Story.story(
+      update,
+      Story.with(withSidebarTracks),
+      Story.message(
+        CommandReceived({ command: PlayerCommandValue.SidebarLikeTrack({ concertId: 1, trackIdx: 0 }) }),
+      ),
+      Story.model((m) => {
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks[0]?.liked).toBe(true); // flipped false→true
+        }
+      }),
+      Story.Command.expectHas(ToggleLikeRequest),
+      Story.Command.resolve(
+        ToggleLikeRequest,
+        CompletedLikeToggle({ concertId: 1, trackIdx: 0, liked: true }),
+      ),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("SidebarLikeTrack for currently-playing track also flips bar star", () => {
+    Story.story(
+      update,
+      Story.with(withSidebarTracks), // concertId=1, trackIdx=0 is playing
+      Story.message(
+        CommandReceived({ command: PlayerCommandValue.SidebarLikeTrack({ concertId: 1, trackIdx: 0 }) }),
+      ),
+      Story.model((m) => {
+        expect(m.playback.liked).toBe(true); // bar star flipped
+      }),
+      Story.Command.resolve(
+        ToggleLikeRequest,
+        CompletedLikeToggle({ concertId: 1, trackIdx: 0, liked: true }),
+      ),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("SidebarLikeTrack for non-playing track leaves bar star unchanged", () => {
+    Story.story(
+      update,
+      Story.with(withSidebarTracks), // playing trackIdx=0
+      Story.message(
+        CommandReceived({ command: PlayerCommandValue.SidebarLikeTrack({ concertId: 1, trackIdx: 1 }) }),
+      ),
+      Story.model((m) => {
+        expect(m.playback.liked).toBe(false); // bar star unchanged (different track)
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks[1]?.liked).toBe(false); // flipped true→false
+        }
+      }),
+      Story.Command.resolve(
+        ToggleLikeRequest,
+        CompletedLikeToggle({ concertId: 1, trackIdx: 1, liked: false }),
+      ),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("SidebarLikeTrack on track not in any list is a no-op", () => {
+    Story.story(
+      update,
+      Story.with(withSidebarTracks),
+      Story.message(
+        CommandReceived({
+          command: PlayerCommandValue.SidebarLikeTrack({ concertId: 1, trackIdx: 99 }),
+        }),
+      ),
+      Story.model((m) => expect(m.playback.liked).toBe(false)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ToggleLike (bar) also syncs sidebar.tracks liked when loaded", () => {
+    Story.story(
+      update,
+      Story.with(withSidebarTracks),
+      Story.message(CommandReceived({ command: PlayerCommandValue.ToggleLike() })),
+      Story.model((m) => {
+        expect(m.playback.liked).toBe(true); // bar star flipped
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks[0]?.liked).toBe(true); // sidebar synced
+        }
+      }),
+      Story.Command.resolve(
+        ToggleLikeRequest,
+        CompletedLikeToggle({ concertId: 1, trackIdx: 0, liked: true }),
+      ),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("FailedLikeToggle reverts sidebar.tracks liked and shows error for current track", () => {
+    // Optimistic state: both bar liked and sidebar track[0].liked flipped to true.
+    const optimistic: Model = {
+      ...withSidebarTracks,
+      playback: { ...withSidebarTracks.playback, liked: true },
+      sidebar: {
+        ...withSidebarTracks.sidebar,
+        tracks: Option.some({
+          tracksBusy: false,
+          tracks: [{ ...sampleTracks[0]!, liked: true }, sampleTracks[1]!],
+        }),
+      },
+    };
+    Story.story(
+      update,
+      Story.with(optimistic),
+      Story.message(FailedLikeToggle({ concertId: 1, trackIdx: 0, attempted: true })),
+      Story.model((m) => {
+        expect(m.playback.liked).toBe(false); // reverted
+        expect(m.status._tag).toBe("Error");
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks[0]?.liked).toBe(false); // reverted
+        }
+      }),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("FailedLikeToggle for a sidebar-only track reverts without showing error", () => {
+    // Optimistic state: sidebar track[1].liked flipped to false (was true),
+    // but playback is on trackIdx=0 — so no bar star error.
+    const optimistic: Model = {
+      ...withSidebarTracks,
+      sidebar: {
+        ...withSidebarTracks.sidebar,
+        tracks: Option.some({
+          tracksBusy: false,
+          tracks: [sampleTracks[0]!, { ...sampleTracks[1]!, liked: false }],
+        }),
+      },
+    };
+    Story.story(
+      update,
+      Story.with(optimistic),
+      Story.message(FailedLikeToggle({ concertId: 1, trackIdx: 1, attempted: false })),
+      Story.model((m) => {
+        expect(m.status._tag).toBe("Idle"); // no error for non-current track
+        expect(Option.isSome(m.sidebar.tracks)).toBe(true);
+        if (Option.isSome(m.sidebar.tracks)) {
+          expect(m.sidebar.tracks.value.tracks[1]?.liked).toBe(true); // reverted back to true
+        }
+      }),
+      Story.Command.resolve(SyncLikeButtonsExternal, Acked()),
+    );
+  });
+
+  test("SidebarAddToPlaylist dispatches OpenAddToPlaylist with correct fields", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(
+        CommandReceived({
+          command: PlayerCommandValue.SidebarAddToPlaylist({
+            concertId: 3,
+            trackIdx: 7,
+            label: "Some Song",
+          }),
+        }),
+      ),
+      Story.Command.expectHas(OpenAddToPlaylist),
+      Story.Command.resolve(OpenAddToPlaylist, Acked()),
     );
   });
 });
