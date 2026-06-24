@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Update an existing pull request, authenticated as a GitHub App installation.
+# The PR must be in draft state; updates to non-draft PRs are rejected.
 #
 # Usage: gh-app-pr-update.sh --pr NUMBER [--repo OWNER/REPO]
 #          [--title TITLE] [--body TEXT | --body-file FILE]
@@ -40,21 +41,31 @@ if [ -z "$title" ] && [ -z "$body" ] && [ -z "$body_file" ] && [ -z "$base" ] &&
   exit 1
 fi
 
-payload="{"
-sep=""
-if [ -n "$title" ]; then
-  payload+=$(jq -n --arg v "$title" '"title": $v'); sep=","
+pr_json=$(gh_app_api_get "repos/${repo}/pulls/${pr}")
+is_draft=$(printf '%s' "$pr_json" | jq -r '.draft')
+if [ "$is_draft" != "true" ]; then
+  echo "error: PR #${pr} is not a draft; only draft PRs may be updated via this script" >&2
+  exit 1
 fi
+
+has_body=false
+resolved_body=""
 if [ -n "$body" ] || [ -n "$body_file" ]; then
+  has_body=true
   resolved_body=$(gh_app_resolve_body "$body" "$body_file")
-  payload+="${sep}"$(jq -n --arg v "$resolved_body" '"body": $v'); sep=","
 fi
-if [ -n "$base" ]; then
-  payload+="${sep}"$(jq -n --arg v "$base" '"base": $v'); sep=","
-fi
-if [ -n "$state" ]; then
-  payload+="${sep}"$(jq -n --arg v "$state" '"state": $v')
-fi
-payload+="}"
+
+payload=$(jq -n \
+  --arg title "$title" \
+  --arg body "$resolved_body" \
+  --arg base "$base" \
+  --arg state "$state" \
+  --argjson has_body "$has_body" \
+  '{
+    title: (if $title != "" then $title else null end),
+    body:  (if $has_body then $body else null end),
+    base:  (if $base  != "" then $base  else null end),
+    state: (if $state != "" then $state else null end)
+  } | with_entries(select(.value != null))')
 
 gh_app_api_patch "repos/${repo}/pulls/${pr}" "$payload"
