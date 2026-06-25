@@ -27,6 +27,8 @@ jobs:
       # Build-time system deps for the default (paddle-ocr) feature set:
       #   pkg-config + libav*-dev/libsw*-dev  - ffmpeg-sys-next links system FFmpeg
       #   clang + libclang-dev                - bindgen in the vendored ocr-rs crate
+      #   libfontconfig-dev                   - plotters' yeslogic-fontconfig-sys (pulls
+      #                                         in freetype/expat -dev transitively)
       # curl/tar/unzip/git (used by the OCR build scripts to fetch MNN + models) are
       # already present on ubuntu-latest. See live-set-song-splitter/build.rs.
       - name: Install system dependencies
@@ -35,7 +37,8 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             build-essential pkg-config clang libclang-dev ffmpeg \
             libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
-            libavutil-dev libswscale-dev libswresample-dev
+            libavutil-dev libswscale-dev libswresample-dev \
+            libfontconfig-dev
 
       # rustup (preinstalled on the runner) auto-installs the channel + rustfmt/clippy
       # components pinned in rust-toolchain.toml on the first cargo invocation.
