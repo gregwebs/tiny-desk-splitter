@@ -16,54 +16,26 @@ clippy:
 clippy-all:
     cargo clippy --workspace --all-targets --features leptess-ocr -- -D warnings
 
-# ShellCheck all tracked shell scripts. Discovers them by shebang (so extensionless
-# hooks like .githooks/pre-commit are covered, not just *.sh) and skips symlinks
-# (download.sh -> scraper/download.sh) to avoid checking the same file twice.
+# The non-trivial gates live in ./scripts/ so CI can run them without installing
+# `just`; these recipes are thin wrappers (see each script for the rationale).
 shellcheck:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    mapfile -t files < <(git ls-files | while read -r f; do
-      [ -f "$f" ] && [ ! -L "$f" ] \
-        && head -1 "$f" | grep -qE '^#!.*(bash|/sh| sh)' && printf '%s\n' "$f"
-    done)
-    shellcheck "${files[@]}"
+    ./scripts/shellcheck.sh
 
-# Strict TypeScript type-check (concert-tracker/frontend's tsconfig + js-tests'
-# unit-test tsconfig, which extends it). Catches the same class of bugs the
-# frontend/TypeScript conversion exists to prevent — run before pushing.
 ts-check:
-    cd concert-tracker/frontend && npx tsc --noEmit
-    npx tsc --noEmit -p js-tests/tsconfig.json
+    ./scripts/ts-check.sh
 
-# Bundle frontend/src/*.ts -> concert-tracker/static/*.js (committed build
-# artifacts — see concert-tracker/frontend/build.mjs's header comment).
 ts-build:
-    node concert-tracker/frontend/build.mjs
+    ./scripts/ts-build.sh
 
 # Rebuild and watch frontend/src for changes (used by `just dev`).
 ts-watch:
-    node concert-tracker/frontend/build.mjs --watch
+    ./scripts/ts-build.sh --watch
 
-# Drift guard: static/player.js must be exactly what `ts-build` produces from
-# the current frontend/src. A diff here means someone hand-edited the generated
-# .js (forbidden — see its "@generated" banner) or forgot to rebuild after a
-# source change. Blocking: wired into `lint` and the pre-push hook.
-#
-# static/splitter.js and static/playlists.js are deliberately NOT diff-guarded
-# here: they're Foldkit (Effect-TS) bundles, built minified (unlike player.js,
-# which stays unminified and reviewable) because the bundled Effect-TS runtime
-# is too large to review as a plain-text diff. They're still committed build
-# artifacts (cargo build stays Node-free via include_str!) — just not ones a
-# human is expected to read. See docs/change/2026-06-19-foldkit-eval.md.
-ts-verify: ts-build
-    git diff --exit-code -- concert-tracker/static/player.js
+ts-verify:
+    ./scripts/ts-verify.sh
 
-# All TypeScript/JS tests: the pure node:test unit suites (js-tests/) plus the
-# Foldkit Story/Scene tests for the widgets (vitest + happy-dom, since they need
-# a DOM). The Playwright e2e suite (e2e/) is separate — run it with `npx playwright test`.
 test-ts:
-    npm run test:unit
-    cd concert-tracker/frontend && npm run test:story
+    ./scripts/ts-test.sh
 
 # Run fmt-check + clippy + shellcheck + ts-check + ts-verify (the full standard lint suite).
 lint: fmt-check clippy shellcheck ts-check ts-verify
@@ -97,6 +69,6 @@ dev *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
     trap 'kill 0' EXIT
-    node concert-tracker/frontend/build.mjs --watch &
+    ./scripts/ts-build.sh --watch &
     cargo watch -w concert-tracker/src -w concert-tracker/templates -w concert-tracker/static \
         -x 'run --bin concert-web -- --dev {{ARGS}}'
