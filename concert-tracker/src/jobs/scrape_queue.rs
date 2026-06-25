@@ -203,23 +203,58 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
+    /// Cadence for the async poll helpers below.
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    /// Budget for `wait_until` (a cheap in-memory predicate): ~2s.
+    const COND_MAX_POLLS: usize = 200;
+    /// Budget for `recv_soon` (awaiting the worker's result after it has run an
+    /// item): larger than `COND_MAX_POLLS` because it waits on real worker
+    /// progress, not just a flag flip. ~5s.
+    const RECV_MAX_POLLS: usize = 500;
+
     fn dummy_db() -> Arc<Mutex<Connection>> {
         Arc::new(Mutex::new(db::open_in_memory().unwrap()))
     }
 
     /// Poll `cond` until true, failing the test if it never becomes true.
     async fn wait_until<F: Fn() -> bool>(cond: F) {
-        for _ in 0..200 {
+        for _ in 0..COND_MAX_POLLS {
             if cond() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
         panic!("condition not met in time");
     }
 
-    // Multi-thread runtime: the tests block on std `recv` to synchronize with the
-    // item, which would starve the spawned worker on a current-thread runtime.
+    /// Await a value from the worker's sync result channel without parking a
+    /// runtime worker thread.
+    ///
+    /// `Receiver::recv_timeout` is a synchronous blocking call: from an async
+    /// test it parks one of the runtime's worker threads for the whole wait. The
+    /// worker task that must deliver the value needs those threads to make
+    /// progress, so under load it can be starved past the timeout — a flaky
+    /// `recv_timeout(...).unwrap()` failure. Polling `try_recv` between async
+    /// `sleep`s frees the worker thread each tick so the scheduler can keep the
+    /// worker running while we wait.
+    async fn recv_soon<T>(rx: &std_mpsc::Receiver<T>) -> T {
+        for _ in 0..RECV_MAX_POLLS {
+            match rx.try_recv() {
+                Ok(v) => return v,
+                Err(std_mpsc::TryRecvError::Empty) => {
+                    tokio::time::sleep(POLL_INTERVAL).await;
+                }
+                Err(std_mpsc::TryRecvError::Disconnected) => {
+                    panic!("worker dropped the result sender before sending a value")
+                }
+            }
+        }
+        panic!("no value received from the scrape worker in time");
+    }
+
+    // Multi-thread runtime so the spawned worker keeps making progress while the
+    // test awaits its result via `recv_soon`; the dedupe item also parks a
+    // spawn_blocking thread until the test releases it.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn enqueue_dedupes_and_clears_pending_after_completion() {
         // The item blocks until the test releases it, so we can deterministically
@@ -244,7 +279,7 @@ mod tests {
 
         // Release the in-flight item and wait for it to finish.
         release_tx.send(()).unwrap();
-        done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        recv_soon(&done_rx).await;
 
         // The worker removes the id from pending once the item returns.
         wait_until(|| !q.is_pending(1)).await;
@@ -265,7 +300,7 @@ mod tests {
         assert!(q.enqueue(2, "u".into())); // must still be processed
 
         // The second item ran despite the first panicking → worker survived.
-        let got = done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let got = recv_soon(&done_rx).await;
         assert_eq!(got, 2);
 
         // Pending cleared for both (panicked one included).

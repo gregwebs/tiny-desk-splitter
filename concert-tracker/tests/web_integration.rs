@@ -17,6 +17,14 @@ use concert_tracker::{
     web::{router, AppState},
 };
 
+/// Cadence for the async poll helpers below.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
+/// Budget for a cheap in-memory predicate poll: ~2s.
+const COND_MAX_POLLS: usize = 200;
+/// Budget for awaiting the worker's result after it has run an item (waits on
+/// real worker progress, not just a flag flip): ~5s.
+const RECV_MAX_POLLS: usize = 500;
+
 /// An idle background scrape queue for tests that never enqueue. Backed by a
 /// throwaway in-memory DB; the worker stays parked.
 fn idle_scrape_queue() -> ScrapeQueue {
@@ -24,6 +32,28 @@ fn idle_scrape_queue() -> ScrapeQueue {
         Arc::new(Mutex::new(db::open_in_memory().unwrap())),
         PathBuf::from("/tmp"),
     )
+}
+
+/// Await a value from the scrape worker's sync result channel without parking a
+/// runtime worker thread.
+///
+/// Mirrors the helper in `jobs::scrape_queue`'s tests: `Receiver::recv_timeout`
+/// is a synchronous blocking call that, from an async test, parks one of the
+/// runtime's worker threads for the whole wait and can starve the scrape worker
+/// under load — a flaky timeout. Polling `try_recv` between async `sleep`s frees
+/// the worker thread each tick so the scheduler keeps the worker running.
+async fn recv_soon<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
+    use std::sync::mpsc::TryRecvError;
+    for _ in 0..RECV_MAX_POLLS {
+        match rx.try_recv() {
+            Ok(v) => return v,
+            Err(TryRecvError::Empty) => tokio::time::sleep(POLL_INTERVAL).await,
+            Err(TryRecvError::Disconnected) => {
+                panic!("worker dropped the result sender before sending a value")
+            }
+        }
+    }
+    panic!("no value received from the scrape worker in time");
 }
 
 /// Fetch the `/concerts/:id/status` fragment HTML (clones the router so it can be
@@ -52,7 +82,6 @@ async fn get_status_html(app: &axum::Router, id: i64) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pending_card_shows_loading_then_thumbnail() {
     use std::sync::mpsc as std_mpsc;
-    use std::time::Duration;
 
     let conn = db::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/pending", "Pending Concert");
@@ -109,12 +138,12 @@ async fn pending_card_shows_loading_then_thumbnail() {
 
     // Release the stub; wait for completion + the worker to clear pending.
     release_tx.send(()).unwrap();
-    done_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    for _ in 0..200 {
+    recv_soon(&done_rx).await;
+    for _ in 0..COND_MAX_POLLS {
         if !scrape_queue.is_pending(1) {
             break;
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        tokio::time::sleep(POLL_INTERVAL).await;
     }
     assert!(
         !scrape_queue.is_pending(1),
