@@ -43,6 +43,23 @@ jobs:
 
       - uses: extractions/setup-just@v3
 
+      # Cache the gitignored OCR assets the build scripts fetch over the network:
+      #   live-set-song-splitter/models  - 3 PaddleOCR model files (~21MB), pinned to a
+      #                                    commit in live-set-song-splitter/build.rs
+      #   vendor/ocr-rs/3rd_party         - prebuilt MNN lib (~15MB), vendor/ocr-rs/build.rs
+      # Both scripts skip the download when the files are already present, so a cache hit
+      # avoids the fetch entirely. Keyed on the build.rs files so a version/commit bump
+      # invalidates the cache. No restore-keys: a stale fallback would never be refreshed
+      # (the scripts only download when the files are missing), including the moving MNN
+      # "dev" tag.
+      - name: Cache downloaded OCR models and prebuilt MNN
+        uses: actions/cache@v4
+        with:
+          path: |
+            live-set-song-splitter/models
+            vendor/ocr-rs/3rd_party
+          key: ocr-assets-${{ runner.os }}-${{ hashFiles('live-set-song-splitter/build.rs', 'vendor/ocr-rs/build.rs') }}
+
       - name: Format check
         run: just fmt-check
 
