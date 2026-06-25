@@ -10,7 +10,7 @@ See README.md for an overview of the project
 - **Testing**: Refactor code into small testable functions. Write lots of tests without using mocks.
 - **Error Handling**: Use Result/Option. Do not ignore errors. An error should be passed up callers until it reaches an error handler that properly handles the error by terminating the program in an exit state or returning an HTTP error code.
 - **Constants**: Define thresholds and parameters as named constants
-- **Documentation**: Document the purpose of code when it is not easy to determine. First try to make the code easier to understand.
+- **Documentation**: Document the design constraints of code. Don't document what code is doing- instead write or refactor the code to make what it is doing easy to understand.
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
 # Workflow
