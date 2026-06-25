@@ -203,17 +203,26 @@ mod tests {
     use std::sync::mpsc as std_mpsc;
     use std::time::Duration;
 
+    /// Cadence for the async poll helpers below.
+    const POLL_INTERVAL: Duration = Duration::from_millis(10);
+    /// Budget for `wait_until` (a cheap in-memory predicate): ~2s.
+    const COND_MAX_POLLS: usize = 200;
+    /// Budget for `recv_soon` (awaiting the worker's result after it has run an
+    /// item): larger than `COND_MAX_POLLS` because it waits on real worker
+    /// progress, not just a flag flip. ~5s.
+    const RECV_MAX_POLLS: usize = 500;
+
     fn dummy_db() -> Arc<Mutex<Connection>> {
         Arc::new(Mutex::new(db::open_in_memory().unwrap()))
     }
 
     /// Poll `cond` until true, failing the test if it never becomes true.
     async fn wait_until<F: Fn() -> bool>(cond: F) {
-        for _ in 0..200 {
+        for _ in 0..COND_MAX_POLLS {
             if cond() {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            tokio::time::sleep(POLL_INTERVAL).await;
         }
         panic!("condition not met in time");
     }
@@ -226,14 +235,14 @@ mod tests {
     /// worker task that must deliver the value needs those threads to make
     /// progress, so under load it can be starved past the timeout — a flaky
     /// `recv_timeout(...).unwrap()` failure. Polling `try_recv` between async
-    /// sleeps keeps the worker thread free and lets the budget stretch when the
-    /// machine is busy.
+    /// `sleep`s frees the worker thread each tick so the scheduler can keep the
+    /// worker running while we wait.
     async fn recv_soon<T>(rx: &std_mpsc::Receiver<T>) -> T {
-        for _ in 0..500 {
+        for _ in 0..RECV_MAX_POLLS {
             match rx.try_recv() {
                 Ok(v) => return v,
                 Err(std_mpsc::TryRecvError::Empty) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
+                    tokio::time::sleep(POLL_INTERVAL).await;
                 }
                 Err(std_mpsc::TryRecvError::Disconnected) => {
                     panic!("worker dropped the result sender before sending a value")
