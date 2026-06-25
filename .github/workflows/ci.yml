@@ -66,14 +66,26 @@ jobs:
       - name: Format check
         run: just fmt-check
 
+      # --locked: fail if the build would change Cargo.lock (dependency drift guard).
       - name: Build
-        run: cargo build --workspace --all-targets
+        run: cargo build --locked --workspace --all-targets
 
       - name: Clippy
         run: just clippy
 
       - name: Test
-        run: cargo test --workspace
+        run: cargo test --locked --workspace
+
+      # Backstop the --locked flags above and catch any other build-time mutation
+      # (gitignored artifacts under target/, models/, 3rd_party/ are not reported).
+      - name: Verify working tree is clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Build left the working tree dirty (uncommitted/generated files):"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
 
   frontend:
     runs-on: ubuntu-latest
@@ -90,6 +102,8 @@ jobs:
 
       - uses: extractions/setup-just@v4
 
+      # npm ci installs strictly from the lockfiles and fails on package.json drift,
+      # so it doubles as the lockfile guard for the JS dependencies.
       - name: Install dependencies
         run: |
           npm ci
@@ -104,3 +118,23 @@ jobs:
 
       - name: Test
         run: just test-ts
+
+      # Catches drift in any generated artifact a build touches: the static/*.js bundles
+      # (including the minified splitter.js/playlists.js that ts-verify does not diff-guard)
+      # and the generated OpenAPI types.
+      - name: Verify working tree is clean
+        run: |
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "::error::Build left the working tree dirty (uncommitted/generated files):"
+            git status --porcelain
+            git diff
+            exit 1
+          fi
+
+  shellcheck:
+    runs-on: ubuntu-latest  # shellcheck is preinstalled on the runner image
+    steps:
+      - uses: actions/checkout@v7
+      - uses: extractions/setup-just@v4
+      - name: ShellCheck
+        run: just shellcheck
