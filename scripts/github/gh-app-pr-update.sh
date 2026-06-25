@@ -14,7 +14,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
+# shellcheck disable=SC1091
 source "${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}/gh-app-token.sh"
 
 repo="" pr="" title="" body="" body_file="" base="" state=""
