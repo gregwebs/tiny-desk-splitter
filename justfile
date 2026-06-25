@@ -16,6 +16,18 @@ clippy:
 clippy-all:
     cargo clippy --workspace --all-targets --features leptess-ocr -- -D warnings
 
+# ShellCheck all tracked shell scripts. Discovers them by shebang (so extensionless
+# hooks like .githooks/pre-commit are covered, not just *.sh) and skips symlinks
+# (download.sh -> scraper/download.sh) to avoid checking the same file twice.
+shellcheck:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    mapfile -t files < <(git ls-files | while read -r f; do
+      [ -f "$f" ] && [ ! -L "$f" ] \
+        && head -1 "$f" | grep -qE '^#!.*(bash|/sh| sh)' && printf '%s\n' "$f"
+    done)
+    shellcheck "${files[@]}"
+
 # Strict TypeScript type-check (concert-tracker/frontend's tsconfig + js-tests'
 # unit-test tsconfig, which extends it). Catches the same class of bugs the
 # frontend/TypeScript conversion exists to prevent — run before pushing.
@@ -53,8 +65,8 @@ test-ts:
     npm run test:unit
     cd concert-tracker/frontend && npm run test:story
 
-# Run fmt-check + clippy + ts-check + ts-verify (the full standard lint suite).
-lint: fmt-check clippy ts-check ts-verify
+# Run fmt-check + clippy + shellcheck + ts-check + ts-verify (the full standard lint suite).
+lint: fmt-check clippy shellcheck ts-check ts-verify
 
 # Wire up the version-controlled git hooks (one-time per clone).
 install-hooks:
