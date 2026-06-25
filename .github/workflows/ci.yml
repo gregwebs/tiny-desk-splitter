@@ -22,7 +22,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Build-time system deps for the default (paddle-ocr) feature set:
       #   pkg-config + libav*-dev/libsw*-dev  - ffmpeg-sys-next links system FFmpeg
@@ -44,7 +44,7 @@ jobs:
       # components pinned in rust-toolchain.toml on the first cargo invocation.
       - uses: Swatinem/rust-cache@v2
 
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
 
       # Cache the gitignored OCR assets the build scripts fetch over the network:
       #   live-set-song-splitter/models  - 3 PaddleOCR model files (~21MB), pinned to a
@@ -56,7 +56,7 @@ jobs:
       # (the scripts only download when the files are missing), including the moving MNN
       # "dev" tag.
       - name: Cache downloaded OCR models and prebuilt MNN
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             live-set-song-splitter/models
@@ -78,9 +78,9 @@ jobs:
   frontend:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -88,7 +88,7 @@ jobs:
             package-lock.json
             concert-tracker/frontend/package-lock.json
 
-      - uses: extractions/setup-just@v3
+      - uses: extractions/setup-just@v4
 
       - name: Install dependencies
         run: |
