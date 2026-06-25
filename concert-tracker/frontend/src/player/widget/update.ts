@@ -28,9 +28,11 @@ import {
   FetchTrackDetails,
   FetchTrackInfo,
   FetchTrackInfoForEnqueue,
+  HideVideoPanel,
   MarkPlayingExternal,
   MarkPlayingInterludeExternal,
   MarkPreparingExternal,
+  MutateBodyClass,
   NavigateToConcert,
   OpenAddToPlaylist,
   OpenExternalRequest,
@@ -47,6 +49,7 @@ import {
   ResumeAudio,
   ScrollQueueToBottom,
   SeekAudio,
+  ShowVideoPanel,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
   ToggleLikeRequest,
@@ -163,6 +166,8 @@ const beginPlayback = (
   const { concertId, trackIdx } = targetIdFor(source);
   const listenUrl = listenUrlFor(source);
   const watchUrl = watchUrlFor(source, info);
+  // Mirrors `if (!isVideo) hideVideoPanel()` + watchTrackDirect's forceOpen.
+  const newVideoOpen = !info.is_video ? false : opts.openVideoPanel ? true : model.video.open;
 
   const model1 = evo(model, {
     playback: () => ({
@@ -180,10 +185,7 @@ const beginPlayback = (
       concert: Option.none(),
       playlistLabel: opts.playlistName,
     }),
-    // Only force-closes for non-video (mirrors `if (!isVideo) hideVideoPanel()`);
-    // ordinary video plays preserve whatever the panel's prior state was.
-    // watchTrackDirect's opts.openVideoPanel forces it open instead.
-    video: (v) => (!info.is_video ? { open: false } : opts.openVideoPanel ? { open: true } : v),
+    video: () => ({ open: newVideoOpen }),
     pending: () => Option.none(),
     status: () => StatusValue.Idle(),
   });
@@ -193,6 +195,7 @@ const beginPlayback = (
     MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }),
     ClearPreparingExternal({}),
   ];
+  if (newVideoOpen !== model.video.open) cmds.push(newVideoOpen ? ShowVideoPanel({}) : HideVideoPanel({}));
   if (listenUrl && opts.recordListen) cmds.push(RecordListenEvent({ url: listenUrl }));
   if (Option.isSome(model.pendingSeek)) cmds.push(SeekAudio({ seconds: model.pendingSeek.value }));
 
@@ -241,7 +244,7 @@ const stopPlaybackPure = (model: Model): UpdateReturn =>
       // pending intentionally untouched — stopPlayback() cancels auto-advance,
       // never a prepare-in-flight (cancelPendingPlay is never called there).
     }),
-    [ClearAudioSrc({})],
+    model.video.open ? [ClearAudioSrc({}), HideVideoPanel({})] : [ClearAudioSrc({})],
   );
 
 /** playNextTrack()'s definitively-nothing-to-advance-to terminal state,
@@ -254,7 +257,10 @@ const applyAdvanceFailure = (model: Model, plan: AdvancePlan): UpdateReturn => {
     case "next-or-stop":
       return stopPlaybackPure(model);
     case "next-or-collapse":
-      return [evo(model, { isPlaying: () => false, video: () => ({ open: false }) }), []];
+      return [
+        evo(model, { isPlaying: () => false, video: () => ({ open: false }) }),
+        model.video.open ? [HideVideoPanel({})] : [],
+      ];
   }
 };
 
@@ -326,7 +332,7 @@ function advanceConcertPure(model: Model): UpdateReturn {
               playback: (p) => ({ ...p, concert: Option.none() }),
               video: () => ({ open: false }),
             }),
-            [],
+            model.video.open ? [HideVideoPanel({})] : [],
           ]
         : playConcertItemPure(model, next);
     },
@@ -346,7 +352,7 @@ function playConcertPosOrEnd(model: Model): UpdateReturn {
               playback: (p) => ({ ...p, concert: Option.none() }),
               video: () => ({ open: false }),
             }),
-            [],
+            model.video.open ? [HideVideoPanel({})] : [],
           ],
   });
 }
@@ -542,6 +548,46 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       AudioErrored: () => advanceOrCollapse(withError(evo(model, { playback: (p) => ({ ...p, ended: true }) }), "Failed to load media")),
       AudioPlayRejected: () => [withError(evo(model, { isPlaying: () => false }), "Playback blocked"), []],
 
+      // ── Subscription-dispatched messages ──────────────────────────────
+      ReassertUi: () => {
+        // Re-stamp playing/preparing CSS markers after htmx:afterSettle /
+        // historyRestore, mirroring player.ts's reassertPlayerUi().
+        const cmds: Command<Message>[] = [];
+        const { concertId, trackIdx } = model.playback;
+        if (concertId !== null) {
+          cmds.push(MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }));
+        }
+        if (Option.isSome(model.pending) && model.pending.value._tag === "Track") {
+          const t = model.pending.value;
+          cmds.push(MarkPreparingExternal({ concertId: t.concertId, trackIdx: t.trackIdx }));
+        }
+        return [model, cmds];
+      },
+
+      SyncLikeFromSwap: ({ concertId, trackIdx, liked }) => {
+        // htmx swapped in new like-button HTML; sync our model copies so bar
+        // star + sidebar list reflect the server's authoritative liked value.
+        let model1 = model;
+        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
+          model1 = evo(model1, { playback: (p) => ({ ...p, liked }) });
+        }
+        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, liked);
+        model1 = flipConcertItemLiked(model1, concertId, trackIdx, liked);
+        return [model1, []];
+      },
+
+      PressedSpace: () => (model.isPlaying ? [model, [PauseAudio({})]] : [model, [ResumeAudio({})]]),
+
+      PressedEscape: () =>
+        model.video.open
+          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel({})]]
+          : [model, []],
+
+      ClickedOutsideVideo: () =>
+        model.video.open
+          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel({})]]
+          : [model, []],
+
       Acked: () => [model, []],
     }),
   );
@@ -629,7 +675,10 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         ];
       },
 
-      Watch: () => [evo(model, { video: (v) => ({ open: !v.open }) }), []],
+      Watch: () => {
+        const open = !model.video.open;
+        return [evo(model, { video: () => ({ open }) }), [open ? ShowVideoPanel({}) : HideVideoPanel({})]];
+      },
       OpenExternal: () =>
         model.playback.watchUrl === null
           ? [model, []]
@@ -670,12 +719,15 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
           const loadGen = model.sidebar.loadGen + 1;
           return [
             evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
-            [FetchTrackDetails({ concertId, loadGen })],
+            [MutateBodyClass({ className: "sidebar-open", add: true }), FetchTrackDetails({ concertId, loadGen })],
           ];
         }
-        return [model1, []];
+        return [model1, [MutateBodyClass({ className: "sidebar-open", add: true })]];
       },
-      CloseSidebar: () => [evo(model, { sidebar: (s) => ({ ...s, open: false }) }), []],
+      CloseSidebar: () => [
+        evo(model, { sidebar: (s) => ({ ...s, open: false }) }),
+        [MutateBodyClass({ className: "sidebar-open", add: false })],
+      ],
       ToggleSidebar: () => {
         const opening = !model.sidebar.open;
         const model1 = evo(model, { sidebar: (s) => ({ ...s, open: opening }) });
@@ -684,10 +736,10 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
           const loadGen = model.sidebar.loadGen + 1;
           return [
             evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
-            [FetchTrackDetails({ concertId, loadGen })],
+            [MutateBodyClass({ className: "sidebar-open", add: opening }), FetchTrackDetails({ concertId, loadGen })],
           ];
         }
-        return [model1, []];
+        return [model1, [MutateBodyClass({ className: "sidebar-open", add: opening })]];
       },
       SidebarDeleteTrack: ({ concertId, trackIdx }) => [model, [DeleteTrackRequest({ concertId, trackIdx, source: "sidebar" })]],
 

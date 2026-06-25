@@ -17,7 +17,7 @@ import {
   postLikeTrack,
   postPrepare,
 } from "../../api/client";
-import { PREPARE_POLL_MS } from "../core";
+import { clampSidebarWidth, PREPARE_POLL_MS, SIDEBAR_WIDTH_KEY } from "../core";
 import { byId, byIdOrNull } from "../../shared/dom";
 import { setNowPlaying } from "../mirror";
 import {
@@ -643,6 +643,57 @@ export const ScrollQueueToBottom = Command.define(
   Effect.sync(() => {
     const section = byIdOrNull("sidebar-queue-section");
     if (section) section.scrollTop = section.scrollHeight;
+  }).pipe(Effect.as(Acked())),
+);
+
+// ── Body class / video panel (external DOM, not widget-owned) ─────────────
+
+/** Toggle a class on `document.body` (used by `sidebar-open` and the
+ *  video-panel `open` class on `#player-video-panel`'s siblings). Idempotent. */
+export const MutateBodyClass = Command.define(
+  "MutateBodyClass",
+  { className: S.String, add: S.Boolean },
+  Acked,
+)(({ className, add }) =>
+  Effect.sync(() => {
+    document.body.classList[add ? "add" : "remove"](className);
+  }).pipe(Effect.as(Acked())),
+);
+
+/** Add `open` class to `#player-video-panel` (shows the video element). */
+export const ShowVideoPanel = Command.define(
+  "ShowVideoPanel",
+  {},
+  Acked,
+)(() =>
+  Effect.sync(() => {
+    byIdOrNull("player-video-panel")?.classList.add("open");
+  }).pipe(Effect.as(Acked())),
+);
+
+/** Remove `open` class from `#player-video-panel` (hides the video element). */
+export const HideVideoPanel = Command.define(
+  "HideVideoPanel",
+  {},
+  Acked,
+)(() =>
+  Effect.sync(() => {
+    byIdOrNull("player-video-panel")?.classList.remove("open");
+  }).pipe(Effect.as(Acked())),
+);
+
+/** Read saved sidebar width from localStorage and apply it as a CSS variable.
+ *  Runs once at widget init to restore the user's last drag position. */
+export const LoadSidebarWidthCmd = Command.define(
+  "LoadSidebarWidthCmd",
+  {},
+  Acked,
+)(() =>
+  Effect.sync(() => {
+    const saved = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY) || "", 10);
+    if (!isNaN(saved)) {
+      document.documentElement.style.setProperty("--sidebar-width", `${clampSidebarWidth(saved)}px`);
+    }
   }).pipe(Effect.as(Acked())),
 );
 

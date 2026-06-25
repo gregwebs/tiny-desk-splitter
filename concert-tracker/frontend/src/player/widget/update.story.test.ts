@@ -12,17 +12,21 @@ import {
   FetchNextTrackInfo,
   FetchTrackDetails,
   FetchTrackInfo,
+  HideVideoPanel,
   MarkPlayingExternal,
   MarkPlayingInterludeExternal,
   MarkPreparingExternal,
+  MutateBodyClass,
   OpenAddToPlaylist,
   PauseAudio,
   PlayAudio,
   PollPrepareStatus,
   RecordListenEvent,
   RefreshCardStatus,
+  ResumeAudio,
   ScrollQueueToBottom,
   SeekAudio,
+  ShowVideoPanel,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
   ToggleLikeRequest,
@@ -32,6 +36,7 @@ import {
   AudioEnded,
   AudioPaused,
   AudioPlaying,
+  ClickedOutsideVideo,
   CommandReceived,
   CompletedLikeToggle,
   FailedFetchInfo,
@@ -39,6 +44,9 @@ import {
   FailedNextTrackInfo,
   FailedPollPrepareStatus,
   FailedTrackDetails,
+  PressedEscape,
+  PressedSpace,
+  ReassertUi,
   ReceivedConcertItems,
   ReceivedConcertPlaybackItems,
   ReceivedDeleteTrackResult,
@@ -49,6 +57,7 @@ import {
   ReceivedQueueDrainResult,
   ReceivedTrackDetails,
   ReceivedTrackInfoForEnqueue,
+  SyncLikeFromSwap,
 } from "./message";
 import {
   defaultPlayOpts,
@@ -618,6 +627,7 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
         expect(m2.sidebar.loadGen).toBe(1);
       }),
       Story.Command.expectHas(FetchTrackDetails),
+      Story.Command.resolve(MutateBodyClass, Acked()),
       Story.Command.resolve(
         FetchTrackDetails,
         ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
@@ -640,6 +650,7 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
         expect(m2.sidebar.loadGen).toBe(1);
       }),
       Story.Command.expectHas(FetchTrackDetails),
+      Story.Command.resolve(MutateBodyClass, Acked()),
       Story.Command.resolve(
         FetchTrackDetails,
         ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
@@ -647,7 +658,7 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
     );
   });
 
-  test("ToggleSidebar closing does NOT dispatch FetchTrackDetails", () => {
+  test("ToggleSidebar closing dispatches MutateBodyClass(sidebar-open, false)", () => {
     const m: Model = {
       ...initialModel,
       playback: { ...initialPlayback, concertId: 5 },
@@ -658,11 +669,11 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
       Story.with(m),
       Story.message(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
       Story.model((m2) => expect(m2.sidebar.open).toBe(false)),
-      Story.Command.expectNone(),
+      Story.Command.resolve(MutateBodyClass, Acked()),
     );
   });
 
-  test("OpenSidebar in reconstruction mode skips FetchTrackDetails", () => {
+  test("OpenSidebar in reconstruction mode skips FetchTrackDetails but dispatches body class", () => {
     const concertState = { id: 5, items: [interludeItem("/c/0.mp3", 0)], pos: 0 };
     const m: Model = {
       ...initialModel,
@@ -676,17 +687,17 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
         expect(m2.sidebar.open).toBe(true);
         expect(m2.sidebar.loadGen).toBe(0); // unchanged — reconstruction uses items, not a fetch
       }),
-      Story.Command.expectNone(),
+      Story.Command.resolve(MutateBodyClass, Acked()),
     );
   });
 
-  test("OpenSidebar with no active concert skips FetchTrackDetails", () => {
+  test("OpenSidebar with no active concert dispatches body class", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(CommandReceived({ command: PlayerCommandValue.OpenSidebar() })),
       Story.model((m) => expect(m.sidebar.open).toBe(true)),
-      Story.Command.expectNone(),
+      Story.Command.resolve(MutateBodyClass, Acked()),
     );
   });
 });
@@ -1002,6 +1013,142 @@ describe("player update — queue section scroll", () => {
         }),
       ),
       Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — body class and video panel commands", () => {
+  test("Watch opening dispatches ShowVideoPanel", () => {
+    Story.story(
+      update,
+      Story.with({ ...initialModel, video: { open: false } }),
+      Story.message(CommandReceived({ command: PlayerCommandValue.Watch() })),
+      Story.model((m) => expect(m.video.open).toBe(true)),
+      Story.Command.resolve(ShowVideoPanel, Acked()),
+    );
+  });
+
+  test("Watch closing dispatches HideVideoPanel", () => {
+    Story.story(
+      update,
+      Story.with({ ...initialModel, video: { open: true } }),
+      Story.message(CommandReceived({ command: PlayerCommandValue.Watch() })),
+      Story.model((m) => expect(m.video.open).toBe(false)),
+      Story.Command.resolve(HideVideoPanel, Acked()),
+    );
+  });
+
+  test("CloseSidebar dispatches MutateBodyClass(sidebar-open, false)", () => {
+    Story.story(
+      update,
+      Story.with({ ...initialModel, sidebar: { open: true, tracks: Option.none(), loadGen: 0 } }),
+      Story.message(CommandReceived({ command: PlayerCommandValue.CloseSidebar() })),
+      Story.model((m) => expect(m.sidebar.open).toBe(false)),
+      Story.Command.resolve(MutateBodyClass, Acked()),
+    );
+  });
+});
+
+describe("player update — subscription-dispatched messages", () => {
+  test("ReassertUi with active playback dispatches MarkPlayingExternal", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(ReassertUi()),
+      Story.model((m) => expect(m).toEqual(playingModel)),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+    );
+  });
+
+  test("ReassertUi with active playback + pending prepare dispatches both markers", () => {
+    const m: Model = {
+      ...playingModel,
+      pending: Option.some({ _tag: "Track" as const, concertId: 1, trackIdx: 0 }),
+    };
+    Story.story(
+      update,
+      Story.with(m),
+      Story.message(ReassertUi()),
+      Story.Command.expectHas(MarkPlayingExternal, MarkPreparingExternal),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+      Story.Command.resolve(MarkPreparingExternal, Acked()),
+    );
+  });
+
+  test("ReassertUi with no active playback dispatches nothing", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(ReassertUi()),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("PressedSpace while playing pauses audio", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(PressedSpace()),
+      Story.Command.resolve(PauseAudio, Acked()),
+    );
+  });
+
+  test("PressedSpace while paused resumes audio", () => {
+    Story.story(
+      update,
+      Story.with({ ...playingModel, isPlaying: false }),
+      Story.message(PressedSpace()),
+      Story.Command.resolve(ResumeAudio, Acked()),
+    );
+  });
+
+  test("PressedEscape with video open closes video panel", () => {
+    Story.story(
+      update,
+      Story.with({ ...initialModel, video: { open: true } }),
+      Story.message(PressedEscape()),
+      Story.model((m) => expect(m.video.open).toBe(false)),
+      Story.Command.resolve(HideVideoPanel, Acked()),
+    );
+  });
+
+  test("PressedEscape with video closed does nothing", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(PressedEscape()),
+      Story.model((m) => expect(m.video.open).toBe(false)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ClickedOutsideVideo with video open closes video panel", () => {
+    Story.story(
+      update,
+      Story.with({ ...initialModel, video: { open: true } }),
+      Story.message(ClickedOutsideVideo()),
+      Story.model((m) => expect(m.video.open).toBe(false)),
+      Story.Command.resolve(HideVideoPanel, Acked()),
+    );
+  });
+
+  test("SyncLikeFromSwap updates playback liked state when track matches", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(SyncLikeFromSwap({ concertId: 1, trackIdx: 0, liked: true })),
+      Story.model((m) => expect(m.playback.liked).toBe(true)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("SyncLikeFromSwap ignores swap for a different track", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(SyncLikeFromSwap({ concertId: 1, trackIdx: 99, liked: true })),
+      Story.model((m) => expect(m.playback.liked).toBe(false)), // unchanged
       Story.Command.expectNone(),
     );
   });

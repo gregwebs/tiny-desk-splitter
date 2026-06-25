@@ -8,6 +8,7 @@ import {
   FetchNextTrackInfo,
   FetchPrevTrackInfo,
   FetchTrackDetails,
+  MutateBodyClass,
   OpenAddToPlaylist,
   PauseAudio,
   SyncLikeButtonsExternal,
@@ -300,7 +301,8 @@ describe("player-bar view", () => {
       Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "false"),
       Scene.click(Scene.selector("#player-queue-toggle")),
-      // ToggleSidebar opening in whole-album mode also dispatches FetchTrackDetails.
+      // ToggleSidebar opening dispatches MutateBodyClass + FetchTrackDetails.
+      Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
         ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
@@ -508,7 +510,8 @@ describe("player sidebar — concert section", () => {
       { update, view },
       Scene.with(model),
       Scene.click(Scene.selector("#player-queue-toggle")),
-      // OpenSidebar command dispatches FetchTrackDetails
+      // ToggleSidebar opening dispatches MutateBodyClass then FetchTrackDetails.
+      Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
         ReceivedTrackDetails({ concertId, loadGen: 1, tracksBusy: false, tracks: [] }),

@@ -263,6 +263,37 @@ export const AudioErrored = m("AudioErrored");
  *  them — it only sets isPlaying false and shows "Playback blocked". */
 export const AudioPlayRejected = m("AudioPlayRejected");
 
+// ── Subscription-dispatched messages (commit 7) ─────────────────────────
+//
+// Dispatched by subscription.ts (not via the command Port); they drive purely
+// declarative decisions in update.ts with no special host-coupling needed.
+
+/** htmx:afterSettle / htmx:historyRestore fired: re-stamp the playing/
+ *  preparing CSS markers on the card DOM (mirrors player.ts's
+ *  reassertPlayerUi). Always a no-op on model, never changes playback. */
+export const ReassertUi = m("ReassertUi");
+
+/** htmx:afterSwap on a like button outside the widget (the card-side hx-post
+ *  star) — sync the model-owned liked state so bar star + sidebar list stay
+ *  in sync without a separate re-fetch. */
+export const SyncLikeFromSwap = m("SyncLikeFromSwap", {
+  concertId: S.Number,
+  trackIdx: S.Number,
+  liked: S.Boolean,
+});
+
+/** document keydown with no modifier + Space, on a non-editable, non-bar
+ *  target — toggle pause. */
+export const PressedSpace = m("PressedSpace");
+
+/** document keydown with no modifier + Escape, on a non-editable target —
+ *  close the video panel if open. */
+export const PressedEscape = m("PressedEscape");
+
+/** Click on document that falls outside #player-video-panel (only active
+ *  while video.open is true — gated in subscription.ts). */
+export const ClickedOutsideVideo = m("ClickedOutsideVideo");
+
 // ── Command acks ─────────────────────────────────────────────────────────
 
 /** Shared by every Command whose result update.ts ignores: the external-DOM
@@ -311,6 +342,11 @@ export const Message = S.Union([
   AudioEnded,
   AudioErrored,
   AudioPlayRejected,
+  ReassertUi,
+  SyncLikeFromSwap,
+  PressedSpace,
+  PressedEscape,
+  ClickedOutsideVideo,
   Acked,
 ]);
 export type Message = typeof Message.Type;
