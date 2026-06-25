@@ -21,8 +21,8 @@ while [ $# -gt 0 ]; do
     else
         # Check if already downloaded file or its metadata
         for file in *.json ; do
-            if ! echo $file | grep listing ; then
-                if [[ "$(jq -r .source "$file")" == $url ]] ; then
+            if ! echo "$file" | grep listing ; then
+                if [[ "$(jq -r .source "$file")" == "$url" ]] ; then
                     echo "found existing metadata file $file"
                     mp4="$(jq -r .album "$file" | sed 's|:||').mp4"
                     if ! test -f "$mp4" ; then
@@ -40,7 +40,7 @@ while [ $# -gt 0 ]; do
     if [[ -z $found ]] ; then
         ./download.sh "$url"
         for file in *.json ; do
-            if [[ "$(jq -r .source "$file")" == $url ]] ; then
+            if [[ "$(jq -r .source "$file")" == "$url" ]] ; then
                 found="$file"
                 break
             fi
