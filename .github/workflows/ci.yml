@@ -1,9 +1,12 @@
 name: CI
 
-# Mirrors the local quality gates (.githooks/pre-commit + pre-push, driven by the
-# justfile) on every PR and on pushes to main. Two independent surfaces -> two jobs:
-#   rust     - cargo build / clippy / fmt-check / test
-#   frontend - TypeScript type-check, build-artifact drift guard, and JS/TS tests
+# Runs the same quality gates as local dev on every PR and on pushes to main. The
+# non-trivial gates live in ./scripts/ (called here and by the justfile / git
+# hooks); the trivial cargo gates are inline one-liners. No `just` is installed.
+# Jobs:
+#   rust       - cargo fmt-check / build / clippy / test
+#   frontend   - TypeScript type-check, build-artifact drift guard, and JS/TS tests
+#   shellcheck - lint all tracked shell scripts
 # The Playwright e2e suite (e2e/) is intentionally not run here.
 on:
   push:
@@ -44,8 +47,6 @@ jobs:
       # components pinned in rust-toolchain.toml on the first cargo invocation.
       - uses: Swatinem/rust-cache@v2
 
-      - uses: extractions/setup-just@v4
-
       # Cache the gitignored OCR assets the build scripts fetch over the network:
       #   live-set-song-splitter/models  - 3 PaddleOCR model files (~21MB), pinned to a
       #                                    commit in live-set-song-splitter/build.rs
@@ -64,14 +65,14 @@ jobs:
           key: ocr-assets-${{ runner.os }}-${{ hashFiles('live-set-song-splitter/build.rs', 'vendor/ocr-rs/build.rs') }}
 
       - name: Format check
-        run: just fmt-check
+        run: cargo fmt --all -- --check
 
       # --locked: fail if the build would change Cargo.lock (dependency drift guard).
       - name: Build
         run: cargo build --locked --workspace --all-targets
 
       - name: Clippy
-        run: just clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --locked --workspace
@@ -100,8 +101,6 @@ jobs:
             package-lock.json
             concert-tracker/frontend/package-lock.json
 
-      - uses: extractions/setup-just@v4
-
       # npm ci installs strictly from the lockfiles and fails on package.json drift,
       # so it doubles as the lockfile guard for the JS dependencies.
       - name: Install dependencies
@@ -110,14 +109,14 @@ jobs:
           npm ci --prefix concert-tracker/frontend
 
       - name: TypeScript type-check
-        run: just ts-check
+        run: ./scripts/ts-check.sh
 
       # Fails if committed static/player.js drifts from a fresh esbuild of frontend/src.
       - name: Verify generated bundles
-        run: just ts-verify
+        run: ./scripts/ts-verify.sh
 
       - name: Test
-        run: just test-ts
+        run: ./scripts/ts-test.sh
 
       # Catches drift in any generated artifact a build touches: the static/*.js bundles
       # (including the minified splitter.js/playlists.js that ts-verify does not diff-guard)
@@ -135,6 +134,5 @@ jobs:
     runs-on: ubuntu-latest  # shellcheck is preinstalled on the runner image
     steps:
       - uses: actions/checkout@v7
-      - uses: extractions/setup-just@v4
       - name: ShellCheck
-        run: just shellcheck
+        run: ./scripts/shellcheck.sh
