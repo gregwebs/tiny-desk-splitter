@@ -502,11 +502,20 @@ export const view = (model: Model): Html => {
       ),
 
       // ── Sidebar ───────────────────────────────────────────────────────
-      // sidebar-close and sidebar-resize are host-rendered until commit 7
-      // (they sit in layout.html as static buttons calling Player.*).
       h.aside(
         [h.Id("player-sidebar")],
         [
+          h.button(
+            [
+              h.Id("sidebar-close"),
+              h.Type("button"),
+              h.Title("Close"),
+              h.AriaLabel("Close sidebar"),
+              h.OnClick(CommandReceived({ command: PlayerCommandValue.CloseSidebar() })),
+            ],
+            ["×"],
+          ),
+          h.div([h.Id("sidebar-resize"), h.AriaHidden(true)], []),
           h.div([h.Class("sidebar-top-spacer")], []),
           queueSection(model),
           concertSection(model),

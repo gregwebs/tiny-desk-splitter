@@ -10,14 +10,11 @@
 // client, generated types, DOM helpers) is duplicated into each bundle by
 // design, not imported across entry points.
 //
-// player.js is unminified with no sourcemap so the committed .js stays
-// reviewable and reproducible (see `just ts-verify`, which fails CI if a
-// rebuild produces a diff against the committed artifact). splitter.js and
-// playlists.js are Foldkit (Effect-TS) bundles — built minified, on a newer
-// target, and deliberately excluded from the `ts-verify` diff guard (the
-// bundled Effect-TS runtime is too large to review as plain text; see
-// docs/change/2026-06-19-foldkit-eval.md). They're still committed, so
-// `cargo build` stays Node-free either way.
+// All three bundles are Foldkit (Effect-TS) widgets — built minified on the
+// es2022 target. The player is the final conversion (see
+// docs/change/2026-06-25-foldkit-player.md); `just ts-verify` is retired now
+// that every bundle is too large to review as unminified plain text. They're
+// still committed artifacts so `cargo build` stays Node-free.
 import * as esbuild from "esbuild";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -41,23 +38,10 @@ const sharedOptions = {
   logLevel: "info",
 };
 
-const reviewableOptions = {
-  ...sharedOptions,
-  entryPoints: {
-    player: path.join(__dirname, "src/player.ts"),
-  },
-  target: "es2020",
-  minify: false,
-};
-
-// Effect-TS requires a newer target than the player bundle; minified because
-// the bundled runtime is too large to keep reviewable unminified. The
-// playlists bundle now carries the Foldkit add-to-playlist widget (and the
-// still-imperative list/detail/drag host glue rides along), joining splitter
-// here; player.js stays the lone reviewable, diff-guarded bundle.
 const foldkitOptions = {
   ...sharedOptions,
   entryPoints: {
+    player: path.join(__dirname, "src/player/index.ts"),
     splitter: path.join(__dirname, "src/splitter/index.ts"),
     playlists: path.join(__dirname, "src/playlists/index.ts"),
   },
@@ -66,12 +50,9 @@ const foldkitOptions = {
 };
 
 if (watch) {
-  const [reviewableCtx, foldkitCtx] = await Promise.all([
-    esbuild.context(reviewableOptions),
-    esbuild.context(foldkitOptions),
-  ]);
-  await Promise.all([reviewableCtx.watch(), foldkitCtx.watch()]);
+  const ctx = await esbuild.context(foldkitOptions);
+  await ctx.watch();
   console.log("esbuild: watching frontend/src for changes...");
 } else {
-  await Promise.all([esbuild.build(reviewableOptions), esbuild.build(foldkitOptions)]);
+  await esbuild.build(foldkitOptions);
 }

@@ -294,6 +294,11 @@ export const PressedEscape = m("PressedEscape");
  *  while video.open is true — gated in subscription.ts). */
 export const ClickedOutsideVideo = m("ClickedOutsideVideo");
 
+// ── Sidebar resize drag ───────────────────────────────────────────────────
+
+export const MovedSidebarDrag = m("MovedSidebarDrag", { clientX: S.Number });
+export const ReleasedSidebarDrag = m("ReleasedSidebarDrag", { clientX: S.Number, moved: S.Boolean });
+
 // ── Command acks ─────────────────────────────────────────────────────────
 
 /** Shared by every Command whose result update.ts ignores: the external-DOM
@@ -347,6 +352,8 @@ export const Message = S.Union([
   PressedSpace,
   PressedEscape,
   ClickedOutsideVideo,
+  MovedSidebarDrag,
+  ReleasedSidebarDrag,
   Acked,
 ]);
 export type Message = typeof Message.Type;

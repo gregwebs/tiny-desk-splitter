@@ -27,15 +27,3 @@ if ! just ts-check; then
     exit 1
 fi
 echo "pre-push: ts-check OK"
-
-echo "pre-push: verifying static/*.js matches frontend/src..."
-if ! just ts-verify; then
-    echo ""
-    echo "  concert-tracker/static/{player,playlists,splitter}.js don't match a"
-    echo "  fresh build of concert-tracker/frontend/src — either a source file"
-    echo "  changed without rebuilding, or the generated .js was hand-edited"
-    echo "  (don't — see its \"@generated\" banner)."
-    echo "  Run 'just ts-build', review the diff, and commit the result."
-    exit 1
-fi
-echo "pre-push: ts-verify OK"

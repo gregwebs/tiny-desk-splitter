@@ -1,7 +1,7 @@
-import { Effect, Option, Schema as S, Stream } from "effect";
+import { Effect, Option, Queue, Schema as S, Stream } from "effect";
 import { Port, Subscription } from "foldkit";
 
-import { clickShouldDismiss, isPlainEscapeKey, isPlainSpaceKey } from "../core";
+import { clickShouldDismiss, isPlainEscapeKey, isPlainSpaceKey, SIDEBAR_MIN_WIDTH } from "../core";
 import { byIdOrNull } from "../../shared/dom";
 import {
   AudioEnded,
@@ -11,9 +11,11 @@ import {
   ClickedOutsideVideo,
   CommandReceived,
   type Message,
+  MovedSidebarDrag,
   PressedEscape,
   PressedSpace,
   ReassertUi,
+  ReleasedSidebarDrag,
   SyncLikeFromSwap,
 } from "./message";
 import type { Model } from "./model";
@@ -159,6 +161,74 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
           ),
           Stream.filter(Option.isSome),
           Stream.map((opt) => opt.value),
+        ),
+    },
+  ),
+
+  // Sidebar drag-to-resize. Wraps the original initSidebarResize() imperative
+  // logic in Stream.callback: pointer capture and body-class mutations happen
+  // inline (no model round-trip needed), while MovedSidebarDrag / ReleasedSidebarDrag
+  // are emitted so update.ts can dispatch SetSidebarWidthVar / PersistSidebarWidth.
+  sidebarResize: entry(
+    {},
+    {
+      modelToDependencies: () => ({}),
+      dependenciesToStream: () =>
+        Stream.callback<Message>((queue) =>
+          Effect.acquireRelease(
+            Effect.sync(() => {
+              const handle = byIdOrNull("sidebar-resize");
+              if (!handle) return () => {};
+
+              let dragging = false;
+              let moved = false;
+
+              const onDown = (e: PointerEvent) => {
+                dragging = true;
+                moved = false;
+                // Seed from computed width so a bare click never persists 0.
+                handle.setPointerCapture(e.pointerId);
+                e.preventDefault();
+                document.body.classList.add("sidebar-resizing");
+              };
+
+              const onMove = (e: PointerEvent) => {
+                if (!dragging) return;
+                moved = true;
+                // Sidebar is position:fixed; left:0 so clientX = desired width.
+                Queue.offerUnsafe(queue, MovedSidebarDrag({ clientX: Math.round(e.clientX) }));
+              };
+
+              const onEnd = (e: PointerEvent) => {
+                if (!dragging) return;
+                dragging = false;
+                document.body.classList.remove("sidebar-resizing");
+                const clientX = Math.round(
+                  e.clientX ||
+                    parseInt(
+                      getComputedStyle(document.documentElement).getPropertyValue("--sidebar-width"),
+                      10,
+                    ) ||
+                    SIDEBAR_MIN_WIDTH,
+                );
+                Queue.offerUnsafe(queue, ReleasedSidebarDrag({ clientX, moved }));
+                moved = false;
+              };
+
+              handle.addEventListener("pointerdown", onDown);
+              document.addEventListener("pointermove", onMove);
+              document.addEventListener("pointerup", onEnd);
+              document.addEventListener("pointercancel", onEnd);
+
+              return () => {
+                handle.removeEventListener("pointerdown", onDown);
+                document.removeEventListener("pointermove", onMove);
+                document.removeEventListener("pointerup", onEnd);
+                document.removeEventListener("pointercancel", onEnd);
+              };
+            }),
+            (cleanup) => Effect.sync(cleanup),
+          ).pipe(Effect.flatMap(() => Effect.never)),
         ),
     },
   ),

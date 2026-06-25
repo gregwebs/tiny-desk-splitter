@@ -697,6 +697,30 @@ export const LoadSidebarWidthCmd = Command.define(
   }).pipe(Effect.as(Acked())),
 );
 
+export const SetSidebarWidthVar = Command.define(
+  "SetSidebarWidthVar",
+  { px: S.Number },
+  Acked,
+)(({ px }) =>
+  Effect.sync(() => {
+    document.documentElement.style.setProperty("--sidebar-width", `${clampSidebarWidth(px)}px`);
+  }).pipe(Effect.as(Acked())),
+);
+
+export const PersistSidebarWidth = Command.define(
+  "PersistSidebarWidth",
+  { px: S.Number },
+  Acked,
+)(({ px }) =>
+  Effect.sync(() => {
+    try {
+      localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(px)));
+    } catch {
+      /* storage unavailable */
+    }
+  }).pipe(Effect.as(Acked())),
+);
+
 // ── Sidebar track details ─────────────────────────────────────────────────
 
 /** Fetches `GET /concerts/:id/track-details` for the player widget's sidebar

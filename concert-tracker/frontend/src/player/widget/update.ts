@@ -38,6 +38,7 @@ import {
   OpenExternalRequest,
   OpenInNewTab,
   PauseAudio,
+  PersistSidebarWidth,
   PlayAudio,
   PollPrepareStatus,
   PostDeleteInterlude,
@@ -49,6 +50,7 @@ import {
   ResumeAudio,
   ScrollQueueToBottom,
   SeekAudio,
+  SetSidebarWidthVar,
   ShowVideoPanel,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
@@ -586,6 +588,13 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       ClickedOutsideVideo: () =>
         model.video.open
           ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel({})]]
+          : [model, []],
+
+      MovedSidebarDrag: ({ clientX }) => [model, [SetSidebarWidthVar({ px: clientX })]],
+
+      ReleasedSidebarDrag: ({ clientX, moved }) =>
+        moved
+          ? [model, [SetSidebarWidthVar({ px: clientX }), PersistSidebarWidth({ px: clientX })]]
           : [model, []],
 
       Acked: () => [model, []],

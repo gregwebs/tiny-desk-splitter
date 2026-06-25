@@ -31,14 +31,14 @@ ts-build:
 ts-watch:
     ./scripts/ts-build.sh --watch
 
-ts-verify:
-    ./scripts/ts-verify.sh
-
+# All TypeScript/JS tests: the pure node:test unit suites (js-tests/) plus the
+# Foldkit Story/Scene tests for the widgets (vitest + happy-dom, since they need
+# a DOM). The Playwright e2e suite (e2e/) is separate — run it with `npx playwright test`.
 test-ts:
     ./scripts/ts-test.sh
 
-# Run fmt-check + clippy + shellcheck + ts-check + ts-verify (the full standard lint suite).
-lint: fmt-check clippy shellcheck ts-check ts-verify
+# Run fmt-check + clippy + shellcheck + ts-check (the full standard lint suite).
+lint: fmt-check clippy shellcheck ts-check
 
 # Wire up the version-controlled git hooks (one-time per clone).
 install-hooks:
