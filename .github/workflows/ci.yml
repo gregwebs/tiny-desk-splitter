@@ -1,0 +1,106 @@
+name: CI
+
+# Mirrors the local quality gates (.githooks/pre-commit + pre-push, driven by the
+# justfile) on every PR and on pushes to main. Two independent surfaces -> two jobs:
+#   rust     - cargo build / clippy / fmt-check / test
+#   frontend - TypeScript type-check, build-artifact drift guard, and JS/TS tests
+# The Playwright e2e suite (e2e/) is intentionally not run here.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  # Cancel an in-progress run when a new commit is pushed to the same ref.
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Build-time system deps for the default (paddle-ocr) feature set:
+      #   pkg-config + libav*-dev/libsw*-dev  - ffmpeg-sys-next links system FFmpeg
+      #   clang + libclang-dev                - bindgen in the vendored ocr-rs crate
+      #   libfontconfig-dev                   - plotters' yeslogic-fontconfig-sys (pulls
+      #                                         in freetype/expat -dev transitively)
+      # curl/tar/unzip/git (used by the OCR build scripts to fetch MNN + models) are
+      # already present on ubuntu-latest. See live-set-song-splitter/build.rs.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libclang-dev ffmpeg \
+            libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libavutil-dev libswscale-dev libswresample-dev \
+            libfontconfig-dev
+
+      # rustup (preinstalled on the runner) auto-installs the channel + rustfmt/clippy
+      # components pinned in rust-toolchain.toml on the first cargo invocation.
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: extractions/setup-just@v4
+
+      # Cache the gitignored OCR assets the build scripts fetch over the network:
+      #   live-set-song-splitter/models  - 3 PaddleOCR model files (~21MB), pinned to a
+      #                                    commit in live-set-song-splitter/build.rs
+      #   vendor/ocr-rs/3rd_party         - prebuilt MNN lib (~15MB), vendor/ocr-rs/build.rs
+      # Both scripts skip the download when the files are already present, so a cache hit
+      # avoids the fetch entirely. Keyed on the build.rs files so a version/commit bump
+      # invalidates the cache. No restore-keys: a stale fallback would never be refreshed
+      # (the scripts only download when the files are missing), including the moving MNN
+      # "dev" tag.
+      - name: Cache downloaded OCR models and prebuilt MNN
+        uses: actions/cache@v6
+        with:
+          path: |
+            live-set-song-splitter/models
+            vendor/ocr-rs/3rd_party
+          key: ocr-assets-${{ runner.os }}-${{ hashFiles('live-set-song-splitter/build.rs', 'vendor/ocr-rs/build.rs') }}
+
+      - name: Format check
+        run: just fmt-check
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Clippy
+        run: just clippy
+
+      - name: Test
+        run: cargo test --workspace
+
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            concert-tracker/frontend/package-lock.json
+
+      - uses: extractions/setup-just@v4
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          npm ci --prefix concert-tracker/frontend
+
+      - name: TypeScript type-check
+        run: just ts-check
+
+      # Fails if committed static/player.js drifts from a fresh esbuild of frontend/src.
+      - name: Verify generated bundles
+        run: just ts-verify
+
+      - name: Test
+        run: just test-ts
