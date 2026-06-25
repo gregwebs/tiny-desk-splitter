@@ -2,6 +2,7 @@ import { Option } from "effect";
 import { Scene } from "foldkit";
 import { describe, test } from "vitest";
 
+import { makeQueueEntry } from "../core";
 import {
   DrainQueue,
   FetchNextTrackInfo,
@@ -512,6 +513,66 @@ describe("player sidebar — concert section", () => {
         FetchTrackDetails,
         ReceivedTrackDetails({ concertId, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
+    );
+  });
+});
+
+describe("player sidebar — queue section", () => {
+  test("empty queue shows Nothing queued", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(initialModel),
+      Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
+    );
+  });
+
+  test("queue with one song shows title", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "Blue Train", false)],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector("#sidebar-queue-list .btn-play-queue")).toContainText("Blue Train"),
+    );
+  });
+
+  test("group header row renders playlist name", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "So What", false, "Jazz Classics", 1)],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector("#sidebar-queue-list .queue-group-header")).toContainText("Jazz Classics"),
+    );
+  });
+
+  test("playlist song has queue-song-nested class", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "So What", false, "Jazz Classics", 1)],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector("#sidebar-queue-list .queue-song-nested")).toContainText("So What"),
+    );
+  });
+
+  test("remove button dequeues entry", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "Blue Train", false)],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.click(Scene.selector("#sidebar-queue-list .btn-remove-queue")),
+      // Dequeue dispatches no commands; view re-renders with empty queue
+      Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
     );
   });
 });

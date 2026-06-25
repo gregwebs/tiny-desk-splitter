@@ -45,6 +45,7 @@ import {
   RefreshConcertItems,
   ResolveFirstAvailableTrack,
   ResumeAudio,
+  ScrollQueueToBottom,
   SeekAudio,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
@@ -376,7 +377,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           onNone: () => [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId, trackIdx }) })]],
           onSome: ({ title, liked }) => {
             const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
-            return [evo(model, { queue: () => result.queue }), []];
+            return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom({})] : []];
           },
         }),
 
@@ -520,7 +521,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         const groupId = model.nextGroupId;
         const entries = tracks.map((t) => makeQueueEntry(t.concertId, t.trackIdx, t.title, false, name, groupId));
         const model1 = evo(model, { queue: (q) => [...q, ...entries], nextGroupId: () => groupId + 1 });
-        return playerIdle(model1) ? [model1, [DrainQueue({ queue: model1.queue, plan: "queue-only" })]] : [model1, []];
+        return playerIdle(model1)
+          ? [model1, [DrainQueue({ queue: model1.queue, plan: "queue-only" }), ScrollQueueToBottom({})]]
+          : [model1, [ScrollQueueToBottom({})]];
       },
       FailedPlaylistLoad: () => [withError(model, "Couldn't load playlist"), []],
 
@@ -697,7 +700,7 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       Dequeue: ({ pos }) => [evo(model, { queue: (q) => dequeueAt(q, pos) }), []],
       Enqueue: ({ concertId, trackIdx, title, liked }) => {
         const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
-        return [evo(model, { queue: () => result.queue }), []];
+        return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom({})] : []];
       },
 
       PlayAlbumAt: ({ concertId, seconds }) => {

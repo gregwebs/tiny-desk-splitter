@@ -21,6 +21,7 @@ import {
   PollPrepareStatus,
   RecordListenEvent,
   RefreshCardStatus,
+  ScrollQueueToBottom,
   SeekAudio,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirrorCmd,
@@ -42,10 +43,12 @@ import {
   ReceivedConcertPlaybackItems,
   ReceivedDeleteTrackResult,
   ReceivedMediaInfo,
+  ReceivedPlaylistTracks,
   ReceivedPrepareStart,
   ReceivedPrepareStatus,
   ReceivedQueueDrainResult,
   ReceivedTrackDetails,
+  ReceivedTrackInfoForEnqueue,
 } from "./message";
 import {
   defaultPlayOpts,
@@ -191,7 +194,7 @@ describe("player update — queue operations", () => {
         expect(m.queue[0]?.concertId).toBe(1);
         expect(m.queue[0]?.trackIdx).toBe(2);
       }),
-      Story.Command.expectNone(),
+      Story.Command.resolve(ScrollQueueToBottom, Acked()),
     );
   });
 
@@ -906,6 +909,100 @@ describe("player update — audio events", () => {
       Story.message(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
       Story.Command.expectHas(PauseAudio),
       Story.Command.resolve(PauseAudio, Acked()),
+    );
+  });
+});
+
+describe("player update — queue section scroll", () => {
+  test("ReceivedTrackInfoForEnqueue adds new entry dispatches ScrollQueueToBottom", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(
+        ReceivedTrackInfoForEnqueue({
+          concertId: 1,
+          trackIdx: 0,
+          info: Option.some({ title: "Track 1", liked: false }),
+        }),
+      ),
+      Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectHas(ScrollQueueToBottom),
+      Story.Command.resolve(ScrollQueueToBottom, Acked()),
+    );
+  });
+
+  test("ReceivedTrackInfoForEnqueue duplicate skips ScrollQueueToBottom", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "Track 1", false)],
+    };
+    Story.story(
+      update,
+      Story.with(model),
+      Story.message(
+        ReceivedTrackInfoForEnqueue({
+          concertId: 1,
+          trackIdx: 0,
+          info: Option.some({ title: "Track 1", liked: false }),
+        }),
+      ),
+      Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ReceivedPlaylistTracks dispatches ScrollQueueToBottom", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(
+        ReceivedPlaylistTracks({
+          playlistId: 1,
+          name: "Jazz Classics",
+          tracks: [{ concertId: 1, trackIdx: 0, title: "So What" }],
+        }),
+      ),
+      Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectHas(DrainQueue),
+      Story.Command.resolve(
+        DrainQueue,
+        ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 1, plan: "queue-only" }),
+      ),
+      Story.Command.expectHas(ScrollQueueToBottom),
+      Story.Command.resolve(ScrollQueueToBottom, Acked()),
+    );
+  });
+
+  test("Enqueue adds new entry dispatches ScrollQueueToBottom", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(
+        CommandReceived({
+          command: PlayerCommandValue.Enqueue({ concertId: 2, trackIdx: 3, title: "Song", liked: false }),
+        }),
+      ),
+      Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectHas(ScrollQueueToBottom),
+      Story.Command.resolve(ScrollQueueToBottom, Acked()),
+    );
+  });
+
+  test("Enqueue duplicate skips ScrollQueueToBottom", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(2, 3, "Song", false)],
+    };
+    Story.story(
+      update,
+      Story.with(model),
+      Story.message(
+        CommandReceived({
+          command: PlayerCommandValue.Enqueue({ concertId: 2, trackIdx: 3, title: "Song", liked: false }),
+        }),
+      ),
+      Story.model((m) => expect(m.queue).toHaveLength(1)),
+      Story.Command.expectNone(),
     );
   });
 });

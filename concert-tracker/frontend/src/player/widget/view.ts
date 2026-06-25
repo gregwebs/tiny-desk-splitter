@@ -1,13 +1,12 @@
 import { Option } from "effect";
 import { type Html, html } from "foldkit/html";
 
-import { nextEnabled, prevEnabled } from "../core";
+import { buildQueueRows, nextEnabled, prevEnabled } from "../core";
 import { CommandReceived, type Message } from "./message";
 import type { ConcertPlaybackState, Model, SidebarTrackList } from "./model";
 import { PlayerCommandValue } from "./port";
 
-// VIEW — player bar + sidebar concert section (commits 2/5).
-// Queue section renders from this same view once commit 6 fills it in.
+// VIEW — player bar + sidebar (queue + concert sections).
 // Host embed wiring + layout.html restructure land in commit 7.
 
 // Inline adapter: widget's Option-based Playback → core.PlaybackState nulls.
@@ -256,6 +255,53 @@ function wholeAlbumList(
   );
 }
 
+// ── Queue section ─────────────────────────────────────────────────────────
+
+function queueSection(model: Model): Html {
+  const h = html<Message>();
+  const liRow = h.keyed("li");
+  const { rows } = buildQueueRows(model.queue);
+
+  return h.section(
+    [h.Id("sidebar-queue-section")],
+    [
+      h.h2([], ["Queue"]),
+      h.ol(
+        [h.Id("sidebar-queue-list"), h.Class("track-list")],
+        rows.map((row) => {
+          if (row.kind === "group-header") {
+            return liRow(`group-${row.groupId}`, [h.Class("queue-group-header")], [row.name]);
+          }
+          return liRow(
+            `song-${row.entry.concertId}-${row.entry.trackIdx}`,
+            [h.Class(row.nested ? "queue-song queue-song-nested" : "queue-song")],
+            [
+              h.button(
+                [
+                  h.Class("btn-remove-queue"),
+                  h.OnClick(CommandReceived({ command: PlayerCommandValue.Dequeue({ pos: row.pos }) })),
+                ],
+                ["×"],
+              ),
+              h.button(
+                [
+                  h.Class("btn-play-queue"),
+                  h.OnClick(CommandReceived({ command: PlayerCommandValue.PlayQueueEntryNow({ pos: row.pos }) })),
+                ],
+                [row.entry.title],
+              ),
+            ],
+          );
+        }),
+      ),
+      h.p(
+        [h.Id("sidebar-queue-empty"), h.Style({ display: rows.length === 0 ? "" : "none" })],
+        ["Nothing queued"],
+      ),
+    ],
+  );
+}
+
 function concertSection(model: Model): Html {
   const h = html<Message>();
   const concertId = model.playback.concertId;
@@ -462,12 +508,7 @@ export const view = (model: Model): Html => {
         [h.Id("player-sidebar")],
         [
           h.div([h.Class("sidebar-top-spacer")], []),
-          // Queue section: rendered in commit 6.
-          h.section([h.Id("sidebar-queue-section")], [
-            h.h2([], ["Queue"]),
-            h.ol([h.Id("sidebar-queue-list"), h.Class("track-list")], []),
-            h.p([h.Id("sidebar-queue-empty")], ["Nothing queued"]),
-          ]),
+          queueSection(model),
           concertSection(model),
         ],
       ),

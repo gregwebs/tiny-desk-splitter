@@ -633,6 +633,19 @@ export const OpenAddToPlaylist = Command.define(
   }).pipe(Effect.as(Acked())),
 );
 
+/** Scrolls the queue section to the bottom, pinning the view to the
+ *  next-to-play entry (pos=0) after a new item is added to the end. */
+export const ScrollQueueToBottom = Command.define(
+  "ScrollQueueToBottom",
+  {},
+  Acked,
+)(() =>
+  Effect.sync(() => {
+    const section = byIdOrNull("sidebar-queue-section");
+    if (section) section.scrollTop = section.scrollHeight;
+  }).pipe(Effect.as(Acked())),
+);
+
 // ── Sidebar track details ─────────────────────────────────────────────────
 
 /** Fetches `GET /concerts/:id/track-details` for the player widget's sidebar
