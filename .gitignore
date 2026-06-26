@@ -17,9 +17,9 @@
 /live-set-song-splitter/models/
 
 # Vendored ocr-rs build cache: prebuilt MNN downloaded by its build.rs at build time (~22MB)
-/vendor/ocr-rs/3rd_party/
-/vendor/ocr-rs/models/
-/vendor/ocr-rs/target/
+/live-set-song-splitter/vendor/ocr-rs/3rd_party/
+/live-set-song-splitter/vendor/ocr-rs/models/
+/live-set-song-splitter/vendor/ocr-rs/target/
 
 # Local-only reference clone of the foldkit framework source (not a build
 # dependency - the npm `foldkit` package is). Not committed; re-fetch with

@@ -70,7 +70,7 @@ RUN apt-get update \
 #     git                       — some build scripts probe the git tree
 #     Rust (via rustup)         — pinned to RUST_VERSION
 #
-#   cmake is intentionally omitted: vendor/ocr-rs only invokes cmake on the
+#   cmake is intentionally omitted: live-set-song-splitter/vendor/ocr-rs only invokes cmake on the
 #   MNN source-build fallback path, which is never triggered for linux/x86_64
 #   or linux/aarch64 (the prebuilt path is used instead).
 # ─────────────────────────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 /// Strip colons from album names to produce safe filesystem paths.
-/// Mirrors the logic in download.sh and extract.sh.
+/// Mirrors the logic in scripts/download.sh and scripts/extract.sh.
 pub fn sanitize_album(album: &str) -> String {
     album.replace(':', "")
 }
