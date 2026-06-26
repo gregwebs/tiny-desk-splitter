@@ -22,6 +22,12 @@ This is a vendored copy of **`ocr-rs`** (PaddleOCR via MNN), used by
   re-enables all image codecs — this was the actual source of the avif/rav1e pull.
 - Removed upstream `[dev-dependencies]`, `[[example]]` entries, and `[profile.dev]`
   (we vendor only `src/`, `cpp/`, and `build.rs`).
+- Added `[lints.clippy] all = { level = "allow", priority = -1 }`. This crate lives under
+  `live-set-song-splitter/`, so cargo resolves it as a member of the parent workspace
+  (a root `exclude` can't drop a member's nested path dep, and giving this crate its own
+  `[workspace]` table errors with "multiple workspace roots"). Allowing all clippy lints
+  here keeps the parent's `cargo clippy --workspace -- -D warnings` gate from failing on
+  third-party code, without patching the upstream sources.
 
 Net effect: `image` resolves to `[png, jpeg]` only; `ravif`/`rav1e`/`exr`/`avif-serialize`
 are dropped from the build.

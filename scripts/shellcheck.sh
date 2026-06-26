@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ShellCheck all tracked shell scripts. Discovers them by shebang (so extensionless
 # hooks like .githooks/pre-commit are covered, not just *.sh) and skips symlinks
-# (download.sh -> scraper/download.sh) to avoid checking the same file twice.
+# (scripts/download.sh -> ../scraper/download.sh) to avoid checking the same file twice.
 #
 # Called by both CI (.github/workflows/ci.yml) and `just shellcheck`.
 set -euo pipefail

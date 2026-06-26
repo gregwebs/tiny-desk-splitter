@@ -1,1 +1,0 @@
-./scraper/download.sh

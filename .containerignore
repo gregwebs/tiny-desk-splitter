@@ -25,7 +25,7 @@ e2e/.fixture/
 *.swp
 .DS_Store
 
-# The vendor/ directory (ocr-rs path dep) IS included in the build context.
+# The live-set-song-splitter/vendor/ dir (ocr-rs path dep) IS included in the build context.
 # The source models/ dir is NOT excluded: build.rs regenerates the models
 # from the network during `cargo build`, writing them into the source tree.
 # Including the local copies would be stale on a cold build — let build.rs

@@ -1,8 +1,12 @@
 [workspace]
 resolver = "2"
 members = ["scraper", "live-set-song-splitter", "concert-tracker", "concert-types"]
-# vendor/ocr-rs is a vendored fork used as a path dependency, not a workspace member.
-exclude = ["vendor"]
+# live-set-song-splitter/vendor/ocr-rs is a vendored fork, used as a path dependency by
+# live-set-song-splitter. Because it's nested inside that member's directory, cargo
+# resolves it as a workspace member (a root `exclude` can't drop a member's path dep, and
+# its own [workspace] table errors with "multiple workspace roots"). To keep this
+# third-party code out of our `clippy -D warnings` gate, ocr-rs's own Cargo.toml sets
+# `[lints.clippy] all = "allow"`. See live-set-song-splitter/vendor/ocr-rs/VENDORING.md.
 
 [workspace.lints.clippy]
 # Declare the standard lint policy for all workspace members.

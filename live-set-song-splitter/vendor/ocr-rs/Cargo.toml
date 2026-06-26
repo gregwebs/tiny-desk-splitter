@@ -27,6 +27,13 @@ exclude = [
     "models/*",
 ]
 
+# VENDORED-FORK MODIFICATION: nesting this crate under live-set-song-splitter makes it a
+# member of the parent workspace, which would otherwise subject this third-party code to
+# our `clippy -D warnings` gate. Allow all clippy lints here so the vendored sources lint
+# cleanly without us patching upstream code. See VENDORING.md.
+[lints.clippy]
+all = { level = "allow", priority = -1 }
+
 [features]
 default = []
 # GPU 后端支持
