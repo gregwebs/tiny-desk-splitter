@@ -19,56 +19,22 @@
   </header>
   <main id="content" hx-history-elt>{% block content %}{% endblock %}</main>
   <div id="player-container">
-    <aside id="player-sidebar" aria-label="Queue and concert tracks">
-      <button id="sidebar-close" type="button" title="Close"
-              aria-label="Close sidebar" onclick="Player.closeSidebar()">&times;</button>
-      <div id="sidebar-resize" aria-hidden="true"></div>
-      <div class="sidebar-top-spacer"></div>
-      <section id="sidebar-queue-section">
-        <h2>Queue</h2>
-        <ol id="sidebar-queue-list" class="track-list"></ol>
-        <p id="sidebar-queue-empty">Nothing queued</p>
-      </section>
-      <section id="sidebar-concert-section">
-        <h2 id="sidebar-concert-heading">Now playing</h2>
-        <div id="sidebar-concert-tracks"></div>
-      </section>
-      <section id="sidebar-add-section" aria-label="Add to playlist">
-        <!-- The add-to-playlist panel is a Foldkit widget (playlists.js,
-             src/playlists/widget); it renders the header / filter / list /
-             error into this mount point. See src/playlists/index.ts. -->
-        <div id="add-pl-widget-root"></div>
-      </section>
-    </aside>
+    <!-- Foldkit player widget renders #player-bar + #player-sidebar into this
+         root (src/player/widget/view.ts). Lives as a sibling of the video panel
+         and add-section overlay so neither element is ever re-rendered away. -->
+    <div id="player-root"></div>
+    <!-- Overlay that covers the sidebar rect when body.showing-add is set.
+         Sibling of #player-root so player re-renders don't wipe the add-panel
+         Foldkit runtime. CSS positions it identically to the sidebar. -->
+    <section id="sidebar-add-section" aria-label="Add to playlist">
+      <!-- The add-to-playlist panel is a Foldkit widget (playlists.js,
+           src/playlists/widget); it renders the header / filter / list /
+           error into this mount point. See src/playlists/index.ts. -->
+      <div id="add-pl-widget-root"></div>
+    </section>
     <div id="player-video-panel">
       <video id="player-audio" playsinline webkit-playsinline tabindex="0" onclick="Player.togglePause()"></video>
       <button id="player-video-close" onclick="Player.watch()" title="Minimize video" aria-label="Minimize video">&#10005;</button>
-    </div>
-    <div id="player-bar">
-      <button id="player-queue-toggle" onclick="Player.toggleSidebar()" aria-label="Toggle queue and tracks sidebar" aria-expanded="false" title="Show queue and tracks">&#9776;<span id="player-queue-badge"></span></button>
-      <div id="player-info">
-        <span class="player-title-line">
-          <button id="player-like" class="btn-like" onclick="Player.toggleLike()" title="Like" style="display:none">&#9734;</button>
-          <button id="player-add-pl" onclick="Player.addToPlaylist()" title="Add to playlist" style="display:none">+</button>
-          <span id="player-track" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
-          <span id="player-title" role="button" tabindex="0" onclick="Player.toggleSidebar()" onkeydown="if(event.key==='Enter'){event.preventDefault();Player.toggleSidebar();}"></span>
-        </span>
-        <a id="player-artist" hx-boost="false" onclick="Player.openConcert(event)"
-           hx-target="#content" hx-select="#content" hx-swap="outerHTML show:window:top"
-           hx-push-url="true" title="View concert"></a>
-        <span id="player-playlist" style="display:none"></span>
-      </div>
-      <span id="player-error"></span>
-      <span id="player-status"></span>
-      <button id="player-watch" onclick="Player.watch()" title="Watch video in player">Watch</button>
-      <button id="player-open" onclick="Player.openExternal()" title="Open in system player">&#10697;</button>
-      <button id="player-delete" onclick="Player.deleteTrack()" title="Delete this track" aria-label="Delete this track"><span class="icon-trash"></span></button>
-      <button id="player-prev" onclick="Player.skipToPrev()" title="Previous track" disabled>&#9198;</button>
-      <button id="player-play-pause" onclick="Player.togglePause()">&#9654;</button>
-      <button id="player-next" onclick="Player.skipToNext()" title="Next track">&#9197;</button>
-      <input id="player-seek" type="range" min="0" max="100" value="0" step="1"
-        oninput="Player.seek(this.value)">
-      <span id="player-time">0:00 / 0:00</span>
     </div>
   </div>
   <script>

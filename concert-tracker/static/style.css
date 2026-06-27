@@ -611,6 +611,7 @@ body.sidebar-open #player-video-panel { left: var(--sidebar-width); }
   /* Overlay mode: sidebar must appear above the video panel (z-index 1000)
      and its close button (z-index 1001). */
   #player-sidebar { width: min(var(--sidebar-width), 85vw); box-shadow: 4px 0 12px var(--shadow-card-hover); z-index: 1002; }
+  #sidebar-add-section { width: min(var(--sidebar-width), 85vw); z-index: 1007; }
 }
 .sidebar-top-spacer { flex: 1 1 0; }
 #sidebar-queue-section {
@@ -667,7 +668,9 @@ body.sidebar-open #player-video-panel { left: var(--sidebar-width); }
   color: var(--fg-faint); font-size: 1.2em; line-height: 1; padding: 0.2rem 0.3rem;
 }
 #sidebar-close:hover { color: var(--fg); }
-#player-sidebar.showing-add #sidebar-close { display: none; }
+/* Hide sidebar-specific affordances when the add-panel overlay is active. */
+body.showing-add #sidebar-close,
+body.showing-add #sidebar-resize { display: none; }
 
 /* Drag handle on the sidebar's right edge for resizing */
 #sidebar-resize {
@@ -871,13 +874,17 @@ a.pl-item-label:hover { text-decoration: underline; }
 .btn-pl-nest:hover { color: var(--accent); }
 
 /* ── Sidebar add-to-playlist panel ─────────────────────────────────────── */
-/* Collapse the spacer so the add section can fill the sidebar from the top. */
-#player-sidebar.showing-add .sidebar-top-spacer { flex: 0 0 0; }
-#sidebar-add-section { display: none; }
-#player-sidebar.showing-add #sidebar-queue-section,
-#player-sidebar.showing-add #sidebar-concert-section { display: none; }
-#player-sidebar.showing-add #sidebar-add-section {
-  flex: 1 1 auto; display: flex; flex-direction: column; gap: 0.5rem;
+/* Overlay the sidebar rect when body.showing-add is set; lives outside
+   #player-sidebar so the add-panel Foldkit runtime survives player re-renders. */
+#sidebar-add-section {
+  display: none; position: fixed; top: 0; bottom: var(--player-bar-height); left: 0;
+  width: var(--sidebar-width); z-index: 1005;
+  background: var(--surface); border-right: 1px solid var(--border); overflow: hidden; }
+/* Hide sidebar content behind the overlay (keyboard accessibility). */
+body.showing-add #sidebar-queue-section,
+body.showing-add #sidebar-concert-section { display: none; }
+body.showing-add #sidebar-add-section {
+  display: flex; flex-direction: column; gap: 0.5rem;
   padding: 0.75rem; min-height: 0; }
 .add-pl-header { display: flex; align-items: center; }
 .add-pl-header h2 { margin: 0; font-size: 1em; flex: 1; }

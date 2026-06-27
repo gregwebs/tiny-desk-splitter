@@ -233,6 +233,15 @@ export async function fetchSidebarTracks(
   return fetchRaw(`/concerts/${concertId}/tracks?context=sidebar${param}`);
 }
 
+export type TrackDetailItem = Schemas["TrackDetailItem"];
+export type TrackDetailsResponse = Schemas["TrackDetailsResponse"];
+
+/** `GET /concerts/:id/track-details` — JSON track list for the player
+ *  widget's sidebar concert section (whole-album / normal mode). */
+export async function getTrackDetails(concertId: number): Promise<TrackDetailsResponse> {
+  return getJson<TrackDetailsResponse>(`/concerts/${concertId}/track-details`);
+}
+
 /** Fire-and-forget POST to a server-provided listen/watch event URL. */
 export async function postEvent(url: string): Promise<Response> {
   return sendJson(url, undefined, "POST");

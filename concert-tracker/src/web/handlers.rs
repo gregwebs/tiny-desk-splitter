@@ -1923,6 +1923,46 @@ pub async fn tracks(
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
 }
 
+#[derive(serde::Serialize, ToSchema)]
+pub struct TrackDetailsResponse {
+    tracks_busy: bool,
+    tracks: Vec<crate::model::TrackDetailItem>,
+}
+
+#[utoipa::path(
+    get,
+    path = "/concerts/{id}/track-details",
+    tag = "playback",
+    params(("id" = i64, Path, description = "Concert ID")),
+    responses(
+        (status = 200, description = "Per-track availability, video flag, and liked status for the sidebar track list", body = TrackDetailsResponse),
+        (status = 404, description = "Concert not found"),
+        (status = 500, description = "Internal error", content_type = "text/plain"),
+    )
+)]
+pub async fn track_details(
+    State(state): State<AppState>,
+    Path(id): Path<i64>,
+) -> Result<Json<TrackDetailsResponse>, AppError> {
+    let concert = {
+        let conn = state.db.lock().unwrap();
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    };
+    let album = concert.album.as_deref().unwrap_or_default();
+    let tracks = crate::model::list_all_track_details(
+        &state.jobs.working_dir,
+        album,
+        &concert.set_list,
+        &concert.tracks_present,
+        &concert.tracks_liked,
+    );
+    let tracks_busy = tracks_busy(&concert, split_queued(&state, id));
+    Ok(Json(TrackDetailsResponse {
+        tracks_busy,
+        tracks,
+    }))
+}
+
 pub async fn listen_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
