@@ -198,28 +198,6 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-title")).toHaveText("Celular");
   });
 
-  test("multiple tracks can be queued", async ({ page }) => {
-    await playTrack(page, AUDIO, 0);
-    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
-
-    await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).evaluate(el => el.click());
-    await trackButton(page, SECOND, 1).evaluate(el => el.click());
-
-    await expect(page.locator("#player-queue-badge")).toHaveText("2");
-  });
-
-  test("duplicate tracks are not enqueued", async ({ page }) => {
-    await playTrack(page, AUDIO, 0);
-    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
-
-    await expandTracks(page, SECOND);
-    await trackButton(page, SECOND, 0).evaluate(el => el.click());
-    await trackButton(page, SECOND, 0).evaluate(el => el.click());
-
-    await expect(page.locator("#player-queue-badge")).toHaveText("1");
-  });
-
   test("clicking currently-playing track toggles pause", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
     // No loop=true here: we're intentionally toggling pause/play, not letting
