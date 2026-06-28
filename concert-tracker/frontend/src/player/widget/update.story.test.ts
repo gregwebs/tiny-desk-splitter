@@ -23,6 +23,7 @@ import {
   PollPrepareStatus,
   RecordListenEvent,
   RefreshCardStatus,
+  RefreshConcertItems,
   ResumeAudio,
   ScrollQueueToBottom,
   SeekAudio,
@@ -512,6 +513,122 @@ describe("player update — prepare / poll", () => {
       ),
       Story.model((m) => expect(m.status._tag).toBe("Error")),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
+    );
+  });
+});
+
+describe("player update — port-behavior fixes (#23)", () => {
+  const sidebarTrack = (index: number, title: string, available = true) => ({
+    index,
+    title,
+    available,
+    is_video: false,
+    liked: false,
+  });
+  // playingModel (concert 1, track 0) with the sidebar open and its track list loaded.
+  const playingWithSidebar: Model = {
+    ...playingModel,
+    sidebar: {
+      open: true,
+      tracks: Option.some({
+        tracksBusy: false,
+        tracks: [sidebarTrack(0, "Celular"), sidebarTrack(1, "Limbo"), sidebarTrack(3, "Dando Vueltas")],
+      }),
+      loadGen: 3,
+    },
+  };
+  const findSidebarTrack = (m: Model, index: number) =>
+    Option.isSome(m.sidebar.tracks) ? m.sidebar.tracks.value.tracks.find((t) => t.index === index) : undefined;
+
+  const resolvePlay = [
+    Story.Command.resolve(PlayAudio, Acked()),
+    Story.Command.resolve(MarkPlayingExternal, Acked()),
+    Story.Command.resolve(ClearPreparingExternal, Acked()),
+    Story.Command.resolve(RecordListenEvent, Acked()),
+    Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+  ];
+
+  test("ReceivedQueueDrainResult sets the playlist label from the played entry", () => {
+    const entry = makeQueueEntry(1, 0, "Track One", false, "My Mix", 7);
+    Story.story(
+      update,
+      Story.with({ ...initialModel, queue: [entry] }),
+      Story.message(ReceivedQueueDrainResult({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
+      Story.model((m) => expect(m.playback.playlistLabel).toBe("My Mix")),
+      ...resolvePlay,
+    );
+  });
+
+  test("ReceivedQueueDrainResult of an ad-hoc entry leaves the playlist label null", () => {
+    const entry = makeQueueEntry(2, 1, "Ad-hoc", false);
+    Story.story(
+      update,
+      Story.with({ ...initialModel, queue: [entry] }),
+      Story.message(ReceivedQueueDrainResult({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
+      Story.model((m) => expect(m.playback.playlistLabel).toBeNull()),
+      ...resolvePlay,
+    );
+  });
+
+  test("ReceivedMediaInfo refetches sidebar tracks when the concert changes while open", () => {
+    const model: Model = { ...playingModel, sidebar: { open: true, tracks: Option.none(), loadGen: 5 } };
+    Story.story(
+      update,
+      Story.with(model),
+      Story.message(ReceivedMediaInfo({ source: PlaySourceValue.Track({ concertId: 2, trackIdx: 0 }), info: mediaInfo, opts: defaultPlayOpts })),
+      Story.model((m) => expect(m.sidebar.loadGen).toBe(6)),
+      Story.Command.expectHas(FetchTrackDetails),
+      Story.Command.resolve(FetchTrackDetails, FailedTrackDetails({ concertId: 2, loadGen: 6 })),
+      ...resolvePlay,
+    );
+  });
+
+  test("ReceivedMediaInfo does not refetch the sidebar on an intra-album advance (same concert)", () => {
+    // The concertId-unchanged guard is load-bearing: next/prev advance flows through
+    // ReceivedMediaInfo too. loadGen stays put and no FetchTrackDetails fires (Story
+    // would throw on an unresolved FetchTrackDetails if it did).
+    const model: Model = { ...playingModel, sidebar: { open: true, tracks: Option.none(), loadGen: 5 } };
+    Story.story(
+      update,
+      Story.with(model),
+      Story.message(ReceivedMediaInfo({ source: PlaySourceValue.Track({ concertId: 1, trackIdx: 1 }), info: mediaInfo, opts: defaultPlayOpts })),
+      Story.model((m) => expect(m.sidebar.loadGen).toBe(5)),
+      ...resolvePlay,
+    );
+  });
+
+  test("sidebar delete on the playing track advances and greys the row", () => {
+    Story.story(
+      update,
+      Story.with(playingWithSidebar),
+      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: true, source: "sidebar" })),
+      Story.model((m) => expect(findSidebarTrack(m, 0)?.available).toBe(false)),
+      Story.Command.expectHas(PauseAudio, DrainQueue),
+      Story.Command.resolve(PauseAudio, Acked()),
+      Story.Command.resolve(DrainQueue, ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 0, plan: "queue-only" })),
+    );
+  });
+
+  test("sidebar delete on a non-playing track greys the row without advancing", () => {
+    Story.story(
+      update,
+      Story.with(playingWithSidebar),
+      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 3, ok: true, source: "sidebar" })),
+      Story.model((m) => {
+        expect(findSidebarTrack(m, 3)?.available).toBe(false);
+        expect(m.playback.trackIdx).toBe(0);
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("sidebar delete in concert mode still refreshes concert items (branch unchanged)", () => {
+    Story.story(
+      update,
+      Story.with(concertModel(0)),
+      Story.message(ReceivedDeleteTrackResult({ concertId: 42, trackIdx: 0, ok: true, source: "sidebar" })),
+      Story.Command.expectHas(RefreshConcertItems),
+      Story.Command.resolve(RefreshConcertItems, ReceivedConcertItems({ concertId: 42, items: [interludeItem("/c/0.mp3", 0)], advanceAfter: false })),
     );
   });
 });

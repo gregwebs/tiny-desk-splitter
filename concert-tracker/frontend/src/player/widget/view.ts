@@ -355,8 +355,10 @@ export const view = (model: Model): Html => {
     [],
     [
       // ── Player bar ────────────────────────────────────────────────────
+      // The `active` class drives visibility (#player-bar is display:none until
+      // active); reactive on hasMedia so it can never desync from playback.
       h.div(
-        [h.Id("player-bar")],
+        [h.Id("player-bar"), ...(hasMedia ? [h.Class("active")] : [])],
         [
           // ── Queue/sidebar toggle ────────────────────────────────────
           h.button(

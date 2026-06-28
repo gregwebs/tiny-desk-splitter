@@ -86,6 +86,24 @@ const albumModel = (overrides: Partial<Model["playback"]> = {}): Model => ({
 });
 
 describe("player-bar view", () => {
+  // #player-bar is display:none until it has the `active` class (CSS), so this
+  // guards the regression where the bar never activated and was invisible.
+  test("player bar gets the active class only when media is loaded", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel()),
+      Scene.expect(Scene.selector("#player-bar")).toHaveAttr("class", "active"),
+    );
+  });
+
+  test("player bar has no active class with nothing playing", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(noPlayback),
+      Scene.expect(Scene.selector("#player-bar")).not.toHaveAttr("class", "active"),
+    );
+  });
+
   test("no playback — action buttons are hidden, play shows ▶", () => {
     Scene.scene(
       { update, view },
