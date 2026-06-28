@@ -621,7 +621,14 @@ export const SyncNowPlayingMirrorCmd = Command.define(
   "SyncNowPlayingMirror",
   { concertId: S.NullOr(S.Number), trackIdx: S.NullOr(S.Number) },
   Acked,
-)(({ concertId, trackIdx }) => Effect.sync(() => setNowPlaying({ concertId, trackIdx })).pipe(Effect.as(Acked())));
+)(({ concertId, trackIdx }) =>
+  Effect.sync(() => {
+    setNowPlaying({ concertId, trackIdx });
+    // #player-bar is display:none until active; body.player-active reserves the
+    // bottom padding. Both track playback identity, so toggle alongside the mirror.
+    document.body.classList.toggle("player-active", concertId !== null);
+  }).pipe(Effect.as(Acked())),
+);
 
 export const OpenAddToPlaylist = Command.define(
   "OpenAddToPlaylist",

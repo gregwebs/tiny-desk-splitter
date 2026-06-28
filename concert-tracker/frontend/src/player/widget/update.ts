@@ -205,6 +205,29 @@ const beginPlayback = (
   return [evo(model1, { pendingSeek: () => Option.none() }), cmds];
 };
 
+/** When a whole-album play changes the playing concert while the sidebar is
+ *  open, the sidebar track list (model.sidebar.tracks) is for the old concert.
+ *  Refetch it, mirroring the OpenSidebar fetch. The concertId-changed guard is
+ *  load-bearing, not an optimization: this also runs on every intra-album
+ *  next/prev advance (same concertId -> no refetch). Reconstruction plays do
+ *  not call this — they render the sidebar from playback.concert.items. */
+const refetchSidebarIfConcertChanged = (
+  prevModel: Model,
+  [model, cmds]: readonly [Model, Command<Message>[]],
+): readonly [Model, Command<Message>[]] => {
+  const concertId = model.playback.concertId;
+  if (
+    !prevModel.sidebar.open ||
+    concertId === null ||
+    concertId === prevModel.playback.concertId ||
+    Option.isSome(model.playback.concert)
+  ) {
+    return [model, cmds];
+  }
+  const loadGen = prevModel.sidebar.loadGen + 1;
+  return [evo(model, { sidebar: (s) => ({ ...s, loadGen }) }), [...cmds, FetchTrackDetails({ concertId, loadGen })]];
+};
+
 /** playTrack()/PlayerApi.playTrack's shared dispatch: same-track toggles
  *  pause/resume, something-else-playing enqueues, otherwise fetches+plays.
  *  Used by CommandReceived.PlayTrack and the prepare-ready path (applyPrepareStatus
@@ -370,7 +393,8 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     M.tagsExhaustive({
       CommandReceived: ({ command }) => handleCommand(model, command),
 
-      ReceivedMediaInfo: ({ source, info, opts }) => withPlayback(...beginPlayback(model, source, info, opts)),
+      ReceivedMediaInfo: ({ source, info, opts }) =>
+        withPlayback(...refetchSidebarIfConcertChanged(model, beginPlayback(model, source, info, opts))),
 
       NotPlayable: ({ url }) => [model, [OpenInNewTab({ url })]],
 
@@ -401,7 +425,17 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         const model1 = evo(model, { queue: (q) => q.slice(playedCount) });
         return Option.match(played, {
           onSome: ({ entry, info }) =>
-            withPlayback(...beginPlayback(model1, PlaySourceValue.Track({ concertId: entry.concertId, trackIdx: entry.trackIdx }), info, defaultPlayOpts)),
+            withPlayback(
+              ...refetchSidebarIfConcertChanged(
+                model1,
+                beginPlayback(
+                  model1,
+                  PlaySourceValue.Track({ concertId: entry.concertId, trackIdx: entry.trackIdx }),
+                  info,
+                  { ...defaultPlayOpts, playlistName: entry.playlistName },
+                ),
+              ),
+            ),
           onNone: () => (plan === "queue-only" ? [model1, []] : advanceToNextTrack(model1, plan)),
         });
       },
@@ -495,7 +529,15 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           return advanceAfterDelete(model);
         }
         const inConcertMode = Option.isSome(model.playback.concert) && model.playback.concert.value.id === concertId;
-        if (!inConcertMode) return [model, []];
+        if (!inConcertMode) {
+          // Whole-album sidebar: grey the deleted row, and if it was the playing
+          // track, advance like the bar-source delete does.
+          const model1 = flipSidebarTrackAvailable(model, concertId, trackIdx, false);
+          if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
+            return advanceAfterDelete(model1);
+          }
+          return [model1, []];
+        }
         const wasPlayingThis = model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
         return [model, [RefreshConcertItems({ concertId, advanceAfter: wasPlayingThis })]];
       },
@@ -626,6 +668,21 @@ function flipSidebarTrackLiked(model: Model, concertId: number, trackIdx: number
     onSome: (sidebarTracks) => {
       if (model.playback.concertId !== concertId) return model;
       const updated = sidebarTracks.tracks.map((t) => (t.index === trackIdx ? { ...t, liked } : t));
+      return evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ ...sidebarTracks, tracks: updated }) }) });
+    },
+  });
+}
+
+// Optimistically mark a whole-album sidebar track available/unavailable (used
+// when a sidebar delete removes the files) so the row greys out without a
+// refetch. Mirrors flipSidebarTrackLiked; no-op if the sidebar isn't showing
+// this concert's track list.
+function flipSidebarTrackAvailable(model: Model, concertId: number, trackIdx: number, available: boolean): Model {
+  return Option.match(model.sidebar.tracks, {
+    onNone: () => model,
+    onSome: (sidebarTracks) => {
+      if (model.playback.concertId !== concertId) return model;
+      const updated = sidebarTracks.tracks.map((t) => (t.index === trackIdx ? { ...t, available } : t));
       return evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ ...sidebarTracks, tracks: updated }) }) });
     },
   });
