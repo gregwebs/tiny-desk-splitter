@@ -270,7 +270,20 @@ function queueSection(model: Model): Html {
         [h.Id("sidebar-queue-list"), h.Class("track-list")],
         rows.map((row) => {
           if (row.kind === "group-header") {
-            return liRow(`group-${row.groupId}`, [h.Class("queue-group-header")], [row.name]);
+            return liRow(
+              `group-${row.groupId}`,
+              [h.Class("queue-group-header")],
+              [
+                h.span([h.Class("queue-group-name")], [row.name]),
+                h.button(
+                  [
+                    h.Class("btn-remove-group"),
+                    h.OnClick(CommandReceived({ command: PlayerCommandValue.RemoveGroup({ groupId: row.groupId }) })),
+                  ],
+                  ["×"],
+                ),
+              ],
+            );
           }
           return liRow(
             `song-${row.entry.concertId}-${row.entry.trackIdx}`,

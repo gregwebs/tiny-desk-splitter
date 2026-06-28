@@ -240,6 +240,48 @@ describe("player update — queue operations", () => {
     );
   });
 
+  test("RemoveGroup removes every entry sharing the groupId, leaving others", () => {
+    const withGroup: Model = {
+      ...initialModel,
+      queue: [
+        makeQueueEntry(1, 0, "A", false, "PL", 7),
+        makeQueueEntry(1, 1, "B", false, "PL", 7),
+        makeQueueEntry(2, 0, "C", false),
+      ],
+    };
+    Story.story(
+      update,
+      Story.with(withGroup),
+      Story.message(CommandReceived({ command: PlayerCommandValue.RemoveGroup({ groupId: 7 }) })),
+      Story.model((m) => {
+        expect(m.queue.length).toBe(1);
+        expect(m.queue[0]?.title).toBe("C");
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("PlayQueueEntryNow dequeues the entry and fetches it for immediate play", () => {
+    const withTwo: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(3, 5, "Now", false), makeQueueEntry(1, 1, "Later", false)],
+    };
+    Story.story(
+      update,
+      Story.with(withTwo),
+      Story.message(CommandReceived({ command: PlayerCommandValue.PlayQueueEntryNow({ pos: 0 }) })),
+      Story.model((m) => {
+        expect(m.queue.length).toBe(1);
+        expect(m.queue[0]?.title).toBe("Later");
+      }),
+      Story.Command.expectHas(FetchTrackInfo),
+      Story.Command.resolve(
+        FetchTrackInfo,
+        FailedFetchInfo({ source: PlaySourceValue.Track({ concertId: 3, trackIdx: 5 }), message: "test-terminal" }),
+      ),
+    );
+  });
+
   test("ReceivedQueueDrainResult with nothing played and queue-only plan trims the queue without advancing", () => {
     const withTwo: Model = {
       ...initialModel,
@@ -250,6 +292,37 @@ describe("player update — queue operations", () => {
       Story.with(withTwo),
       Story.message(ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 2, plan: "queue-only" })),
       Story.model((m) => expect(m.queue).toEqual([])),
+      Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — skip guards", () => {
+  // Non-concert playback with no neighbours and an empty queue: SkipToNext/Prev
+  // must be no-ops (no PauseAudio), matching the disabled Next/Back buttons. This
+  // is the in-process counterpart to the e2e guard that the public skip API does
+  // not pause the audio element when there is nothing to advance to.
+  const noNeighbors: Model = {
+    ...playingModel,
+    playback: { ...playingModel.playback, hasNext: false, hasPrev: false },
+  };
+
+  test("SkipToNext is a no-op when nothing is next and the queue is empty", () => {
+    Story.story(
+      update,
+      Story.with(noNeighbors),
+      Story.message(CommandReceived({ command: PlayerCommandValue.SkipToNext() })),
+      Story.model((m) => expect(m).toEqual(noNeighbors)),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("SkipToPrev is a no-op on the first track (nothing previous)", () => {
+    Story.story(
+      update,
+      Story.with(noNeighbors),
+      Story.message(CommandReceived({ command: PlayerCommandValue.SkipToPrev() })),
+      Story.model((m) => expect(m).toEqual(noNeighbors)),
       Story.Command.expectNone(),
     );
   });

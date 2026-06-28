@@ -12,6 +12,7 @@ import {
   PREPARE_TIMEOUT_MS,
   prevEnabled,
   refindPosByUrl,
+  removeGroup,
   type PlaybackState as CorePlaybackState,
 } from "../core";
 import {
@@ -759,6 +760,7 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         return [model1, [FetchTrackInfo({ concertId: entry.concertId, trackIdx: entry.trackIdx, opts: defaultPlayOpts })]];
       },
       Dequeue: ({ pos }) => [evo(model, { queue: (q) => dequeueAt(q, pos) }), []],
+      RemoveGroup: ({ groupId }) => [evo(model, { queue: (q) => removeGroup(q, groupId) }), []],
       Enqueue: ({ concertId, trackIdx, title, liked }) => {
         const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
         return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom({})] : []];

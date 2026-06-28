@@ -50,7 +50,7 @@ async function closeSidebar(page) {
 // Wait for at least one track button to appear in the sidebar concert section.
 async function waitForSidebarTracks(page, concertId) {
   await page.waitForFunction((cid) => {
-    const section = document.getElementById("sidebar-concert-tracks");
+    const section = document.getElementById("sidebar-concert-section");
     return section != null && section.querySelector(`[data-concert-id="${cid}"]`) != null;
   }, concertId);
 }
@@ -165,7 +165,7 @@ test.describe("Player Sidebar", () => {
 
     // All 4 tracks should appear in the sidebar list.
     await expect(
-      page.locator(`#sidebar-concert-tracks [data-concert-id="${AUDIO}"]`)
+      page.locator(`#sidebar-concert-section [data-concert-id="${AUDIO}"]`)
     ).toHaveCount(4);
   });
 
@@ -176,11 +176,11 @@ test.describe("Player Sidebar", () => {
 
     // Track 0 should carry .playing in the sidebar.
     await expect(
-      page.locator(`#sidebar-concert-tracks [data-concert-id="${AUDIO}"][data-track-idx="0"]`)
+      page.locator(`#sidebar-concert-section [data-concert-id="${AUDIO}"][data-track-idx="0"]`)
     ).toHaveClass(/playing/);
     // Track 1 should not.
     await expect(
-      page.locator(`#sidebar-concert-tracks [data-concert-id="${AUDIO}"][data-track-idx="1"]`)
+      page.locator(`#sidebar-concert-section [data-concert-id="${AUDIO}"][data-track-idx="1"]`)
     ).not.toHaveClass(/playing/);
   });
 
@@ -191,7 +191,7 @@ test.describe("Player Sidebar", () => {
 
     // The track's sidebar star should already be liked.
     await expect(
-      page.locator(`#sidebar-concert-tracks .btn-like`).first()
+      page.locator(`#sidebar-concert-section .btn-like`).first()
     ).toHaveClass(/liked/);
   });
 
@@ -207,7 +207,7 @@ test.describe("Player Sidebar", () => {
 
     // Sidebar star for track 0 should sync to liked.
     await page.waitForFunction(() => {
-      const s = document.querySelector("#sidebar-concert-tracks .btn-like");
+      const s = document.querySelector("#sidebar-concert-section .btn-like");
       return s && s.classList.contains("liked");
     });
   });
@@ -225,7 +225,7 @@ test.describe("Player Sidebar", () => {
     // Sidebar should now show the second concert's tracks.
     await waitForSidebarTracks(page, SECOND);
     await expect(
-      page.locator(`#sidebar-concert-tracks [data-concert-id="${SECOND}"]`)
+      page.locator(`#sidebar-concert-section [data-concert-id="${SECOND}"]`)
     ).toHaveCount(3);
   });
 
@@ -248,7 +248,7 @@ test.describe("Player Sidebar", () => {
     // The track remains in the sidebar but is now greyed (unavailable).
     // Deleted tracks retain their row so the user can see the set list.
     await page.waitForFunction(() => {
-      const section = document.getElementById("sidebar-concert-tracks");
+      const section = document.getElementById("sidebar-concert-section");
       const btn = section && section.querySelector('[data-concert-id="1"][data-track-idx="3"]');
       return btn && btn.classList.contains("track-title-unavailable");
     });
@@ -275,7 +275,7 @@ test.describe("Player Sidebar", () => {
 
     await expect(page.locator("#sidebar-queue-empty")).toBeVisible();
     await expect(page.locator("#sidebar-queue-empty")).toHaveText("Nothing queued");
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(0);
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(0);
   });
 
   test("queued track appears in the sidebar list", async ({ page }) => {
@@ -290,10 +290,10 @@ test.describe("Player Sidebar", () => {
     await openSidebar(page);
 
     await expect(page.locator("#sidebar-queue-empty")).not.toBeVisible();
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(1);
-    await expect(page.locator("#sidebar-queue-list .queue-title").first()).toHaveText("Limbo");
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(1);
+    await expect(page.locator("#sidebar-queue-list .btn-play-queue").first()).toHaveText("Limbo");
     // Remove button should NOT use the trash icon.
-    await expect(page.locator("#sidebar-queue-list .btn-queue-remove").first()).toHaveText("✕");
+    await expect(page.locator("#sidebar-queue-list .btn-remove-queue").first()).toHaveText("×");
     await expect(page.locator("#sidebar-queue-list .icon-trash")).toHaveCount(0);
   });
 
@@ -305,11 +305,11 @@ test.describe("Player Sidebar", () => {
     await trackButton(page, AUDIO, 1).evaluate(el => el.click());
 
     await openSidebar(page);
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(1);
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(1);
 
-    await page.locator("#sidebar-queue-list .btn-queue-remove").first().click();
+    await page.locator("#sidebar-queue-list .btn-remove-queue").first().click();
 
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(0);
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(0);
     await expect(page.locator("#sidebar-queue-empty")).toBeVisible();
     // Playback unaffected.
     await expect(page.locator("#player-title")).toHaveText("Celular");
@@ -323,12 +323,12 @@ test.describe("Player Sidebar", () => {
     await trackButton(page, AUDIO, 2).evaluate(el => el.click()); // queue Track Three
 
     await openSidebar(page);
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(1);
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(1);
 
-    await page.locator("#sidebar-queue-list .btn-queue-play").first().click();
+    await page.locator("#sidebar-queue-list .btn-play-queue").first().click();
 
     await waitForPlaying(page);
     await expect(page.locator("#player-title")).toHaveText("Track Three");
-    await expect(page.locator("#sidebar-queue-list .queue-item")).toHaveCount(0);
+    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(0);
   });
 });
