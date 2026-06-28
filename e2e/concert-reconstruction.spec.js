@@ -70,7 +70,7 @@ async function openSidebar(page) {
 
 async function waitForSidebarTracks(page) {
   await page.waitForFunction((cid) => {
-    const section = document.getElementById("sidebar-concert-tracks");
+    const section = document.getElementById("sidebar-concert-section");
     return section != null && section.querySelector(`[data-concert-id="${cid}"]`) != null;
   }, ID);
 }
@@ -121,19 +121,19 @@ test.describe("Concert reconstruction playback", () => {
 
     // Sidebar should contain interlude buttons (data-interlude-idx).
     const interludeBtn = page.locator(
-      `#sidebar-concert-tracks .btn-interlude[data-interlude-idx]`
+      `#sidebar-concert-section .btn-interlude[data-interlude-idx]`
     );
     await expect(interludeBtn).toBeVisible({ timeout: 5000 });
 
     // Song buttons are also present (data-track-idx).
     const songBtns = page.locator(
-      `#sidebar-concert-tracks [data-concert-id="${ID}"][data-track-idx]`
+      `#sidebar-concert-section [data-concert-id="${ID}"][data-track-idx]`
     );
     await expect(songBtns).toHaveCount(3);
 
     // Step 7: delete the interlude from the sidebar.
     const interludeDeleteBtn = page.locator(
-      `#sidebar-concert-tracks li:has(.btn-interlude) .btn-delete`
+      `#sidebar-concert-section li:has(.btn-interlude) .btn-delete`
     ).first();
     await expect(interludeDeleteBtn).toBeVisible();
     await interludeDeleteBtn.click();
@@ -169,7 +169,7 @@ test.describe("Concert reconstruction playback", () => {
 
     // No interlude buttons in normal per-track mode.
     const interludeBtns = page.locator(
-      `#sidebar-concert-tracks .btn-interlude`
+      `#sidebar-concert-section .btn-interlude`
     );
     await expect(interludeBtns).toHaveCount(0);
   });

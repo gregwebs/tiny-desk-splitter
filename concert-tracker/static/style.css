@@ -627,24 +627,30 @@ body.sidebar-open #player-video-panel { left: var(--sidebar-width); }
   letter-spacing: 0.06em; color: var(--fg-muted); margin: 0 0 0.5rem;
 }
 #sidebar-queue-empty { font-size: 0.82em; color: var(--fg-fainter); margin: 0; }
-/* Queue item row */
-.queue-item { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; }
-.queue-item.nested { padding-left: 0.9rem; }
-.queue-title { flex: 1; font-size: 0.82em; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.btn-queue-play, .btn-queue-remove {
+/* Queue song row */
+.queue-song { display: flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0; }
+.queue-song-nested { padding-left: 0.9rem; }
+/* The play button carries the track title and acts as the flexible row label. */
+.btn-play-queue {
+  flex: 1; min-width: 0; text-align: left;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: none; border: 1px solid #666; color: var(--fg); border-radius: 3px;
+  padding: 0.1rem 0.35rem; font-size: 0.82em; cursor: pointer;
+}
+.btn-remove-queue, .btn-remove-group {
   background: none; border: 1px solid #666; color: var(--fg); border-radius: 3px;
   padding: 0.1rem 0.35rem; font-size: 0.75em; cursor: pointer; flex: none;
 }
-.btn-queue-play:hover { border-color: var(--btn-success); color: var(--btn-success); }
-.btn-queue-remove:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.btn-play-queue:hover { border-color: var(--btn-success); color: var(--btn-success); }
+.btn-remove-queue:hover, .btn-remove-group:hover { border-color: var(--border-strong); background: var(--surface-hover); }
 /* Playlist group header in the queue */
-.queue-group {
+.queue-group-header {
   display: flex; align-items: center; gap: 0.3rem;
   padding: 0.3rem 0 0.1rem;
   margin-top: 0.2rem;
   border-top: 1px solid var(--border-faint);
 }
-.queue-group:first-child { border-top: none; margin-top: 0; }
+.queue-group-header:first-child { border-top: none; margin-top: 0; }
 .queue-group-name {
   flex: 1; font-size: 0.75em; font-weight: 700; text-transform: uppercase;
   letter-spacing: 0.04em; color: var(--fg-muted);

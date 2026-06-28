@@ -194,6 +194,14 @@ describe("player-bar view", () => {
     );
   });
 
+  test("queue badge shows 1 for a single-entry queue (post-dedup render)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...trackModel(), queue: [makeQueueEntry(2, 3, "Giant Steps", false)] }),
+      Scene.expect(Scene.selector("#player-queue-badge")).toContainText("1"),
+    );
+  });
+
   test("next/prev disabled when hasNext and hasPrev are false and queue empty", () => {
     Scene.scene(
       { update, view },
@@ -526,6 +534,7 @@ describe("player sidebar — queue section", () => {
       { update, view },
       Scene.with(initialModel),
       Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
+      Scene.expect(Scene.selector("#sidebar-queue-empty")).toContainText("Nothing queued"),
     );
   });
 
@@ -575,6 +584,36 @@ describe("player sidebar — queue section", () => {
       Scene.with(model),
       Scene.click(Scene.selector("#sidebar-queue-list .btn-remove-queue")),
       // Dequeue dispatches no commands; view re-renders with empty queue
+      Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
+    );
+  });
+
+  test("remove button shows the × glyph, not a trash icon", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [makeQueueEntry(1, 0, "Blue Train", false)],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.expect(Scene.selector("#sidebar-queue-list .btn-remove-queue")).toContainText("×"),
+      Scene.expect(Scene.selector("#sidebar-queue-list .icon-trash")).toBeAbsent(),
+    );
+  });
+
+  test("group-header remove dequeues the whole group", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [
+        makeQueueEntry(1, 0, "So What", false, "Jazz Classics", 3),
+        makeQueueEntry(1, 1, "Blue in Green", false, "Jazz Classics", 3),
+      ],
+    };
+    Scene.scene(
+      { update, view },
+      Scene.with(model),
+      Scene.click(Scene.selector("#sidebar-queue-list .btn-remove-group")),
+      // RemoveGroup dispatches no commands; both songs leave, queue is empty.
       Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
     );
   });

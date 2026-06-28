@@ -51,6 +51,7 @@ const ToggleSidebar = ts("ToggleSidebar");
 const SidebarDeleteTrack = ts("SidebarDeleteTrack", { concertId: S.Number, trackIdx: S.Number });
 const PlayQueueEntryNow = ts("PlayQueueEntryNow", { pos: S.Number });
 const Dequeue = ts("Dequeue", { pos: S.Number });
+const RemoveGroup = ts("RemoveGroup", { groupId: S.Number });
 const Enqueue = ts("Enqueue", {
   concertId: S.Number,
   trackIdx: S.Number,
@@ -98,6 +99,7 @@ export const PlayerCommand = S.Union([
   SidebarDeleteTrack,
   PlayQueueEntryNow,
   Dequeue,
+  RemoveGroup,
   Enqueue,
   PlayAlbumAt,
   PlayPlaylist,
@@ -133,6 +135,7 @@ export const PlayerCommandValue = {
   SidebarDeleteTrack,
   PlayQueueEntryNow,
   Dequeue,
+  RemoveGroup,
   Enqueue,
   PlayAlbumAt,
   PlayPlaylist,

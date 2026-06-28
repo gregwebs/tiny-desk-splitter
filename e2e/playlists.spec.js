@@ -262,11 +262,11 @@ test.describe("Playlist queue groups (2d)", () => {
     await openQueueSidebar(page);
 
     // One group header appears with the playlist name.
-    await expect(page.locator(".queue-group")).toHaveCount(1);
-    await expect(page.locator(".queue-group .queue-group-name")).toHaveText("Group Test");
+    await expect(page.locator(".queue-group-header")).toHaveCount(1);
+    await expect(page.locator(".queue-group-header .queue-group-name")).toHaveText("Group Test");
 
     // Both song rows are nested under the group.
-    await expect(page.locator(".queue-item.nested")).toHaveCount(2);
+    await expect(page.locator(".queue-song-nested")).toHaveCount(2);
   });
 
   test("playing the same playlist twice creates two independent groups", async ({ page }) => {
@@ -291,7 +291,7 @@ test.describe("Playlist queue groups (2d)", () => {
     await openQueueSidebar(page);
 
     // Two separate group headers.
-    await expect(page.locator(".queue-group")).toHaveCount(2);
+    await expect(page.locator(".queue-group-header")).toHaveCount(2);
   });
 
   test("the group ✕ removes all songs in the group at once", async ({ page }) => {
@@ -311,15 +311,15 @@ test.describe("Playlist queue groups (2d)", () => {
     await expect(page.locator("#player-queue-badge")).toHaveText("3");
 
     await openQueueSidebar(page);
-    await expect(page.locator(".queue-group")).toHaveCount(1);
+    await expect(page.locator(".queue-group-header")).toHaveCount(1);
 
     // Click the group ✕ button.
-    await page.locator(".queue-group .btn-queue-remove").evaluate(el => el.click());
+    await page.locator(".queue-group-header .btn-remove-group").evaluate(el => el.click());
 
     // All 3 tracks removed — badge gone and header vanishes.
     await expect(page.locator("#player-queue-badge")).toHaveText("");
-    await expect(page.locator(".queue-group")).toHaveCount(0);
-    await expect(page.locator(".queue-item.nested")).toHaveCount(0);
+    await expect(page.locator(".queue-group-header")).toHaveCount(0);
+    await expect(page.locator(".queue-song-nested")).toHaveCount(0);
   });
 
   test("removing a group ✕ leaves another group untouched", async ({ page }) => {
@@ -344,17 +344,17 @@ test.describe("Playlist queue groups (2d)", () => {
     await expect(page.locator("#player-queue-badge")).toHaveText("3");
 
     await openQueueSidebar(page);
-    await expect(page.locator(".queue-group")).toHaveCount(2);
+    await expect(page.locator(".queue-group-header")).toHaveCount(2);
 
     // Remove the FIRST group (it renders at the bottom = last-appended, so it is
-    // the last .queue-group in the list since we iterate in reverse).
-    const groups = page.locator(".queue-group");
-    await groups.last().locator(".btn-queue-remove").evaluate(el => el.click());
+    // the last .queue-group-header in the list since we iterate in reverse).
+    const groups = page.locator(".queue-group-header");
+    await groups.last().locator(".btn-remove-group").evaluate(el => el.click());
 
     // 1 track remains (the second group's song).
     await expect(page.locator("#player-queue-badge")).toHaveText("1");
-    await expect(page.locator(".queue-group")).toHaveCount(1);
-    await expect(page.locator(".queue-group .queue-group-name")).toHaveText("Second Group");
+    await expect(page.locator(".queue-group-header")).toHaveCount(1);
+    await expect(page.locator(".queue-group-header .queue-group-name")).toHaveText("Second Group");
   });
 
   test("ad-hoc queued tracks are not nested and have no group header", async ({ page }) => {
@@ -374,8 +374,8 @@ test.describe("Playlist queue groups (2d)", () => {
     await openQueueSidebar(page);
 
     // No group header; the item is not nested.
-    await expect(page.locator(".queue-group")).toHaveCount(0);
-    await expect(page.locator(".queue-item")).toHaveCount(1);
-    await expect(page.locator(".queue-item.nested")).toHaveCount(0);
+    await expect(page.locator(".queue-group-header")).toHaveCount(0);
+    await expect(page.locator(".queue-song")).toHaveCount(1);
+    await expect(page.locator(".queue-song-nested")).toHaveCount(0);
   });
 });
