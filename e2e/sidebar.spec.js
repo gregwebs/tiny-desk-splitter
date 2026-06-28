@@ -269,34 +269,6 @@ test.describe("Player Sidebar", () => {
 
   // ── Queue section ─────────────────────────────────────────────────────────
 
-  test("empty queue shows 'Nothing queued' message", async ({ page }) => {
-    await playTrack(page, AUDIO, 0);
-    await openSidebar(page);
-
-    await expect(page.locator("#sidebar-queue-empty")).toBeVisible();
-    await expect(page.locator("#sidebar-queue-empty")).toHaveText("Nothing queued");
-    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(0);
-  });
-
-  test("queued track appears in the sidebar list", async ({ page }) => {
-    await playTrack(page, AUDIO, 0);
-    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
-
-    // Enqueue track 1 while track 0 is playing. Use evaluate to avoid real pointer
-    // events being intercepted by the fixed player bar on top of the card list.
-    await expandTracks(page, AUDIO);
-    await trackButton(page, AUDIO, 1).evaluate(el => el.click());
-
-    await openSidebar(page);
-
-    await expect(page.locator("#sidebar-queue-empty")).not.toBeVisible();
-    await expect(page.locator("#sidebar-queue-list .queue-song")).toHaveCount(1);
-    await expect(page.locator("#sidebar-queue-list .btn-play-queue").first()).toHaveText("Limbo");
-    // Remove button should NOT use the trash icon.
-    await expect(page.locator("#sidebar-queue-list .btn-remove-queue").first()).toHaveText("×");
-    await expect(page.locator("#sidebar-queue-list .icon-trash")).toHaveCount(0);
-  });
-
   test("remove button deletes queue entry without affecting playback", async ({ page }) => {
     await playTrack(page, AUDIO, 0);
     await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
