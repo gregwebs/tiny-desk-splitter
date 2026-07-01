@@ -18,7 +18,19 @@ offline), track info is reconstructed from `split` and `track_delete` events.
 ## Sync
 
 NPR concerts are scraped and synced to a local SQLite DB in a concerts table.
-This is initiated by the user for an individual month with a synced_months table.
+This is initiated by the user for an individual month, via a Sync button shown
+on the index page's month divider. Each sync is recorded as a `(year, month,
+synced_at)` row in `synced_months`.
+
+A month's Sync button is hidden once that month counts as *fully synced* —
+which requires a sync recorded **after the month has ended** (plus a small
+grace window for the UTC/US-Eastern offset), not merely a sync at any point
+during the month. Otherwise a sync run mid-month would hide the button before
+NPR published that month's remaining concerts, with no way to re-sync. The
+current month's button is therefore always shown. See
+`concert-tracker/src/db.rs::list_fully_synced_months` and
+`./change/2026-07-01-month-sync-completeness.md` for the implementation.
+
 Detailed scraping is also initiated by going to the concert detail page or clicking download.
 
 ## Concert State

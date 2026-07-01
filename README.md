@@ -178,7 +178,7 @@ concert-db clear-stale-download-errors
 
 ### Database schema
 
-See [./doc/data.md](./doc/data.md) for an overview of the data model.
+See [./docs/data.md](./docs/data.md) for an overview of the data model.
 
 ---
 
