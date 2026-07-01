@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Shared helpers for the gh-app-*.sh scripts in this directory. These call
 # the GitHub REST API directly (not the gh CLI) using a token minted from a
-# GitHub App installation - see ~/.config/github-app/gh-app-token.sh.
+# GitHub App installation - see ./gh-app-token.sh in this directory.
 set -euo pipefail
 
 # Best-effort "owner/repo" from the current directory's origin remote.

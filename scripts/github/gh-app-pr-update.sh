@@ -9,7 +9,7 @@
 # --repo defaults to the current directory's github.com origin remote.
 # At least one of --title, --body/--body-file, --base, or --state is required.
 # Requires a GitHub App set up per docs/change/2026-06-20-github-app-push.md
-# (app-id, installation-id, private-key.pem under ~/.config/github-app/,
+# (client-id, private-key.pem under ~/.config/github-app/, not tracked;
 # installation granted Contents:write + Pull requests:write on the repo).
 set -euo pipefail
 
@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
 # shellcheck disable=SC1091
-source "${GITHUB_APP_CONFIG_DIR:-$HOME/.config/github-app}/gh-app-token.sh"
+source "$SCRIPT_DIR/gh-app-token.sh"
 
 repo="" pr="" title="" body="" body_file="" base="" state=""
 while [ $# -gt 0 ]; do
