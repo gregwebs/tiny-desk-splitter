@@ -101,5 +101,18 @@ and PR/issue number** work for both:
 
 ## Setup reference
 
-Credentials live in `~/.config/github-app/` (not tracked). Full write-up:
-`docs/change/2026-06-20-github-app-push.md`.
+All GitHub-interaction code (token minting, git credential helper, the
+gh-app-*.sh scripts, lib.sh) lives in `./scripts/github/` and is tracked in
+this repo. The only things that live outside the repo, in
+`~/.config/github-app/` (not tracked, `chmod 700`/`600`), are the two actual
+secrets:
+
+- `client-id` — the App's client ID (used as the JWT `iss` claim)
+- `private-key.pem` — the App's private key (signs the JWT)
+
+The installation ID isn't a secret and is committed as
+`./scripts/github/installation-id`. Override the secrets directory with
+`GITHUB_APP_SECRETS_DIR` if needed (default `~/.config/github-app`).
+
+Full write-up and history: `docs/change/2026-06-20-github-app-push.md` and
+`docs/change/2026-07-01-github-scripts-tracked.md`.
