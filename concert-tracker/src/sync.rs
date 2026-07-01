@@ -80,9 +80,10 @@ impl YearMonth {
     }
 }
 
-/// Build the set of synced months from the database.
+/// Build the set of fully synced months from the database (months synced only
+/// while still in progress are excluded; see `db::list_fully_synced_months`).
 pub fn synced_months_set(conn: &Connection) -> Result<HashSet<YearMonth>> {
-    let pairs = db::list_synced_months(conn)?;
+    let pairs = db::list_fully_synced_months(conn)?;
     Ok(pairs
         .into_iter()
         .map(|(y, m)| YearMonth { year: y, month: m })
