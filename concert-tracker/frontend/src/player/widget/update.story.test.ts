@@ -92,10 +92,15 @@ const mediaInfo: MediaInfo = {
   url: "/audio/t1.mp3",
 };
 
-const interludeItem = (url: string, interludeIdx: number, title = `Interlude ${interludeIdx}`): PlaybackItem => ({
+const interludeItem = (
+  url: string,
+  interludeIdx: number,
+  title = `Interlude ${interludeIdx}`,
+  isVideo = false,
+): PlaybackItem => ({
   artist: "",
   interlude_index: interludeIdx,
-  is_video: false,
+  is_video: isVideo,
   kind: "interlude",
   liked: false,
   title,
@@ -655,6 +660,34 @@ describe("player update — concert-reconstruction advance", () => {
       Story.Command.expectHas(SyncNowPlayingMirrorCmd),
       // playConcertItemPure for an interlude: PlayAudio, MarkPlayingExternal,
       // ClearPreparingExternal, MarkPlayingInterludeExternal, SyncNowPlayingMirrorCmd.
+      Story.Command.resolve(PlayAudio, Acked()),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+      Story.Command.resolve(ClearPreparingExternal, Acked()),
+      Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+    );
+  });
+
+  // Regression pin: a video item played via concert-reconstruction must land
+  // in the state the Watch button's view gate expects (isVideo: true,
+  // watchUrl: null) — see watchUrlFor's ConcertItem case in update.ts and the
+  // matching Scene regression test in view.scene.test.ts.
+  test("ReceivedConcertPlaybackItems with a video item sets isVideo true and watchUrl null", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(
+        ReceivedConcertPlaybackItems({
+          concertId: 42,
+          items: [interludeItem("/c/0.mp4", 0, "Interlude 0", true)],
+          atPos: 0,
+        }),
+      ),
+      Story.model((m) => {
+        expect(m.playback.isVideo).toBe(true);
+        expect(m.playback.watchUrl).toBeNull();
+      }),
+      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),

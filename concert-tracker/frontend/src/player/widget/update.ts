@@ -150,7 +150,10 @@ const watchUrlFor = (source: PlaySource, info: MediaInfo): string | null => {
     case "Album":
       return `/concerts/${source.concertId}/watch`;
     case "ConcertItem":
-      // playConcertItem() always passes watchUrl: null, even for video items.
+      // playConcertItem() always passes watchUrl: null, even for video items
+      // (no per-item watch endpoint, and interludes have no trackIdx to build
+      // one from). The view must therefore gate the Watch button on isVideo
+      // alone, not on watchUrl — see view.ts's player-watch button.
       return null;
   }
 };
