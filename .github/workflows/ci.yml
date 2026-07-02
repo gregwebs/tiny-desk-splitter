@@ -112,6 +112,9 @@ jobs:
       - name: TypeScript type-check
         run: ./scripts/ts-check.sh
 
+      - name: TypeScript lint
+        run: ./scripts/ts-lint.sh
+
       # Fails if committed static/player.js drifts from a fresh esbuild of frontend/src.
       - name: Verify generated bundles
         run: ./scripts/ts-verify.sh
