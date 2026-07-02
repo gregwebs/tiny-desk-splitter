@@ -732,7 +732,7 @@ type VNode = NonNullable<Html>;
 
 function findById(node: Html, id: string): VNode | null {
   if (node === null) return null;
-  const props = node.data?.props as Record<string, unknown> | undefined;
+  const props: Record<string, unknown> | undefined = node.data?.props;
   if (props?.id === id) return node;
   for (const child of node.children ?? []) {
     if (typeof child === "string") continue;
