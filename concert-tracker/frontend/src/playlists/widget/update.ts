@@ -38,9 +38,9 @@ const sameTarget = (a: AddTarget, b: AddTarget): boolean => {
 const currentTarget = (model: Model): Option.Option<AddTarget> =>
   M.value(model.phase).pipe(
     M.withReturnType<Option.Option<AddTarget>>(),
-    M.tag("Loading", (p) => Option.some(p.target)),
-    M.tag("LoadFailed", (p) => Option.some(p.target)),
-    M.tag("Loaded", (p) => Option.some(p.target)),
+    M.tag("Loading", (phase) => Option.some(phase.target)),
+    M.tag("LoadFailed", (phase) => Option.some(phase.target)),
+    M.tag("Loaded", (phase) => Option.some(phase.target)),
     M.tag("Closed", () => Option.none()),
     M.exhaustive,
   );
@@ -58,23 +58,23 @@ type LoadedOverrides = Partial<{
   activeFromTyping: boolean;
 }>;
 
-const setLoaded = (model: Model, l: Loaded, overrides: LoadedOverrides): Model =>
+const setLoaded = (model: Model, loaded: Loaded, overrides: LoadedOverrides): Model =>
   evo(model, {
     phase: () =>
       PhaseValue.Loaded({
-        target: l.target,
-        playlists: overrides.playlists ?? l.playlists,
-        members: overrides.members ?? l.members,
-        filter: overrides.filter ?? l.filter,
-        activeId: overrides.activeId ?? l.activeId,
-        activeFromTyping: overrides.activeFromTyping ?? l.activeFromTyping,
+        target: loaded.target,
+        playlists: overrides.playlists ?? loaded.playlists,
+        members: overrides.members ?? loaded.members,
+        filter: overrides.filter ?? loaded.filter,
+        activeId: overrides.activeId ?? loaded.activeId,
+        activeFromTyping: overrides.activeFromTyping ?? loaded.activeFromTyping,
       }),
   });
 
-const withLoaded = (model: Model, f: (l: Loaded) => UpdateReturn): UpdateReturn =>
+const withLoaded = (model: Model, f: (loaded: Loaded) => UpdateReturn): UpdateReturn =>
   M.value(model.phase).pipe(
     withUpdateReturn,
-    M.tag("Loaded", (l) => f(l)),
+    M.tag("Loaded", (loaded) => f(loaded)),
     M.orElse(() => [model, []]),
   );
 
@@ -96,7 +96,7 @@ const computeAutoHighlight = (
 /** The Command(s) the active row's primary action maps to (Enter / row click). */
 const commandsForRow = (
   target: AddTarget,
-  members: readonly Member[],
+  members: ReadonlyArray<Member>,
   row: Row,
 ): ReadonlyArray<Command<Message>> => {
   switch (row.kind) {
@@ -128,8 +128,8 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       CompletedLoad: ({ forTarget, playlists, members }) =>
         Option.match(currentTarget(model), {
           onNone: () => [model, []],
-          onSome: (t) =>
-            sameTarget(t, forTarget)
+          onSome: (target) =>
+            sameTarget(target, forTarget)
               ? [
                   evo(model, {
                     phase: () =>
@@ -151,8 +151,8 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       FailedLoad: ({ forTarget }) =>
         Option.match(currentTarget(model), {
           onNone: () => [model, []],
-          onSome: (t) =>
-            sameTarget(t, forTarget)
+          onSome: (target) =>
+            sameTarget(target, forTarget)
               ? [
                   evo(model, {
                     phase: () => PhaseValue.LoadFailed({ target: forTarget }),
@@ -164,110 +164,114 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         }),
 
       ChangedFilter: ({ value }) =>
-        withLoaded(model, (l) => {
-          const { activeId, activeFromTyping, scroll } = computeAutoHighlight(l.playlists, l.members, value);
-          return [setLoaded(clearError(model), l, { filter: value, activeId, activeFromTyping }), scroll];
+        withLoaded(model, (loaded) => {
+          const { activeId, activeFromTyping, scroll } = computeAutoHighlight(
+            loaded.playlists,
+            loaded.members,
+            value,
+          );
+          return [setLoaded(clearError(model), loaded, { filter: value, activeId, activeFromTyping }), scroll];
         }),
 
       PressedArrowDown: () =>
-        withLoaded(model, (l) => {
-          const rows = buildRows({ playlists: l.playlists, members: l.members, filter: l.filter });
-          const next = nextRow(rows, Option.getOrNull(l.activeId));
+        withLoaded(model, (loaded) => {
+          const rows = buildRows({ playlists: loaded.playlists, members: loaded.members, filter: loaded.filter });
+          const next = nextRow(rows, Option.getOrNull(loaded.activeId));
           return [
-            setLoaded(model, l, { activeId: Option.fromNullishOr(next), activeFromTyping: false }),
+            setLoaded(model, loaded, { activeId: Option.fromNullishOr(next), activeFromTyping: false }),
             next !== null ? [ScrollActiveIntoView({ rowId: next })] : [],
           ];
         }),
 
       PressedArrowUp: () =>
-        withLoaded(model, (l) => {
-          const rows = buildRows({ playlists: l.playlists, members: l.members, filter: l.filter });
-          const prev = prevRow(rows, Option.getOrNull(l.activeId));
+        withLoaded(model, (loaded) => {
+          const rows = buildRows({ playlists: loaded.playlists, members: loaded.members, filter: loaded.filter });
+          const prev = prevRow(rows, Option.getOrNull(loaded.activeId));
           return [
-            setLoaded(model, l, { activeId: Option.fromNullishOr(prev), activeFromTyping: false }),
+            setLoaded(model, loaded, { activeId: Option.fromNullishOr(prev), activeFromTyping: false }),
             prev !== null ? [ScrollActiveIntoView({ rowId: prev })] : [],
           ];
         }),
 
       PressedEnter: () =>
-        withLoaded(model, (l) => {
-          const active = Option.getOrNull(l.activeId);
+        withLoaded(model, (loaded) => {
+          const active = Option.getOrNull(loaded.activeId);
           if (active !== null) {
-            const rows = buildRows({ playlists: l.playlists, members: l.members, filter: l.filter });
-            const row = rows.find((r) => r.id === active);
+            const rows = buildRows({ playlists: loaded.playlists, members: loaded.members, filter: loaded.filter });
+            const row = rows.find((row) => row.id === active);
             if (row) {
-              const cmds = commandsForRow(l.target, l.members, row);
+              const commands = commandsForRow(loaded.target, loaded.members, row);
               // Typing-originated: clear the filter + highlight in the same
               // update, then act. Arrow-originated: act, keep the filter so the
               // user can keep toggling the same row.
-              return l.activeFromTyping
+              return loaded.activeFromTyping
                 ? [
-                    setLoaded(clearError(model), l, {
+                    setLoaded(clearError(model), loaded, {
                       filter: "",
                       activeId: Option.none(),
                       activeFromTyping: false,
                     }),
-                    cmds,
+                    commands,
                   ]
-                : [clearError(model), cmds];
+                : [clearError(model), commands];
             }
           }
           // No highlight + empty filter: close. Otherwise a no-op (ambiguous).
-          return l.filter.trim() === "" ? [closed(model), [RequestClose()]] : [model, []];
+          return loaded.filter.trim() === "" ? [closed(model), [RequestClose()]] : [model, []];
         }),
 
       ClickedRow: ({ id }) =>
-        withLoaded(model, (l) => {
+        withLoaded(model, (loaded) => {
           // Interpret the click against the row's *current* kind, so a reused
           // row element (member↔nonmember, empty↔create) can never act on a
           // stale handler. A click on a member row is a deliberate no-op — the
           // trash button removes — unlike Enter on a highlighted member row,
           // which toggles it off (see commandsForRow).
-          const rows = buildRows({ playlists: l.playlists, members: l.members, filter: l.filter });
-          const row = rows.find((r) => r.id === id);
+          const rows = buildRows({ playlists: loaded.playlists, members: loaded.members, filter: loaded.filter });
+          const row = rows.find((row) => row.id === id);
           if (!row) return [model, []];
           switch (row.kind) {
             case "member":
               return [model, []];
             case "nonmember":
               return typeof row.id === "number"
-                ? [clearError(model), [AddItem({ target: l.target, playlistId: row.id })]]
+                ? [clearError(model), [AddItem({ target: loaded.target, playlistId: row.id })]]
                 : [model, []];
             case "create":
-              return [clearError(model), [CreateAndAdd({ target: l.target, name: l.filter.trim() })]];
+              return [clearError(model), [CreateAndAdd({ target: loaded.target, name: loaded.filter.trim() })]];
             case "empty":
               return [clearError(model), [RequestNewName()]];
           }
         }),
 
       ClickedRemove: ({ playlistId }) =>
-        withLoaded(model, (l) => {
-          const itemId = itemIdFor(l.members, playlistId);
+        withLoaded(model, (loaded) => {
+          const itemId = itemIdFor(loaded.members, playlistId);
           return itemId !== null
-            ? [clearError(model), [RemoveItem({ target: l.target, playlistId, itemId })]]
+            ? [clearError(model), [RemoveItem({ target: loaded.target, playlistId, itemId })]]
             : [model, []];
         }),
 
       EnteredNewName: ({ name }) =>
-        withLoaded(model, (l) => [clearError(model), [CreateAndAdd({ target: l.target, name })]]),
+        withLoaded(model, (loaded) => [clearError(model), [CreateAndAdd({ target: loaded.target, name })]]),
 
       ClickedClose: () => [closed(model), [RequestClose()]],
 
       CompletedMutation: ({ forTarget, playlists, members }) =>
-        withLoaded(model, (l) => {
-          if (!sameTarget(l.target, forTarget)) return [model, []];
+        withLoaded(model, (loaded) => {
+          if (!sameTarget(loaded.target, forTarget)) return [model, []];
           // Re-run the typing auto-highlight only when nothing is currently
           // highlighted (mirrors the old renderAddList's activeId === null guard).
-          if (Option.isNone(l.activeId)) {
-            const { activeId, activeFromTyping, scroll } = computeAutoHighlight(playlists, members, l.filter);
-            return [setLoaded(clearError(model), l, { playlists, members, activeId, activeFromTyping }), scroll];
+          if (Option.isNone(loaded.activeId)) {
+            const { activeId, activeFromTyping, scroll } = computeAutoHighlight(playlists, members, loaded.filter);
+            return [setLoaded(clearError(model), loaded, { playlists, members, activeId, activeFromTyping }), scroll];
           }
-          return [setLoaded(clearError(model), l, { playlists, members }), []];
+          return [setLoaded(clearError(model), loaded, { playlists, members }), []];
         }),
 
       FailedMutation: ({ forTarget, errorMessage: msg }) =>
-        withLoaded(model, (l) =>
-          sameTarget(l.target, forTarget) ? [evo(model, { error: () => Option.some(msg) }), []] : [model, []],
+        withLoaded(model, (loaded) =>
+          sameTarget(loaded.target, forTarget) ? [evo(model, { error: () => Option.some(msg) }), []] : [model, []],
         ),
 
       CompletedScrollActiveIntoView: () => [model, []],

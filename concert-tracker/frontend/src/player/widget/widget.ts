@@ -1,7 +1,7 @@
 import { Effect } from "effect";
 import { Runtime } from "foldkit";
 
-import { LoadSidebarWidthCmd } from "./command";
+import { LoadSidebarWidth } from "./command";
 import type { Message } from "./message";
 import { Flags, initialModel, Model } from "./model";
 import { ports } from "./port";
@@ -13,7 +13,7 @@ import { view } from "./view";
 
 export const init: Runtime.ElementInit<Model, Message, Flags> = () => [
   initialModel,
-  [LoadSidebarWidthCmd()],
+  [LoadSidebarWidth()],
 ];
 
 /** Build a Foldkit Element for the player widget, ready to mount with

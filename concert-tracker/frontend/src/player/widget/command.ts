@@ -282,7 +282,7 @@ export const ToggleLikeRequest = Command.define(
 /** Also performs the original's external-DOM follow-up (swapping the
  *  refreshed concert-card HTML in if it's on the page) — that's real
  *  imperative DOM work outside the widget's own root, same family as
- *  Mark/ClearPlayingExternal below, so it belongs in the Command rather than
+ *  MarkPlayingExternal below, so it belongs in the Command rather than
  *  a separate Acked-ignoring round trip. */
 export const DeleteTrackRequest = Command.define(
   "DeleteTrackRequest",
@@ -387,8 +387,8 @@ export const FetchPlaylistForPlay = Command.define(
   Effect.tryPromise(() => getPlaylist(playlistId)).pipe(
     Effect.map((data) => {
       const tracks = (data.resolved_tracks || [])
-        .filter((t) => t.available)
-        .map((t) => ({ concertId: t.concert_id, trackIdx: t.track_index, title: t.title }));
+        .filter((track) => track.available)
+        .map((track) => ({ concertId: track.concert_id, trackIdx: track.track_index, title: track.title }));
       return ReceivedPlaylistTracks({ playlistId, name: data.playlist.name, tracks });
     }),
     Effect.catch(() => Effect.succeed(FailedPlaylistLoad({ playlistId }))),
@@ -499,20 +499,8 @@ export const MarkPlayingExternal = Command.define(
   Effect.sync(() => {
     document
       .querySelectorAll(".btn-track-listen.playing, .btn-listen.playing")
-      .forEach((b) => b.classList.remove("playing"));
-    findTrackButtons(concertId, Option.getOrNull(trackIdx)).forEach((b) => b.classList.add("playing"));
-  }).pipe(Effect.as(Acked())),
-);
-
-export const ClearPlayingExternal = Command.define(
-  "ClearPlayingExternal",
-  {},
-  Acked,
-)(() =>
-  Effect.sync(() => {
-    document
-      .querySelectorAll(".btn-track-listen.playing, .btn-listen.playing")
-      .forEach((b) => b.classList.remove("playing"));
+      .forEach((button) => button.classList.remove("playing"));
+    findTrackButtons(concertId, Option.getOrNull(trackIdx)).forEach((button) => button.classList.add("playing"));
   }).pipe(Effect.as(Acked())),
 );
 
@@ -526,10 +514,10 @@ export const MarkPlayingInterludeExternal = Command.define(
   Effect.sync(() => {
     document
       .querySelectorAll(".btn-track-listen.playing, .btn-listen.playing")
-      .forEach((b) => b.classList.remove("playing"));
+      .forEach((button) => button.classList.remove("playing"));
     document
       .querySelectorAll(`[data-concert-id="${concertId}"][data-interlude-idx="${interludeIdx}"]`)
-      .forEach((b) => b.classList.add("playing"));
+      .forEach((button) => button.classList.add("playing"));
   }).pipe(Effect.as(Acked())),
 );
 
@@ -539,7 +527,7 @@ export const MarkPreparingExternal = Command.define(
   Acked,
 )(({ concertId, trackIdx }) =>
   Effect.sync(() => {
-    findTrackButtons(concertId, trackIdx).forEach((b) => b.classList.add("preparing"));
+    findTrackButtons(concertId, trackIdx).forEach((button) => button.classList.add("preparing"));
   }).pipe(Effect.as(Acked())),
 );
 
@@ -548,7 +536,7 @@ export const ClearPreparingExternal = Command.define(
   Acked,
 )(
   Effect.sync(() => {
-    document.querySelectorAll(".btn-track-listen.preparing").forEach((b) => b.classList.remove("preparing"));
+    document.querySelectorAll(".btn-track-listen.preparing").forEach((button) => button.classList.remove("preparing"));
   }).pipe(Effect.as(Acked())),
 );
 
@@ -559,8 +547,8 @@ export const DisableCardTracksExternal = Command.define(
 )(({ concertId }) =>
   Effect.sync(() => {
     const card = byIdOrNull(`concert-${concertId}`);
-    card?.querySelectorAll<HTMLButtonElement>(".btn-tracks, .btn-track-listen").forEach((b) => {
-      b.disabled = true;
+    card?.querySelectorAll<HTMLButtonElement>(".btn-tracks, .btn-track-listen").forEach((button) => {
+      button.disabled = true;
     });
   }).pipe(Effect.as(Acked())),
 );
@@ -575,9 +563,9 @@ export const SyncLikeButtonsExternal = Command.define(
       .querySelectorAll<HTMLElement>(
         `.btn-like[hx-post="/concerts/${concertId}/tracks/${Option.getOrNull(trackIdx)}/like"]`,
       )
-      .forEach((lb) => {
-        lb.classList.toggle("liked", liked);
-        lb.textContent = liked ? "★" : "☆";
+      .forEach((likeButton) => {
+        likeButton.classList.toggle("liked", liked);
+        likeButton.textContent = liked ? "★" : "☆";
       });
   }).pipe(Effect.as(Acked())),
 );
@@ -685,8 +673,8 @@ export const HideVideoPanel = Command.define(
 
 /** Read saved sidebar width from localStorage and apply it as a CSS variable.
  *  Runs once at widget init to restore the user's last drag position. */
-export const LoadSidebarWidthCmd = Command.define(
-  "LoadSidebarWidthCmd",
+export const LoadSidebarWidth = Command.define(
+  "LoadSidebarWidth",
   Acked,
 )(
   Effect.sync(() => {

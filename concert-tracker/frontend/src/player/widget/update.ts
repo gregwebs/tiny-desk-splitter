@@ -1,4 +1,4 @@
-import { Match as M, Option } from "effect";
+import { Array, Match as M, Option } from "effect";
 import type { Command } from "foldkit/command";
 import { evo } from "foldkit/struct";
 
@@ -61,13 +61,14 @@ import type { Message } from "./message";
 import {
   type AdvancePlan,
   defaultPlayOpts,
+  initialPlayback,
   type MediaInfo,
   type Model,
   type PlayOpts,
   type PlaySource,
   PlaySourceValue,
-  type PlayTarget,
   PlayTargetValue,
+  sameTarget,
   StatusValue,
 } from "./model";
 import type { PlayerCommand } from "./port";
@@ -111,9 +112,9 @@ const withBusy = (model: Model, message: string): Model =>
 
 /** Appends the now-playing mirror sync. Call exactly once, at the outermost
  *  return of a branch that changes playback identity — see ../mirror.ts. */
-const withPlayback = (model: Model, cmds: ReadonlyArray<Command<Message>>): UpdateReturn => [
+const withPlayback = (model: Model, commands: ReadonlyArray<Command<Message>>): UpdateReturn => [
   model,
-  [...cmds, SyncNowPlayingMirror({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
+  [...commands, SyncNowPlayingMirror({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
 ];
 
 // ── PlaySource → identity/URL derivation ────────────────────────────────
@@ -168,7 +169,7 @@ const beginPlayback = (
   source: PlaySource,
   info: MediaInfo,
   opts: PlayOpts,
-): readonly [Model, Command<Message>[]] => {
+): readonly [Model, ReadonlyArray<Command<Message>>] => {
   const { concertId, trackIdx } = targetIdFor(source);
   const listenUrl = listenUrlFor(source);
   const watchUrl = watchUrlFor(source, info);
@@ -196,16 +197,22 @@ const beginPlayback = (
     status: () => StatusValue.Idle(),
   });
 
-  const cmds: Command<Message>[] = [
+  const videoPanelToggle = newVideoOpen !== model.video.open ? [newVideoOpen ? ShowVideoPanel() : HideVideoPanel()] : [];
+  const recordListen = listenUrl && opts.recordListen ? [RecordListenEvent({ url: listenUrl })] : [];
+  const resumeSeek = Option.match(model.pendingSeek, {
+    onNone: () => [],
+    onSome: (seconds) => [SeekAudio({ seconds })],
+  });
+  const commands: ReadonlyArray<Command<Message>> = [
     PlayAudio({ url: info.url }),
     MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }),
     ClearPreparingExternal(),
+    ...videoPanelToggle,
+    ...recordListen,
+    ...resumeSeek,
   ];
-  if (newVideoOpen !== model.video.open) cmds.push(newVideoOpen ? ShowVideoPanel() : HideVideoPanel());
-  if (listenUrl && opts.recordListen) cmds.push(RecordListenEvent({ url: listenUrl }));
-  if (Option.isSome(model.pendingSeek)) cmds.push(SeekAudio({ seconds: model.pendingSeek.value }));
 
-  return [evo(model1, { pendingSeek: () => Option.none() }), cmds];
+  return [evo(model1, { pendingSeek: () => Option.none() }), commands];
 };
 
 /** When a whole-album play changes the playing concert while the sidebar is
@@ -216,8 +223,8 @@ const beginPlayback = (
  *  not call this — they render the sidebar from playback.concert.items. */
 const refetchSidebarIfConcertChanged = (
   prevModel: Model,
-  [model, cmds]: readonly [Model, Command<Message>[]],
-): readonly [Model, Command<Message>[]] => {
+  [model, commands]: readonly [Model, ReadonlyArray<Command<Message>>],
+): readonly [Model, ReadonlyArray<Command<Message>>] => {
   const concertId = model.playback.concertId;
   if (
     !prevModel.sidebar.open ||
@@ -225,10 +232,13 @@ const refetchSidebarIfConcertChanged = (
     concertId === prevModel.playback.concertId ||
     Option.isSome(model.playback.concert)
   ) {
-    return [model, cmds];
+    return [model, commands];
   }
   const loadGen = prevModel.sidebar.loadGen + 1;
-  return [evo(model, { sidebar: (s) => ({ ...s, loadGen }) }), [...cmds, FetchTrackDetails({ concertId, loadGen })]];
+  return [
+    evo(model, { sidebar: () => evo(model.sidebar, { loadGen: () => loadGen }) }),
+    [...commands, FetchTrackDetails({ concertId, loadGen })],
+  ];
 };
 
 /** playTrack()/PlayerApi.playTrack's shared dispatch: same-track toggles
@@ -250,20 +260,7 @@ const dispatchPlayTrack = (model: Model, concertId: number, trackIdx: number): U
 const stopPlaybackPure = (model: Model): UpdateReturn =>
   withPlayback(
     evo(model, {
-      playback: () => ({
-        concertId: null,
-        trackIdx: null,
-        title: "",
-        artist: "",
-        isVideo: false,
-        watchUrl: null,
-        hasNext: false,
-        hasPrev: false,
-        liked: false,
-        ended: false,
-        concert: Option.none(),
-        playlistLabel: null,
-      }),
+      playback: () => initialPlayback,
       queue: () => [],
       sidebar: () => ({ open: false, tracks: Option.none(), loadGen: 0 }),
       video: () => ({ open: false }),
@@ -336,13 +333,15 @@ function playConcertItemPure(model: Model, pos: number): UpdateReturn {
         url: item.url,
       };
       const source = PlaySourceValue.ConcertItem({ concertId: concert.id, trackIdx, isInterlude });
-      const [model2, cmds] = beginPlayback(model, source, info, defaultPlayOpts);
-      const model3 = evo(model2, { playback: (p) => ({ ...p, concert: Option.some({ ...concert, pos }) }) });
-      const extraCmds: Command<Message>[] =
+      const [model2, commands] = beginPlayback(model, source, info, defaultPlayOpts);
+      const model3 = evo(model2, {
+        playback: () => evo(model2.playback, { concert: () => Option.some(evo(concert, { pos: () => pos })) }),
+      });
+      const extraCommands: ReadonlyArray<Command<Message>> =
         isInterlude && item.interlude_index != null
           ? [MarkPlayingInterludeExternal({ concertId: concert.id, interludeIdx: item.interlude_index })]
           : [];
-      return withPlayback(model3, [...cmds, ...extraCmds]);
+      return withPlayback(model3, [...commands, ...extraCommands]);
     },
   });
 }
@@ -358,7 +357,7 @@ function advanceConcertPure(model: Model): UpdateReturn {
       return next === null
         ? [
             evo(model, {
-              playback: (p) => ({ ...p, concert: Option.none() }),
+              playback: () => evo(model.playback, { concert: () => Option.none() }),
               video: () => ({ open: false }),
             }),
             model.video.open ? [HideVideoPanel()] : [],
@@ -378,7 +377,7 @@ function playConcertPosOrEnd(model: Model): UpdateReturn {
         ? playConcertItemPure(model, concert.pos)
         : [
             evo(model, {
-              playback: (p) => ({ ...p, concert: Option.none() }),
+              playback: () => evo(model.playback, { concert: () => Option.none() }),
               video: () => ({ open: false }),
             }),
             model.video.open ? [HideVideoPanel()] : [],
@@ -425,7 +424,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       ReceivedQueueDrainResult: ({ played, skippedCount, plan }) => {
         const playedCount = Option.isSome(played) ? skippedCount + 1 : skippedCount;
-        const model1 = evo(model, { queue: (q) => q.slice(playedCount) });
+        const model1 = evo(model, { queue: (queue) => queue.slice(playedCount) });
         return Option.match(played, {
           onSome: ({ entry, info }) =>
             withPlayback(
@@ -454,7 +453,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       ReceivedPrepareStart: ({ target, seedStatus }) => {
         const model1 = evo(model, { pending: () => Option.some(target), status: () => StatusValue.Busy({ message: "Preparing…" }) });
-        const cmds: Command<Message>[] =
+        const commands: ReadonlyArray<Command<Message>> =
           target._tag === "Track"
             ? [
                 MarkPreparingExternal({ concertId: target.concertId, trackIdx: target.trackIdx }),
@@ -462,7 +461,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
                 RefreshCardStatus({ concertId: target.concertId }),
               ]
             : [DisableCardTracksExternal({ concertId: target.concertId }), RefreshCardStatus({ concertId: target.concertId })];
-        return [model1, [...cmds, PollPrepareStatus({ target, elapsedMs: 0, seedStatus })]];
+        return [model1, [...commands, PollPrepareStatus({ target, elapsedMs: 0, seedStatus })]];
       },
 
       FailedPrepareStart: () => [withError(model, "Prepare failed"), []],
@@ -471,12 +470,12 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         Option.match(model.pending, {
           onNone: () => [model, []],
           onSome: (pendingTarget) => {
-            if (!sameTargetLocal(pendingTarget, target)) return [model, []]; // superseded by a newer prepare
+            if (!sameTarget(pendingTarget, target)) return [model, []]; // superseded by a newer prepare
             const ready = target._tag === "Track" && status.tracks_present[target.trackIdx] === true;
             if (ready && target._tag === "Track") {
               const model1 = evo(model, { pending: () => Option.none() });
-              const [model2, cmds] = dispatchPlayTrack(model1, target.concertId, target.trackIdx);
-              return [model2, [ClearPreparingExternal(), ...cmds]];
+              const [model2, commands] = dispatchPlayTrack(model1, target.concertId, target.trackIdx);
+              return [model2, [ClearPreparingExternal(), ...commands]];
             }
             if (status.download === "download-error" || status.split === "split-error") {
               return [evo(withError(model, "Preparing tracks failed"), { pending: () => Option.none() }), [ClearPreparingExternal()]];
@@ -493,7 +492,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         Option.match(model.pending, {
           onNone: () => [model, []],
           onSome: (pendingTarget) => {
-            if (!sameTargetLocal(pendingTarget, target)) return [model, []];
+            if (!sameTarget(pendingTarget, target)) return [model, []];
             if (elapsedMs > PREPARE_TIMEOUT_MS) {
               return [evo(withError(model, "Preparing tracks timed out"), { pending: () => Option.none() }), [ClearPreparingExternal()]];
             }
@@ -501,28 +500,20 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           },
         }),
 
-      CompletedLikeToggle: ({ concertId, trackIdx, liked }) => {
-        // Confirm server value (should match the optimistic flip, but carry it through).
-        let model1 = model;
-        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
-          model1 = evo(model1, { playback: (p) => ({ ...p, liked }) });
-        }
-        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, liked);
-        model1 = flipConcertItemLiked(model1, concertId, trackIdx, liked);
-        return [model1, []];
-      },
+      // Confirm server value (should match the optimistic flip, but carry it through).
+      CompletedLikeToggle: ({ concertId, trackIdx, liked }) => [
+        applyLikedEverywhere(model, concertId, trackIdx, liked),
+        [],
+      ],
 
       FailedLikeToggle: ({ concertId, trackIdx, attempted }) => {
         const reverted = !attempted;
-        let model1 = model;
-        const isCurrentTrack =
-          model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
-        if (isCurrentTrack) {
-          model1 = withError(evo(model1, { playback: (p) => ({ ...p, liked: reverted }) }), "Like failed");
-        }
-        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, reverted);
-        model1 = flipConcertItemLiked(model1, concertId, trackIdx, reverted);
-        return [model1, [SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: reverted })]];
+        const isCurrentTrack = model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
+        const model1 = applyLikedEverywhere(model, concertId, trackIdx, reverted);
+        return [
+          isCurrentTrack ? withError(model1, "Like failed") : model1,
+          [SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: reverted })],
+        ];
       },
 
       ReceivedDeleteTrackResult: ({ concertId, trackIdx, ok, source }) => {
@@ -552,7 +543,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
             if (concert.id !== concertId) return [model, []];
             const currentItem = concert.items[concert.pos] ?? null;
             const pos = refindPosByUrl(items, currentItem ? currentItem.url : null, concert.pos);
-            const model1 = evo(model, { playback: (p) => ({ ...p, concert: Option.some({ ...concert, items, pos }) }) });
+            const model1 = evo(model, {
+              playback: () => evo(model.playback, { concert: () => Option.some(evo(concert, { items: () => items, pos: () => pos })) }),
+            });
             return advanceAfter ? playConcertPosOrEnd(model1) : [model1, []];
           },
         }),
@@ -560,7 +553,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       ReceivedConcertPlaybackItems: ({ concertId, items, atPos }) =>
         playConcertPosOrEnd(
-          evo(model, { playback: (p) => ({ ...p, concert: Option.some({ id: concertId, items, pos: atPos }) }) }),
+          evo(model, {
+            playback: () => evo(model.playback, { concert: () => Option.some({ id: concertId, items, pos: atPos }) }),
+          }),
         ),
       FailedConcertPlayback: ({ errorMessage: msg }) => [withError(model, msg), []],
 
@@ -571,10 +566,12 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       FailedDeleteInterlude: () => [withError(model, "Delete failed"), []],
 
       ReceivedPlaylistTracks: ({ tracks, name }) => {
-        if (tracks.length === 0) return [withError(model, "Nothing to play in this playlist"), []];
+        if (Array.isReadonlyArrayEmpty(tracks)) return [withError(model, "Nothing to play in this playlist"), []];
         const groupId = model.nextGroupId;
-        const entries = tracks.map((t) => makeQueueEntry(t.concertId, t.trackIdx, t.title, false, name, groupId));
-        const model1 = evo(model, { queue: (q) => [...q, ...entries], nextGroupId: () => groupId + 1 });
+        const entries = tracks.map((track) =>
+          makeQueueEntry(track.concertId, track.trackIdx, track.title, false, name, groupId),
+        );
+        const model1 = evo(model, { queue: (queue) => [...queue, ...entries], nextGroupId: () => groupId + 1 });
         return playerIdle(model1)
           ? [model1, [DrainQueue({ queue: model1.queue, plan: "queue-only" }), ScrollQueueToBottom()]]
           : [model1, [ScrollQueueToBottom()]];
@@ -584,7 +581,10 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       ReceivedTrackDetails: ({ concertId, loadGen, tracksBusy, tracks }) => {
         if (model.sidebar.loadGen !== loadGen) return [model, []]; // stale — newer fetch started
         if (model.playback.concertId !== concertId) return [model, []]; // concert changed
-        return [evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ tracksBusy, tracks }) }) }), []];
+        return [
+          evo(model, { sidebar: () => evo(model.sidebar, { tracks: () => Option.some({ tracksBusy, tracks }) }) }),
+          [],
+        ];
       },
       FailedTrackDetails: () => [model, []], // sidebar stays at Option.none(); not user-visible
 
@@ -592,37 +592,40 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       AudioPlaying: () => [evo(model, { isPlaying: () => true }), []],
       AudioPaused: () => [evo(model, { isPlaying: () => false }), []],
-      AudioEnded: () => advanceOrCollapse(evo(model, { playback: (p) => ({ ...p, ended: true }) })),
-      AudioErrored: () => advanceOrCollapse(withError(evo(model, { playback: (p) => ({ ...p, ended: true }) }), "Failed to load media")),
+      AudioEnded: () =>
+        advanceOrCollapse(evo(model, { playback: () => evo(model.playback, { ended: () => true }) })),
+      AudioErrored: () =>
+        advanceOrCollapse(
+          withError(
+            evo(model, { playback: () => evo(model.playback, { ended: () => true }) }),
+            "Failed to load media",
+          ),
+        ),
       AudioPlayRejected: () => [withError(evo(model, { isPlaying: () => false }), "Playback blocked"), []],
 
       // ── Subscription-dispatched messages ──────────────────────────────
+      // Re-stamp playing/preparing CSS markers after htmx:afterSettle /
+      // historyRestore, mirroring player.ts's reassertPlayerUi().
       ReassertUi: () => {
-        // Re-stamp playing/preparing CSS markers after htmx:afterSettle /
-        // historyRestore, mirroring player.ts's reassertPlayerUi().
-        const cmds: Command<Message>[] = [];
         const { concertId, trackIdx } = model.playback;
-        if (concertId !== null) {
-          cmds.push(MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }));
-        }
-        if (Option.isSome(model.pending) && model.pending.value._tag === "Track") {
-          const t = model.pending.value;
-          cmds.push(MarkPreparingExternal({ concertId: t.concertId, trackIdx: t.trackIdx }));
-        }
-        return [model, cmds];
+        const markPlaying =
+          concertId !== null ? [MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) })] : [];
+        const markPreparing = Option.match(model.pending, {
+          onNone: () => [],
+          onSome: (target) =>
+            target._tag === "Track"
+              ? [MarkPreparingExternal({ concertId: target.concertId, trackIdx: target.trackIdx })]
+              : [],
+        });
+        return [model, [...markPlaying, ...markPreparing]];
       },
 
-      SyncLikeFromSwap: ({ concertId, trackIdx, liked }) => {
-        // htmx swapped in new like-button HTML; sync our model copies so bar
-        // star + sidebar list reflect the server's authoritative liked value.
-        let model1 = model;
-        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
-          model1 = evo(model1, { playback: (p) => ({ ...p, liked }) });
-        }
-        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, liked);
-        model1 = flipConcertItemLiked(model1, concertId, trackIdx, liked);
-        return [model1, []];
-      },
+      // htmx swapped in new like-button HTML; sync our model copies so bar
+      // star + sidebar list reflect the server's authoritative liked value.
+      SyncLikeFromSwap: ({ concertId, trackIdx, liked }) => [
+        applyLikedEverywhere(model, concertId, trackIdx, liked),
+        [],
+      ],
 
       PressedSpace: () => (model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]]),
 
@@ -647,16 +650,6 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     }),
   );
 
-/** Local sameTarget over PlayTarget — model.ts already exports one, reused
- *  here under a distinct name to avoid colliding with PlaySource's own
- *  identity helpers above. */
-function sameTargetLocal(a: PlayTarget, b: PlayTarget): boolean {
-  if (a._tag !== b._tag) return false;
-  if (a._tag === "Track" && b._tag === "Track") return a.concertId === b.concertId && a.trackIdx === b.trackIdx;
-  if (a._tag === "Album" && b._tag === "Album") return a.concertId === b.concertId;
-  return false;
-}
-
 // ── Like-sync helpers ────────────────────────────────────────────────────
 //
 // Called from every like-toggle path (bar ToggleLike, sidebar SidebarLikeTrack,
@@ -670,8 +663,10 @@ function flipSidebarTrackLiked(model: Model, concertId: number, trackIdx: number
     onNone: () => model,
     onSome: (sidebarTracks) => {
       if (model.playback.concertId !== concertId) return model;
-      const updated = sidebarTracks.tracks.map((t) => (t.index === trackIdx ? { ...t, liked } : t));
-      return evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ ...sidebarTracks, tracks: updated }) }) });
+      const updated = sidebarTracks.tracks.map((track) => (track.index === trackIdx ? { ...track, liked } : track));
+      return evo(model, {
+        sidebar: () => evo(model.sidebar, { tracks: () => Option.some(evo(sidebarTracks, { tracks: () => updated })) }),
+      });
     },
   });
 }
@@ -685,8 +680,12 @@ function flipSidebarTrackAvailable(model: Model, concertId: number, trackIdx: nu
     onNone: () => model,
     onSome: (sidebarTracks) => {
       if (model.playback.concertId !== concertId) return model;
-      const updated = sidebarTracks.tracks.map((t) => (t.index === trackIdx ? { ...t, available } : t));
-      return evo(model, { sidebar: (s) => ({ ...s, tracks: Option.some({ ...sidebarTracks, tracks: updated }) }) });
+      const updated = sidebarTracks.tracks.map((track) =>
+        track.index === trackIdx ? { ...track, available } : track,
+      );
+      return evo(model, {
+        sidebar: () => evo(model.sidebar, { tracks: () => Option.some(evo(sidebarTracks, { tracks: () => updated })) }),
+      });
     },
   });
 }
@@ -699,9 +698,46 @@ function flipConcertItemLiked(model: Model, concertId: number, trackIdx: number,
       const updated = concert.items.map((item) =>
         item.track_index === trackIdx && item.kind !== "interlude" ? { ...item, liked } : item,
       );
-      return evo(model, { playback: (p) => ({ ...p, concert: Option.some({ ...concert, items: updated }) }) });
+      return evo(model, {
+        playback: () => evo(model.playback, { concert: () => Option.some(evo(concert, { items: () => updated })) }),
+      });
     },
   });
+}
+
+/** Applies a `liked` flip to every copy the Model keeps in sync: the bar star
+ *  (only when `concertId`/`trackIdx` is the currently-playing track),
+ *  the whole-album sidebar list, and the concert-reconstruction list.
+ *  Shared by every like-toggle path (bar ToggleLike, sidebar SidebarLikeTrack,
+ *  CompletedLikeToggle/FailedLikeToggle, and the htmx-swap SyncLikeFromSwap). */
+function applyLikedEverywhere(model: Model, concertId: number, trackIdx: number, liked: boolean): Model {
+  const isCurrentTrack = model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
+  const model1 = isCurrentTrack
+    ? evo(model, { playback: () => evo(model.playback, { liked: () => liked }) })
+    : model;
+  const model2 = flipSidebarTrackLiked(model1, concertId, trackIdx, liked);
+  return flipConcertItemLiked(model2, concertId, trackIdx, liked);
+}
+
+/** The current `liked` state for a track, looked up from whichever list is
+ *  active (the whole-album sidebar list, then the concert-reconstruction
+ *  list) — `None` when the track isn't in either loaded list. */
+function findCurrentLiked(model: Model, concertId: number, trackIdx: number): Option.Option<boolean> {
+  const inSidebar =
+    model.playback.concertId === concertId
+      ? Option.flatMap(model.sidebar.tracks, (sidebarTracks) =>
+          Option.fromNullishOr(sidebarTracks.tracks.find((track) => track.index === trackIdx)?.liked),
+        )
+      : Option.none();
+  return Option.orElse(inSidebar, () =>
+    Option.flatMap(model.playback.concert, (concert) =>
+      concert.id === concertId
+        ? Option.fromNullishOr(
+            concert.items.find((item) => item.track_index === trackIdx && item.kind !== "interlude")?.liked,
+          )
+        : Option.none(),
+    ),
+  );
 }
 
 // ── PlayerCommand dispatch (host calls in via the single inbound Port) ──
@@ -724,8 +760,8 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
 
       SkipToNext: () => {
         if (Option.isSome(model.playback.concert)) {
-          const [model2, cmds] = advanceConcertPure(model);
-          return [model2, [PauseAudio(), ...cmds]];
+          const [model2, commands] = advanceConcertPure(model);
+          return [model2, [PauseAudio(), ...commands]];
         }
         if (!nextEnabled(toCoreState(model.playback), model.queue.length)) return [model, []];
         return [model, [PauseAudio(), DrainQueue({ queue: model.queue, plan: "next-or-none" })]];
@@ -734,8 +770,8 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         if (Option.isSome(model.playback.concert)) {
           const concert = model.playback.concert.value;
           if (concert.pos <= 0) return [model, []];
-          const [model2, cmds] = playConcertItemPure(model, concert.pos - 1);
-          return [model2, [PauseAudio(), ...cmds]];
+          const [model2, commands] = playConcertItemPure(model, concert.pos - 1);
+          return [model2, [PauseAudio(), ...commands]];
         }
         if (!prevEnabled(toCoreState(model.playback))) return [model, []];
         if (model.playback.concertId === null || model.playback.trackIdx === null) return [model, []];
@@ -762,11 +798,8 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         if (model.playback.trackIdx === null || model.playback.concertId === null) return [model, []];
         const { concertId, trackIdx } = model.playback;
         const next = !model.playback.liked;
-        let model1 = evo(model, { playback: (p) => ({ ...p, liked: next }) });
-        model1 = flipSidebarTrackLiked(model1, concertId, trackIdx, next);
-        model1 = flipConcertItemLiked(model1, concertId, trackIdx, next);
         return [
-          model1,
+          applyLikedEverywhere(model, concertId, trackIdx, next),
           [
             ToggleLikeRequest({ concertId, trackIdx, next }),
             SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: next }),
@@ -781,31 +814,31 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       OpenConcert: () =>
         model.playback.concertId === null ? [model, []] : [model, [NavigateToConcert({ concertId: model.playback.concertId })]],
       OpenSidebar: () => {
-        const model1 = evo(model, { sidebar: (s) => ({ ...s, open: true }) });
+        const model1 = evo(model, { sidebar: () => evo(model.sidebar, { open: () => true }) });
         // Whole-album mode: fetch the track list. Reconstruction mode (concert
         // Some) renders from model.playback.concert.items — no fetch needed.
         const concertId = model.playback.concertId;
         if (concertId !== null && Option.isNone(model.playback.concert)) {
           const loadGen = model.sidebar.loadGen + 1;
           return [
-            evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
+            evo(model1, { sidebar: () => evo(model1.sidebar, { loadGen: () => loadGen }) }),
             [MutateBodyClass({ className: "sidebar-open", add: true }), FetchTrackDetails({ concertId, loadGen })],
           ];
         }
         return [model1, [MutateBodyClass({ className: "sidebar-open", add: true })]];
       },
       CloseSidebar: () => [
-        evo(model, { sidebar: (s) => ({ ...s, open: false }) }),
+        evo(model, { sidebar: () => evo(model.sidebar, { open: () => false }) }),
         [MutateBodyClass({ className: "sidebar-open", add: false })],
       ],
       ToggleSidebar: () => {
         const opening = !model.sidebar.open;
-        const model1 = evo(model, { sidebar: (s) => ({ ...s, open: opening }) });
+        const model1 = evo(model, { sidebar: () => evo(model.sidebar, { open: () => opening }) });
         const concertId = model.playback.concertId;
         if (opening && concertId !== null && Option.isNone(model.playback.concert)) {
           const loadGen = model.sidebar.loadGen + 1;
           return [
-            evo(model1, { sidebar: (s) => ({ ...s, loadGen }) }),
+            evo(model1, { sidebar: () => evo(model1.sidebar, { loadGen: () => loadGen }) }),
             [MutateBodyClass({ className: "sidebar-open", add: opening }), FetchTrackDetails({ concertId, loadGen })],
           ];
         }
@@ -816,11 +849,11 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       PlayQueueEntryNow: ({ pos }) => {
         const entry = model.queue[pos];
         if (!entry) return [model, []];
-        const model1 = evo(model, { queue: (q) => dequeueAt(q, pos) });
+        const model1 = evo(model, { queue: (queue) => dequeueAt(queue, pos) });
         return [model1, [FetchTrackInfo({ concertId: entry.concertId, trackIdx: entry.trackIdx, opts: defaultPlayOpts })]];
       },
-      Dequeue: ({ pos }) => [evo(model, { queue: (q) => dequeueAt(q, pos) }), []],
-      RemoveGroup: ({ groupId }) => [evo(model, { queue: (q) => removeGroup(q, groupId) }), []],
+      Dequeue: ({ pos }) => [evo(model, { queue: (queue) => dequeueAt(queue, pos) }), []],
+      RemoveGroup: ({ groupId }) => [evo(model, { queue: (queue) => removeGroup(queue, groupId) }), []],
       Enqueue: ({ concertId, trackIdx, title, liked }) => {
         const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
         return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom()] : []];
@@ -828,11 +861,12 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
 
       PlayAlbumAt: ({ concertId, seconds }) => {
         if (model.playback.concertId === concertId && model.playback.trackIdx === null) {
-          const cmds: Command<Message>[] = [SeekAudio({ seconds })];
-          if (!model.isPlaying) cmds.push(ResumeAudio());
-          return [model, cmds];
+          return [model, [SeekAudio({ seconds }), ...(model.isPlaying ? [] : [ResumeAudio()])]];
         }
-        return [evo(model, { pendingSeek: () => Option.some(seconds) }), [FetchAlbumInfo({ concertId, opts: { recordListen: false, playlistName: null, openVideoPanel: false } })]];
+        return [
+          evo(model, { pendingSeek: () => Option.some(seconds) }),
+          [FetchAlbumInfo({ concertId, opts: { recordListen: false, playlistName: null, openVideoPanel: false } })],
+        ];
       },
       PlayPlaylist: ({ playlistId }) => [model, [FetchPlaylistForPlay({ playlistId })]],
 
@@ -860,7 +894,12 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
         Option.match(model.playback.concert, {
           onSome: (concert) =>
             concert.id === concertId
-              ? playConcertItemPure(evo(model, { playback: (p) => ({ ...p, concert: Option.some({ ...concert, pos }) }) }), pos)
+              ? playConcertItemPure(
+                  evo(model, {
+                    playback: () => evo(model.playback, { concert: () => Option.some(evo(concert, { pos: () => pos })) }),
+                  }),
+                  pos,
+                )
               : [model, [FetchConcertPlayback({ concertId, atPos: Option.some(pos), errorMessage: concertErrorMessages.load })]],
           onNone: () => [model, [FetchConcertPlayback({ concertId, atPos: Option.some(pos), errorMessage: concertErrorMessages.load })]],
         }),
@@ -876,33 +915,12 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       },
 
       SidebarLikeTrack: ({ concertId, trackIdx }) => {
-        // Find current liked state from whichever list is active.
-        let currentLiked: boolean | null = null;
-        const sidebarTracks = Option.getOrNull(model.sidebar.tracks);
-        if (sidebarTracks && model.playback.concertId === concertId) {
-          const t = sidebarTracks.tracks.find((t) => t.index === trackIdx);
-          if (t) currentLiked = t.liked;
-        }
-        if (currentLiked === null) {
-          const concert = Option.getOrNull(model.playback.concert);
-          if (concert && concert.id === concertId) {
-            const item = concert.items.find(
-              (item) => item.track_index === trackIdx && item.kind !== "interlude",
-            );
-            if (item) currentLiked = item.liked;
-          }
-        }
-        if (currentLiked === null) return [model, []]; // track not in any loaded list
+        const maybeCurrentLiked = findCurrentLiked(model, concertId, trackIdx);
+        if (Option.isNone(maybeCurrentLiked)) return [model, []]; // track not in any loaded list
 
-        const next = !currentLiked;
-        let model1 = flipSidebarTrackLiked(model, concertId, trackIdx, next);
-        model1 = flipConcertItemLiked(model1, concertId, trackIdx, next);
-        // Also sync bar star if this is the currently-playing track.
-        if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
-          model1 = evo(model1, { playback: (p) => ({ ...p, liked: next }) });
-        }
+        const next = !maybeCurrentLiked.value;
         return [
-          model1,
+          applyLikedEverywhere(model, concertId, trackIdx, next),
           [
             ToggleLikeRequest({ concertId, trackIdx, next }),
             SyncLikeButtonsExternal({ concertId, trackIdx: Option.some(trackIdx), liked: next }),
