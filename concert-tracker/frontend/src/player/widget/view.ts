@@ -8,6 +8,18 @@ import { PlayerCommandValue } from "./port";
 
 // VIEW — player bar + sidebar (queue + concert sections).
 // Host embed wiring + layout.html restructure land in commit 7.
+//
+// NOTE: hand-rolling buttons/inputs here rather than reaching for Ui.Button /
+// Ui.Input — @foldkit/ui is not a dependency of this project (see
+// package.json). Adopting it is a separate decision from this a11y pass;
+// these elements are instead given explicit AriaLabel/Role/AriaPressed by
+// hand where the interaction isn't self-describing from visible text.
+
+/** Enter/Space activation for an element carrying `Role("button")` — native
+ *  `<button>` gets this for free; a `<span role="button">` needs it wired
+ *  explicitly or it's a keyboard trap. */
+const onActivateKey = (message: Message) => (key: string) =>
+  key === "Enter" || key === " " ? Option.some(message) : Option.none();
 
 // Inline adapter: widget's Option-based Playback → core.PlaybackState nulls.
 // Kept local since only nextEnabled/prevEnabled need the core shape.
@@ -36,13 +48,15 @@ function reconstructionList(concert: ConcertPlaybackState, concertId: number): H
 
       if (!isInterlude && trackIdx !== null) {
         return liRow(
-          String(pos),
+          `track-${trackIdx}`,
           [h.Class(isPlaying ? "concert-item concert-item-playing" : "concert-item")],
           [
             h.button(
               [
                 h.Class(item.liked ? "btn-like liked" : "btn-like"),
                 h.Title("Like"),
+                h.AriaLabel("Like"),
+                h.AriaPressed(item.liked ? "true" : "false"),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarLikeTrack({ concertId, trackIdx }),
@@ -66,6 +80,7 @@ function reconstructionList(concert: ConcertPlaybackState, concertId: number): H
               [
                 h.Class("btn-delete"),
                 h.Title("Delete track files"),
+                h.AriaLabel(`Delete files for ${item.title}`),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarDeleteTrack({ concertId, trackIdx }),
@@ -78,6 +93,7 @@ function reconstructionList(concert: ConcertPlaybackState, concertId: number): H
               [
                 h.Class("btn-add-pl"),
                 h.Title("Add to playlist"),
+                h.AriaLabel(`Add ${item.title} to playlist`),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarAddToPlaylist({
@@ -97,7 +113,7 @@ function reconstructionList(concert: ConcertPlaybackState, concertId: number): H
       // Interlude row
       const interludeIdx = item.interlude_index ?? 0;
       return liRow(
-        String(pos),
+        `interlude-${interludeIdx}`,
         [h.Class(isPlaying ? "concert-item concert-item-interlude concert-item-playing" : "concert-item concert-item-interlude")],
         [
           h.button(
@@ -115,6 +131,7 @@ function reconstructionList(concert: ConcertPlaybackState, concertId: number): H
             [
               h.Class("btn-delete"),
               h.Title("Delete interlude file"),
+              h.AriaLabel(`Delete interlude file for ${item.title}`),
               h.OnClick(
                 CommandReceived({
                   command: PlayerCommandValue.SidebarDeleteInterlude({ concertId, interludeIdx }),
@@ -145,13 +162,15 @@ function wholeAlbumList(
 
       if (track.available) {
         return liRow(
-          String(track.index),
+          `avail-${track.index}`,
           [h.Class(isPlaying ? "concert-item concert-item-playing" : "concert-item")],
           [
             h.button(
               [
                 h.Class(track.liked ? "btn-like liked" : "btn-like"),
                 h.Title("Like"),
+                h.AriaLabel("Like"),
+                h.AriaPressed(track.liked ? "true" : "false"),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarLikeTrack({
@@ -199,6 +218,7 @@ function wholeAlbumList(
               [
                 h.Class("btn-delete"),
                 h.Title("Delete track files"),
+                h.AriaLabel(`Delete files for ${track.title}`),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarDeleteTrack({
@@ -214,6 +234,7 @@ function wholeAlbumList(
               [
                 h.Class("btn-add-pl"),
                 h.Title("Add to playlist"),
+                h.AriaLabel(`Add ${track.title} to playlist`),
                 h.OnClick(
                   CommandReceived({
                     command: PlayerCommandValue.SidebarAddToPlaylist({
@@ -232,7 +253,7 @@ function wholeAlbumList(
 
       // Unavailable track: clicking triggers prepare via PlayTrack's missing-file path.
       return liRow(
-        String(track.index),
+        `unavail-${track.index}`,
         [h.Class("concert-item track-unavailable")],
         [
           h.button(
@@ -278,6 +299,7 @@ function queueSection(model: Model): Html {
                 h.button(
                   [
                     h.Class("btn-remove-group"),
+                    h.AriaLabel(`Remove ${row.name} from queue`),
                     h.OnClick(CommandReceived({ command: PlayerCommandValue.RemoveGroup({ groupId: row.groupId }) })),
                   ],
                   ["×"],
@@ -286,12 +308,13 @@ function queueSection(model: Model): Html {
             );
           }
           return liRow(
-            `song-${row.entry.concertId}-${row.entry.trackIdx}`,
+            `song-${row.entry.groupId ?? "solo"}-${row.entry.concertId}-${row.entry.trackIdx}`,
             [h.Class(row.nested ? "queue-song queue-song-nested" : "queue-song")],
             [
               h.button(
                 [
                   h.Class("btn-remove-queue"),
+                  h.AriaLabel(`Remove ${row.entry.title} from queue`),
                   h.OnClick(CommandReceived({ command: PlayerCommandValue.Dequeue({ pos: row.pos }) })),
                 ],
                 ["×"],
@@ -384,6 +407,8 @@ export const view = (model: Model): Html => {
                       h.Id("player-like"),
                       h.Class("btn-like"),
                       h.Title("Like"),
+                      h.AriaLabel("Like"),
+                      h.AriaPressed(p.liked ? "true" : "false"),
                       h.Style({ display: hasTrack ? "" : "none" }),
                       h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleLike() })),
                     ],
@@ -393,6 +418,7 @@ export const view = (model: Model): Html => {
                     [
                       h.Id("player-add-pl"),
                       h.Title("Add to playlist"),
+                      h.AriaLabel("Add to playlist"),
                       h.Style({ display: hasTrack ? "" : "none" }),
                       h.OnClick(CommandReceived({ command: PlayerCommandValue.AddToPlaylist() })),
                     ],
@@ -403,11 +429,15 @@ export const view = (model: Model): Html => {
                       h.Id("player-track"),
                       h.Role("button"),
                       h.Tabindex(0),
+                      h.AriaLabel("Toggle queue and tracks sidebar"),
                       // #player-track has `display: none` as its CSS baseline
                       // (style.css); like the action buttons above, it needs
                       // an explicit shown value, not "".
                       h.Style({ display: hasTrack && p.trackIdx !== null ? "inline-block" : "none" }),
                       h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                      h.OnKeyDownPreventDefault(
+                        onActivateKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                      ),
                     ],
                     [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
                   ),
@@ -416,7 +446,11 @@ export const view = (model: Model): Html => {
                       h.Id("player-title"),
                       h.Role("button"),
                       h.Tabindex(0),
+                      h.AriaLabel("Toggle queue and tracks sidebar"),
                       h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                      h.OnKeyDownPreventDefault(
+                        onActivateKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                      ),
                     ],
                     [p.title],
                   ),
@@ -448,8 +482,8 @@ export const view = (model: Model): Html => {
           ),
 
           // ── Status / error feedback ─────────────────────────────────
-          h.span([h.Id("player-error")], [errorText]),
-          h.span([h.Id("player-status")], [busyText]),
+          h.span([h.Id("player-error"), h.Role("alert")], [errorText]),
+          h.span([h.Id("player-status"), h.AriaLive("polite")], [busyText]),
 
           // ── Action buttons ──────────────────────────────────────────
           // Watch gates on isVideo alone: it only folds out the inline video
@@ -477,6 +511,7 @@ export const view = (model: Model): Html => {
             [
               h.Id("player-open"),
               h.Title("Open in system player"),
+              h.AriaLabel("Open in system player"),
               h.Style({ display: p.watchUrl !== null ? "inline-block" : "none" }),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.OpenExternal() })),
             ],
@@ -502,6 +537,7 @@ export const view = (model: Model): Html => {
             [
               h.Id("player-prev"),
               h.Title("Previous track"),
+              h.AriaLabel("Previous track"),
               h.Disabled(!prevOn),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToPrev() })),
             ],
@@ -510,6 +546,7 @@ export const view = (model: Model): Html => {
           h.button(
             [
               h.Id("player-play-pause"),
+              h.AriaLabel(model.isPlaying ? "Pause" : "Play"),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
             ],
             [model.isPlaying ? "⏸" : "▶"],
@@ -518,19 +555,23 @@ export const view = (model: Model): Html => {
             [
               h.Id("player-next"),
               h.Title("Next track"),
+              h.AriaLabel("Next track"),
               h.Disabled(!nextOn),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.SkipToNext() })),
             ],
             ["⏭"],
           ),
-          // Seek + time: static until audio Subscription adds currentTime/duration.
+          // Seek + time: static until audio Subscription adds currentTime/duration,
+          // so it's disabled rather than presented as a working control.
           h.input([
             h.Id("player-seek"),
             h.Type("range"),
+            h.AriaLabel("Seek"),
             h.Min("0"),
             h.Max("100"),
             h.Value("0"),
             h.Step("1"),
+            h.Disabled(true),
           ]),
           h.span([h.Id("player-time")], ["0:00 / 0:00"]),
         ],

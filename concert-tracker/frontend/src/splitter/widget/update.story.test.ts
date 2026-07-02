@@ -206,6 +206,23 @@ describe("splitter update", () => {
     );
   });
 
+  test("ChangedTimeInput clears a previous status error once a valid timecode is entered", () => {
+    Story.story(
+      update,
+      Story.with(ready()),
+      Story.message(ChangedTimeInput({ trackIndex: 0, kind: "Start", rawValue: "abc" })),
+      Story.model((m) =>
+        expect(m.status).toEqual(StatusValue.StatusError({ message: "Enter a time like 2:05.0" })),
+      ),
+      Story.message(ChangedTimeInput({ trackIndex: 0, kind: "Start", rawValue: "0:10" })),
+      Story.model((m) => {
+        expect(m.status).toEqual(StatusValue.NoStatus());
+        expect(asReady(m).editor.tracks[0]?.start).toBe(10);
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
   test("ToggledBoundary detaches a linked boundary", () => {
     Story.story(
       update,

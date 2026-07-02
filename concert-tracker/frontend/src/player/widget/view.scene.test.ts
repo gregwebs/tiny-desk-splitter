@@ -1,6 +1,7 @@
 import { Option } from "effect";
 import { Scene } from "foldkit";
-import { describe, test } from "vitest";
+import type { Html } from "foldkit/html";
+import { describe, expect, test } from "vitest";
 
 import { makeQueueEntry } from "../core";
 import {
@@ -362,6 +363,60 @@ describe("player-bar view", () => {
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
     );
   });
+
+  // Regression: #player-title/#player-track are Role("button") spans, not
+  // native <button>s, so Enter/Space activation has to be wired explicitly
+  // via OnKeyDownPreventDefault — a keyboard user otherwise can't open the
+  // sidebar from them at all.
+  test("pressing Enter on the title span opens the sidebar (keyboard activation)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
+      Scene.keydown(Scene.selector("#player-title"), "Enter"),
+      Scene.Command.resolve(MutateBodyClass, Acked()),
+      Scene.Command.resolve(
+        FetchTrackDetails,
+        ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
+      ),
+      Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
+    );
+  });
+
+  test("pressing Enter on the track-number span opens the sidebar (keyboard activation)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
+      Scene.keydown(Scene.selector("#player-track"), " "),
+      Scene.Command.resolve(MutateBodyClass, Acked()),
+      Scene.Command.resolve(
+        FetchTrackDetails,
+        ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
+      ),
+      Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
+    );
+  });
+
+  test("play/pause button's accessible name reflects isPlaying", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({}, { isPlaying: false })),
+      Scene.expect(Scene.selector("#player-play-pause")).toHaveAccessibleName("Play"),
+    );
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({}, { isPlaying: true })),
+      Scene.expect(Scene.selector("#player-play-pause")).toHaveAccessibleName("Pause"),
+    );
+  });
+
+  test("error text is announced via role=alert", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...noPlayback, status: StatusValue.Error({ message: "Playback blocked" }) }),
+      Scene.expect(Scene.selector("#player-error")).toHaveAttr("role", "alert"),
+      Scene.expect(Scene.selector("#player-error")).toContainText("Playback blocked"),
+    );
+  });
 });
 
 describe("player sidebar — concert section", () => {
@@ -660,5 +715,123 @@ describe("player sidebar — queue section", () => {
       // RemoveGroup dispatches no commands; both songs leave, queue is empty.
       Scene.expect(Scene.selector("#sidebar-queue-empty")).toBeVisible(),
     );
+  });
+});
+
+// ── Keyed list identity ──────────────────────────────────────────────────
+//
+// Foldkit's `keyed()` wraps each row so the vdom patches by identity, not
+// position (see architecture.md's "Keyed Views" and checklist blind spot
+// #16). These tests inspect the rendered VNode tree directly — Scene's
+// DOM-level API doesn't expose snabbdom's `key`, which is never reflected
+// as a DOM attribute — to verify the identity contract keyed() depends on:
+// keys must be unique within a render, and stable for the same logical row
+// across a position shift.
+
+type VNode = NonNullable<Html>;
+
+function findById(node: Html, id: string): VNode | null {
+  if (node === null) return null;
+  const props: Record<string, unknown> | undefined = node.data?.props;
+  if (props?.id === id) return node;
+  for (const child of node.children ?? []) {
+    if (typeof child === "string") continue;
+    const found = findById(child, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+function rowKeys(list: VNode): ReadonlyArray<PropertyKey> {
+  return (list.children ?? []).flatMap((child) => (typeof child === "string" ? [] : (child.key ?? [])));
+}
+
+function findOl(node: Html): VNode | null {
+  if (node === null) return null;
+  if (node.sel === "ol") return node;
+  for (const child of node.children ?? []) {
+    if (typeof child === "string") continue;
+    const found = findOl(child);
+    if (found) return found;
+  }
+  return null;
+}
+
+describe("player sidebar — keyed row identity", () => {
+  test("a queue row queued solo and again via a playlist group gets distinct keys", () => {
+    const model: Model = {
+      ...initialModel,
+      queue: [
+        makeQueueEntry(1, 0, "Solo Queue", false),
+        makeQueueEntry(1, 0, "Playlist Queue", false, "Jazz Classics", 7),
+      ],
+    };
+    const list = findById(view(model), "sidebar-queue-list");
+    if (!list) throw new Error("expected #sidebar-queue-list to render");
+    const keys = rowKeys(list);
+    expect(new Set(keys).size).toBe(keys.length);
+  });
+
+  test("a concert-reconstruction track row's key is stable across a position shift", () => {
+    const concertId = 1;
+    const trackAtPos2: Model = {
+      ...initialModel,
+      playback: {
+        ...initialPlayback,
+        concertId,
+        concert: Option.some({
+          id: concertId,
+          pos: 0,
+          items: [
+            interludeItem(0, "Intro", "/i/0.mp3"),
+            interludeItem(1, "Intermission", "/i/1.mp3"),
+            trackItem(5, "Track", "/a/5.mp3"),
+          ],
+        }),
+      },
+    };
+    const trackAtPos0: Model = {
+      ...initialModel,
+      playback: {
+        ...initialPlayback,
+        concertId,
+        concert: Option.some({
+          id: concertId,
+          pos: 0,
+          items: [trackItem(5, "Track", "/a/5.mp3")],
+        }),
+      },
+    };
+    const olAtPos2 = findOl(findById(view(trackAtPos2), "sidebar-concert-section"));
+    const olAtPos0 = findOl(findById(view(trackAtPos0), "sidebar-concert-section"));
+    if (!olAtPos2 || !olAtPos0) throw new Error("expected the concert section's track list to render");
+    const [, , keyAtPos2] = rowKeys(olAtPos2);
+    const [keyAtPos0] = rowKeys(olAtPos0);
+    expect(keyAtPos2).toBe(keyAtPos0);
+  });
+
+  test("a whole-album track's key differs across its available and unavailable states", () => {
+    const concertId = 1;
+    const trackList = (tracks: { index: number; title: string; available: boolean; is_video: boolean; liked: boolean }[]) => ({
+      ...initialModel,
+      playback: { ...initialPlayback, concertId, trackIdx: 0 },
+      sidebar: { open: true, tracks: Option.some({ tracksBusy: false, tracks }), loadGen: 1 },
+    });
+    // Same track (index 5), rendered once while its file is missing and once
+    // after it's downloaded — the row's button count changes (1 button vs.
+    // 5), so patching one into the other by a shared key would misapply
+    // event handlers to the wrong structure.
+    const unavailable: Model = trackList([
+      { index: 5, title: "Sixth", available: false, is_video: false, liked: false },
+    ]);
+    const available: Model = trackList([
+      { index: 5, title: "Sixth", available: true, is_video: false, liked: false },
+    ]);
+    const olUnavailable = findOl(findById(view(unavailable), "sidebar-concert-section"));
+    const olAvailable = findOl(findById(view(available), "sidebar-concert-section"));
+    if (!olUnavailable || !olAvailable) throw new Error("expected the concert section's track list to render");
+    const [keyUnavailable] = rowKeys(olUnavailable);
+    const [keyAvailable] = rowKeys(olAvailable);
+    expect(keyUnavailable).not.toBe(keyAvailable);
   });
 });

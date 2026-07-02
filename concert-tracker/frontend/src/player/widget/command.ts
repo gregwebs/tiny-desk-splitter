@@ -18,7 +18,7 @@ import {
   postPrepare,
 } from "../../api/client";
 import { clampSidebarWidth, PREPARE_POLL_MS, SIDEBAR_WIDTH_KEY } from "../core";
-import { byIdOf, byIdOfOrNull, byIdOrNull } from "../../shared/dom";
+import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import { setNowPlaying } from "../mirror";
 import {
   Acked,
@@ -426,14 +426,15 @@ export const PlayAudio = Command.define(
   Acked,
   AudioPlayRejected,
 )(({ url }) =>
-  Effect.sync(() => {
-    const audio = byIdOf("player-audio", HTMLMediaElement);
-    audio.src = url;
-    return audio;
-  }).pipe(
-    Effect.flatMap((audio) => Effect.tryPromise(() => audio.play())),
-    Effect.as(Acked()),
-    Effect.catch(() => Effect.succeed(AudioPlayRejected())),
+  Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
+    Effect.flatMap((audio) => {
+      if (!audio) return Effect.succeed(AudioPlayRejected());
+      audio.src = url;
+      return Effect.tryPromise(() => audio.play()).pipe(
+        Effect.as(Acked()),
+        Effect.catch(() => Effect.succeed(AudioPlayRejected())),
+      );
+    }),
   ),
 );
 
@@ -585,7 +586,7 @@ export const OpenInNewTab = Command.define(
   "OpenInNewTab",
   { url: S.String },
   Acked,
-)(({ url }) => Effect.sync(() => window.open(url, "_blank")).pipe(Effect.as(Acked())));
+)(({ url }) => Effect.sync(() => window.open(url, "_blank", "noopener")).pipe(Effect.as(Acked())));
 
 export const NavigateToConcert = Command.define(
   "NavigateToConcert",
