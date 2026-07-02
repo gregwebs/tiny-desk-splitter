@@ -403,6 +403,10 @@ export const view = (model: Model): Html => {
                       h.Id("player-track"),
                       h.Role("button"),
                       h.Tabindex(0),
+                      // #player-track has `display: none` as its CSS baseline
+                      // (style.css); like the action buttons above, it needs
+                      // an explicit shown value, not "".
+                      h.Style({ display: hasTrack && p.trackIdx !== null ? "inline-block" : "none" }),
                       h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                     ],
                     [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
@@ -448,11 +452,23 @@ export const view = (model: Model): Html => {
           h.span([h.Id("player-status")], [busyText]),
 
           // ── Action buttons ──────────────────────────────────────────
+          // Watch gates on isVideo alone: it only folds out the inline video
+          // panel over the already-playing #player-audio element, so it needs
+          // no URL — and concert-reconstruction playback always has
+          // watchUrl: null (see watchUrlFor's ConcertItem case in update.ts)
+          // even for video items. Open gates on watchUrl because OpenExternal
+          // is a no-op without one.
+          //
+          // "inline-block" (not "") is the shown value everywhere in this
+          // action-button group: #player-watch/#player-open/#player-delete
+          // all have `display: none` as their CSS baseline (style.css), so an
+          // empty inline style leaves that baseline in effect and the element
+          // stays hidden — only a real value actually overrides it.
           h.button(
             [
               h.Id("player-watch"),
               h.Title("Watch video in player"),
-              h.Style({ display: p.isVideo && p.watchUrl !== null ? "" : "none" }),
+              h.Style({ display: p.isVideo ? "inline-block" : "none" }),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.Watch() })),
             ],
             ["Watch"],
@@ -461,7 +477,7 @@ export const view = (model: Model): Html => {
             [
               h.Id("player-open"),
               h.Title("Open in system player"),
-              h.Style({ display: p.watchUrl !== null ? "" : "none" }),
+              h.Style({ display: p.watchUrl !== null ? "inline-block" : "none" }),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.OpenExternal() })),
             ],
             ["⊞"],
@@ -471,7 +487,11 @@ export const view = (model: Model): Html => {
               h.Id("player-delete"),
               h.Title("Delete this track"),
               h.AriaLabel("Delete this track"),
-              h.Style({ display: hasTrack ? "" : "none" }),
+              // Liked tracks hide Delete (mirrors the old player's
+              // `trackIdx == null || liked` guard) — deleting a starred
+              // track's files is a destructive action gated behind unstarring
+              // first.
+              h.Style({ display: hasTrack && !p.liked ? "inline-block" : "none" }),
               h.OnClick(CommandReceived({ command: PlayerCommandValue.DeleteTrack() })),
             ],
             [h.span([h.Class("icon-trash")], [])],

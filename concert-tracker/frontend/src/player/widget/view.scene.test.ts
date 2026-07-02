@@ -141,6 +141,19 @@ describe("player-bar view", () => {
     );
   });
 
+  // Regression: #player-delete must gate on liked too (mirrors the old
+  // player's `trackIdx == null || liked` guard) — a starred track's files
+  // are protected from the player-bar delete button until unstarred.
+  test("playing a liked track — delete hidden, like/add still visible", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({ liked: true })),
+      Scene.expect(Scene.selector("#player-like")).toBeVisible(),
+      Scene.expect(Scene.selector("#player-add-pl")).toBeVisible(),
+      Scene.expect(Scene.selector("#player-delete")).not.toBeVisible(),
+    );
+  });
+
   test("playing in album mode — like/add/delete hidden (no trackIdx)", () => {
     Scene.scene(
       { update, view },
@@ -174,6 +187,19 @@ describe("player-bar view", () => {
       Scene.with(trackModel({ isVideo: false, watchUrl: "https://example.com/watch/1" })),
       Scene.expect(Scene.selector("#player-watch")).not.toBeVisible(),
       Scene.expect(Scene.selector("#player-open")).toBeVisible(),
+    );
+  });
+
+  // Regression test: concert-reconstruction playback of a video item always
+  // has watchUrl: null (see watchUrlFor's ConcertItem case in update.ts), so
+  // Watch must stay visible on isVideo alone — it doesn't need a URL, it only
+  // folds out the inline video panel over the already-playing element.
+  test("video item playing with watchUrl null (concert playback) — watch visible, open hidden", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({ isVideo: true, watchUrl: null })),
+      Scene.expect(Scene.selector("#player-watch")).toBeVisible(),
+      Scene.expect(Scene.selector("#player-open")).not.toBeVisible(),
     );
   });
 
