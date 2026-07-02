@@ -68,7 +68,7 @@ export const TrackMissing = m("TrackMissing", { source: PlaySource });
  *  callers supply it via the Command since it varies ("Couldn't load next
  *  track" vs "Couldn't start concert" etc), matching player.ts's per-call-site
  *  showError() text. */
-export const FailedFetchInfo = m("FailedFetchInfo", { source: PlaySource, message: S.String });
+export const FailedFetchInfo = m("FailedFetchInfo", { source: PlaySource, errorMessage: S.String });
 
 /** trackMediaInfo() result for the playTrack "something else is already
  *  playing" branch — enqueue, don't play. `info` is None when the track file
@@ -191,7 +191,7 @@ export const ReceivedConcertPlaybackItems = m("ReceivedConcertPlaybackItems", {
 /** Covers both the empty-items case ("Nothing to play") and a fetch error
  *  ("Couldn't start/load concert"); `message` carries the right text since it
  *  differs by call site (playConcert vs playConcertFrom). */
-export const FailedConcertPlayback = m("FailedConcertPlayback", { concertId: S.Number, message: S.String });
+export const FailedConcertPlayback = m("FailedConcertPlayback", { concertId: S.Number, errorMessage: S.String });
 
 export const CompletedDeleteInterlude = m("CompletedDeleteInterlude", {
   concertId: S.Number,

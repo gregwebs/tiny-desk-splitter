@@ -241,9 +241,15 @@ A root `justfile` provides the standard lint targets:
 
 ```sh
 just fmt          # auto-format
-just lint         # fmt --check + clippy + ts-check + ts-verify (the full standard suite)
+just lint         # fmt --check + clippy + shellcheck + ts-check + ts-lint (the full standard suite)
 just clippy-all   # also lint the leptess-ocr code path (needs Tesseract/leptonica)
 ```
+
+`just ts-lint` runs [oxlint](https://oxc.rs/docs/guide/usage/linter.html) with the
+[Foldkit oxlint plugin](https://foldkit.dev/tooling/oxlint-plugin) over
+`concert-tracker/frontend` (config: `concert-tracker/frontend/.oxlintrc.json`) — Elm
+Architecture naming/shape conventions plus a strict TypeScript baseline (no `any`, no
+type assertions). See `docs/change/2026-07-01-oxlint-foldkit.md`.
 
 #### One-time hook setup (per clone)
 
@@ -253,7 +259,7 @@ just install-hooks
 
 This sets `core.hooksPath = .githooks` so that:
 - **pre-commit** runs `cargo fmt --check` (fast)
-- **pre-push** runs `just clippy`, `just ts-check`, and `just ts-verify`
+- **pre-push** runs `just clippy`, `just ts-check`, and `just ts-lint`
   (gates what leaves the machine)
 
 ### Frontend (TypeScript)
@@ -270,6 +276,7 @@ pre-push hook) that fails if the committed `.js` doesn't match a fresh build.
 cd concert-tracker/frontend && npm install   # one-time
 just ts-build     # rebuild static/*.js from frontend/src
 just ts-check     # strict tsc --noEmit (frontend + js-tests)
+just ts-lint      # oxlint + Foldkit oxlint plugin (frontend)
 just openapi-types  # regenerate frontend/src/generated/openapi.d.ts from the
                      # backend's live OpenAPI spec, after changing a
                      # #[utoipa::path]/ToSchema in concert-tracker/src/web

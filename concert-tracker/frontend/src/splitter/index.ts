@@ -8,6 +8,7 @@
 // concert_detail.html), so nothing here touches the DOM at module load time.
 import { Runtime } from "foldkit";
 
+import { byIdOfOrNull } from "../shared/dom";
 import { makeElement, PLAYHEAD_HIDDEN } from "./widget";
 // window.Player and window.htmx are declared ambiently by
 // ../shared/player-api.ts and ../shared/globals.d.ts (picked up by tsc via
@@ -75,7 +76,7 @@ function open(container: HTMLElement, btn: HTMLButtonElement | undefined, concer
   });
   handle.ports.cardDirty.subscribe(() => refreshCard(concertId));
 
-  const globalAudio = document.getElementById("player-audio") as HTMLMediaElement | null;
+  const globalAudio = byIdOfOrNull("player-audio", HTMLMediaElement);
   const playheadHandler = globalAudio
     ? () => handle.ports.playhead.send(playheadFractionFor(concertId, globalAudio))
     : () => undefined;

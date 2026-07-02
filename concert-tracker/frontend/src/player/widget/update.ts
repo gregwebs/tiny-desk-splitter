@@ -54,7 +54,7 @@ import {
   SetSidebarWidthVar,
   ShowVideoPanel,
   SyncLikeButtonsExternal,
-  SyncNowPlayingMirrorCmd,
+  SyncNowPlayingMirror,
   ToggleLikeRequest,
 } from "./command";
 import type { Message } from "./message";
@@ -76,7 +76,7 @@ import type { PlayerCommand } from "./port";
 //
 // Ports nearly all decision logic from player.ts (everything message.ts's
 // scope comment claims). The one structural rule worth stating up front:
-// `withPlayback` is the ONLY place that appends SyncNowPlayingMirrorCmd, and
+// `withPlayback` is the ONLY place that appends SyncNowPlayingMirror, and
 // it must be called exactly once at the outermost return of any branch that
 // changes playback identity — never from inside a helper another handler also
 // wraps (see beginPlayback/playConcertItem below), or the mirror sync would
@@ -113,7 +113,7 @@ const withBusy = (model: Model, message: string): Model =>
  *  return of a branch that changes playback identity — see ../mirror.ts. */
 const withPlayback = (model: Model, cmds: ReadonlyArray<Command<Message>>): UpdateReturn => [
   model,
-  [...cmds, SyncNowPlayingMirrorCmd({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
+  [...cmds, SyncNowPlayingMirror({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
 ];
 
 // ── PlaySource → identity/URL derivation ────────────────────────────────
@@ -199,9 +199,9 @@ const beginPlayback = (
   const cmds: Command<Message>[] = [
     PlayAudio({ url: info.url }),
     MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }),
-    ClearPreparingExternal({}),
+    ClearPreparingExternal(),
   ];
-  if (newVideoOpen !== model.video.open) cmds.push(newVideoOpen ? ShowVideoPanel({}) : HideVideoPanel({}));
+  if (newVideoOpen !== model.video.open) cmds.push(newVideoOpen ? ShowVideoPanel() : HideVideoPanel());
   if (listenUrl && opts.recordListen) cmds.push(RecordListenEvent({ url: listenUrl }));
   if (Option.isSome(model.pendingSeek)) cmds.push(SeekAudio({ seconds: model.pendingSeek.value }));
 
@@ -237,7 +237,7 @@ const refetchSidebarIfConcertChanged = (
  *  also calls playTrack, not startTrack). */
 const dispatchPlayTrack = (model: Model, concertId: number, trackIdx: number): UpdateReturn => {
   if (model.playback.concertId === concertId && model.playback.trackIdx === trackIdx) {
-    return model.isPlaying ? [model, [PauseAudio({})]] : [model, [ResumeAudio({})]];
+    return model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]];
   }
   if (isMediaPlaying(model)) {
     return [model, [FetchTrackInfoForEnqueue({ concertId, trackIdx })]];
@@ -273,7 +273,7 @@ const stopPlaybackPure = (model: Model): UpdateReturn =>
       // pending intentionally untouched — stopPlayback() cancels auto-advance,
       // never a prepare-in-flight (cancelPendingPlay is never called there).
     }),
-    model.video.open ? [ClearAudioSrc({}), HideVideoPanel({})] : [ClearAudioSrc({})],
+    model.video.open ? [ClearAudioSrc(), HideVideoPanel()] : [ClearAudioSrc()],
   );
 
 /** playNextTrack()'s definitively-nothing-to-advance-to terminal state,
@@ -288,7 +288,7 @@ const applyAdvanceFailure = (model: Model, plan: AdvancePlan): UpdateReturn => {
     case "next-or-collapse":
       return [
         evo(model, { isPlaying: () => false, video: () => ({ open: false }) }),
-        model.video.open ? [HideVideoPanel({})] : [],
+        model.video.open ? [HideVideoPanel()] : [],
       ];
   }
 };
@@ -301,7 +301,7 @@ const advanceToNextTrack = (model: Model, plan: AdvancePlan): UpdateReturn => {
 
 const advanceAfterDelete = (model: Model): UpdateReturn => [
   model,
-  [PauseAudio({}), DrainQueue({ queue: model.queue, plan: "next-or-stop" })],
+  [PauseAudio(), DrainQueue({ queue: model.queue, plan: "next-or-stop" })],
 ];
 
 const advanceOrCollapse = (model: Model): UpdateReturn =>
@@ -361,7 +361,7 @@ function advanceConcertPure(model: Model): UpdateReturn {
               playback: (p) => ({ ...p, concert: Option.none() }),
               video: () => ({ open: false }),
             }),
-            model.video.open ? [HideVideoPanel({})] : [],
+            model.video.open ? [HideVideoPanel()] : [],
           ]
         : playConcertItemPure(model, next);
     },
@@ -381,7 +381,7 @@ function playConcertPosOrEnd(model: Model): UpdateReturn {
               playback: (p) => ({ ...p, concert: Option.none() }),
               video: () => ({ open: false }),
             }),
-            model.video.open ? [HideVideoPanel({})] : [],
+            model.video.open ? [HideVideoPanel()] : [],
           ],
   });
 }
@@ -406,14 +406,14 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         return [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId: source.concertId, trackIdx: source.trackIdx }) })]];
       },
 
-      FailedFetchInfo: ({ message: msg }) => [withError(model, msg), []],
+      FailedFetchInfo: ({ errorMessage: msg }) => [withError(model, msg), []],
 
       ReceivedTrackInfoForEnqueue: ({ concertId, trackIdx, info }) =>
         Option.match(info, {
           onNone: () => [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId, trackIdx }) })]],
           onSome: ({ title, liked }) => {
             const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
-            return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom({})] : []];
+            return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom()] : []];
           },
         }),
 
@@ -476,13 +476,13 @@ export const update = (model: Model, message: Message): UpdateReturn =>
             if (ready && target._tag === "Track") {
               const model1 = evo(model, { pending: () => Option.none() });
               const [model2, cmds] = dispatchPlayTrack(model1, target.concertId, target.trackIdx);
-              return [model2, [ClearPreparingExternal({}), ...cmds]];
+              return [model2, [ClearPreparingExternal(), ...cmds]];
             }
             if (status.download === "download-error" || status.split === "split-error") {
-              return [evo(withError(model, "Preparing tracks failed"), { pending: () => Option.none() }), [ClearPreparingExternal({})]];
+              return [evo(withError(model, "Preparing tracks failed"), { pending: () => Option.none() }), [ClearPreparingExternal()]];
             }
             if (elapsedMs > PREPARE_TIMEOUT_MS) {
-              return [evo(withError(model, "Preparing tracks timed out"), { pending: () => Option.none() }), [ClearPreparingExternal({})]];
+              return [evo(withError(model, "Preparing tracks timed out"), { pending: () => Option.none() }), [ClearPreparingExternal()]];
             }
             const progress = status.split === "splitting" ? "Preparing… (splitting)" : "Preparing… (downloading)";
             return [withBusy(model, progress), [PollPrepareStatus({ target, elapsedMs, seedStatus: Option.none() })]];
@@ -495,7 +495,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           onSome: (pendingTarget) => {
             if (!sameTargetLocal(pendingTarget, target)) return [model, []];
             if (elapsedMs > PREPARE_TIMEOUT_MS) {
-              return [evo(withError(model, "Preparing tracks timed out"), { pending: () => Option.none() }), [ClearPreparingExternal({})]];
+              return [evo(withError(model, "Preparing tracks timed out"), { pending: () => Option.none() }), [ClearPreparingExternal()]];
             }
             return [model, [PollPrepareStatus({ target, elapsedMs, seedStatus: Option.none() })]];
           },
@@ -562,7 +562,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         playConcertPosOrEnd(
           evo(model, { playback: (p) => ({ ...p, concert: Option.some({ id: concertId, items, pos: atPos }) }) }),
         ),
-      FailedConcertPlayback: ({ message: msg }) => [withError(model, msg), []],
+      FailedConcertPlayback: ({ errorMessage: msg }) => [withError(model, msg), []],
 
       CompletedDeleteInterlude: ({ concertId, wasPlayingThis }) => {
         const inConcertMode = Option.isSome(model.playback.concert) && model.playback.concert.value.id === concertId;
@@ -576,8 +576,8 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         const entries = tracks.map((t) => makeQueueEntry(t.concertId, t.trackIdx, t.title, false, name, groupId));
         const model1 = evo(model, { queue: (q) => [...q, ...entries], nextGroupId: () => groupId + 1 });
         return playerIdle(model1)
-          ? [model1, [DrainQueue({ queue: model1.queue, plan: "queue-only" }), ScrollQueueToBottom({})]]
-          : [model1, [ScrollQueueToBottom({})]];
+          ? [model1, [DrainQueue({ queue: model1.queue, plan: "queue-only" }), ScrollQueueToBottom()]]
+          : [model1, [ScrollQueueToBottom()]];
       },
       FailedPlaylistLoad: () => [withError(model, "Couldn't load playlist"), []],
 
@@ -624,16 +624,16 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         return [model1, []];
       },
 
-      PressedSpace: () => (model.isPlaying ? [model, [PauseAudio({})]] : [model, [ResumeAudio({})]]),
+      PressedSpace: () => (model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]]),
 
       PressedEscape: () =>
         model.video.open
-          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel({})]]
+          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel()]]
           : [model, []],
 
       ClickedOutsideVideo: () =>
         model.video.open
-          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel({})]]
+          ? [evo(model, { video: () => ({ open: false }) }), [HideVideoPanel()]]
           : [model, []],
 
       MovedSidebarDrag: ({ clientX }) => [model, [SetSidebarWidthVar({ px: clientX })]],
@@ -719,40 +719,40 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       ],
       StartTrack: ({ concertId, trackIdx }) => [model, [FetchTrackInfo({ concertId, trackIdx, opts: defaultPlayOpts })]],
 
-      TogglePause: () => (model.isPlaying ? [model, [PauseAudio({})]] : [model, [ResumeAudio({})]]),
+      TogglePause: () => (model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]]),
       Seek: ({ seconds }) => [model, [SeekAudio({ seconds })]],
 
       SkipToNext: () => {
         if (Option.isSome(model.playback.concert)) {
           const [model2, cmds] = advanceConcertPure(model);
-          return [model2, [PauseAudio({}), ...cmds]];
+          return [model2, [PauseAudio(), ...cmds]];
         }
         if (!nextEnabled(toCoreState(model.playback), model.queue.length)) return [model, []];
-        return [model, [PauseAudio({}), DrainQueue({ queue: model.queue, plan: "next-or-none" })]];
+        return [model, [PauseAudio(), DrainQueue({ queue: model.queue, plan: "next-or-none" })]];
       },
       SkipToPrev: () => {
         if (Option.isSome(model.playback.concert)) {
           const concert = model.playback.concert.value;
           if (concert.pos <= 0) return [model, []];
           const [model2, cmds] = playConcertItemPure(model, concert.pos - 1);
-          return [model2, [PauseAudio({}), ...cmds]];
+          return [model2, [PauseAudio(), ...cmds]];
         }
         if (!prevEnabled(toCoreState(model.playback))) return [model, []];
         if (model.playback.concertId === null || model.playback.trackIdx === null) return [model, []];
         return [
           model,
-          [PauseAudio({}), FetchPrevTrackInfo({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
+          [PauseAudio(), FetchPrevTrackInfo({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx })],
         ];
       },
 
       Watch: () => {
         const open = !model.video.open;
-        return [evo(model, { video: () => ({ open }) }), [open ? ShowVideoPanel({}) : HideVideoPanel({})]];
+        return [evo(model, { video: () => ({ open }) }), [open ? ShowVideoPanel() : HideVideoPanel()]];
       },
       OpenExternal: () =>
         model.playback.watchUrl === null
           ? [model, []]
-          : [model, [PauseAudio({}), OpenExternalRequest({ url: model.playback.watchUrl })]],
+          : [model, [PauseAudio(), OpenExternalRequest({ url: model.playback.watchUrl })]],
       WatchTrackDirect: ({ concertId, trackIdx }) => [
         model,
         [FetchTrackInfo({ concertId, trackIdx, opts: { recordListen: true, playlistName: null, openVideoPanel: true } })],
@@ -823,13 +823,13 @@ function handleCommand(model: Model, command: PlayerCommand): UpdateReturn {
       RemoveGroup: ({ groupId }) => [evo(model, { queue: (q) => removeGroup(q, groupId) }), []],
       Enqueue: ({ concertId, trackIdx, title, liked }) => {
         const result = enqueueDedupe(model.queue, makeQueueEntry(concertId, trackIdx, title, liked));
-        return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom({})] : []];
+        return [evo(model, { queue: () => result.queue }), result.added ? [ScrollQueueToBottom()] : []];
       },
 
       PlayAlbumAt: ({ concertId, seconds }) => {
         if (model.playback.concertId === concertId && model.playback.trackIdx === null) {
           const cmds: Command<Message>[] = [SeekAudio({ seconds })];
-          if (!model.isPlaying) cmds.push(ResumeAudio({}));
+          if (!model.isPlaying) cmds.push(ResumeAudio());
           return [model, cmds];
         }
         return [evo(model, { pendingSeek: () => Option.some(seconds) }), [FetchAlbumInfo({ concertId, opts: { recordListen: false, playlistName: null, openVideoPanel: false } })]];

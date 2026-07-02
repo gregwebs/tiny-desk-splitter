@@ -47,7 +47,7 @@ export const CompletedMutation = m("CompletedMutation", {
 });
 export const FailedMutation = m("FailedMutation", {
   forTarget: AddTarget,
-  message: S.String,
+  errorMessage: S.String,
 });
 
 /** Command acks (no information; `update` ignores them). */

@@ -24,6 +24,9 @@ shellcheck:
 ts-check:
     ./scripts/ts-check.sh
 
+ts-lint:
+    ./scripts/ts-lint.sh
+
 ts-build:
     ./scripts/ts-build.sh
 
@@ -37,8 +40,8 @@ ts-watch:
 test-ts:
     ./scripts/ts-test.sh
 
-# Run fmt-check + clippy + shellcheck + ts-check (the full standard lint suite).
-lint: fmt-check clippy shellcheck ts-check
+# Run fmt-check + clippy + shellcheck + ts-check + ts-lint (the full standard lint suite).
+lint: fmt-check clippy shellcheck ts-check ts-lint
 
 # Wire up the version-controlled git hooks (one-time per clone).
 install-hooks:
