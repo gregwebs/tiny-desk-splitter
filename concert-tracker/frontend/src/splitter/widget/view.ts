@@ -24,6 +24,10 @@ import type { DragState, Model, Status } from "./model";
 import { TIMELINE_DATA_ATTRIBUTE, timeFromClientX, timelineElement } from "./timeline";
 
 // VIEW
+//
+// NOTE: hand-rolling buttons/inputs here rather than Ui.Button / Ui.Input —
+// @foldkit/ui is not a dependency of this project (see package.json).
+// Adopting it is a separate decision from this a11y pass.
 
 const percentOf = (duration: number, time: number): number =>
   duration > 0 ? (time / duration) * 100 : 0;
@@ -54,7 +58,13 @@ const toolbarView = (editor: EditorState, busy: boolean, status: Status): Html =
   return h.div(
     [h.Class("splitter-toolbar")],
     [
-      h.span([h.Class(statusClass(status))], [statusText(status)]),
+      h.span(
+        [
+          h.Class(statusClass(status)),
+          ...(status._tag === "StatusError" ? [h.Role("alert")] : [h.AriaLive("polite")]),
+        ],
+        [statusText(status)],
+      ),
       h.button(
         [
           h.Class("splitter-submit"),
@@ -242,6 +252,7 @@ const auditionButton = (time: number, playable: boolean): Html => {
       h.Class("splitter-play"),
       h.Type("button"),
       h.Title("Play from here"),
+      h.AriaLabel("Play from here"),
       h.Disabled(!playable),
       ...(playable ? [h.OnClick(ClickedAudition({ time }))] : []),
     ],

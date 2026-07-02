@@ -18,9 +18,11 @@ import {
   MarkPreparingExternal,
   MutateBodyClass,
   OpenAddToPlaylist,
+  OpenInNewTab,
   PauseAudio,
   PlayAudio,
   PollPrepareStatus,
+  PostPrepare,
   RecordListenEvent,
   RefreshCardStatus,
   RefreshConcertItems,
@@ -37,14 +39,22 @@ import {
   AudioEnded,
   AudioPaused,
   AudioPlaying,
+  AudioPlayRejected,
   ClickedOutsideVideo,
   CommandReceived,
+  CompletedDeleteInterlude,
   CompletedLikeToggle,
+  FailedConcertPlayback,
+  FailedDeleteInterlude,
   FailedFetchInfo,
   FailedLikeToggle,
   FailedNextTrackInfo,
+  FailedOpenExternal,
+  FailedPlaylistLoad,
   FailedPollPrepareStatus,
+  FailedPrepareStart,
   FailedTrackDetails,
+  NotPlayable,
   PressedEscape,
   PressedSpace,
   ReassertUi,
@@ -59,6 +69,7 @@ import {
   ReceivedTrackDetails,
   ReceivedTrackInfoForEnqueue,
   SyncLikeFromSwap,
+  TrackMissing,
 } from "./message";
 import {
   defaultPlayOpts,
@@ -1372,6 +1383,174 @@ describe("player update — subscription-dispatched messages", () => {
       Story.with(playingModel),
       Story.message(SyncLikeFromSwap({ concertId: 1, trackIdx: 99, liked: true })),
       Story.model((m) => expect(m.playback.liked).toBe(false)), // unchanged
+      Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — fetch-result entry points", () => {
+  test("TrackMissing enters the prepare flow via PostPrepare", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(TrackMissing({ source: PlaySourceValue.Track({ concertId: 1, trackIdx: 0 }) })),
+      Story.Command.expectHas(PostPrepare),
+      Story.Command.resolve(
+        PostPrepare,
+        ReceivedPrepareStart({ target: { _tag: "Track", concertId: 1, trackIdx: 0 }, seedStatus: Option.none() }),
+      ),
+      Story.model((m) => expect(Option.isSome(m.pending)).toBe(true)),
+      Story.Command.expectHas(MarkPreparingExternal, DisableCardTracksExternal, RefreshCardStatus, PollPrepareStatus),
+      Story.Command.resolve(MarkPreparingExternal, Acked()),
+      Story.Command.resolve(DisableCardTracksExternal, Acked()),
+      Story.Command.resolve(RefreshCardStatus, Acked()),
+      Story.Command.resolve(
+        PollPrepareStatus,
+        ReceivedPrepareStatus({
+          target: { _tag: "Track", concertId: 1, trackIdx: 0 },
+          status: prepareStatus({ tracks_present: [true] }),
+          elapsedMs: 0,
+        }),
+      ),
+      Story.model((m) => expect(Option.isNone(m.pending)).toBe(true)),
+      Story.Command.expectHas(ClearPreparingExternal, FetchTrackInfo),
+      Story.Command.resolve(ClearPreparingExternal, Acked()),
+      Story.Command.resolve(
+        FetchTrackInfo,
+        ReceivedMediaInfo({
+          source: PlaySourceValue.Track({ concertId: 1, trackIdx: 0 }),
+          info: mediaInfo,
+          opts: defaultPlayOpts,
+        }),
+      ),
+      Story.Command.expectHas(SyncNowPlayingMirror),
+      Story.Command.resolve(PlayAudio, Acked()),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+      Story.Command.resolve(ClearPreparingExternal, Acked()),
+      Story.Command.resolve(RecordListenEvent, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
+    );
+  });
+
+  test("NotPlayable falls back to opening the file URL directly", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(NotPlayable({ source: PlaySourceValue.Track({ concertId: 1, trackIdx: 0 }), url: "/audio/t1.mp3" })),
+      Story.Command.expectHas(OpenInNewTab),
+      Story.Command.resolve(OpenInNewTab, Acked()),
+    );
+  });
+});
+
+describe("player update — failure paths", () => {
+  test("FailedPrepareStart surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(FailedPrepareStart({ target: trackTarget })),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Prepare failed" }))),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("FailedConcertPlayback surfaces the caller-supplied message", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(FailedConcertPlayback({ concertId: 42, errorMessage: "Couldn't start concert" })),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Couldn't start concert" }))),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("FailedPlaylistLoad surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(FailedPlaylistLoad({ playlistId: 7 })),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Couldn't load playlist" }))),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("FailedOpenExternal surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(FailedOpenExternal()),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Couldn't open externally" }))),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("AudioPlayRejected stops isPlaying and surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(AudioPlayRejected()),
+      Story.model((m) => {
+        expect(m.isPlaying).toBe(false);
+        expect(m.status).toEqual(StatusValue.Error({ message: "Playback blocked" }));
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("ReceivedDeleteTrackResult with ok: false surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: false, source: "bar" })),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Delete failed" }))),
+      Story.Command.expectNone(),
+    );
+  });
+});
+
+describe("player update — sidebar delete interlude", () => {
+  test("CompletedDeleteInterlude in concert mode refreshes items and carries wasPlayingThis", () => {
+    Story.story(
+      update,
+      Story.with(concertModel(0)),
+      Story.message(
+        CompletedDeleteInterlude({ concertId: 42, interludeIdx: 0, wasPlayingThis: true }),
+      ),
+      Story.Command.expectHas(RefreshConcertItems),
+      Story.Command.resolve(
+        RefreshConcertItems,
+        ReceivedConcertItems({
+          concertId: 42,
+          items: [interludeItem("/c/1.mp3", 1)],
+          advanceAfter: true,
+        }),
+      ),
+      Story.Command.expectHas(SyncNowPlayingMirror),
+      Story.Command.resolve(PlayAudio, Acked()),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+      Story.Command.resolve(ClearPreparingExternal, Acked()),
+      Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
+    );
+  });
+
+  test("CompletedDeleteInterlude outside concert mode is a no-op", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(
+        CompletedDeleteInterlude({ concertId: 1, interludeIdx: 0, wasPlayingThis: false }),
+      ),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("FailedDeleteInterlude surfaces a status error", () => {
+    Story.story(
+      update,
+      Story.with(concertModel(0)),
+      Story.message(FailedDeleteInterlude({ concertId: 42, interludeIdx: 0 })),
+      Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Delete failed" }))),
       Story.Command.expectNone(),
     );
   });

@@ -152,7 +152,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
             [],
           ];
         }
-        return withClonedEditor(model, (editor) => {
+        const clearedModel =
+          model.status._tag === "StatusError" ? evo(model, { status: () => StatusValue.NoStatus() }) : model;
+        return withClonedEditor(clearedModel, (editor) => {
           if (kind === "Start") {
             setStart(editor, trackIndex, value);
           } else {

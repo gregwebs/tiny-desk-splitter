@@ -20,6 +20,12 @@ import type { Model } from "./model";
 // the mount point), preserving every id/class/aria attribute the CSS and the
 // e2e suite depend on. The DOM is a pure function of the Model — no separate
 // "now sync the DOM to match a variable" pass (the old applyActiveHighlight).
+//
+// NOTE: hand-rolling the combobox/listbox/rows here rather than Ui.Combobox —
+// @foldkit/ui is not a dependency of this project (see package.json).
+// Adopting it is a separate decision from this a11y pass; the ARIA wiring
+// below (role/aria-selected/aria-activedescendant/keyboard nav) is done by
+// hand instead.
 
 const rowIsActive = (activeId: Option.Option<RowId>, id: RowId): boolean =>
   Option.match(activeId, { onNone: () => false, onSome: (a) => a === id });
@@ -193,6 +199,7 @@ const sectionView = (opts: {
         h.Class("add-pl-filter"),
         h.Type("text"),
         h.Attribute("placeholder", "Filter playlists…"),
+        h.Attribute("aria-label", "Filter playlists"),
         h.Attribute("autocomplete", "off"),
         h.Attribute("role", "combobox"),
         h.Attribute("aria-expanded", "true"),
@@ -219,6 +226,7 @@ const sectionView = (opts: {
         [
           h.Class("add-pl-error"),
           h.Id("add-pl-error"),
+          h.Role("alert"),
           h.Style(Option.isSome(opts.error) ? {} : { display: "none" }),
         ],
         [Option.getOrElse(opts.error, () => "")],

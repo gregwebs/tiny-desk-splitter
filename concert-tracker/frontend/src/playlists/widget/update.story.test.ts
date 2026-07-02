@@ -18,6 +18,8 @@ import {
   CompletedLoad,
   CompletedMutation,
   CompletedScrollActiveIntoView,
+  FailedLoad,
+  FailedMutation,
   OpenRequested,
   PressedArrowDown,
   PressedEnter,
@@ -119,6 +121,29 @@ describe("add-panel update", () => {
     );
   });
 
+  test("a FailedLoad for a superseded target is ignored (staleness rule)", () => {
+    Story.story(
+      update,
+      Story.with(loading(trackA)),
+      Story.message(FailedLoad({ forTarget: trackB })),
+      Story.model((m) => expect(m.phase._tag).toBe("Loading")),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("a matching FailedLoad enters LoadFailed with an error", () => {
+    Story.story(
+      update,
+      Story.with(loading(trackA)),
+      Story.message(FailedLoad({ forTarget: trackA })),
+      Story.model((m) => {
+        expect(m.phase._tag).toBe("LoadFailed");
+        expect(Option.getOrNull(m.error)).toBe("Couldn't load playlists.");
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
   test("clicking a non-member row adds it", () => {
     Story.story(
       update,
@@ -134,6 +159,23 @@ describe("add-panel update", () => {
         }),
       ),
       Story.model((m) => expect(asLoaded(m).members).toContainEqual({ playlistId: 1, itemId: 5 })),
+    );
+  });
+
+  test("a failed AddItem surfaces the error and leaves membership untouched", () => {
+    Story.story(
+      update,
+      Story.with(loaded({ playlists: [{ id: 1, name: "Rock" }], members: [] })),
+      Story.message(ClickedRow({ id: 1 })),
+      Story.Command.expectHas(AddItem),
+      Story.Command.resolve(
+        AddItem,
+        FailedMutation({ forTarget: trackA, errorMessage: "Couldn't add to playlist." }),
+      ),
+      Story.model((m) => {
+        expect(Option.getOrNull(m.error)).toBe("Couldn't add to playlist.");
+        expect(asLoaded(m).members.length).toBe(0);
+      }),
     );
   });
 
@@ -160,7 +202,43 @@ describe("add-panel update", () => {
     );
   });
 
-  test("a failed mutation for a superseded target is ignored", () => {
+  test("a failed RemoveItem surfaces the error and leaves membership untouched", () => {
+    Story.story(
+      update,
+      Story.with(loaded({ playlists: [{ id: 1, name: "Rock" }], members: [{ playlistId: 1, itemId: 5 }] })),
+      Story.message(ClickedRemove({ playlistId: 1 })),
+      Story.Command.expectHas(RemoveItem),
+      Story.Command.resolve(
+        RemoveItem,
+        FailedMutation({ forTarget: trackA, errorMessage: "Couldn't remove from playlist." }),
+      ),
+      Story.model((m) => {
+        expect(Option.getOrNull(m.error)).toBe("Couldn't remove from playlist.");
+        expect(asLoaded(m).members).toContainEqual({ playlistId: 1, itemId: 5 });
+      }),
+    );
+  });
+
+  test("a failed CreateAndAdd surfaces the error without clearing the loaded view", () => {
+    Story.story(
+      update,
+      Story.with(
+        loaded({ playlists: [], filter: "New Mix", activeId: Option.some("new"), activeFromTyping: true }),
+      ),
+      Story.message(PressedEnter()),
+      Story.Command.expectHas(CreateAndAdd),
+      Story.Command.resolve(
+        CreateAndAdd,
+        FailedMutation({ forTarget: trackA, errorMessage: "Couldn't create playlist." }),
+      ),
+      Story.model((m) => {
+        expect(Option.getOrNull(m.error)).toBe("Couldn't create playlist.");
+        expect(asLoaded(m).playlists.length).toBe(0);
+      }),
+    );
+  });
+
+  test("a stale CompletedMutation for a superseded target is ignored", () => {
     Story.story(
       update,
       Story.with(loaded({ target: trackA, playlists: [{ id: 1, name: "Rock" }], members: [] })),
@@ -169,6 +247,34 @@ describe("add-panel update", () => {
         // Unchanged: still trackA's loaded view with its playlist.
         expect(asLoaded(m).playlists.length).toBe(1);
         expect(asLoaded(m).members.length).toBe(0);
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("a stale FailedMutation for a superseded target is ignored", () => {
+    Story.story(
+      update,
+      Story.with(loaded({ target: trackA, playlists: [{ id: 1, name: "Rock" }], members: [] })),
+      Story.message(FailedMutation({ forTarget: trackB, errorMessage: "Couldn't add to playlist." })),
+      Story.model((m) => {
+        // Unchanged: no error surfaced, still trackA's loaded view.
+        expect(Option.isNone(m.error)).toBe(true);
+        expect(asLoaded(m).playlists.length).toBe(1);
+      }),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("a matching FailedMutation surfaces the error without discarding the loaded view", () => {
+    Story.story(
+      update,
+      Story.with(loaded({ target: trackA, playlists: [{ id: 1, name: "Rock" }], members: [] })),
+      Story.message(FailedMutation({ forTarget: trackA, errorMessage: "Couldn't add to playlist." })),
+      Story.model((m) => {
+        expect(Option.getOrNull(m.error)).toBe("Couldn't add to playlist.");
+        // Still Loaded, with its prior playlists untouched.
+        expect(asLoaded(m).playlists.length).toBe(1);
       }),
       Story.Command.expectNone(),
     );
