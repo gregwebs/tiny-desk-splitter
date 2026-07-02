@@ -10,13 +10,15 @@
 // templates -- never via one-shot DOMContentLoaded listeners that a boost swap
 // would bypass.
 import {
+  type CreatedPlaylistJson,
   createPlaylist,
   deletePlaylist as apiDeletePlaylist,
+  readJson,
   removePlaylistItem,
   reorderPlaylistItems,
   updatePlaylist,
 } from "../api/client";
-import { byIdOrNull } from "../shared/dom";
+import { byIdOfOrNull, byIdOrNull } from "../shared/dom";
 
 declare global {
   interface Window {
@@ -32,7 +34,7 @@ export function trace(...args: unknown[]): void {
 
 export async function createFromForm(event: Event): Promise<boolean> {
   event.preventDefault();
-  const input = byIdOrNull<HTMLInputElement>("new-playlist-name");
+  const input = byIdOfOrNull("new-playlist-name", HTMLInputElement);
   const name = input ? input.value.trim() : "";
   if (!name) return false;
   try {
@@ -41,7 +43,7 @@ export async function createFromForm(event: Event): Promise<boolean> {
       alert("Couldn't create playlist: " + (await resp.text()));
       return false;
     }
-    const { id } = (await resp.json()) as { id: number };
+    const { id } = await readJson<CreatedPlaylistJson>(resp);
     window.location.href = "/playlists/" + id;
   } catch (e) {
     trace("createFromForm failed", e);
@@ -72,8 +74,8 @@ export function cancelEdit(): void {
 
 export async function saveDetails(event: Event, id: number): Promise<boolean> {
   event.preventDefault();
-  const name = byIdOrNull<HTMLInputElement>("edit-playlist-name")?.value;
-  const description = byIdOrNull<HTMLInputElement>("edit-playlist-description")?.value;
+  const name = byIdOfOrNull("edit-playlist-name", HTMLInputElement)?.value;
+  const description = byIdOfOrNull("edit-playlist-description", HTMLInputElement)?.value;
   if (!name || !name.trim()) return false;
   try {
     const resp = await updatePlaylist(id, { name: name.trim(), description: description || "" });
@@ -166,8 +168,7 @@ async function persistOrder(list: HTMLElement): Promise<void> {
 }
 
 document.addEventListener("dragstart", (e) => {
-  const target = e.target as HTMLElement | null;
-  const li = target?.closest?.<HTMLElement>(".playlist-item");
+  const li = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>(".playlist-item") : null;
   if (!li) return;
   dragSrc = li;
   li.classList.add("dragging");
@@ -189,8 +190,7 @@ document.addEventListener("dragend", () => {
 
 document.addEventListener("dragover", (e) => {
   if (!dragSrc) return;
-  const target = e.target as HTMLElement | null;
-  const list = target?.closest?.<HTMLElement>("#playlist-items");
+  const list = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>("#playlist-items") : null;
   if (!list) return;
   e.preventDefault();
   const after = getDragAfterElement(list, e.clientY);
@@ -200,8 +200,7 @@ document.addEventListener("dragover", (e) => {
 
 document.addEventListener("drop", (e) => {
   if (!dragSrc) return;
-  const target = e.target as HTMLElement | null;
-  const list = target?.closest?.<HTMLElement>("#playlist-items");
+  const list = e.target instanceof HTMLElement ? e.target.closest<HTMLElement>("#playlist-items") : null;
   if (!list) return;
   e.preventDefault();
   persistOrder(list);

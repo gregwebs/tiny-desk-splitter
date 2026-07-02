@@ -13,7 +13,7 @@ import { view } from "./view";
 
 export const init: Runtime.ElementInit<Model, Message, Flags> = () => [
   initialModel,
-  [LoadSidebarWidthCmd({})],
+  [LoadSidebarWidthCmd()],
 ];
 
 /** Build a Foldkit Element for the player widget, ready to mount with

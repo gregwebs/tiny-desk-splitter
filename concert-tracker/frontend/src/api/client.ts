@@ -64,21 +64,32 @@ export class ApiError extends Error {
 }
 
 /**
+ * Decodes the JSON body of a Response already obtained by the caller (e.g.
+ * after branching on status code). The single unchecked assertion `json()`
+ * requires — the wire body is genuinely `unknown` until here — is centralized
+ * in this one spot instead of repeated at every parse site.
+ */
+export async function readJson<T>(r: Response): Promise<T> {
+  // oxlint-disable-next-line typescript/consistent-type-assertions -- json() returns Promise<unknown>; T is the caller-supplied wire type generated from the OpenAPI spec.
+  return (await r.json()) as T;
+}
+
+/**
  * GET a JSON endpoint, throwing ApiError on a non-2xx response. `init` is
  * passed through to fetch() unchanged — mainly used to thread an
- * AbortSignal for cancellable requests (e.g. player.ts's auto-advance).
+ * AbortSignal for cancellable requests (e.g. next/prev track prefetch).
  */
 export async function getJson<T>(url: string, init?: RequestInit): Promise<T> {
   const r = await fetch(url, init);
   if (!r.ok) throw new ApiError(r.status);
-  return (await r.json()) as T;
+  return readJson<T>(r);
 }
 
 /** GET a JSON endpoint, returning null instead of throwing on a non-2xx response. */
 export async function getJsonOrNull<T>(url: string, init?: RequestInit): Promise<T | null> {
   const r = await fetch(url, init);
   if (!r.ok) return null;
-  return (await r.json()) as T;
+  return readJson<T>(r);
 }
 
 /**

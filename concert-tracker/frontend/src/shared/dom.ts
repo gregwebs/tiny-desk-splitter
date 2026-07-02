@@ -9,16 +9,43 @@
  * silently no-op'ing if the assumption is ever violated — that's a markup
  * bug, not a runtime condition to swallow.
  */
-export function byId<T extends Element = HTMLElement>(id: string): T {
+export function byId(id: string): HTMLElement {
   const el = document.getElementById(id);
   if (!el) throw new Error(`expected #${id} to exist`);
-  return el as unknown as T;
+  return el;
 }
 
 /**
  * Look up an element that may legitimately be absent (e.g. only rendered on
  * some pages/states). Callers handle the null case explicitly.
  */
-export function byIdOrNull<T extends Element = HTMLElement>(id: string): T | null {
-  return document.getElementById(id) as unknown as T | null;
+export function byIdOrNull(id: string): HTMLElement | null {
+  return document.getElementById(id);
+}
+
+/**
+ * Look up an element expected to exist (see `byId`) and be of type `T`,
+ * verified with `instanceof` rather than trusted via a generic type
+ * parameter. Throws loudly on either a missing id or the wrong element type.
+ */
+export function byIdOf<T extends Element>(id: string, ctor: abstract new (...args: never[]) => T): T {
+  const el = byId(id);
+  if (!(el instanceof ctor)) throw new Error(`expected #${id} to be a ${ctor.name}`);
+  return el;
+}
+
+/**
+ * Look up an element that may legitimately be absent (see `byIdOrNull`) and,
+ * if present, is of type `T`, verified with `instanceof`. Throws if the
+ * element exists but is the wrong type — that's a markup bug, not an
+ * absence to swallow.
+ */
+export function byIdOfOrNull<T extends Element>(
+  id: string,
+  ctor: abstract new (...args: never[]) => T,
+): T | null {
+  const el = byIdOrNull(id);
+  if (el === null) return null;
+  if (!(el instanceof ctor)) throw new Error(`expected #${id} to be a ${ctor.name}`);
+  return el;
 }

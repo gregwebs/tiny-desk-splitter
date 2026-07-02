@@ -18,7 +18,7 @@ import {
   postPrepare,
 } from "../../api/client";
 import { clampSidebarWidth, PREPARE_POLL_MS, SIDEBAR_WIDTH_KEY } from "../core";
-import { byId, byIdOrNull } from "../../shared/dom";
+import { byIdOf, byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import { setNowPlaying } from "../mirror";
 import {
   Acked,
@@ -90,7 +90,7 @@ export const FetchAlbumInfo = Command.define(
     ),
     Effect.catch(() =>
       Effect.succeed(
-        FailedFetchInfo({ source: PlaySourceValue.Album({ concertId }), message: "Couldn't load album" }),
+        FailedFetchInfo({ source: PlaySourceValue.Album({ concertId }), errorMessage: "Couldn't load album" }),
       ),
     ),
   ),
@@ -116,7 +116,7 @@ export const FetchTrackInfo = Command.define(
           ? ReceivedMediaInfo({ source, info, opts })
           : NotPlayable({ source, url: info.url }),
     ),
-    Effect.catch(() => Effect.succeed(FailedFetchInfo({ source, message: "Couldn't load track" }))),
+    Effect.catch(() => Effect.succeed(FailedFetchInfo({ source, errorMessage: "Couldn't load track" }))),
   );
 });
 
@@ -351,9 +351,9 @@ export const FetchConcertPlayback = Command.define(
       }
       return data.items.length > 0
         ? ReceivedConcertPlaybackItems({ concertId, items: data.items, atPos: Option.getOrElse(atPos, () => 0) })
-        : FailedConcertPlayback({ concertId, message: "Nothing to play" });
+        : FailedConcertPlayback({ concertId, errorMessage: "Nothing to play" });
     }),
-    Effect.catch(() => Effect.succeed(FailedConcertPlayback({ concertId, message: errorMessage }))),
+    Effect.catch(() => Effect.succeed(FailedConcertPlayback({ concertId, errorMessage }))),
   ),
 );
 
@@ -427,7 +427,7 @@ export const PlayAudio = Command.define(
   AudioPlayRejected,
 )(({ url }) =>
   Effect.sync(() => {
-    const audio = byId<HTMLMediaElement>("player-audio");
+    const audio = byIdOf("player-audio", HTMLMediaElement);
     audio.src = url;
     return audio;
   }).pipe(
@@ -439,17 +439,15 @@ export const PlayAudio = Command.define(
 
 export const PauseAudio = Command.define(
   "PauseAudio",
-  {},
   Acked,
-)(() => Effect.sync(() => byIdOrNull<HTMLMediaElement>("player-audio")?.pause()).pipe(Effect.as(Acked())));
+)(Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)?.pause()).pipe(Effect.as(Acked())));
 
 export const ResumeAudio = Command.define(
   "ResumeAudio",
-  {},
   Acked,
   AudioPlayRejected,
-)(() =>
-  Effect.sync(() => byIdOrNull<HTMLMediaElement>("player-audio")).pipe(
+)(
+  Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
     Effect.flatMap((audio) => (audio ? Effect.tryPromise(() => audio.play()) : Effect.void)),
     Effect.as(Acked()),
     Effect.catch(() => Effect.succeed(AudioPlayRejected())),
@@ -462,7 +460,7 @@ export const SeekAudio = Command.define(
   Acked,
 )(({ seconds }) =>
   Effect.sync(() => {
-    const audio = byIdOrNull<HTMLMediaElement>("player-audio");
+    const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
     if (audio && Number.isFinite(audio.duration) && audio.duration > 0) audio.currentTime = seconds;
   }).pipe(Effect.as(Acked())),
 );
@@ -472,11 +470,10 @@ export const SeekAudio = Command.define(
  *  trigger auto-advance (see player.ts's stopPlayback comment). */
 export const ClearAudioSrc = Command.define(
   "ClearAudioSrc",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
-    const audio = byIdOrNull<HTMLMediaElement>("player-audio");
+    const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
     if (!audio) return;
     audio.pause();
     audio.removeAttribute("src");
@@ -547,9 +544,8 @@ export const MarkPreparingExternal = Command.define(
 
 export const ClearPreparingExternal = Command.define(
   "ClearPreparingExternal",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
     document.querySelectorAll(".btn-track-listen.preparing").forEach((b) => b.classList.remove("preparing"));
   }).pipe(Effect.as(Acked())),
@@ -617,7 +613,7 @@ export const RefreshCardStatus = Command.define(
   }).pipe(Effect.as(Acked())),
 );
 
-export const SyncNowPlayingMirrorCmd = Command.define(
+export const SyncNowPlayingMirror = Command.define(
   "SyncNowPlayingMirror",
   { concertId: S.NullOr(S.Number), trackIdx: S.NullOr(S.Number) },
   Acked,
@@ -644,9 +640,8 @@ export const OpenAddToPlaylist = Command.define(
  *  next-to-play entry (pos=0) after a new item is added to the end. */
 export const ScrollQueueToBottom = Command.define(
   "ScrollQueueToBottom",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
     const section = byIdOrNull("sidebar-queue-section");
     if (section) section.scrollTop = section.scrollHeight;
@@ -670,9 +665,8 @@ export const MutateBodyClass = Command.define(
 /** Add `open` class to `#player-video-panel` (shows the video element). */
 export const ShowVideoPanel = Command.define(
   "ShowVideoPanel",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
     byIdOrNull("player-video-panel")?.classList.add("open");
   }).pipe(Effect.as(Acked())),
@@ -681,9 +675,8 @@ export const ShowVideoPanel = Command.define(
 /** Remove `open` class from `#player-video-panel` (hides the video element). */
 export const HideVideoPanel = Command.define(
   "HideVideoPanel",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
     byIdOrNull("player-video-panel")?.classList.remove("open");
   }).pipe(Effect.as(Acked())),
@@ -693,9 +686,8 @@ export const HideVideoPanel = Command.define(
  *  Runs once at widget init to restore the user's last drag position. */
 export const LoadSidebarWidthCmd = Command.define(
   "LoadSidebarWidthCmd",
-  {},
   Acked,
-)(() =>
+)(
   Effect.sync(() => {
     const saved = parseInt(localStorage.getItem(SIDEBAR_WIDTH_KEY) || "", 10);
     if (!isNaN(saved)) {

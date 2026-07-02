@@ -2,7 +2,7 @@ import { Effect, Option, Queue, Schema as S, Stream } from "effect";
 import { Port, Subscription } from "foldkit";
 
 import { clickShouldDismiss, isPlainEscapeKey, isPlainSpaceKey, SIDEBAR_MIN_WIDTH } from "../core";
-import { byIdOrNull } from "../../shared/dom";
+import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import {
   AudioEnded,
   AudioErrored,
@@ -59,7 +59,7 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
     {
       modelToDependencies: () => ({}),
       dependenciesToStream: (): Stream.Stream<Message> => {
-        const audio = byIdOrNull<HTMLMediaElement>("player-audio");
+        const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
         if (!audio) return Stream.empty;
         return Stream.merge(
           Stream.merge(
@@ -144,7 +144,7 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
         Stream.fromEventListener<Event>(document.body, "htmx:afterSwap").pipe(
           Stream.mapEffect((evt) =>
             Effect.sync((): Option.Option<Message> => {
-              const detail = (evt as CustomEvent<{ elt?: Element }>).detail;
+              const detail: { elt?: Element } | undefined = evt instanceof CustomEvent ? evt.detail : undefined;
               const hxPost = detail?.elt?.getAttribute("hx-post");
               const m = hxPost?.match(/\/concerts\/(\d+)\/tracks\/(\d+)\/like/);
               if (!m) return Option.none();

@@ -7,8 +7,10 @@ import {
   createPlaylist,
   listPlaylists,
   playlistNestedIn,
+  readJson,
   removePlaylistItem,
   trackMembership,
+  type CreatedPlaylistJson,
   type MembershipJson,
 } from "../../api/client";
 import { addItemBody, type Member, type PlaylistRef } from "../core";
@@ -83,12 +85,12 @@ export const AddItem = Command.define(
     const resp = yield* Effect.tryPromise(() => addPlaylistItem(playlistId, addItemBody(target)));
     if (!resp.ok) {
       const text = yield* Effect.tryPromise(() => resp.text());
-      return FailedMutation({ forTarget: target, message: "Couldn't add: " + text });
+      return FailedMutation({ forTarget: target, errorMessage: "Couldn't add: " + text });
     }
     return yield* reload(target);
   }).pipe(
     Effect.catch(() =>
-      Effect.succeed(FailedMutation({ forTarget: target, message: "Couldn't add to playlist." })),
+      Effect.succeed(FailedMutation({ forTarget: target, errorMessage: "Couldn't add to playlist." })),
     ),
   ),
 );
@@ -104,12 +106,12 @@ export const RemoveItem = Command.define(
     // 404 is treated as success (concurrent removal).
     if (!resp.ok && resp.status !== 404) {
       const text = yield* Effect.tryPromise(() => resp.text());
-      return FailedMutation({ forTarget: target, message: "Couldn't remove: " + text });
+      return FailedMutation({ forTarget: target, errorMessage: "Couldn't remove: " + text });
     }
     return yield* reload(target);
   }).pipe(
     Effect.catch(() =>
-      Effect.succeed(FailedMutation({ forTarget: target, message: "Couldn't remove from playlist." })),
+      Effect.succeed(FailedMutation({ forTarget: target, errorMessage: "Couldn't remove from playlist." })),
     ),
   ),
 );
@@ -124,18 +126,18 @@ export const CreateAndAdd = Command.define(
     const plResp = yield* Effect.tryPromise(() => createPlaylist({ name }));
     if (!plResp.ok) {
       const text = yield* Effect.tryPromise(() => plResp.text());
-      return FailedMutation({ forTarget: target, message: "Couldn't create: " + text });
+      return FailedMutation({ forTarget: target, errorMessage: "Couldn't create: " + text });
     }
-    const created = yield* Effect.tryPromise(() => plResp.json() as Promise<{ id: number }>);
+    const created = yield* Effect.tryPromise(() => readJson<CreatedPlaylistJson>(plResp));
     const addResp = yield* Effect.tryPromise(() => addPlaylistItem(created.id, addItemBody(target)));
     if (!addResp.ok) {
       const text = yield* Effect.tryPromise(() => addResp.text());
-      return FailedMutation({ forTarget: target, message: "Couldn't add: " + text });
+      return FailedMutation({ forTarget: target, errorMessage: "Couldn't add: " + text });
     }
     return yield* reload(target);
   }).pipe(
     Effect.catch(() =>
-      Effect.succeed(FailedMutation({ forTarget: target, message: "Couldn't create playlist." })),
+      Effect.succeed(FailedMutation({ forTarget: target, errorMessage: "Couldn't create playlist." })),
     ),
   ),
 );
@@ -157,20 +159,17 @@ export const ScrollActiveIntoView = Command.define(
  *  parsing, not for an input the runtime renders dynamically. */
 export const FocusFilter = Command.define(
   "FocusFilter",
-  {},
   CompletedFocusFilter,
-)(() => Dom.focus("#add-pl-filter").pipe(Effect.ignore, Effect.as(CompletedFocusFilter())));
+)(Dom.focus("#add-pl-filter").pipe(Effect.ignore, Effect.as(CompletedFocusFilter())));
 
 export const RequestClose = Command.define(
   "RequestClose",
-  {},
   CompletedRequestClose,
-)(() => Port.emit(ports.outbound.requestClose, undefined).pipe(Effect.as(CompletedRequestClose())));
+)(Port.emit(ports.outbound.requestClose, undefined).pipe(Effect.as(CompletedRequestClose())));
 
 export const RequestNewName = Command.define(
   "RequestNewName",
-  {},
   CompletedRequestNewName,
-)(() =>
+)(
   Port.emit(ports.outbound.requestNewName, undefined).pipe(Effect.as(CompletedRequestNewName())),
 );

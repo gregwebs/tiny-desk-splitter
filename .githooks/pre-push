@@ -27,3 +27,12 @@ if ! just ts-check; then
     exit 1
 fi
 echo "pre-push: ts-check OK"
+
+echo "pre-push: running oxlint..."
+if ! just ts-lint; then
+    echo ""
+    echo "  oxlint found errors. Fix them before pushing."
+    echo "  Run 'just ts-lint' for the full output."
+    exit 1
+fi
+echo "pre-push: ts-lint OK"

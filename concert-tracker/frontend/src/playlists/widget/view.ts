@@ -28,7 +28,10 @@ const rowClass = (base: string, isActive: boolean): string =>
   isActive ? `${base} add-pl-row-active` : base;
 
 /** Member/non-member rows carry a numeric playlist id (never "new"). */
-const playlistIdOf = (row: Row): number => row.id as number;
+const playlistIdOf = (row: Row): number => {
+  if (typeof row.id !== "number") throw new Error(`expected a numeric playlist id, got "new"`);
+  return row.id;
+};
 
 // Row keys encode the kind so a kind change (member↔nonmember on a toggle,
 // empty↔create as the filter changes) recreates the <li> rather than patching

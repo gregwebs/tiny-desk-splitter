@@ -29,7 +29,7 @@ import {
   SeekAudio,
   ShowVideoPanel,
   SyncLikeButtonsExternal,
-  SyncNowPlayingMirrorCmd,
+  SyncNowPlayingMirror,
   ToggleLikeRequest,
 } from "./command";
 import {
@@ -150,7 +150,7 @@ const concertModel = (pos: number): Model => ({
 });
 
 describe("player update — mirror invariant", () => {
-  test("ReceivedMediaInfo always emits SyncNowPlayingMirrorCmd (mirror invariant)", () => {
+  test("ReceivedMediaInfo always emits SyncNowPlayingMirror (mirror invariant)", () => {
     Story.story(
       update,
       Story.with(initialModel),
@@ -166,19 +166,19 @@ describe("player update — mirror invariant", () => {
         expect(m.playback.trackIdx).toBe(0);
         expect(m.playback.title).toBe("Track One");
       }),
-      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(SyncNowPlayingMirror),
       // beginPlayback + withPlayback emit: PlayAudio, MarkPlayingExternal,
       // ClearPreparingExternal, RecordListenEvent (Track+recordListen=true),
-      // SyncNowPlayingMirrorCmd.
+      // SyncNowPlayingMirror.
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(RecordListenEvent, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 
-  test("StopPlayback emits SyncNowPlayingMirrorCmd with null ids (mirror cleared)", () => {
+  test("StopPlayback emits SyncNowPlayingMirror with null ids (mirror cleared)", () => {
     Story.story(
       update,
       Story.with(playingModel),
@@ -189,9 +189,9 @@ describe("player update — mirror invariant", () => {
         expect(m.queue).toEqual([]);
         expect(m.isPlaying).toBe(false);
       }),
-      Story.Command.expectHas(ClearAudioSrc, SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(ClearAudioSrc, SyncNowPlayingMirror),
       Story.Command.resolve(ClearAudioSrc, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 });
@@ -283,7 +283,7 @@ describe("player update — queue operations", () => {
       Story.Command.expectHas(FetchTrackInfo),
       Story.Command.resolve(
         FetchTrackInfo,
-        FailedFetchInfo({ source: PlaySourceValue.Track({ concertId: 3, trackIdx: 5 }), message: "test-terminal" }),
+        FailedFetchInfo({ source: PlaySourceValue.Track({ concertId: 3, trackIdx: 5 }), errorMessage: "test-terminal" }),
       ),
     );
   });
@@ -354,7 +354,7 @@ describe("player update — delete and advance", () => {
       Story.Command.resolve(FetchNextTrackInfo, FailedNextTrackInfo({ plan: "next-or-stop" })),
       // next-or-stop after advance failure → stopPlaybackPure
       Story.Command.resolve(ClearAudioSrc, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 
@@ -387,7 +387,7 @@ describe("player update — delete and advance", () => {
       // Terminate FetchAlbumInfo cleanly with a failure
       Story.Command.resolve(
         FetchAlbumInfo,
-        FailedFetchInfo({ source: PlaySourceValue.Album({ concertId: 1 }), message: "test-terminal" }),
+        FailedFetchInfo({ source: PlaySourceValue.Album({ concertId: 1 }), errorMessage: "test-terminal" }),
       ),
       Story.model((m) => expect(m.status._tag).toBe("Error")),
     );
@@ -443,7 +443,7 @@ describe("player update — prepare / poll", () => {
       // Terminate the FetchTrackInfo chain cleanly with a failure
       Story.Command.resolve(
         FetchTrackInfo,
-        FailedFetchInfo({ source: PlaySourceValue.Track(trackTarget), message: "test-terminal" }),
+        FailedFetchInfo({ source: PlaySourceValue.Track(trackTarget), errorMessage: "test-terminal" }),
       ),
       Story.model((m) => expect(m.status._tag).toBe("Error")),
     );
@@ -550,7 +550,7 @@ describe("player update — port-behavior fixes (#23)", () => {
     Story.Command.resolve(MarkPlayingExternal, Acked()),
     Story.Command.resolve(ClearPreparingExternal, Acked()),
     Story.Command.resolve(RecordListenEvent, Acked()),
-    Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+    Story.Command.resolve(SyncNowPlayingMirror, Acked()),
   ];
 
   test("ReceivedQueueDrainResult sets the playlist label from the played entry", () => {
@@ -657,14 +657,14 @@ describe("player update — concert-reconstruction advance", () => {
           expect(m.playback.concert.value.pos).toBe(0);
         }
       }),
-      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(SyncNowPlayingMirror),
       // playConcertItemPure for an interlude: PlayAudio, MarkPlayingExternal,
-      // ClearPreparingExternal, MarkPlayingInterludeExternal, SyncNowPlayingMirrorCmd.
+      // ClearPreparingExternal, MarkPlayingInterludeExternal, SyncNowPlayingMirror.
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 
@@ -687,12 +687,12 @@ describe("player update — concert-reconstruction advance", () => {
         expect(m.playback.isVideo).toBe(true);
         expect(m.playback.watchUrl).toBeNull();
       }),
-      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(SyncNowPlayingMirror),
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 
@@ -707,12 +707,12 @@ describe("player update — concert-reconstruction advance", () => {
           expect(m.playback.concert.value.pos).toBe(1);
         }
       }),
-      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(SyncNowPlayingMirror),
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 
@@ -766,12 +766,12 @@ describe("player update — concert-reconstruction advance", () => {
           advanceAfter: true,
         }),
       ),
-      Story.Command.expectHas(SyncNowPlayingMirrorCmd),
+      Story.Command.expectHas(SyncNowPlayingMirror),
       Story.Command.resolve(PlayAudio, Acked()),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(MarkPlayingInterludeExternal, Acked()),
-      Story.Command.resolve(SyncNowPlayingMirrorCmd, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 });

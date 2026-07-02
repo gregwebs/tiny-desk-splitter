@@ -110,7 +110,7 @@ const commandsForRow = (
     case "create":
       return [CreateAndAdd({ target, name: row.name })];
     case "empty":
-      return [RequestNewName({})];
+      return [RequestNewName()];
   }
 };
 
@@ -120,7 +120,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     M.tagsExhaustive({
       OpenRequested: ({ target }) => [
         evo(model, { phase: () => PhaseValue.Loading({ target }), error: () => Option.none() }),
-        [LoadAddPanel({ target }), FocusFilter({})],
+        [LoadAddPanel({ target }), FocusFilter()],
       ],
 
       CloseRequested: () => [closed(model), []],
@@ -213,7 +213,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
             }
           }
           // No highlight + empty filter: close. Otherwise a no-op (ambiguous).
-          return l.filter.trim() === "" ? [closed(model), [RequestClose({})]] : [model, []];
+          return l.filter.trim() === "" ? [closed(model), [RequestClose()]] : [model, []];
         }),
 
       ClickedRow: ({ id }) =>
@@ -236,7 +236,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
             case "create":
               return [clearError(model), [CreateAndAdd({ target: l.target, name: l.filter.trim() })]];
             case "empty":
-              return [clearError(model), [RequestNewName({})]];
+              return [clearError(model), [RequestNewName()]];
           }
         }),
 
@@ -251,7 +251,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       EnteredNewName: ({ name }) =>
         withLoaded(model, (l) => [clearError(model), [CreateAndAdd({ target: l.target, name })]]),
 
-      ClickedClose: () => [closed(model), [RequestClose({})]],
+      ClickedClose: () => [closed(model), [RequestClose()]],
 
       CompletedMutation: ({ forTarget, playlists, members }) =>
         withLoaded(model, (l) => {
@@ -265,7 +265,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           return [setLoaded(clearError(model), l, { playlists, members }), []];
         }),
 
-      FailedMutation: ({ forTarget, message: msg }) =>
+      FailedMutation: ({ forTarget, errorMessage: msg }) =>
         withLoaded(model, (l) =>
           sameTarget(l.target, forTarget) ? [evo(model, { error: () => Option.some(msg) }), []] : [model, []],
         ),
