@@ -119,44 +119,41 @@ const withPlayback = (model: Model, commands: ReadonlyArray<Command<Message>>): 
 
 // ── PlaySource → identity/URL derivation ────────────────────────────────
 
-const targetIdFor = (source: PlaySource): { concertId: number; trackIdx: number | null } => {
-  switch (source._tag) {
-    case "Track":
-      return { concertId: source.concertId, trackIdx: source.trackIdx };
-    case "Album":
-      return { concertId: source.concertId, trackIdx: null };
-    case "ConcertItem":
-      return { concertId: source.concertId, trackIdx: source.trackIdx };
-  }
-};
+const targetIdFor = (source: PlaySource): { concertId: number; trackIdx: number | null } =>
+  M.value(source).pipe(
+    M.withReturnType<{ concertId: number; trackIdx: number | null }>(),
+    M.tagsExhaustive({
+      Track: ({ concertId, trackIdx }) => ({ concertId, trackIdx }),
+      Album: ({ concertId }) => ({ concertId, trackIdx: null }),
+      ConcertItem: ({ concertId, trackIdx }) => ({ concertId, trackIdx }),
+    }),
+  );
 
-const listenUrlFor = (source: PlaySource): string | null => {
-  switch (source._tag) {
-    case "Track":
-      return `/concerts/${source.concertId}/tracks/${source.trackIdx}/listen`;
-    case "Album":
-      return `/concerts/${source.concertId}/listen`;
-    case "ConcertItem":
-      return source.isInterlude || source.trackIdx === null
-        ? null
-        : `/concerts/${source.concertId}/tracks/${source.trackIdx}/listen`;
-  }
-};
+const listenUrlFor = (source: PlaySource): string | null =>
+  M.value(source).pipe(
+    M.withReturnType<string | null>(),
+    M.tagsExhaustive({
+      Track: ({ concertId, trackIdx }) => `/concerts/${concertId}/tracks/${trackIdx}/listen`,
+      Album: ({ concertId }) => `/concerts/${concertId}/listen`,
+      ConcertItem: ({ concertId, trackIdx, isInterlude }) =>
+        isInterlude || trackIdx === null ? null : `/concerts/${concertId}/tracks/${trackIdx}/listen`,
+    }),
+  );
 
 const watchUrlFor = (source: PlaySource, info: MediaInfo): string | null => {
   if (!info.is_video) return null;
-  switch (source._tag) {
-    case "Track":
-      return `/concerts/${source.concertId}/tracks/${source.trackIdx}/watch`;
-    case "Album":
-      return `/concerts/${source.concertId}/watch`;
-    case "ConcertItem":
+  return M.value(source).pipe(
+    M.withReturnType<string | null>(),
+    M.tagsExhaustive({
+      Track: ({ concertId, trackIdx }) => `/concerts/${concertId}/tracks/${trackIdx}/watch`,
+      Album: ({ concertId }) => `/concerts/${concertId}/watch`,
       // playConcertItem() always passes watchUrl: null, even for video items
       // (no per-item watch endpoint, and interludes have no trackIdx to build
       // one from). The view must therefore gate the Watch button on isVideo
       // alone, not on watchUrl — see view.ts's player-watch button.
-      return null;
-  }
+      ConcertItem: () => null,
+    }),
+  );
 };
 
 // ── Begin playback (mirrors player.ts's play()) ─────────────────────────
@@ -275,20 +272,17 @@ const stopPlaybackPure = (model: Model): UpdateReturn =>
 
 /** playNextTrack()'s definitively-nothing-to-advance-to terminal state,
  *  shared by the immediate no-track guard and FailedNextTrackInfo. */
-const applyAdvanceFailure = (model: Model, plan: AdvancePlan): UpdateReturn => {
-  switch (plan) {
-    case "queue-only":
-    case "next-or-none":
-      return [evo(model, { isPlaying: () => false }), []];
-    case "next-or-stop":
-      return stopPlaybackPure(model);
-    case "next-or-collapse":
-      return [
-        evo(model, { isPlaying: () => false, video: () => ({ open: false }) }),
-        model.video.open ? [HideVideoPanel()] : [],
-      ];
-  }
-};
+const applyAdvanceFailure = (model: Model, plan: AdvancePlan): UpdateReturn =>
+  M.value(plan).pipe(
+    withUpdateReturn,
+    M.whenOr("queue-only", "next-or-none", () => [evo(model, { isPlaying: () => false }), []]),
+    M.when("next-or-stop", () => stopPlaybackPure(model)),
+    M.when("next-or-collapse", () => [
+      evo(model, { isPlaying: () => false, video: () => ({ open: false }) }),
+      model.video.open ? [HideVideoPanel()] : [],
+    ]),
+    M.exhaustive,
+  );
 
 const advanceToNextTrack = (model: Model, plan: AdvancePlan): UpdateReturn => {
   const { concertId, trackIdx } = model.playback;
@@ -395,7 +389,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
     M.tagsExhaustive({
       CommandReceived: ({ command }) => handleCommand(model, command),
 
-      ReceivedMediaInfo: ({ source, info, opts }) =>
+      SucceededMediaInfo: ({ source, info, opts }) =>
         withPlayback(...refetchSidebarIfConcertChanged(model, beginPlayback(model, source, info, opts))),
 
       NotPlayable: ({ url }) => [model, [OpenInNewTab({ url })]],
@@ -407,7 +401,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       FailedFetchInfo: ({ errorMessage: msg }) => [withError(model, msg), []],
 
-      ReceivedTrackInfoForEnqueue: ({ concertId, trackIdx, info }) =>
+      SucceededTrackInfoForEnqueue: ({ concertId, trackIdx, info }) =>
         Option.match(info, {
           onNone: () => [model, [PostPrepare({ target: PlayTargetValue.Track({ concertId, trackIdx }) })]],
           onSome: ({ title, liked }) => {
@@ -422,7 +416,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           onSome: (idx) => dispatchPlayTrack(model, concertId, idx),
         }),
 
-      ReceivedQueueDrainResult: ({ played, skippedCount, plan }) => {
+      DrainedQueue: ({ played, skippedCount, plan }) => {
         const playedCount = Option.isSome(played) ? skippedCount + 1 : skippedCount;
         const model1 = evo(model, { queue: (queue) => queue.slice(playedCount) });
         return Option.match(played, {
@@ -451,7 +445,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       },
       FailedPrevTrackInfo: () => [evo(model, { isPlaying: () => false }), []],
 
-      ReceivedPrepareStart: ({ target, seedStatus }) => {
+      SucceededPrepareStart: ({ target, seedStatus }) => {
         const model1 = evo(model, { pending: () => Option.some(target), status: () => StatusValue.Busy({ message: "Preparing…" }) });
         const commands: ReadonlyArray<Command<Message>> =
           target._tag === "Track"
@@ -466,7 +460,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       FailedPrepareStart: () => [withError(model, "Prepare failed"), []],
 
-      ReceivedPrepareStatus: ({ target, status, elapsedMs }) =>
+      SucceededPrepareStatus: ({ target, status, elapsedMs }) =>
         Option.match(model.pending, {
           onNone: () => [model, []],
           onSome: (pendingTarget) => {
@@ -516,7 +510,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         ];
       },
 
-      ReceivedDeleteTrackResult: ({ concertId, trackIdx, ok, source }) => {
+      CompletedDeleteTrack: ({ concertId, trackIdx, ok, source }) => {
         if (!ok) return [withError(model, "Delete failed"), []];
         if (source === "bar") {
           if (model.playback.concertId !== concertId || model.playback.trackIdx !== trackIdx) return [model, []];
@@ -536,7 +530,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         return [model, [RefreshConcertItems({ concertId, advanceAfter: wasPlayingThis })]];
       },
 
-      ReceivedConcertItems: ({ concertId, items, advanceAfter }) =>
+      SucceededConcertItems: ({ concertId, items, advanceAfter }) =>
         Option.match(model.playback.concert, {
           onNone: () => [model, []],
           onSome: (concert) => {
@@ -551,7 +545,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         }),
       FailedConcertItems: () => [model, []], // bare catch in the original — not user-visible
 
-      ReceivedConcertPlaybackItems: ({ concertId, items, atPos }) =>
+      SucceededConcertPlaybackItems: ({ concertId, items, atPos }) =>
         playConcertPosOrEnd(
           evo(model, {
             playback: () => evo(model.playback, { concert: () => Option.some({ id: concertId, items, pos: atPos }) }),
@@ -565,7 +559,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       },
       FailedDeleteInterlude: () => [withError(model, "Delete failed"), []],
 
-      ReceivedPlaylistTracks: ({ tracks, name }) => {
+      SucceededPlaylistTracks: ({ tracks, name }) => {
         if (Array.isReadonlyArrayEmpty(tracks)) return [withError(model, "Nothing to play in this playlist"), []];
         const groupId = model.nextGroupId;
         const entries = tracks.map((track) =>
@@ -578,7 +572,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
       },
       FailedPlaylistLoad: () => [withError(model, "Couldn't load playlist"), []],
 
-      ReceivedTrackDetails: ({ concertId, loadGen, tracksBusy, tracks }) => {
+      SucceededTrackDetails: ({ concertId, loadGen, tracksBusy, tracks }) => {
         if (model.sidebar.loadGen !== loadGen) return [model, []]; // stale — newer fetch started
         if (model.playback.concertId !== concertId) return [model, []]; // concert changed
         return [
@@ -590,23 +584,23 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       FailedOpenExternal: () => [withError(model, "Couldn't open externally"), []],
 
-      AudioPlaying: () => [evo(model, { isPlaying: () => true }), []],
-      AudioPaused: () => [evo(model, { isPlaying: () => false }), []],
-      AudioEnded: () =>
+      StartedAudio: () => [evo(model, { isPlaying: () => true }), []],
+      PausedAudio: () => [evo(model, { isPlaying: () => false }), []],
+      EndedAudio: () =>
         advanceOrCollapse(evo(model, { playback: () => evo(model.playback, { ended: () => true }) })),
-      AudioErrored: () =>
+      ErroredAudio: () =>
         advanceOrCollapse(
           withError(
             evo(model, { playback: () => evo(model.playback, { ended: () => true }) }),
             "Failed to load media",
           ),
         ),
-      AudioPlayRejected: () => [withError(evo(model, { isPlaying: () => false }), "Playback blocked"), []],
+      RejectedAudioPlay: () => [withError(evo(model, { isPlaying: () => false }), "Playback blocked"), []],
 
       // ── Subscription-dispatched messages ──────────────────────────────
       // Re-stamp playing/preparing CSS markers after htmx:afterSettle /
       // historyRestore, mirroring player.ts's reassertPlayerUi().
-      ReassertUi: () => {
+      SettledHtmxContent: () => {
         const { concertId, trackIdx } = model.playback;
         const markPlaying =
           concertId !== null ? [MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) })] : [];
@@ -622,7 +616,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       // htmx swapped in new like-button HTML; sync our model copies so bar
       // star + sidebar list reflect the server's authoritative liked value.
-      SyncLikeFromSwap: ({ concertId, trackIdx, liked }) => [
+      SwappedLikeButton: ({ concertId, trackIdx, liked }) => [
         applyLikedEverywhere(model, concertId, trackIdx, liked),
         [],
       ],
@@ -709,7 +703,7 @@ function flipConcertItemLiked(model: Model, concertId: number, trackIdx: number,
  *  (only when `concertId`/`trackIdx` is the currently-playing track),
  *  the whole-album sidebar list, and the concert-reconstruction list.
  *  Shared by every like-toggle path (bar ToggleLike, sidebar SidebarLikeTrack,
- *  CompletedLikeToggle/FailedLikeToggle, and the htmx-swap SyncLikeFromSwap). */
+ *  CompletedLikeToggle/FailedLikeToggle, and the htmx-swap SwappedLikeButton). */
 function applyLikedEverywhere(model: Model, concertId: number, trackIdx: number, liked: boolean): Model {
   const isCurrentTrack = model.playback.concertId === concertId && model.playback.trackIdx === trackIdx;
   const model1 = isCurrentTrack

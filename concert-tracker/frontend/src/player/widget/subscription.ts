@@ -4,19 +4,19 @@ import { Port, Subscription } from "foldkit";
 import { clickShouldDismiss, isPlainEscapeKey, isPlainSpaceKey, SIDEBAR_MIN_WIDTH } from "../core";
 import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import {
-  AudioEnded,
-  AudioErrored,
-  AudioPaused,
-  AudioPlaying,
+  EndedAudio,
+  ErroredAudio,
+  PausedAudio,
+  StartedAudio,
   ClickedOutsideVideo,
   CommandReceived,
   type Message,
   MovedSidebarDrag,
   PressedEscape,
   PressedSpace,
-  ReassertUi,
+  SettledHtmxContent,
   ReleasedSidebarDrag,
-  SyncLikeFromSwap,
+  SwappedLikeButton,
 } from "./message";
 import type { Model } from "./model";
 import { ports } from "./port";
@@ -27,8 +27,8 @@ import { ports } from "./port";
 //   audioEvents   — play/pause/ended/error on the <audio> element
 //   keyboard      — keydown → PressedSpace / PressedEscape
 //   outsideVideo  — click outside #player-video-panel (gated on video.open)
-//   htmxSettle    — htmx:afterSettle + historyRestore → ReassertUi
-//   htmxSwap      — htmx:afterSwap on like buttons → SyncLikeFromSwap
+//   htmxSettle    — htmx:afterSettle + historyRestore → SettledHtmxContent
+//   htmxSwap      — htmx:afterSwap on like buttons → SwappedLikeButton
 //   commandPort   — inbound Port.subscription for window.Player calls
 //
 // Sidebar-resize and video-controls-idle subscriptions land in commit 8
@@ -63,12 +63,12 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
         if (!audio) return Stream.empty;
         return Stream.merge(
           Stream.merge(
-            Stream.fromEventListener(audio, "play").pipe(Stream.map(() => AudioPlaying())),
-            Stream.fromEventListener(audio, "pause").pipe(Stream.map(() => AudioPaused())),
+            Stream.fromEventListener(audio, "play").pipe(Stream.map(() => StartedAudio())),
+            Stream.fromEventListener(audio, "pause").pipe(Stream.map(() => PausedAudio())),
           ),
           Stream.merge(
-            Stream.fromEventListener(audio, "ended").pipe(Stream.map(() => AudioEnded())),
-            Stream.fromEventListener(audio, "error").pipe(Stream.map(() => AudioErrored())),
+            Stream.fromEventListener(audio, "ended").pipe(Stream.map(() => EndedAudio())),
+            Stream.fromEventListener(audio, "error").pipe(Stream.map(() => ErroredAudio())),
           ),
         );
       },
@@ -132,7 +132,7 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
         Stream.merge(
           Stream.fromEventListener(document.body, "htmx:afterSettle"),
           Stream.fromEventListener(document.body, "htmx:historyRestore"),
-        ).pipe(Stream.map(() => ReassertUi())),
+        ).pipe(Stream.map(() => SettledHtmxContent())),
     },
   ),
 
@@ -155,7 +155,7 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
               );
               if (!lb) return Option.none();
               return Option.some(
-                SyncLikeFromSwap({ concertId, trackIdx, liked: lb.classList.contains("liked") }),
+                SwappedLikeButton({ concertId, trackIdx, liked: lb.classList.contains("liked") }),
               );
             }),
           ),

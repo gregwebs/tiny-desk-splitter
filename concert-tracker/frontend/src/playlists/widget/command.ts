@@ -1,4 +1,4 @@
-import { Effect, Schema as S } from "effect";
+import { Effect, Match as M, Schema as S } from "effect";
 import { Command, Dom, Port } from "foldkit";
 
 import {
@@ -34,16 +34,15 @@ const fetchAllPlaylists = (): Promise<PlaylistRef[]> =>
     entries.map((e) => ({ id: e.playlist.id, name: e.playlist.name })),
   );
 
-const fetchMembershipJson = (target: AddTarget): Promise<MembershipJson[]> => {
-  switch (target.type) {
-    case "track":
-      return trackMembership(target.concertId, target.trackIndex);
-    case "concert":
-      return concertMembership(target.concertId);
-    case "playlist":
-      return playlistNestedIn(target.childPlaylistId);
-  }
-};
+const fetchMembershipJson = (target: AddTarget): Promise<MembershipJson[]> =>
+  M.value(target).pipe(
+    M.withReturnType<Promise<MembershipJson[]>>(),
+    M.discriminatorsExhaustive("type")({
+      track: ({ concertId, trackIndex }) => trackMembership(concertId, trackIndex),
+      concert: ({ concertId }) => concertMembership(concertId),
+      playlist: ({ childPlaylistId }) => playlistNestedIn(childPlaylistId),
+    }),
+  );
 
 const fetchMembers = (target: AddTarget): Promise<Member[]> =>
   fetchMembershipJson(target).then((ms) => ms.map((m) => ({ playlistId: m.id, itemId: m.item_id })));

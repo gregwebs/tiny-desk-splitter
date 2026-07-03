@@ -25,7 +25,7 @@ import { PlayerCommand } from "./port";
 // concert reconstruction navigation (playConcertItem/advanceConcert/
 // playConcert/playConcertFrom/sidebarDeleteInterlude — the two advance paths
 // the EL flagged as highest bug density), and the audio element's
-// play/pause/ended/error events (AudioPlaying..AudioPlayRejected below).
+// play/pause/ended/error events (StartedAudio..RejectedAudioPlay below).
 //
 // Deliberately OUT of scope for this commit (no decision content to port —
 // pure DOM mechanics that later commits' Subscriptions will dispatch
@@ -55,7 +55,7 @@ export const CommandReceived = m("CommandReceived", { command: PlayerCommand });
  *  every play path (startAlbum/startTrack/playAlbumAt/playFromQueue/
  *  playNextTrack/playPrevTrack/playConcertItem/playConcert's source branch).
  *  Mirrors player.ts's `play()`. */
-export const ReceivedMediaInfo = m("ReceivedMediaInfo", { source: PlaySource, info: MediaInfo, opts: PlayOpts });
+export const SucceededMediaInfo = m("SucceededMediaInfo", { source: PlaySource, info: MediaInfo, opts: PlayOpts });
 /** Fetched info exists but isn't browser-playable: falls back to opening the
  *  file URL directly (mirrors `window.open(info.url, "_blank")`). */
 export const NotPlayable = m("NotPlayable", { source: PlaySource, url: S.String });
@@ -73,7 +73,7 @@ export const FailedFetchInfo = m("FailedFetchInfo", { source: PlaySource, errorM
 /** trackMediaInfo() result for the playTrack "something else is already
  *  playing" branch — enqueue, don't play. `info` is None when the track file
  *  doesn't exist (still enters the prepare flow, same as the play path). */
-export const ReceivedTrackInfoForEnqueue = m("ReceivedTrackInfoForEnqueue", {
+export const SucceededTrackInfoForEnqueue = m("SucceededTrackInfoForEnqueue", {
   concertId: S.Number,
   trackIdx: S.Number,
   info: S.Option(S.Struct({ title: S.String, liked: S.Boolean })),
@@ -95,7 +95,7 @@ export const ResolvedFirstAvailableTrack = m("ResolvedFirstAvailableTrack", {
  *  trimming a count rather than diffing by identity keeps that race benign).
  *  `plan` carries what to do next when nothing played (see model.ts's
  *  AdvancePlan doc comment). */
-export const ReceivedQueueDrainResult = m("ReceivedQueueDrainResult", {
+export const DrainedQueue = m("DrainedQueue", {
   played: S.Option(S.Struct({ entry: QueueEntry, info: MediaInfo })),
   skippedCount: S.Number,
   plan: AdvancePlan,
@@ -111,7 +111,7 @@ export const FailedPrevTrackInfo = m("FailedPrevTrackInfo");
 
 // ── Prepare / poll ───────────────────────────────────────────────────────
 
-export const ReceivedPrepareStart = m("ReceivedPrepareStart", {
+export const SucceededPrepareStart = m("SucceededPrepareStart", {
   target: PlayTarget,
   seedStatus: S.Option(PrepareStatus),
 });
@@ -122,7 +122,7 @@ export const FailedPrepareStart = m("FailedPrepareStart", { target: PlayTarget }
  *  poll-clock surrogate — update.ts compares it to PREPARE_TIMEOUT_MS rather
  *  than reading Date.now(), so the timeout branch is exercised by a plain
  *  Story.message rather than a real timer. */
-export const ReceivedPrepareStatus = m("ReceivedPrepareStatus", {
+export const SucceededPrepareStatus = m("SucceededPrepareStatus", {
   target: PlayTarget,
   status: PrepareStatus,
   elapsedMs: S.Number,
@@ -151,7 +151,7 @@ export const FailedLikeToggle = m("FailedLikeToggle", {
  *  fallback) for the bar, or the concert-aware playConcertPosOrEnd /
  *  refreshConcertItems dance for the sidebar. See model.ts's AdvancePlan doc
  *  and the engineering-lead's project_concert_reconstruction memory. */
-export const ReceivedDeleteTrackResult = m("ReceivedDeleteTrackResult", {
+export const CompletedDeleteTrack = m("CompletedDeleteTrack", {
   concertId: S.Number,
   trackIdx: S.Number,
   ok: S.Boolean,
@@ -170,7 +170,7 @@ export const ReceivedDeleteTrackResult = m("ReceivedDeleteTrackResult", {
  *  deleted item was the one currently playing, in which case update.ts
  *  plays the refreshed `pos` (mirrors playConcertPosOrEnd()); false just
  *  updates nav state silently (some other item in the list was deleted). */
-export const ReceivedConcertItems = m("ReceivedConcertItems", {
+export const SucceededConcertItems = m("SucceededConcertItems", {
   concertId: S.Number,
   items: S.mutable(S.Array(PlaybackItem)),
   advanceAfter: S.Boolean,
@@ -178,12 +178,12 @@ export const ReceivedConcertItems = m("ReceivedConcertItems", {
 export const FailedConcertItems = m("FailedConcertItems", { concertId: S.Number });
 
 /** playConcert()/playConcertFrom()'s reconstruction-mode branch (the
- *  source-present branch reuses ReceivedMediaInfo/NotPlayable with a PlaySource
+ *  source-present branch reuses SucceededMediaInfo/NotPlayable with a PlaySource
  *  Album tag — see ./command.ts's FetchConcertPlayback, which mirrors the
  *  exact branching `isSourcePlayback(data)` does in player.ts). `atPos` is 0
  *  for playConcert, or the requested position for playConcertFrom starting
  *  fresh (not already in concert mode for this id). */
-export const ReceivedConcertPlaybackItems = m("ReceivedConcertPlaybackItems", {
+export const SucceededConcertPlaybackItems = m("SucceededConcertPlaybackItems", {
   concertId: S.Number,
   items: S.mutable(S.Array(PlaybackItem)),
   atPos: S.Number,
@@ -207,7 +207,7 @@ export const FailedDeleteInterlude = m("FailedDeleteInterlude", { concertId: S.N
 // ── Playlists ────────────────────────────────────────────────────────────
 
 const PlaylistTrack = S.Struct({ concertId: S.Number, trackIdx: S.Number, title: S.String });
-export const ReceivedPlaylistTracks = m("ReceivedPlaylistTracks", {
+export const SucceededPlaylistTracks = m("SucceededPlaylistTracks", {
   playlistId: S.Number,
   name: S.String,
   tracks: S.Array(PlaylistTrack),
@@ -218,7 +218,7 @@ export const FailedPlaylistLoad = m("FailedPlaylistLoad", { playlistId: S.Number
 
 /** FetchTrackDetails resolved successfully; `loadGen` is compared against
  *  `model.sidebar.loadGen` in update.ts to discard stale responses. */
-export const ReceivedTrackDetails = m("ReceivedTrackDetails", {
+export const SucceededTrackDetails = m("SucceededTrackDetails", {
   concertId: S.Number,
   loadGen: S.Number,
   tracksBusy: S.Boolean,
@@ -233,12 +233,8 @@ export const FailedTrackDetails = m("FailedTrackDetails", {
 
 // ── Audio element events ────────────────────────────────────────────────
 //
-// No Subscription dispatches these yet (that's a later commit, once the
-// widget actually owns/wires the <audio> element) — they're included now so
-// the decision logic they drive (advanceOrCollapse, the play/pause icon
-// mirror, the "Playback blocked" error) can be ported and Story-tested
-// alongside everything else, per the EL's request to review update.ts in
-// isolation before any DOM wiring exists.
+// Dispatched by subscription.ts's audioEvents Subscription, which listens on
+// the widget-owned <audio> element's native play/pause/ended/error events.
 
 /** openExternal()'s postEvent(state.watchUrl) failure — the one fire-and-forget
  *  POST in player.ts that DOES show an error on failure ("Couldn't open
@@ -246,22 +242,22 @@ export const FailedTrackDetails = m("FailedTrackDetails", {
  *  (those use a bare `.catch(() => {})` and are covered by Acked below). */
 export const FailedOpenExternal = m("FailedOpenExternal");
 
-export const AudioPlaying = m("AudioPlaying");
-export const AudioPaused = m("AudioPaused");
+export const StartedAudio = m("StartedAudio");
+export const PausedAudio = m("PausedAudio");
 /** Natural end of the current track/album: advanceOrCollapse() — try the
  *  queue, then the next set-list track, else collapse the video panel.
  *  Concert mode (state.concert set) advances within the concert item list
  *  first instead; see update.ts. */
-export const AudioEnded = m("AudioEnded");
+export const EndedAudio = m("EndedAudio");
 /** A load/playback error fired on the element itself (not a rejected
- *  `.play()` call — see AudioPlayRejected for that). Shows "Failed to load
- *  media" then runs the same advanceOrCollapse as AudioEnded. */
-export const AudioErrored = m("AudioErrored");
+ *  `.play()` call — see RejectedAudioPlay for that). Shows "Failed to load
+ *  media" then runs the same advanceOrCollapse as EndedAudio. */
+export const ErroredAudio = m("ErroredAudio");
 /** `audio.play()` rejected (autoplay policy, etc.) — from play(),
  *  togglePause(), or playAlbumAt(). Model fields for the track were already
  *  applied before the play() call in every case, so this never reverts
  *  them — it only sets isPlaying false and shows "Playback blocked". */
-export const AudioPlayRejected = m("AudioPlayRejected");
+export const RejectedAudioPlay = m("RejectedAudioPlay");
 
 // ── Subscription-dispatched messages (commit 7) ─────────────────────────
 //
@@ -271,12 +267,12 @@ export const AudioPlayRejected = m("AudioPlayRejected");
 /** htmx:afterSettle / htmx:historyRestore fired: re-stamp the playing/
  *  preparing CSS markers on the card DOM (mirrors player.ts's
  *  reassertPlayerUi). Always a no-op on model, never changes playback. */
-export const ReassertUi = m("ReassertUi");
+export const SettledHtmxContent = m("SettledHtmxContent");
 
 /** htmx:afterSwap on a like button outside the widget (the card-side hx-post
  *  star) — sync the model-owned liked state so bar star + sidebar list stay
  *  in sync without a separate re-fetch. */
-export const SyncLikeFromSwap = m("SyncLikeFromSwap", {
+export const SwappedLikeButton = m("SwappedLikeButton", {
   concertId: S.Number,
   trackIdx: S.Number,
   liked: S.Boolean,
@@ -310,45 +306,45 @@ export const ReleasedSidebarDrag = m("ReleasedSidebarDrag", { clientX: S.Number,
  *  would add ~15 identical no-op cases to update.ts for no benefit here,
  *  since none of these Commands can fail in a way the user needs to see
  *  (PlayAudio/ResumeAudio are the one exception that DOES need a distinct
- *  outcome — see AudioPlayRejected above). */
+ *  outcome — see RejectedAudioPlay above). */
 export const Acked = m("Acked");
 
 export const Message = S.Union([
   CommandReceived,
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   NotPlayable,
   TrackMissing,
   FailedFetchInfo,
-  ReceivedTrackInfoForEnqueue,
+  SucceededTrackInfoForEnqueue,
   ResolvedFirstAvailableTrack,
-  ReceivedQueueDrainResult,
+  DrainedQueue,
   FailedNextTrackInfo,
   FailedPrevTrackInfo,
-  ReceivedPrepareStart,
+  SucceededPrepareStart,
   FailedPrepareStart,
-  ReceivedPrepareStatus,
+  SucceededPrepareStatus,
   FailedPollPrepareStatus,
   CompletedLikeToggle,
   FailedLikeToggle,
-  ReceivedDeleteTrackResult,
-  ReceivedConcertItems,
+  CompletedDeleteTrack,
+  SucceededConcertItems,
   FailedConcertItems,
-  ReceivedConcertPlaybackItems,
+  SucceededConcertPlaybackItems,
   FailedConcertPlayback,
   CompletedDeleteInterlude,
   FailedDeleteInterlude,
-  ReceivedPlaylistTracks,
+  SucceededPlaylistTracks,
   FailedPlaylistLoad,
-  ReceivedTrackDetails,
+  SucceededTrackDetails,
   FailedTrackDetails,
   FailedOpenExternal,
-  AudioPlaying,
-  AudioPaused,
-  AudioEnded,
-  AudioErrored,
-  AudioPlayRejected,
-  ReassertUi,
-  SyncLikeFromSwap,
+  StartedAudio,
+  PausedAudio,
+  EndedAudio,
+  ErroredAudio,
+  RejectedAudioPlay,
+  SettledHtmxContent,
+  SwappedLikeButton,
   PressedSpace,
   PressedEscape,
   ClickedOutsideVideo,

@@ -22,7 +22,7 @@ import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import { setNowPlaying } from "../mirror";
 import {
   Acked,
-  AudioPlayRejected,
+  RejectedAudioPlay,
   CompletedDeleteInterlude,
   CompletedLikeToggle,
   FailedConcertItems,
@@ -38,16 +38,16 @@ import {
   FailedPrevTrackInfo,
   FailedTrackDetails,
   NotPlayable,
-  ReceivedConcertItems,
-  ReceivedConcertPlaybackItems,
-  ReceivedDeleteTrackResult,
-  ReceivedMediaInfo,
-  ReceivedPlaylistTracks,
-  ReceivedPrepareStart,
-  ReceivedPrepareStatus,
-  ReceivedQueueDrainResult,
-  ReceivedTrackDetails,
-  ReceivedTrackInfoForEnqueue,
+  SucceededConcertItems,
+  SucceededConcertPlaybackItems,
+  CompletedDeleteTrack,
+  SucceededMediaInfo,
+  SucceededPlaylistTracks,
+  SucceededPrepareStart,
+  SucceededPrepareStatus,
+  DrainedQueue,
+  SucceededTrackDetails,
+  SucceededTrackInfoForEnqueue,
   ResolvedFirstAvailableTrack,
   TrackMissing,
 } from "./message";
@@ -78,14 +78,14 @@ import {
 export const FetchAlbumInfo = Command.define(
   "FetchAlbumInfo",
   { concertId: S.Number, opts: PlayOpts },
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   NotPlayable,
   FailedFetchInfo,
 )(({ concertId, opts }) =>
   Effect.tryPromise(() => getMediaInfo(concertId)).pipe(
     Effect.map((info) =>
       info.playable
-        ? ReceivedMediaInfo({ source: PlaySourceValue.Album({ concertId }), info, opts })
+        ? SucceededMediaInfo({ source: PlaySourceValue.Album({ concertId }), info, opts })
         : NotPlayable({ source: PlaySourceValue.Album({ concertId }), url: info.url }),
     ),
     Effect.catch(() =>
@@ -102,7 +102,7 @@ export const FetchAlbumInfo = Command.define(
 export const FetchTrackInfo = Command.define(
   "FetchTrackInfo",
   { concertId: S.Number, trackIdx: S.Number, opts: PlayOpts },
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   NotPlayable,
   TrackMissing,
   FailedFetchInfo,
@@ -113,7 +113,7 @@ export const FetchTrackInfo = Command.define(
       info === null
         ? TrackMissing({ source })
         : info.playable
-          ? ReceivedMediaInfo({ source, info, opts })
+          ? SucceededMediaInfo({ source, info, opts })
           : NotPlayable({ source, url: info.url }),
     ),
     Effect.catch(() => Effect.succeed(FailedFetchInfo({ source, errorMessage: "Couldn't load track" }))),
@@ -123,18 +123,18 @@ export const FetchTrackInfo = Command.define(
 export const FetchTrackInfoForEnqueue = Command.define(
   "FetchTrackInfoForEnqueue",
   { concertId: S.Number, trackIdx: S.Number },
-  ReceivedTrackInfoForEnqueue,
+  SucceededTrackInfoForEnqueue,
 )(({ concertId, trackIdx }) =>
   Effect.tryPromise(() => getTrackMediaInfoOrNull(concertId, trackIdx)).pipe(
     Effect.map((info) =>
-      ReceivedTrackInfoForEnqueue({
+      SucceededTrackInfoForEnqueue({
         concertId,
         trackIdx,
         info: info === null ? Option.none() : Option.some({ title: info.title, liked: !!info.liked }),
       }),
     ),
     Effect.catch(() =>
-      Effect.succeed(ReceivedTrackInfoForEnqueue({ concertId, trackIdx, info: Option.none() })),
+      Effect.succeed(SucceededTrackInfoForEnqueue({ concertId, trackIdx, info: Option.none() })),
     ),
   ),
 );
@@ -164,11 +164,11 @@ export const ResolveFirstAvailableTrack = Command.define(
  *  playable file, skipping (and permanently dropping) any that don't.
  *  `skippedCount` lets update.ts trim that many off the front of the
  *  *current* model.queue, tolerant of a concurrent Enqueue while this was
- *  in flight (see ReceivedQueueDrainResult's doc comment in message.ts). */
+ *  in flight (see DrainedQueue's doc comment in message.ts). */
 export const DrainQueue = Command.define(
   "DrainQueue",
   { queue: S.Array(QueueEntry), plan: AdvancePlan },
-  ReceivedQueueDrainResult,
+  DrainedQueue,
 )(({ queue, plan }) =>
   Effect.gen(function* () {
     for (let i = 0; i < queue.length; i++) {
@@ -177,22 +177,22 @@ export const DrainQueue = Command.define(
         getTrackMediaInfoOrNull(entry.concertId, entry.trackIdx),
       ).pipe(Effect.catch(() => Effect.succeed(null)));
       if (info && info.playable) {
-        return ReceivedQueueDrainResult({ played: Option.some({ entry, info }), skippedCount: i, plan });
+        return DrainedQueue({ played: Option.some({ entry, info }), skippedCount: i, plan });
       }
     }
-    return ReceivedQueueDrainResult({ played: Option.none(), skippedCount: queue.length, plan });
+    return DrainedQueue({ played: Option.none(), skippedCount: queue.length, plan });
   }),
 );
 
 export const FetchNextTrackInfo = Command.define(
   "FetchNextTrackInfo",
   { concertId: S.Number, trackIdx: S.Number, plan: AdvancePlan },
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   FailedNextTrackInfo,
 )(({ concertId, trackIdx, plan }) =>
   Effect.tryPromise(() => getNextTrackMediaInfo(concertId, trackIdx)).pipe(
     Effect.map((info) =>
-      ReceivedMediaInfo({
+      SucceededMediaInfo({
         source: PlaySourceValue.Track({ concertId, trackIdx: info.track_index ?? trackIdx }),
         info,
         opts: { recordListen: true, playlistName: null, openVideoPanel: false },
@@ -205,12 +205,12 @@ export const FetchNextTrackInfo = Command.define(
 export const FetchPrevTrackInfo = Command.define(
   "FetchPrevTrackInfo",
   { concertId: S.Number, trackIdx: S.Number },
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   FailedPrevTrackInfo,
 )(({ concertId, trackIdx }) =>
   Effect.tryPromise(() => getPrevTrackMediaInfo(concertId, trackIdx)).pipe(
     Effect.map((info) =>
-      ReceivedMediaInfo({
+      SucceededMediaInfo({
         source: PlaySourceValue.Track({ concertId, trackIdx: info.track_index ?? trackIdx }),
         info,
         opts: { recordListen: true, playlistName: null, openVideoPanel: false },
@@ -225,7 +225,7 @@ export const FetchPrevTrackInfo = Command.define(
 export const PostPrepare = Command.define(
   "PostPrepare",
   { target: PlayTarget },
-  ReceivedPrepareStart,
+  SucceededPrepareStart,
   FailedPrepareStart,
 )(({ target }) =>
   Effect.gen(function* () {
@@ -238,23 +238,23 @@ export const PostPrepare = Command.define(
       }),
       Effect.catch(() => Effect.succeed(Option.none<PrepareStatus>())),
     );
-    return ReceivedPrepareStart({ target, seedStatus });
+    return SucceededPrepareStart({ target, seedStatus });
   }).pipe(Effect.catch(() => Effect.succeed(FailedPrepareStart({ target })))),
 );
 
 export const PollPrepareStatus = Command.define(
   "PollPrepareStatus",
   { target: PlayTarget, elapsedMs: S.Number, seedStatus: S.Option(PrepareStatus) },
-  ReceivedPrepareStatus,
+  SucceededPrepareStatus,
   FailedPollPrepareStatus,
 )(({ target, elapsedMs, seedStatus }) =>
   Option.match(seedStatus, {
-    onSome: (status) => Effect.succeed(ReceivedPrepareStatus({ target, status, elapsedMs })),
+    onSome: (status) => Effect.succeed(SucceededPrepareStatus({ target, status, elapsedMs })),
     onNone: () => {
       const concertId = target.concertId;
       return Effect.sleep(PREPARE_POLL_MS).pipe(
         Effect.flatMap(() => Effect.tryPromise(() => getPrepareStatus(concertId))),
-        Effect.map((status) => ReceivedPrepareStatus({ target, status, elapsedMs: elapsedMs + PREPARE_POLL_MS })),
+        Effect.map((status) => SucceededPrepareStatus({ target, status, elapsedMs: elapsedMs + PREPARE_POLL_MS })),
         Effect.catch(() => Effect.succeed(FailedPollPrepareStatus({ target, elapsedMs: elapsedMs + PREPARE_POLL_MS }))),
       );
     },
@@ -287,7 +287,7 @@ export const ToggleLikeRequest = Command.define(
 export const DeleteTrackRequest = Command.define(
   "DeleteTrackRequest",
   { concertId: S.Number, trackIdx: S.Number, source: S.Literals(["bar", "sidebar"]) },
-  ReceivedDeleteTrackResult,
+  CompletedDeleteTrack,
 )(({ concertId, trackIdx, source }) =>
   Effect.tryPromise(() => postDeleteTrack(concertId, trackIdx)).pipe(
     Effect.flatMap((resp) =>
@@ -303,11 +303,11 @@ export const DeleteTrackRequest = Command.define(
                 }
               }),
             ),
-            Effect.as(ReceivedDeleteTrackResult({ concertId, trackIdx, ok: true, source })),
+            Effect.as(CompletedDeleteTrack({ concertId, trackIdx, ok: true, source })),
           )
-        : Effect.succeed(ReceivedDeleteTrackResult({ concertId, trackIdx, ok: false, source })),
+        : Effect.succeed(CompletedDeleteTrack({ concertId, trackIdx, ok: false, source })),
     ),
-    Effect.catch(() => Effect.succeed(ReceivedDeleteTrackResult({ concertId, trackIdx, ok: false, source }))),
+    Effect.catch(() => Effect.succeed(CompletedDeleteTrack({ concertId, trackIdx, ok: false, source }))),
   ),
 );
 
@@ -316,14 +316,14 @@ export const DeleteTrackRequest = Command.define(
 export const RefreshConcertItems = Command.define(
   "RefreshConcertItems",
   { concertId: S.Number, advanceAfter: S.Boolean },
-  ReceivedConcertItems,
+  SucceededConcertItems,
   FailedConcertItems,
 )(({ concertId, advanceAfter }) =>
   Effect.tryPromise(() => getConcertPlayback(concertId)).pipe(
     Effect.map((data) =>
       isSourcePlayback(data)
         ? FailedConcertItems({ concertId }) // defensive: shouldn't happen while in reconstruction mode
-        : ReceivedConcertItems({ concertId, items: data.items, advanceAfter }),
+        : SucceededConcertItems({ concertId, items: data.items, advanceAfter }),
     ),
     Effect.catch(() => Effect.succeed(FailedConcertItems({ concertId }))),
   ),
@@ -332,9 +332,9 @@ export const RefreshConcertItems = Command.define(
 export const FetchConcertPlayback = Command.define(
   "FetchConcertPlayback",
   { concertId: S.Number, atPos: S.Option(S.Number), errorMessage: S.String },
-  ReceivedMediaInfo,
+  SucceededMediaInfo,
   NotPlayable,
-  ReceivedConcertPlaybackItems,
+  SucceededConcertPlaybackItems,
   FailedConcertPlayback,
 )(({ concertId, atPos, errorMessage }) =>
   Effect.tryPromise(() => getConcertPlayback(concertId)).pipe(
@@ -342,7 +342,7 @@ export const FetchConcertPlayback = Command.define(
       if (isSourcePlayback(data)) {
         const info = data.source;
         return info.playable
-          ? ReceivedMediaInfo({
+          ? SucceededMediaInfo({
               source: PlaySourceValue.Album({ concertId }),
               info,
               opts: { recordListen: true, playlistName: null, openVideoPanel: false },
@@ -350,7 +350,7 @@ export const FetchConcertPlayback = Command.define(
           : NotPlayable({ source: PlaySourceValue.Album({ concertId }), url: info.url });
       }
       return data.items.length > 0
-        ? ReceivedConcertPlaybackItems({ concertId, items: data.items, atPos: Option.getOrElse(atPos, () => 0) })
+        ? SucceededConcertPlaybackItems({ concertId, items: data.items, atPos: Option.getOrElse(atPos, () => 0) })
         : FailedConcertPlayback({ concertId, errorMessage: "Nothing to play" });
     }),
     Effect.catch(() => Effect.succeed(FailedConcertPlayback({ concertId, errorMessage }))),
@@ -381,7 +381,7 @@ export const PostDeleteInterlude = Command.define(
 export const FetchPlaylistForPlay = Command.define(
   "FetchPlaylistForPlay",
   { playlistId: S.Number },
-  ReceivedPlaylistTracks,
+  SucceededPlaylistTracks,
   FailedPlaylistLoad,
 )(({ playlistId }) =>
   Effect.tryPromise(() => getPlaylist(playlistId)).pipe(
@@ -389,7 +389,7 @@ export const FetchPlaylistForPlay = Command.define(
       const tracks = (data.resolved_tracks || [])
         .filter((track) => track.available)
         .map((track) => ({ concertId: track.concert_id, trackIdx: track.track_index, title: track.title }));
-      return ReceivedPlaylistTracks({ playlistId, name: data.playlist.name, tracks });
+      return SucceededPlaylistTracks({ playlistId, name: data.playlist.name, tracks });
     }),
     Effect.catch(() => Effect.succeed(FailedPlaylistLoad({ playlistId }))),
   ),
@@ -424,15 +424,15 @@ export const PlayAudio = Command.define(
   "PlayAudio",
   { url: S.String },
   Acked,
-  AudioPlayRejected,
+  RejectedAudioPlay,
 )(({ url }) =>
   Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
     Effect.flatMap((audio) => {
-      if (!audio) return Effect.succeed(AudioPlayRejected());
+      if (!audio) return Effect.succeed(RejectedAudioPlay());
       audio.src = url;
       return Effect.tryPromise(() => audio.play()).pipe(
         Effect.as(Acked()),
-        Effect.catch(() => Effect.succeed(AudioPlayRejected())),
+        Effect.catch(() => Effect.succeed(RejectedAudioPlay())),
       );
     }),
   ),
@@ -446,12 +446,12 @@ export const PauseAudio = Command.define(
 export const ResumeAudio = Command.define(
   "ResumeAudio",
   Acked,
-  AudioPlayRejected,
+  RejectedAudioPlay,
 )(
   Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
     Effect.flatMap((audio) => (audio ? Effect.tryPromise(() => audio.play()) : Effect.void)),
     Effect.as(Acked()),
-    Effect.catch(() => Effect.succeed(AudioPlayRejected())),
+    Effect.catch(() => Effect.succeed(RejectedAudioPlay())),
   ),
 );
 
@@ -717,12 +717,12 @@ export const PersistSidebarWidth = Command.define(
 export const FetchTrackDetails = Command.define(
   "FetchTrackDetails",
   { concertId: S.Number, loadGen: S.Number },
-  ReceivedTrackDetails,
+  SucceededTrackDetails,
   FailedTrackDetails,
 )(({ concertId, loadGen }) =>
   Effect.tryPromise(() => getTrackDetails(concertId)).pipe(
     Effect.map((data) =>
-      ReceivedTrackDetails({
+      SucceededTrackDetails({
         concertId,
         loadGen,
         tracksBusy: data.tracks_busy,
