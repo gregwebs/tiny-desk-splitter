@@ -24,16 +24,16 @@ const withUpdateReturn = M.withReturnType<UpdateReturn>();
 type Loaded = Extract<Phase, { _tag: "Loaded" }>;
 
 /** Target identity for the staleness rule (label is cosmetic, excluded). */
-const sameTarget = (a: AddTarget, b: AddTarget): boolean => {
-  switch (a.type) {
-    case "track":
-      return b.type === "track" && a.concertId === b.concertId && a.trackIndex === b.trackIndex;
-    case "concert":
-      return b.type === "concert" && a.concertId === b.concertId;
-    case "playlist":
-      return b.type === "playlist" && a.childPlaylistId === b.childPlaylistId;
-  }
-};
+const sameTarget = (a: AddTarget, b: AddTarget): boolean =>
+  M.value(a).pipe(
+    M.withReturnType<boolean>(),
+    M.discriminatorsExhaustive("type")({
+      track: ({ concertId, trackIndex }) =>
+        b.type === "track" && b.concertId === concertId && b.trackIndex === trackIndex,
+      concert: ({ concertId }) => b.type === "concert" && b.concertId === concertId,
+      playlist: ({ childPlaylistId }) => b.type === "playlist" && b.childPlaylistId === childPlaylistId,
+    }),
+  );
 
 const currentTarget = (model: Model): Option.Option<AddTarget> =>
   M.value(model.phase).pipe(
@@ -99,6 +99,11 @@ const commandsForRow = (
   members: ReadonlyArray<Member>,
   row: Row,
 ): ReadonlyArray<Command<Message>> => {
+  // NOTE: `Row` (core.ts) is a flat interface with `kind: RowKind` as a plain
+  // literal-union field, not a genuine per-variant discriminated union (every
+  // kind shares the same `{id, kind, name}` shape) — Match.discriminatorsExhaustive
+  // can't narrow a flat interface this way (TS infers `never` for each branch),
+  // so a plain switch is the correct tool here.
   switch (row.kind) {
     case "nonmember":
       return typeof row.id === "number" ? [AddItem({ target, playlistId: row.id })] : [];
@@ -230,6 +235,9 @@ export const update = (model: Model, message: Message): UpdateReturn =>
           const rows = buildRows({ playlists: loaded.playlists, members: loaded.members, filter: loaded.filter });
           const row = rows.find((row) => row.id === id);
           if (!row) return [model, []];
+          // NOTE: Row (core.ts) is a flat interface, not a genuine per-variant
+          // discriminated union — see commandsForRow's NOTE for why a plain
+          // switch (not Match.discriminatorsExhaustive) is correct here.
           switch (row.kind) {
             case "member":
               return [model, []];

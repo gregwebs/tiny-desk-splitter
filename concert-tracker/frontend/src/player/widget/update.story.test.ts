@@ -36,10 +36,10 @@ import {
 } from "./command";
 import {
   Acked,
-  AudioEnded,
-  AudioPaused,
-  AudioPlaying,
-  AudioPlayRejected,
+  EndedAudio,
+  PausedAudio,
+  StartedAudio,
+  RejectedAudioPlay,
   ClickedOutsideVideo,
   CommandReceived,
   CompletedDeleteInterlude,
@@ -57,18 +57,18 @@ import {
   NotPlayable,
   PressedEscape,
   PressedSpace,
-  ReassertUi,
-  ReceivedConcertItems,
-  ReceivedConcertPlaybackItems,
-  ReceivedDeleteTrackResult,
-  ReceivedMediaInfo,
-  ReceivedPlaylistTracks,
-  ReceivedPrepareStart,
-  ReceivedPrepareStatus,
-  ReceivedQueueDrainResult,
-  ReceivedTrackDetails,
-  ReceivedTrackInfoForEnqueue,
-  SyncLikeFromSwap,
+  SettledHtmxContent,
+  SucceededConcertItems,
+  SucceededConcertPlaybackItems,
+  CompletedDeleteTrack,
+  SucceededMediaInfo,
+  SucceededPlaylistTracks,
+  SucceededPrepareStart,
+  SucceededPrepareStatus,
+  DrainedQueue,
+  SucceededTrackDetails,
+  SucceededTrackInfoForEnqueue,
+  SwappedLikeButton,
   TrackMissing,
 } from "./message";
 import {
@@ -161,12 +161,12 @@ const concertModel = (pos: number): Model => ({
 });
 
 describe("player update — mirror invariant", () => {
-  test("ReceivedMediaInfo always emits SyncNowPlayingMirror (mirror invariant)", () => {
+  test("SucceededMediaInfo always emits SyncNowPlayingMirror (mirror invariant)", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(
-        ReceivedMediaInfo({
+        SucceededMediaInfo({
           source: PlaySourceValue.Track({ concertId: 1, trackIdx: 0 }),
           info: mediaInfo,
           opts: defaultPlayOpts,
@@ -299,7 +299,7 @@ describe("player update — queue operations", () => {
     );
   });
 
-  test("ReceivedQueueDrainResult with nothing played and queue-only plan trims the queue without advancing", () => {
+  test("DrainedQueue with nothing played and queue-only plan trims the queue without advancing", () => {
     const withTwo: Model = {
       ...initialModel,
       queue: [makeQueueEntry(1, 0, "A", false), makeQueueEntry(1, 1, "B", false)],
@@ -307,7 +307,7 @@ describe("player update — queue operations", () => {
     Story.story(
       update,
       Story.with(withTwo),
-      Story.message(ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 2, plan: "queue-only" })),
+      Story.message(DrainedQueue({ played: Option.none(), skippedCount: 2, plan: "queue-only" })),
       Story.model((m) => expect(m.queue).toEqual([])),
       Story.Command.expectNone(),
     );
@@ -346,19 +346,19 @@ describe("player update — skip guards", () => {
 });
 
 describe("player update — delete and advance", () => {
-  test("ReceivedDeleteTrackResult bar-source for playing track pauses + drains queue", () => {
+  test("CompletedDeleteTrack bar-source for playing track pauses + drains queue", () => {
     // advanceAfterDelete: emits [PauseAudio, DrainQueue({plan:"next-or-stop"})]
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: true, source: "bar" })),
+      Story.message(CompletedDeleteTrack({ concertId: 1, trackIdx: 0, ok: true, source: "bar" })),
       Story.Command.expectHas(PauseAudio, DrainQueue),
       Story.Command.resolve(PauseAudio, Acked()),
       // Empty queue + "next-or-stop" → advanceToNextTrack → FetchNextTrackInfo for the deleted track.
       // The server skips the deleted index and returns the next available track.
       Story.Command.resolve(
         DrainQueue,
-        ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 0, plan: "next-or-stop" }),
+        DrainedQueue({ played: Option.none(), skippedCount: 0, plan: "next-or-stop" }),
       ),
       Story.Command.expectHas(FetchNextTrackInfo),
       // Resolve with failure to terminate the chain cleanly
@@ -406,7 +406,7 @@ describe("player update — delete and advance", () => {
 });
 
 describe("player update — prepare / poll", () => {
-  test("ReceivedPrepareStatus for a superseded target is a no-op (staleness guard)", () => {
+  test("SucceededPrepareStatus for a superseded target is a no-op (staleness guard)", () => {
     const model: Model = {
       ...initialModel,
       pending: Option.some(trackTarget),
@@ -415,7 +415,7 @@ describe("player update — prepare / poll", () => {
       update,
       Story.with(model),
       Story.message(
-        ReceivedPrepareStatus({
+        SucceededPrepareStatus({
           target: { _tag: "Track", concertId: 99, trackIdx: 0 }, // different concert → stale
           status: prepareStatus({ tracks_present: [true] }),
           elapsedMs: 100,
@@ -426,11 +426,11 @@ describe("player update — prepare / poll", () => {
     );
   });
 
-  test("ReceivedPrepareStart enters Busy, starts polling, then clears pending on ready track", () => {
+  test("SucceededPrepareStart enters Busy, starts polling, then clears pending on ready track", () => {
     Story.story(
       update,
       Story.with(initialModel),
-      Story.message(ReceivedPrepareStart({ target: trackTarget, seedStatus: Option.none() })),
+      Story.message(SucceededPrepareStart({ target: trackTarget, seedStatus: Option.none() })),
       Story.model((m) => {
         expect(Option.isSome(m.pending)).toBe(true);
         expect(m.status._tag).toBe("Busy");
@@ -442,7 +442,7 @@ describe("player update — prepare / poll", () => {
       // Track ready on first poll → pending cleared, play dispatched
       Story.Command.resolve(
         PollPrepareStatus,
-        ReceivedPrepareStatus({ target: trackTarget, status: prepareStatus({ tracks_present: [true] }), elapsedMs: 100 }),
+        SucceededPrepareStatus({ target: trackTarget, status: prepareStatus({ tracks_present: [true] }), elapsedMs: 100 }),
       ),
       Story.model((m) => {
         expect(Option.isNone(m.pending)).toBe(true);
@@ -460,7 +460,7 @@ describe("player update — prepare / poll", () => {
     );
   });
 
-  test("ReceivedPrepareStatus with download-error surfaces an error and clears pending", () => {
+  test("SucceededPrepareStatus with download-error surfaces an error and clears pending", () => {
     const model: Model = {
       ...initialModel,
       pending: Option.some(trackTarget),
@@ -470,7 +470,7 @@ describe("player update — prepare / poll", () => {
       update,
       Story.with(model),
       Story.message(
-        ReceivedPrepareStatus({
+        SucceededPrepareStatus({
           target: trackTarget,
           status: prepareStatus({ download: "download-error" }),
           elapsedMs: 100,
@@ -485,7 +485,7 @@ describe("player update — prepare / poll", () => {
     );
   });
 
-  test("ReceivedPrepareStatus past the timeout surfaces a timeout error", () => {
+  test("SucceededPrepareStatus past the timeout surfaces a timeout error", () => {
     const model: Model = {
       ...initialModel,
       pending: Option.some(trackTarget),
@@ -495,7 +495,7 @@ describe("player update — prepare / poll", () => {
       update,
       Story.with(model),
       Story.message(
-        ReceivedPrepareStatus({ target: trackTarget, status: prepareStatus(), elapsedMs: PREPARE_TIMEOUT_MS + 1 }),
+        SucceededPrepareStatus({ target: trackTarget, status: prepareStatus(), elapsedMs: PREPARE_TIMEOUT_MS + 1 }),
       ),
       Story.model((m) => {
         expect(Option.isNone(m.pending)).toBe(true);
@@ -525,7 +525,7 @@ describe("player update — prepare / poll", () => {
       // Terminate the retry with a download-error to avoid infinite recursion
       Story.Command.resolve(
         PollPrepareStatus,
-        ReceivedPrepareStatus({ target: trackTarget, status: prepareStatus({ download: "download-error" }), elapsedMs: 200 }),
+        SucceededPrepareStatus({ target: trackTarget, status: prepareStatus({ download: "download-error" }), elapsedMs: 200 }),
       ),
       Story.model((m) => expect(m.status._tag).toBe("Error")),
       Story.Command.resolve(ClearPreparingExternal, Acked()),
@@ -564,34 +564,34 @@ describe("player update — port-behavior fixes (#23)", () => {
     Story.Command.resolve(SyncNowPlayingMirror, Acked()),
   ];
 
-  test("ReceivedQueueDrainResult sets the playlist label from the played entry", () => {
+  test("DrainedQueue sets the playlist label from the played entry", () => {
     const entry = makeQueueEntry(1, 0, "Track One", false, "My Mix", 7);
     Story.story(
       update,
       Story.with({ ...initialModel, queue: [entry] }),
-      Story.message(ReceivedQueueDrainResult({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
+      Story.message(DrainedQueue({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
       Story.model((m) => expect(m.playback.playlistLabel).toBe("My Mix")),
       ...resolvePlay,
     );
   });
 
-  test("ReceivedQueueDrainResult of an ad-hoc entry leaves the playlist label null", () => {
+  test("DrainedQueue of an ad-hoc entry leaves the playlist label null", () => {
     const entry = makeQueueEntry(2, 1, "Ad-hoc", false);
     Story.story(
       update,
       Story.with({ ...initialModel, queue: [entry] }),
-      Story.message(ReceivedQueueDrainResult({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
+      Story.message(DrainedQueue({ played: Option.some({ entry, info: mediaInfo }), skippedCount: 0, plan: "queue-only" })),
       Story.model((m) => expect(m.playback.playlistLabel).toBeNull()),
       ...resolvePlay,
     );
   });
 
-  test("ReceivedMediaInfo refetches sidebar tracks when the concert changes while open", () => {
+  test("SucceededMediaInfo refetches sidebar tracks when the concert changes while open", () => {
     const model: Model = { ...playingModel, sidebar: { open: true, tracks: Option.none(), loadGen: 5 } };
     Story.story(
       update,
       Story.with(model),
-      Story.message(ReceivedMediaInfo({ source: PlaySourceValue.Track({ concertId: 2, trackIdx: 0 }), info: mediaInfo, opts: defaultPlayOpts })),
+      Story.message(SucceededMediaInfo({ source: PlaySourceValue.Track({ concertId: 2, trackIdx: 0 }), info: mediaInfo, opts: defaultPlayOpts })),
       Story.model((m) => expect(m.sidebar.loadGen).toBe(6)),
       Story.Command.expectHas(FetchTrackDetails),
       Story.Command.resolve(FetchTrackDetails, FailedTrackDetails({ concertId: 2, loadGen: 6 })),
@@ -599,15 +599,15 @@ describe("player update — port-behavior fixes (#23)", () => {
     );
   });
 
-  test("ReceivedMediaInfo does not refetch the sidebar on an intra-album advance (same concert)", () => {
+  test("SucceededMediaInfo does not refetch the sidebar on an intra-album advance (same concert)", () => {
     // The concertId-unchanged guard is load-bearing: next/prev advance flows through
-    // ReceivedMediaInfo too. loadGen stays put and no FetchTrackDetails fires (Story
+    // SucceededMediaInfo too. loadGen stays put and no FetchTrackDetails fires (Story
     // would throw on an unresolved FetchTrackDetails if it did).
     const model: Model = { ...playingModel, sidebar: { open: true, tracks: Option.none(), loadGen: 5 } };
     Story.story(
       update,
       Story.with(model),
-      Story.message(ReceivedMediaInfo({ source: PlaySourceValue.Track({ concertId: 1, trackIdx: 1 }), info: mediaInfo, opts: defaultPlayOpts })),
+      Story.message(SucceededMediaInfo({ source: PlaySourceValue.Track({ concertId: 1, trackIdx: 1 }), info: mediaInfo, opts: defaultPlayOpts })),
       Story.model((m) => expect(m.sidebar.loadGen).toBe(5)),
       ...resolvePlay,
     );
@@ -617,11 +617,11 @@ describe("player update — port-behavior fixes (#23)", () => {
     Story.story(
       update,
       Story.with(playingWithSidebar),
-      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: true, source: "sidebar" })),
+      Story.message(CompletedDeleteTrack({ concertId: 1, trackIdx: 0, ok: true, source: "sidebar" })),
       Story.model((m) => expect(findSidebarTrack(m, 0)?.available).toBe(false)),
       Story.Command.expectHas(PauseAudio, DrainQueue),
       Story.Command.resolve(PauseAudio, Acked()),
-      Story.Command.resolve(DrainQueue, ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 0, plan: "queue-only" })),
+      Story.Command.resolve(DrainQueue, DrainedQueue({ played: Option.none(), skippedCount: 0, plan: "queue-only" })),
     );
   });
 
@@ -629,7 +629,7 @@ describe("player update — port-behavior fixes (#23)", () => {
     Story.story(
       update,
       Story.with(playingWithSidebar),
-      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 3, ok: true, source: "sidebar" })),
+      Story.message(CompletedDeleteTrack({ concertId: 1, trackIdx: 3, ok: true, source: "sidebar" })),
       Story.model((m) => {
         expect(findSidebarTrack(m, 3)?.available).toBe(false);
         expect(m.playback.trackIdx).toBe(0);
@@ -642,20 +642,20 @@ describe("player update — port-behavior fixes (#23)", () => {
     Story.story(
       update,
       Story.with(concertModel(0)),
-      Story.message(ReceivedDeleteTrackResult({ concertId: 42, trackIdx: 0, ok: true, source: "sidebar" })),
+      Story.message(CompletedDeleteTrack({ concertId: 42, trackIdx: 0, ok: true, source: "sidebar" })),
       Story.Command.expectHas(RefreshConcertItems),
-      Story.Command.resolve(RefreshConcertItems, ReceivedConcertItems({ concertId: 42, items: [interludeItem("/c/0.mp3", 0)], advanceAfter: false })),
+      Story.Command.resolve(RefreshConcertItems, SucceededConcertItems({ concertId: 42, items: [interludeItem("/c/0.mp3", 0)], advanceAfter: false })),
     );
   });
 });
 
 describe("player update — concert-reconstruction advance", () => {
-  test("ReceivedConcertPlaybackItems enters concert mode and plays pos 0", () => {
+  test("SucceededConcertPlaybackItems enters concert mode and plays pos 0", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(
-        ReceivedConcertPlaybackItems({
+        SucceededConcertPlaybackItems({
           concertId: 42,
           items: [interludeItem("/c/0.mp3", 0), interludeItem("/c/1.mp3", 1)],
           atPos: 0,
@@ -683,12 +683,12 @@ describe("player update — concert-reconstruction advance", () => {
   // in the state the Watch button's view gate expects (isVideo: true,
   // watchUrl: null) — see watchUrlFor's ConcertItem case in update.ts and the
   // matching Scene regression test in view.scene.test.ts.
-  test("ReceivedConcertPlaybackItems with a video item sets isVideo true and watchUrl null", () => {
+  test("SucceededConcertPlaybackItems with a video item sets isVideo true and watchUrl null", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(
-        ReceivedConcertPlaybackItems({
+        SucceededConcertPlaybackItems({
           concertId: 42,
           items: [interludeItem("/c/0.mp4", 0, "Interlude 0", true)],
           atPos: 0,
@@ -707,11 +707,11 @@ describe("player update — concert-reconstruction advance", () => {
     );
   });
 
-  test("AudioEnded in concert mode advances to the next item", () => {
+  test("EndedAudio in concert mode advances to the next item", () => {
     Story.story(
       update,
       Story.with(concertModel(0)),
-      Story.message(AudioEnded()),
+      Story.message(EndedAudio()),
       Story.model((m) => {
         expect(Option.isSome(m.playback.concert)).toBe(true);
         if (Option.isSome(m.playback.concert)) {
@@ -727,14 +727,14 @@ describe("player update — concert-reconstruction advance", () => {
     );
   });
 
-  test("AudioEnded at the last concert item clears concert mode without emitting commands", () => {
+  test("EndedAudio at the last concert item clears concert mode without emitting commands", () => {
     // pos=1 is the last of 2 items; concertAdvancePos(1, 2) === null.
     // advanceConcertPure end-of-concert branch does NOT call withPlayback because
     // clearing `concert` alone doesn't change nowPlaying()'s concertId/trackIdx.
     Story.story(
       update,
       Story.with(concertModel(1)),
-      Story.message(AudioEnded()),
+      Story.message(EndedAudio()),
       Story.model((m) => {
         expect(Option.isNone(m.playback.concert)).toBe(true);
         expect(m.video.open).toBe(false);
@@ -743,13 +743,13 @@ describe("player update — concert-reconstruction advance", () => {
     );
   });
 
-  test("ReceivedConcertItems with advanceAfter=false updates items without triggering play", () => {
+  test("SucceededConcertItems with advanceAfter=false updates items without triggering play", () => {
     const updatedItem0 = interludeItem("/c/0.mp3", 0, "Updated Interlude 0");
     Story.story(
       update,
       Story.with(concertModel(0)),
       Story.message(
-        ReceivedConcertItems({
+        SucceededConcertItems({
           concertId: 42,
           items: [updatedItem0, interludeItem("/c/1.mp3", 1)],
           advanceAfter: false,
@@ -766,12 +766,12 @@ describe("player update — concert-reconstruction advance", () => {
     );
   });
 
-  test("ReceivedConcertItems with advanceAfter=true plays the refreshed position", () => {
+  test("SucceededConcertItems with advanceAfter=true plays the refreshed position", () => {
     Story.story(
       update,
       Story.with(concertModel(0)),
       Story.message(
-        ReceivedConcertItems({
+        SucceededConcertItems({
           concertId: 42,
           items: [interludeItem("/c/0.mp3", 0), interludeItem("/c/1.mp3", 1)],
           advanceAfter: true,
@@ -798,11 +798,11 @@ describe("player update — sidebar track details", () => {
     { index: 1, title: "Track B", available: false, is_video: false, liked: true },
   ];
 
-  test("ReceivedTrackDetails stores tracks when loadGen matches", () => {
+  test("SucceededTrackDetails stores tracks when loadGen matches", () => {
     Story.story(
       update,
       Story.with(concertModel),
-      Story.message(ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
+      Story.message(SucceededTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
       Story.model((m) => {
         expect(Option.isSome(m.sidebar.tracks)).toBe(true);
         if (Option.isSome(m.sidebar.tracks)) {
@@ -814,21 +814,21 @@ describe("player update — sidebar track details", () => {
     );
   });
 
-  test("ReceivedTrackDetails is discarded when loadGen is stale", () => {
+  test("SucceededTrackDetails is discarded when loadGen is stale", () => {
     Story.story(
       update,
       Story.with(concertModel),
-      Story.message(ReceivedTrackDetails({ concertId: 1, loadGen: 0, tracksBusy: false, tracks: sampleTracks })),
+      Story.message(SucceededTrackDetails({ concertId: 1, loadGen: 0, tracksBusy: false, tracks: sampleTracks })),
       Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
       Story.Command.expectNone(),
     );
   });
 
-  test("ReceivedTrackDetails is discarded when concert has changed", () => {
+  test("SucceededTrackDetails is discarded when concert has changed", () => {
     Story.story(
       update,
       Story.with(concertModel),
-      Story.message(ReceivedTrackDetails({ concertId: 99, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
+      Story.message(SucceededTrackDetails({ concertId: 99, loadGen: 1, tracksBusy: false, tracks: sampleTracks })),
       Story.model((m) => expect(Option.isNone(m.sidebar.tracks)).toBe(true)),
       Story.Command.expectNone(),
     );
@@ -864,7 +864,7 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
       Story.Command.resolve(MutateBodyClass, Acked()),
       Story.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
     );
   });
@@ -887,7 +887,7 @@ describe("player update — OpenSidebar/ToggleSidebar FetchTrackDetails dispatch
       Story.Command.resolve(MutateBodyClass, Acked()),
       Story.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId: 5, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
     );
   });
@@ -1127,21 +1127,21 @@ describe("player update — like-sync", () => {
 });
 
 describe("player update — audio events", () => {
-  test("AudioPlaying sets isPlaying true", () => {
+  test("StartedAudio sets isPlaying true", () => {
     Story.story(
       update,
       Story.with(initialModel),
-      Story.message(AudioPlaying()),
+      Story.message(StartedAudio()),
       Story.model((m) => expect(m.isPlaying).toBe(true)),
       Story.Command.expectNone(),
     );
   });
 
-  test("AudioPaused sets isPlaying false", () => {
+  test("PausedAudio sets isPlaying false", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(AudioPaused()),
+      Story.message(PausedAudio()),
       Story.model((m) => expect(m.isPlaying).toBe(false)),
       Story.Command.expectNone(),
     );
@@ -1159,12 +1159,12 @@ describe("player update — audio events", () => {
 });
 
 describe("player update — queue section scroll", () => {
-  test("ReceivedTrackInfoForEnqueue adds new entry dispatches ScrollQueueToBottom", () => {
+  test("SucceededTrackInfoForEnqueue adds new entry dispatches ScrollQueueToBottom", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(
-        ReceivedTrackInfoForEnqueue({
+        SucceededTrackInfoForEnqueue({
           concertId: 1,
           trackIdx: 0,
           info: Option.some({ title: "Track 1", liked: false }),
@@ -1176,7 +1176,7 @@ describe("player update — queue section scroll", () => {
     );
   });
 
-  test("ReceivedTrackInfoForEnqueue duplicate skips ScrollQueueToBottom", () => {
+  test("SucceededTrackInfoForEnqueue duplicate skips ScrollQueueToBottom", () => {
     const model: Model = {
       ...initialModel,
       queue: [makeQueueEntry(1, 0, "Track 1", false)],
@@ -1185,7 +1185,7 @@ describe("player update — queue section scroll", () => {
       update,
       Story.with(model),
       Story.message(
-        ReceivedTrackInfoForEnqueue({
+        SucceededTrackInfoForEnqueue({
           concertId: 1,
           trackIdx: 0,
           info: Option.some({ title: "Track 1", liked: false }),
@@ -1196,12 +1196,12 @@ describe("player update — queue section scroll", () => {
     );
   });
 
-  test("ReceivedPlaylistTracks dispatches ScrollQueueToBottom", () => {
+  test("SucceededPlaylistTracks dispatches ScrollQueueToBottom", () => {
     Story.story(
       update,
       Story.with(initialModel),
       Story.message(
-        ReceivedPlaylistTracks({
+        SucceededPlaylistTracks({
           playlistId: 1,
           name: "Jazz Classics",
           tracks: [{ concertId: 1, trackIdx: 0, title: "So What" }],
@@ -1211,7 +1211,7 @@ describe("player update — queue section scroll", () => {
       Story.Command.expectHas(DrainQueue),
       Story.Command.resolve(
         DrainQueue,
-        ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 1, plan: "queue-only" }),
+        DrainedQueue({ played: Option.none(), skippedCount: 1, plan: "queue-only" }),
       ),
       Story.Command.expectHas(ScrollQueueToBottom),
       Story.Command.resolve(ScrollQueueToBottom, Acked()),
@@ -1285,17 +1285,17 @@ describe("player update — body class and video panel commands", () => {
 });
 
 describe("player update — subscription-dispatched messages", () => {
-  test("ReassertUi with active playback dispatches MarkPlayingExternal", () => {
+  test("SettledHtmxContent with active playback dispatches MarkPlayingExternal", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(ReassertUi()),
+      Story.message(SettledHtmxContent()),
       Story.model((m) => expect(m).toEqual(playingModel)),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
     );
   });
 
-  test("ReassertUi with active playback + pending prepare dispatches both markers", () => {
+  test("SettledHtmxContent with active playback + pending prepare dispatches both markers", () => {
     const m: Model = {
       ...playingModel,
       pending: Option.some({ _tag: "Track" as const, concertId: 1, trackIdx: 0 }),
@@ -1303,18 +1303,18 @@ describe("player update — subscription-dispatched messages", () => {
     Story.story(
       update,
       Story.with(m),
-      Story.message(ReassertUi()),
+      Story.message(SettledHtmxContent()),
       Story.Command.expectHas(MarkPlayingExternal, MarkPreparingExternal),
       Story.Command.resolve(MarkPlayingExternal, Acked()),
       Story.Command.resolve(MarkPreparingExternal, Acked()),
     );
   });
 
-  test("ReassertUi with no active playback dispatches nothing", () => {
+  test("SettledHtmxContent with no active playback dispatches nothing", () => {
     Story.story(
       update,
       Story.with(initialModel),
-      Story.message(ReassertUi()),
+      Story.message(SettledHtmxContent()),
       Story.Command.expectNone(),
     );
   });
@@ -1367,21 +1367,21 @@ describe("player update — subscription-dispatched messages", () => {
     );
   });
 
-  test("SyncLikeFromSwap updates playback liked state when track matches", () => {
+  test("SwappedLikeButton updates playback liked state when track matches", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(SyncLikeFromSwap({ concertId: 1, trackIdx: 0, liked: true })),
+      Story.message(SwappedLikeButton({ concertId: 1, trackIdx: 0, liked: true })),
       Story.model((m) => expect(m.playback.liked).toBe(true)),
       Story.Command.expectNone(),
     );
   });
 
-  test("SyncLikeFromSwap ignores swap for a different track", () => {
+  test("SwappedLikeButton ignores swap for a different track", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(SyncLikeFromSwap({ concertId: 1, trackIdx: 99, liked: true })),
+      Story.message(SwappedLikeButton({ concertId: 1, trackIdx: 99, liked: true })),
       Story.model((m) => expect(m.playback.liked).toBe(false)), // unchanged
       Story.Command.expectNone(),
     );
@@ -1397,7 +1397,7 @@ describe("player update — fetch-result entry points", () => {
       Story.Command.expectHas(PostPrepare),
       Story.Command.resolve(
         PostPrepare,
-        ReceivedPrepareStart({ target: { _tag: "Track", concertId: 1, trackIdx: 0 }, seedStatus: Option.none() }),
+        SucceededPrepareStart({ target: { _tag: "Track", concertId: 1, trackIdx: 0 }, seedStatus: Option.none() }),
       ),
       Story.model((m) => expect(Option.isSome(m.pending)).toBe(true)),
       Story.Command.expectHas(MarkPreparingExternal, DisableCardTracksExternal, RefreshCardStatus, PollPrepareStatus),
@@ -1406,7 +1406,7 @@ describe("player update — fetch-result entry points", () => {
       Story.Command.resolve(RefreshCardStatus, Acked()),
       Story.Command.resolve(
         PollPrepareStatus,
-        ReceivedPrepareStatus({
+        SucceededPrepareStatus({
           target: { _tag: "Track", concertId: 1, trackIdx: 0 },
           status: prepareStatus({ tracks_present: [true] }),
           elapsedMs: 0,
@@ -1417,7 +1417,7 @@ describe("player update — fetch-result entry points", () => {
       Story.Command.resolve(ClearPreparingExternal, Acked()),
       Story.Command.resolve(
         FetchTrackInfo,
-        ReceivedMediaInfo({
+        SucceededMediaInfo({
           source: PlaySourceValue.Track({ concertId: 1, trackIdx: 0 }),
           info: mediaInfo,
           opts: defaultPlayOpts,
@@ -1484,11 +1484,11 @@ describe("player update — failure paths", () => {
     );
   });
 
-  test("AudioPlayRejected stops isPlaying and surfaces a status error", () => {
+  test("RejectedAudioPlay stops isPlaying and surfaces a status error", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(AudioPlayRejected()),
+      Story.message(RejectedAudioPlay()),
       Story.model((m) => {
         expect(m.isPlaying).toBe(false);
         expect(m.status).toEqual(StatusValue.Error({ message: "Playback blocked" }));
@@ -1497,11 +1497,11 @@ describe("player update — failure paths", () => {
     );
   });
 
-  test("ReceivedDeleteTrackResult with ok: false surfaces a status error", () => {
+  test("CompletedDeleteTrack with ok: false surfaces a status error", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(ReceivedDeleteTrackResult({ concertId: 1, trackIdx: 0, ok: false, source: "bar" })),
+      Story.message(CompletedDeleteTrack({ concertId: 1, trackIdx: 0, ok: false, source: "bar" })),
       Story.model((m) => expect(m.status).toEqual(StatusValue.Error({ message: "Delete failed" }))),
       Story.Command.expectNone(),
     );
@@ -1519,7 +1519,7 @@ describe("player update — sidebar delete interlude", () => {
       Story.Command.expectHas(RefreshConcertItems),
       Story.Command.resolve(
         RefreshConcertItems,
-        ReceivedConcertItems({
+        SucceededConcertItems({
           concertId: 42,
           items: [interludeItem("/c/1.mp3", 1)],
           advanceAfter: true,

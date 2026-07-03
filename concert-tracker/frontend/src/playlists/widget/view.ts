@@ -44,20 +44,35 @@ const playlistIdOf = (row: Row): number => {
 // it in place — the latter can leave a stale click handler from the previous
 // kind (e.g. the create row firing the empty row's prompt() bridge). The DOM
 // id stays add-pl-opt-<id> regardless, for aria-activedescendant + scroll.
+//
+// memberRowView's trash button must NOT be a descendant of the role="option"
+// element — ARIA forbids interactive descendants of option (a screen reader
+// can't reach a focusable child of an option the same way it reaches a
+// sibling). The <li> instead carries role="presentation" (it's the visual
+// flex row only); the option semantics + id (for aria-activedescendant) move
+// to an inner span, and the trash button is that span's sibling. The inner
+// span is `display: contents` so it stays invisible to the .add-pl-row flex
+// layout — .add-pl-check/.add-pl-name remain direct flex items exactly as
+// before, and .add-pl-trash keeps pushing right via its own margin-left: auto.
 const memberRowView = (row: Row, isActive: boolean): Html => {
   const h = html<Message>();
   const playlistId = playlistIdOf(row);
   return h.keyed("li")(
     `member-${row.id}`,
+    [h.Class(rowClass("add-pl-row add-pl-row-member", isActive)), h.Attribute("role", "presentation")],
     [
-      h.Id(`add-pl-opt-${row.id}`),
-      h.Class(rowClass("add-pl-row add-pl-row-member", isActive)),
-      h.Attribute("role", "option"),
-      h.Attribute("aria-selected", isActive ? "true" : "false"),
-    ],
-    [
-      h.span([h.Class("add-pl-check"), h.Attribute("aria-hidden", "true")], ["✓"]),
-      h.span([h.Class("add-pl-name")], [row.name]),
+      h.span(
+        [
+          h.Id(`add-pl-opt-${row.id}`),
+          h.Attribute("role", "option"),
+          h.Attribute("aria-selected", isActive ? "true" : "false"),
+          h.Style({ display: "contents" }),
+        ],
+        [
+          h.span([h.Class("add-pl-check"), h.Attribute("aria-hidden", "true")], ["✓"]),
+          h.span([h.Class("add-pl-name")], [row.name]),
+        ],
+      ),
       h.button(
         [
           h.Class("add-pl-trash"),
@@ -138,6 +153,10 @@ const emptyRowView = (isActive: boolean): Html => {
   );
 };
 
+// NOTE: Row (core.ts) is a flat interface with `kind: RowKind` as a plain
+// literal-union field, not a genuine per-variant discriminated union — every
+// kind shares the same `{id, kind, name}` shape, so Match.discriminatorsExhaustive
+// can't narrow it (TS infers `never` per branch). A plain switch is correct here.
 const rowView = (row: Row, isActive: boolean): Html => {
   switch (row.kind) {
     case "member":

@@ -142,27 +142,22 @@ export const initialPlayback: Playback = {
 
 // ── Play targets / sources ──────────────────────────────────────────────
 //
-// `PlayTarget` is the prepare/poll discriminant (track or whole-album; a
-// concert reconstruction item is never prepared — see player.ts's
-// playConcertItem, which has no missing-file branch). `PlaySource` is the
-// richer discriminant carried on `ReceivedMediaInfo` etc. so update.ts can
-// derive the right listen/watch URLs and apply the result to the right
-// place (play vs enqueue), covering concert items too.
+// `PlayTarget` is the prepare/poll discriminant. Only tracks ever enter the
+// prepare/poll flow: startAlbum has no prepare fallback (whole-album fetches
+// are always either playable or a hard failure), and a concert reconstruction
+// item is never prepared — see player.ts's playConcertItem, which has no
+// missing-file branch. `PlaySource` is the richer discriminant carried on
+// `SucceededMediaInfo` etc. so update.ts can derive the right listen/watch
+// URLs and apply the result to the right place (play vs enqueue), covering
+// concert items and whole-album plays too.
 
 const TrackTarget = ts("Track", { concertId: S.Number, trackIdx: S.Number });
-const AlbumTarget = ts("Album", { concertId: S.Number });
-export const PlayTarget = S.Union([TrackTarget, AlbumTarget]);
+export const PlayTarget = TrackTarget;
 export type PlayTarget = typeof PlayTarget.Type;
-export const PlayTargetValue = { Track: TrackTarget, Album: AlbumTarget };
+export const PlayTargetValue = { Track: TrackTarget };
 
-export const sameTarget = (a: PlayTarget, b: PlayTarget): boolean => {
-  switch (a._tag) {
-    case "Track":
-      return b._tag === "Track" && a.concertId === b.concertId && a.trackIdx === b.trackIdx;
-    case "Album":
-      return b._tag === "Album" && a.concertId === b.concertId;
-  }
-};
+export const sameTarget = (a: PlayTarget, b: PlayTarget): boolean =>
+  a.concertId === b.concertId && a.trackIdx === b.trackIdx;
 
 const TrackSource = ts("Track", { concertId: S.Number, trackIdx: S.Number });
 const AlbumSource = ts("Album", { concertId: S.Number });
@@ -240,7 +235,7 @@ export const Model = S.Struct({
   }),
   video: S.Struct({ open: S.Boolean }),
   /** Mirrors the real `<audio>` element's play/pause state, driven by the
-   *  AudioPlaying/AudioPaused/AudioEnded messages a later commit's
+   *  StartedAudio/PausedAudio/EndedAudio messages a later commit's
    *  Subscription will dispatch from the element's real events — never set
    *  optimistically by a user-action message (see update.ts's TogglePause). */
   isPlaying: S.Boolean,

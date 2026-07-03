@@ -20,8 +20,8 @@ import {
   CompletedLikeToggle,
   FailedNextTrackInfo,
   FailedPrevTrackInfo,
-  ReceivedQueueDrainResult,
-  ReceivedTrackDetails,
+  DrainedQueue,
+  SucceededTrackDetails,
 } from "./message";
 import type { Model } from "./model";
 import { initialModel, initialPlayback, StatusValue } from "./model";
@@ -324,7 +324,7 @@ describe("player-bar view", () => {
       Scene.with(trackModel({ hasNext: true, hasPrev: false })),
       Scene.click(Scene.selector("#player-next")),
       Scene.Command.resolve(PauseAudio, Acked()),
-      Scene.Command.resolve(DrainQueue, ReceivedQueueDrainResult({ played: Option.none(), skippedCount: 0, plan: "next-or-none" })),
+      Scene.Command.resolve(DrainQueue, DrainedQueue({ played: Option.none(), skippedCount: 0, plan: "next-or-none" })),
       Scene.Command.resolve(FetchNextTrackInfo, FailedNextTrackInfo({ plan: "next-or-none" })),
     );
   });
@@ -358,7 +358,7 @@ describe("player-bar view", () => {
       Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
     );
@@ -376,7 +376,7 @@ describe("player-bar view", () => {
       Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
     );
@@ -390,7 +390,7 @@ describe("player-bar view", () => {
       Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
     );
@@ -621,7 +621,7 @@ describe("player sidebar — concert section", () => {
       Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
-        ReceivedTrackDetails({ concertId, loadGen: 1, tracksBusy: false, tracks: [] }),
+        SucceededTrackDetails({ concertId, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
     );
   });
