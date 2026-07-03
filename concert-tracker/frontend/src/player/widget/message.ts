@@ -302,7 +302,7 @@ export const ReleasedSidebarDrag = m("ReleasedSidebarDrag", { clientX: S.Number,
 // ── Command acks ─────────────────────────────────────────────────────────
 
 /** Shared by every Command whose result update.ts ignores: the external-DOM
- *  marker/sync Commands (Mark/ClearPlayingExternal, Mark/ClearPreparingExternal,
+ *  marker/sync Commands (MarkPlayingExternal, Mark/ClearPreparingExternal,
  *  DisableCardTracksExternal, SyncLikeButtonsExternal), the audio
  *  pause/seek/clear-src Commands, navigation/window.open, the
  *  add-to-playlist host call, the listen-event POST, and the now-playing
