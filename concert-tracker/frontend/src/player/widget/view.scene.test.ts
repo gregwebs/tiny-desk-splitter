@@ -365,9 +365,12 @@ describe("player-bar view", () => {
   });
 
   // Regression: #player-title/#player-track are Role("button") spans, not
-  // native <button>s, so Enter/Space activation has to be wired explicitly
-  // via OnKeyDownPreventDefault — a keyboard user otherwise can't open the
-  // sidebar from them at all.
+  // native <button>s, so Enter activation has to be wired explicitly via
+  // OnKeyDownPreventDefault — a keyboard user otherwise can't open the
+  // sidebar from them at all. Deliberately Enter-only (not the usual ARIA
+  // Enter+Space convention): both spans sit inside #player-bar, where Space
+  // is claimed by the global playback shortcut (pauses, doesn't toggle the
+  // sidebar) — see subscription.ts's keyboard entry and issue #28.
   test("pressing Enter on the title span opens the sidebar (keyboard activation)", () => {
     Scene.scene(
       { update, view },
@@ -386,13 +389,31 @@ describe("player-bar view", () => {
     Scene.scene(
       { update, view },
       Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
-      Scene.keydown(Scene.selector("#player-track"), " "),
+      Scene.keydown(Scene.selector("#player-track"), "Enter"),
       Scene.Command.resolve(MutateBodyClass, Acked()),
       Scene.Command.resolve(
         FetchTrackDetails,
         SucceededTrackDetails({ concertId: 1, loadGen: 1, tracksBusy: false, tracks: [] }),
       ),
       Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "true"),
+    );
+  });
+
+  test("pressing Space on the title span does not open the sidebar (reserved for the global playback shortcut)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
+      Scene.keydown(Scene.selector("#player-title"), " "),
+      Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "false"),
+    );
+  });
+
+  test("pressing Space on the track-number span does not open the sidebar (reserved for the global playback shortcut)", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with({ ...trackModel(), sidebar: { open: false, tracks: Option.none(), loadGen: 0 } }),
+      Scene.keydown(Scene.selector("#player-track"), " "),
+      Scene.expect(Scene.selector("#player-queue-toggle")).toHaveAttr("aria-expanded", "false"),
     );
   });
 

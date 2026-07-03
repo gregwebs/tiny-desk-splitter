@@ -1,9 +1,11 @@
-// Pure, DOM-free logic extracted from ../player.ts: queue algebra, the
+// Pure logic extracted from the pre-Foldkit ../player.ts: queue algebra, the
 // contiguous-groupId queue-row grouping, next/prev enablement, concert
-// reconstruction navigation math, and small predicates. No `document`,
-// `audio`, or `fetch` access here — see ../player.ts (Phase A) and eventually
-// ../player/widget/ (Phase B) for the interaction layer that calls these.
-// Unit-tested directly: see js-tests/player-core.test.ts.
+// reconstruction navigation math, and small predicates. No global `document`,
+// `audio`, or `fetch` access here; predicates may take a DOM `Element` as an
+// argument (e.g. clickShouldDismiss, the keyboard-target helpers below) and
+// call closest/matches on it. See ../player/widget/ for the interaction
+// layer (subscriptions, commands) that supplies those arguments.
+// Unit-tested directly: see the *.unit.test.ts files alongside this one.
 import type { PlaybackItemJson } from "../api/client";
 
 // ── State shapes ─────────────────────────────────────────────────────────
@@ -283,4 +285,33 @@ export function isPlainEscapeKey(e: KeyboardEvent): boolean {
     !e.altKey &&
     !e.shiftKey
   );
+}
+
+// True for text-entry targets where native key behavior (typing a space,
+// clearing/blurring on Escape) must win over the global player shortcuts.
+export function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (target.matches("input, textarea, select")) return true;
+  const editable = target.closest<HTMLElement>("[contenteditable]");
+  return !!(editable && editable.isContentEditable);
+}
+
+// True for targets where the global Space shortcut should still control
+// playback: the player bar and the inline video panel (which contains
+// #player-audio), excluding anything editable within them (e.g. #player-seek).
+export function isPlayerPlaybackShortcutTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (isEditableTarget(target)) return false;
+  return !!target.closest("#player-bar, #player-video-panel");
+}
+
+// True when the global Space shortcut should be suppressed in favor of
+// native key behavior: editable targets, or interactive controls
+// (INTERACTIVE_SELECTOR) outside the player bar / video panel.
+export function isKeyboardShortcutIgnoredTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false;
+  if (isPlayerPlaybackShortcutTarget(target)) return false;
+  if (isEditableTarget(target)) return true;
+  return !!target.closest(INTERACTIVE_SELECTOR);
 }

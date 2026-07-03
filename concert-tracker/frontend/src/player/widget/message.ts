@@ -279,8 +279,13 @@ export const SwappedLikeButton = m("SwappedLikeButton", {
 });
 
 /** document keydown with no modifier + Space, on a non-editable, non-bar
- *  target — toggle pause. */
-export const PressedSpace = m("PressedSpace");
+ *  target — toggle pause. audioPaused is #player-audio's live `.paused` at
+ *  dispatch time (mirrors the pre-Foldkit player.ts's togglePause(), which
+ *  read `audio.paused` directly): model.isPlaying is only updated from the
+ *  audio element's async play/pause DOM events, so two Space presses in
+ *  quick succession (e.g. a double-tap) can both see a stale model.isPlaying
+ *  and both issue PauseAudio instead of pause-then-resume. */
+export const PressedSpace = m("PressedSpace", { audioPaused: S.Boolean });
 
 /** document keydown with no modifier + Escape, on a non-editable target —
  *  close the video panel if open. */
