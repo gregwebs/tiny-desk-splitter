@@ -15,11 +15,14 @@ import { PlayerCommandValue } from "./port";
 // these elements are instead given explicit AriaLabel/Role/AriaPressed by
 // hand where the interaction isn't self-describing from visible text.
 
-/** Enter/Space activation for an element carrying `Role("button")` — native
+/** Enter activation for an element carrying `Role("button")` — native
  *  `<button>` gets this for free; a `<span role="button">` needs it wired
- *  explicitly or it's a keyboard trap. */
-const onActivateKey = (message: Message) => (key: string) =>
-  key === "Enter" || key === " " ? Option.some(message) : Option.none();
+ *  explicitly or it's a keyboard trap. Deliberately Enter-only, not the usual
+ *  Enter+Space ARIA button convention: these spans live inside #player-bar,
+ *  where Space is already claimed by the global playback shortcut (pause,
+ *  not row-activation) — see isPlayerPlaybackShortcutTarget in ../core. */
+const onEnterKey = (message: Message) => (key: string) =>
+  key === "Enter" ? Option.some(message) : Option.none();
 
 // Inline adapter: widget's Option-based Playback → core.PlaybackState nulls.
 // Kept local since only nextEnabled/prevEnabled need the core shape.
@@ -397,7 +400,7 @@ function playerBarView(model: Model): Html {
                   h.Style({ display: hasTrack && p.trackIdx !== null ? "inline-block" : "none" }),
                   h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                   h.OnKeyDownPreventDefault(
-                    onActivateKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                    onEnterKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                   ),
                 ],
                 [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
@@ -410,7 +413,7 @@ function playerBarView(model: Model): Html {
                   h.AriaLabel("Toggle queue and tracks sidebar"),
                   h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                   h.OnKeyDownPreventDefault(
-                    onActivateKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
+                    onEnterKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                   ),
                 ],
                 [p.title],

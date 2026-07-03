@@ -1319,20 +1319,34 @@ describe("player update — subscription-dispatched messages", () => {
     );
   });
 
-  test("PressedSpace while playing pauses audio", () => {
+  test("PressedSpace with audioPaused false pauses audio", () => {
     Story.story(
       update,
       Story.with(playingModel),
-      Story.message(PressedSpace()),
+      Story.message(PressedSpace({ audioPaused: false })),
       Story.Command.resolve(PauseAudio, Acked()),
     );
   });
 
-  test("PressedSpace while paused resumes audio", () => {
+  test("PressedSpace with audioPaused true resumes audio", () => {
     Story.story(
       update,
       Story.with({ ...playingModel, isPlaying: false }),
-      Story.message(PressedSpace()),
+      Story.message(PressedSpace({ audioPaused: true })),
+      Story.Command.resolve(ResumeAudio, Acked()),
+    );
+  });
+
+  // Regression: PressedSpace must decide from the live audioPaused payload,
+  // not model.isPlaying — that field only catches up once the audio
+  // element's async play/pause event round-trips through audioEvents, so a
+  // second Space press in quick succession (e.g. a double-tap) can arrive
+  // while model.isPlaying is still stale from the first press.
+  test("PressedSpace resumes on a stale isPlaying=true model when audioPaused is true", () => {
+    Story.story(
+      update,
+      Story.with({ ...playingModel, isPlaying: true }),
+      Story.message(PressedSpace({ audioPaused: true })),
       Story.Command.resolve(ResumeAudio, Acked()),
     );
   });

@@ -7,12 +7,14 @@ import { defineConfig } from "vitest/config";
 // never runs a Command's real Effect body (Commands are resolved abstractly).
 // *.command.test.ts is for the rare Command whose Effect has DOM-dependent
 // branching (e.g. an element being present/absent) that only a real Effect
-// run against happy-dom can exercise.
+// run against happy-dom can exercise. *.unit.test.ts is for plain
+// Element-argument predicates (e.g. player/core.ts's keyboard-target
+// helpers) that need a DOM fixture but aren't Story/Scene/Command tests.
 export default defineConfig({
   test: {
     environment: "happy-dom",
     setupFiles: ["./vitest-setup.ts"],
-    include: ["src/**/*.{story,scene,command}.test.ts"],
+    include: ["src/**/*.{story,scene,command,unit}.test.ts"],
     server: {
       deps: {
         // Foldkit and Effect ship ESM that vitest must transform in place.

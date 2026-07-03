@@ -291,7 +291,7 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         [],
       ],
 
-      PressedSpace: () => (model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]]),
+      PressedSpace: ({ audioPaused }) => (audioPaused ? [model, [ResumeAudio()]] : [model, [PauseAudio()]]),
 
       PressedEscape: () =>
         model.video.open

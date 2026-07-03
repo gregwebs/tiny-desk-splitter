@@ -1,7 +1,14 @@
 import { Effect, Option, Queue, Schema as S, Stream } from "effect";
 import { Port, Subscription } from "foldkit";
 
-import { clickShouldDismiss, isPlainEscapeKey, isPlainSpaceKey, SIDEBAR_MIN_WIDTH } from "../core";
+import {
+  clickShouldDismiss,
+  isEditableTarget,
+  isKeyboardShortcutIgnoredTarget,
+  isPlainEscapeKey,
+  isPlainSpaceKey,
+  SIDEBAR_MIN_WIDTH,
+} from "../core";
 import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import {
   EndedAudio,
@@ -34,21 +41,14 @@ import { ports } from "./port";
 // Sidebar-resize and video-controls-idle subscriptions land in commit 8
 // alongside the layout.html restructure that adds #sidebar-resize to the DOM.
 
-// ── Keyboard helpers (stay in subscription layer — use closest/matches) ──
-
-function isEditableTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  const tag = target.tagName.toLowerCase();
-  if (tag === "input" || tag === "textarea" || tag === "select") return true;
-  if (tag === "div" && target.getAttribute("contenteditable") === "true") return true;
-  return false;
-}
-
-function isKeyboardShortcutIgnoredTarget(target: EventTarget | null): boolean {
-  if (!(target instanceof Element)) return false;
-  if (isEditableTarget(target)) return true;
-  if (target.closest("#player-bar")) return true;
-  return false;
+// #player-audio, if it has a track loaded — mirrors the pre-Foldkit
+// player.ts hasActiveMedia() exactly (currentSrc/src), not the model's
+// playback.concertId, which is only subtly equivalent (e.g. it can lag a
+// real load failure). Space with nothing loaded must fall through to
+// native (page-scroll) behavior, per the old player.ts.
+function activeMediaElement(): HTMLMediaElement | null {
+  const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
+  return audio && (audio.currentSrc || audio.getAttribute("src")) ? audio : null;
 }
 
 // ── Subscriptions ─────────────────────────────────────────────────────────
@@ -76,21 +76,38 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
   ),
 
   keyboard: entry(
-    {},
+    { videoOpen: S.Boolean },
     {
-      modelToDependencies: () => ({}),
-      dependenciesToStream: () =>
+      modelToDependencies: (model) => ({ videoOpen: model.video.open }),
+      dependenciesToStream: ({ videoOpen }) =>
         Stream.fromEventListener<KeyboardEvent>(document, "keydown").pipe(
           Stream.mapEffect((e) =>
             Effect.sync((): Option.Option<Message> => {
-              if (isPlainEscapeKey(e) && !isEditableTarget(e.target)) {
+              // An earlier handler (e.g. a future OnKeyDownPreventDefault in
+              // view.ts) already claimed this key; don't double-handle it.
+              if (e.defaultPrevented) return Option.none();
+              // Escape only folds the video panel, so only claim it (and
+              // suppress native Escape) while the panel is open — otherwise
+              // native Escape (e.g. clearing a native browser field) wins.
+              if (isPlainEscapeKey(e) && !isEditableTarget(e.target) && videoOpen) {
                 e.preventDefault();
                 return Option.some(PressedEscape());
               }
               if (isPlainSpaceKey(e) && !isKeyboardShortcutIgnoredTarget(e.target)) {
-                if (e.repeat) return Option.none();
+                // Nothing loaded: let Space fall through to native page-scroll.
+                const audio = activeMediaElement();
+                if (!audio) return Option.none();
+                // preventDefault before the repeat check: a held Space must
+                // still suppress page-scroll on every repeat keydown, even
+                // though only the first one toggles playback.
                 e.preventDefault();
-                return Option.some(PressedSpace());
+                if (e.repeat) return Option.none();
+                // audio.paused is read live, not from model.isPlaying: that
+                // field only updates from the audio element's async
+                // play/pause events, so two Space presses in quick
+                // succession could otherwise both see a stale isPlaying and
+                // both dispatch PauseAudio (see PressedSpace's doc comment).
+                return Option.some(PressedSpace({ audioPaused: audio.paused }));
               }
               return Option.none();
             }),

@@ -431,7 +431,7 @@ test.describe("Player keyboard shortcuts", () => {
     await playTrack(page, AUDIO, 0);
     await focusPageBody(page);
 
-    const prevented = await page.evaluate(() => {
+    const prevented = await page.evaluate(async () => {
       const event = new KeyboardEvent("keydown", {
         bubbles: true,
         cancelable: true,
@@ -440,6 +440,12 @@ test.describe("Player keyboard shortcuts", () => {
         repeat: true,
       });
       document.dispatchEvent(event);
+      // The player's keydown handling runs through an Effect Stream (queue →
+      // async pull → preventDefault), so defaultPrevented isn't observable in
+      // the same synchronous tick as dispatchEvent() the way a plain
+      // addEventListener callback would be. A macrotask is enough for the
+      // Stream to drain past the microtasks it schedules internally.
+      await new Promise((r) => setTimeout(r, 0));
       return event.defaultPrevented;
     });
 
