@@ -64,31 +64,39 @@ would be worth tightening in that same follow-up.
   `toHaveClass("liked")` / `not.toHaveClass("liked")` assertions — this is the coverage gap that
   let Bug 1 ship (jsdom-based Scene tests never caught the missing class because they were only
   asserting text/state, not the class list).
-- `subscription.test.ts` (new): unit tests for `parseLikeSwapEvent` against real `CustomEvent`s —
-  a liked button, an unliked button, `detail.elt` reassigned to a parent (no `hx-post`, the exact
-  failure mode), a non-like `hx-post`, and a plain `Event` with no `detail`.
-- `vitest.config.ts`'s `include` glob was `src/**/*.{story,scene,command}.test.ts`, which doesn't
-  match a plain unit test like `subscription.test.ts` (not a Story/Scene harness test, not a
-  Command-effect test). Broadened to `src/**/*.test.ts` — still only matches `src/`, not the
-  separate `node:test`-based `../../js-tests` suite.
+- `subscription.unit.test.ts` (new): unit tests for `parseLikeSwapEvent` against real `CustomEvent`s
+  — a liked button, an unliked button, `detail.elt` reassigned to a parent (no `hx-post`, the exact
+  failure mode), a non-like `hx-post`, and a plain `Event` with no `detail`. Named `.unit.test.ts` to
+  match the category [#28](https://github.com/gregwebs/tiny-desk-splitter/issues/28)'s fix
+  introduced in `vitest.config.ts` for plain DOM-dependent unit tests that aren't Story/Scene/Command
+  harness tests (e.g. `player/core.unit.test.ts`'s keyboard-target predicates) — no config change
+  needed here, it already covers this file.
 - The three originally-reported e2e tests plus `sidebar.spec.js:198` are the acceptance criteria;
   no changes needed to any of them.
 
 ## Verification
 
 - `npm run check` / `npm run lint` (frontend) — clean.
-- `npx vitest run` — 190 green (was 185; +5 new `parseLikeSwapEvent` cases in `subscription.test.ts`;
-  the 2 new scene-class assertions extend an existing test rather than adding new ones).
+- `npx vitest run` — 210 green (was 205 on updated `main`; +5 new `parseLikeSwapEvent` cases in
+  `subscription.unit.test.ts`; the 2 new scene-class assertions extend an existing test rather
+  than adding new ones).
 - `node build.mjs` + `cargo build --bin concert-web` re-embedded `concert-tracker/static/player.js`.
 - `just lint` (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D
   warnings` + shellcheck + ts-check + ts-lint) — clean.
 - `npx playwright test e2e/player-queue.spec.js -g "Player like star"` — all 7 pass (was 4/7).
-- Full e2e suite, measured before/after against the same branch tip (stash-based A/B, not a
-  different checkout): **33 failed / 138 passed** without the fix, **28 failed / 143 passed**
-  with it. The 5 newly-passing tests are exactly the 3 reported + `sidebar.spec.js:198` (same
-  root cause) + one apparently-flaky keyboard test (`:568`, not touched by this change). All 28
-  remaining failures are byte-for-byte the same test names in both runs — pre-existing, already
-  tracked in #28/#29/#31/#32/#33, unrelated to this fix.
+- Full e2e suite, measured before/after via two clean checkouts of the same commit set (updated
+  `main` vs. this branch): **26 failed / 145 passed** on `main`, **22 failed / 149 passed** on this
+  branch. The 4 newly-passing tests are exactly the 3 reported (`:959`, `:977`, `:1009`) plus
+  `sidebar.spec.js:198` (same root cause). All 22 remaining failures are byte-for-byte the same
+  test names in both runs — pre-existing, already tracked in #29/#31/#32/#33 (and the one flaky
+  `#28`-adjacent keyboard test that #28's own fix didn't fully stabilize), unrelated to this fix.
+- This branch was originally developed on top of `foldkit-widget-group-6` before that branch merged
+  to `main` via #39; the one new commit was cherry-picked onto fresh `main` (which had since also
+  picked up #28's keyboard-shortcut fix, PR #41) to keep this PR scoped to just the like-star fix.
+  `subscription.ts`'s auto-merge combined both fixes without conflict; `vitest.config.ts` conflicted
+  only on the *name* of the new test-file category (this PR proposed `*.test.ts` generally, #28's
+  PR had already landed a narrower `*.unit.test.ts` convention) — resolved by adopting #28's
+  convention and renaming `subscription.test.ts` → `subscription.unit.test.ts`.
 - Manual: started `concert-web` on a separate port against a copied fixture db/workdir, played a
   track, clicked the bar star, and confirmed via `getComputedStyle(...).color` that it visibly
   changes from gray (`rgb(170,170,170)`, the default text color) to gold (`rgb(240,165,0)`, the
