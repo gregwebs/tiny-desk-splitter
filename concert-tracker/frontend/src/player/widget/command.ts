@@ -661,13 +661,15 @@ export const ShowVideoPanel = Command.define(
   }).pipe(Effect.as(Acked())),
 );
 
-/** Remove `open` class from `#player-video-panel` (hides the video element). */
+/** Remove `open` (hides the video element) and `controls-visible` (the
+ *  minimize-button reveal, mirroring pre-Foldkit hideVideoPanel()'s cleanup —
+ *  otherwise the button could linger revealed across a close/reopen). */
 export const HideVideoPanel = Command.define(
   "HideVideoPanel",
   Acked,
 )(
   Effect.sync(() => {
-    byIdOrNull("player-video-panel")?.classList.remove("open");
+    byIdOrNull("player-video-panel")?.classList.remove("open", "controls-visible");
   }).pipe(Effect.as(Acked())),
 );
 
