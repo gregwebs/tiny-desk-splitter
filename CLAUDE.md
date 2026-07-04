@@ -13,6 +13,31 @@ See README.md for an overview of the project
 - **Documentation**: Comments state design constraints, invariants, and why. Not what the code does. Do not write comments that restate what the next line does. write or refactor code to make what it is doing easier to understand
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
+## Agent Review
+
+If the Codex plugin is installed, use Codex for review.
+If Codex is not installed, use the engineering-lead agent for review.
+
+### Codex review
+
+For nontrivial code changes, invoke the `codex:codex-rescue` subagent
+in the foreground and wait for its response at these checkpoints:
+
+1. After preparing the implementation plan, before editing:
+   Ask Codex to review the included plan, challenge assumptions, identify
+   missing cases, and suggest safer alternatives. Read-only.
+
+2. After implementation and tests pass, before reporting completion:
+   Ask Codex to review the current git diff for correctness, regressions,
+   security issues, race conditions, and missing tests. Read-only.
+   Require findings ordered by severity with file:line references.
+
+Address material findings, rerun tests, and request one follow-up Codex
+review if the implementation changed substantially.
+
+Do not substitute Claude's own review for these checkpoints.
+Do not invoke Codex for trivial documentation or formatting-only changes.
+
 # Workflow
 - update the local main to the latest from origin and branch from that.
 - Planning
@@ -25,7 +50,7 @@ See README.md for an overview of the project
     * Suggest breaking larger changes into iterative steps
     * Describe the future phases of coding (including tests and documentation) and verification, 
   * get feedback and rework the plan
-    * Have engineering-lead review any new features or non-trivial bug fixes
+    * Perform an Agent Review of any new features or non-trivial bug fixes
   * get approval before implementing
 - Changing data
   * When updating database data, first create a backup of the existing database
@@ -42,8 +67,8 @@ See README.md for an overview of the project
     * Put information from this change into a file in ./docs/change
       * If older change documentation is outdated, remove it.
 - Code review
-  * Have engineeering-lead do a code review before verification
-    * Do a follow up review of the changes made during verification
+  * Perform an Agent Review before verification
+    * Do a follow up Agent Review of any changes made during verification
 - Verification
   * verify manually that the changes work as expected in the application
   * start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information
