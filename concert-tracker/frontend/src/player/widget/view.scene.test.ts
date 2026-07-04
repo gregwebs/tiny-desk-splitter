@@ -136,7 +136,7 @@ describe("player-bar view", () => {
       Scene.expect(Scene.selector("#player-title")).toContainText("Blue Train"),
       Scene.expect(Scene.selector("#player-artist")).toContainText("John Coltrane"),
       // Track number (1-based)
-      Scene.expect(Scene.selector("#player-track")).toContainText("1."),
+      Scene.expect(Scene.selector("#player-track")).toContainText("#1"),
       // Playing → ⏸
       Scene.expect(Scene.text("⏸")).toExist(),
     );
@@ -233,6 +233,8 @@ describe("player-bar view", () => {
         ],
       }),
       Scene.expect(Scene.selector("#player-queue-badge")).toContainText("2"),
+      Scene.expect(Scene.selector("#player-queue-badge")).toBeVisible(),
+      Scene.expect(Scene.selector("#player-queue-badge")).toHaveAttr("title", "Giant Steps\nNaima"),
     );
   });
 
@@ -241,6 +243,8 @@ describe("player-bar view", () => {
       { update, view },
       Scene.with(trackModel()),
       Scene.expect(Scene.selector("#player-queue-badge")).toContainText(""),
+      Scene.expect(Scene.selector("#player-queue-badge")).not.toBeVisible(),
+      Scene.expect(Scene.selector("#player-queue-badge")).toHaveAttr("title", ""),
     );
   });
 
@@ -249,6 +253,8 @@ describe("player-bar view", () => {
       { update, view },
       Scene.with({ ...trackModel(), queue: [makeQueueEntry(2, 3, "Giant Steps", false)] }),
       Scene.expect(Scene.selector("#player-queue-badge")).toContainText("1"),
+      Scene.expect(Scene.selector("#player-queue-badge")).toBeVisible(),
+      Scene.expect(Scene.selector("#player-queue-badge")).toHaveAttr("title", "Giant Steps"),
     );
   });
 

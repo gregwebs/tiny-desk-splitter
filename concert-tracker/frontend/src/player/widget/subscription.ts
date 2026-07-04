@@ -8,6 +8,7 @@ import {
   isPlainEscapeKey,
   isPlainSpaceKey,
   SIDEBAR_MIN_WIDTH,
+  VIDEO_CONTROLS_IDLE_MS,
 } from "../core";
 import { byIdOfOrNull, byIdOrNull } from "../../shared/dom";
 import {
@@ -30,16 +31,15 @@ import { ports } from "./port";
 
 // SUBSCRIPTION
 //
-// Six subscription entries mirror the player.ts event-listener setup:
-//   audioEvents   — play/pause/ended/error on the <audio> element
-//   keyboard      — keydown → PressedSpace / PressedEscape
-//   outsideVideo  — click outside #player-video-panel (gated on video.open)
-//   htmxSettle    — htmx:afterSettle + historyRestore → SettledHtmxContent
-//   htmxSwap      — htmx:afterSwap on like buttons → SwappedLikeButton
-//   commandPort   — inbound Port.subscription for window.Player calls
-//
-// Sidebar-resize and video-controls-idle subscriptions land in commit 8
-// alongside the layout.html restructure that adds #sidebar-resize to the DOM.
+// Eight subscription entries mirror the player.ts event-listener setup:
+//   audioEvents      — play/pause/ended/error on the <audio> element
+//   keyboard         — keydown → PressedSpace / PressedEscape
+//   outsideVideo     — click outside #player-video-panel (gated on video.open)
+//   htmxSettle       — htmx:afterSettle + historyRestore → SettledHtmxContent
+//   htmxSwap         — htmx:afterSwap on like buttons → SwappedLikeButton
+//   sidebarResize    — pointer drag on #sidebar-resize
+//   videoControlsIdle — reveal/fade the minimize button (gated on video.open)
+//   commandPort      — inbound Port.subscription for window.Player calls
 
 // #player-audio, if it has a track loaded — mirrors the pre-Foldkit
 // player.ts hasActiveMedia() exactly (currentSrc/src), not the model's
@@ -49,6 +49,35 @@ import { ports } from "./port";
 function activeMediaElement(): HTMLMediaElement | null {
   const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
   return audio && (audio.currentSrc || audio.getAttribute("src")) ? audio : null;
+}
+
+/** Reveal the video minimize button (#player-video-close, via CSS keyed off
+ *  controls-visible) on pointer activity over the panel, fading it back out
+ *  after VIDEO_CONTROLS_IDLE_MS idle — ports the pre-Foldkit
+ *  showVideoControls()/videoControlsTimer pair. Returns a cleanup that
+ *  detaches both listeners, cancels any pending timer, and removes the
+ *  class; the videoControlsIdle entry below only acquires this while
+ *  video.open is true, so no runtime "is the panel open" guard is needed. */
+export function attachVideoControlsIdle(panel: HTMLElement | null): () => void {
+  if (!panel) return () => {};
+
+  let timer: ReturnType<typeof setTimeout> | null = null;
+
+  const onActivity = () => {
+    panel.classList.add("controls-visible");
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => panel.classList.remove("controls-visible"), VIDEO_CONTROLS_IDLE_MS);
+  };
+
+  panel.addEventListener("mousemove", onActivity);
+  panel.addEventListener("touchstart", onActivity, { passive: true });
+
+  return () => {
+    panel.removeEventListener("mousemove", onActivity);
+    panel.removeEventListener("touchstart", onActivity);
+    if (timer) clearTimeout(timer);
+    panel.classList.remove("controls-visible");
+  };
 }
 
 /** Extracted from a `htmx:afterSwap` event fired by a like button's
@@ -260,6 +289,27 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
             (cleanup) => Effect.sync(cleanup),
           ).pipe(Effect.flatMap(() => Effect.never)),
         ),
+    },
+  ),
+
+  // Gated on video.open, like outsideVideo/keyboard above: Foldkit tears
+  // down and re-acquires the stream on dependency change, so listeners and
+  // the idle timer only exist while the panel is open — no runtime
+  // "is it open" guard needed the way the pre-Foldkit always-attached
+  // listener required.
+  videoControlsIdle: entry(
+    { videoOpen: S.Boolean },
+    {
+      modelToDependencies: (model) => ({ videoOpen: model.video.open }),
+      dependenciesToStream: ({ videoOpen }): Stream.Stream<Message> =>
+        !videoOpen
+          ? Stream.empty
+          : Stream.callback<Message>(() =>
+              Effect.acquireRelease(
+                Effect.sync(() => attachVideoControlsIdle(byIdOrNull("player-video-panel"))),
+                (cleanup) => Effect.sync(cleanup),
+              ).pipe(Effect.flatMap(() => Effect.never)),
+            ),
     },
   ),
 

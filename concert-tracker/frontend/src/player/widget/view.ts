@@ -360,7 +360,20 @@ function playerBarView(model: Model): Html {
           h.Title("Show queue and tracks"),
           h.OnClick(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
         ],
-        ["☰", h.span([h.Id("player-queue-badge")], [queueCount > 0 ? String(queueCount) : ""])],
+        [
+          "☰",
+          h.span(
+            [
+              h.Id("player-queue-badge"),
+              // CSS baseline is visibility:hidden (style.css) — deliberately
+              // visibility, not display, so the badge always occupies its
+              // slot and enqueuing a track never shifts the bar layout.
+              h.Style({ visibility: queueCount > 0 ? "visible" : "hidden" }),
+              h.Title(queueCount > 0 ? model.queue.map((q) => q.title).join("\n") : ""),
+            ],
+            [queueCount > 0 ? String(queueCount) : ""],
+          ),
+        ],
       ),
 
       // ── Info: title-line + artist + playlist ────────────────────
@@ -407,7 +420,7 @@ function playerBarView(model: Model): Html {
                     onEnterKey(CommandReceived({ command: PlayerCommandValue.ToggleSidebar() })),
                   ),
                 ],
-                [hasTrack && p.trackIdx !== null ? `${p.trackIdx + 1}.` : ""],
+                [hasTrack && p.trackIdx !== null ? `#${p.trackIdx + 1}` : ""],
               ),
               h.span(
                 [
