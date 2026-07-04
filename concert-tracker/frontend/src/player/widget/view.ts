@@ -44,11 +44,15 @@ const toCorePb = (p: Model["playback"]) => ({
 // SidebarLikeTrack/SidebarDeleteTrack/SidebarAddToPlaylist commands — shared
 // here instead of duplicated per list.
 
+// Shared by every rendering of the like star (bar + sidebar rows) so the
+// `liked` class can't drift out of sync with one call site again.
+const likeButtonClass = (liked: boolean): string => (liked ? "btn-like liked" : "btn-like");
+
 const likeButton = (concertId: number, trackIdx: number, liked: boolean): Html => {
   const h = html<Message>();
   return h.button(
     [
-      h.Class(liked ? "btn-like liked" : "btn-like"),
+      h.Class(likeButtonClass(liked)),
       h.Title("Like"),
       h.AriaLabel("Like"),
       h.AriaPressed(liked ? "true" : "false"),
@@ -369,7 +373,7 @@ function playerBarView(model: Model): Html {
               h.button(
                 [
                   h.Id("player-like"),
-                  h.Class("btn-like"),
+                  h.Class(likeButtonClass(p.liked)),
                   h.Title("Like"),
                   h.AriaLabel("Like"),
                   h.AriaPressed(p.liked ? "true" : "false"),
