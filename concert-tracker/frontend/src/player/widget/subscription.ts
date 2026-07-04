@@ -51,6 +51,24 @@ function activeMediaElement(): HTMLMediaElement | null {
   return audio && (audio.currentSrc || audio.getAttribute("src")) ? audio : null;
 }
 
+/** Extracted from a `htmx:afterSwap` event fired by a like button's
+ *  `hx-post="/concerts/:id/tracks/:idx/like"` swap. Must be called
+ *  synchronously from the DOM listener — see the `htmxSwap` subscription
+ *  entry for why `evt.detail` can't be read later on the Effect fiber. */
+export function parseLikeSwapEvent(
+  evt: Event,
+): Option.Option<{ concertId: number; trackIdx: number; liked: boolean }> {
+  const detail: { elt?: Element } | undefined = evt instanceof CustomEvent ? evt.detail : undefined;
+  const hxPost = detail?.elt?.getAttribute("hx-post");
+  const m = hxPost?.match(/\/concerts\/(\d+)\/tracks\/(\d+)\/like/);
+  if (!m) return Option.none();
+  const concertId = parseInt(m[1]!, 10);
+  const trackIdx = parseInt(m[2]!, 10);
+  const lb = document.querySelector<HTMLElement>(`[hx-post="/concerts/${concertId}/tracks/${trackIdx}/like"]`);
+  if (!lb) return Option.none();
+  return Option.some({ concertId, trackIdx, liked: lb.classList.contains("liked") });
+}
+
 // ── Subscriptions ─────────────────────────────────────────────────────────
 
 export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
@@ -153,31 +171,26 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
     },
   ),
 
+  // htmx reuses the event's detail object for its settle phase and reassigns
+  // detail.elt right after dispatch (outerHTML swap: from the swapped-in
+  // button to its parent), so parseLikeSwapEvent must run synchronously
+  // inside the DOM listener below — a Stream.mapEffect stage runs later on
+  // the Effect fiber and would see the already-mutated detail.
   htmxSwap: entry(
     {},
     {
       modelToDependencies: () => ({}),
       dependenciesToStream: () =>
-        Stream.fromEventListener<Event>(document.body, "htmx:afterSwap").pipe(
-          Stream.mapEffect((evt) =>
-            Effect.sync((): Option.Option<Message> => {
-              const detail: { elt?: Element } | undefined = evt instanceof CustomEvent ? evt.detail : undefined;
-              const hxPost = detail?.elt?.getAttribute("hx-post");
-              const m = hxPost?.match(/\/concerts\/(\d+)\/tracks\/(\d+)\/like/);
-              if (!m) return Option.none();
-              const concertId = parseInt(m[1]!, 10);
-              const trackIdx = parseInt(m[2]!, 10);
-              const lb = document.querySelector<HTMLElement>(
-                `[hx-post="/concerts/${concertId}/tracks/${trackIdx}/like"]`,
-              );
-              if (!lb) return Option.none();
-              return Option.some(
-                SwappedLikeButton({ concertId, trackIdx, liked: lb.classList.contains("liked") }),
-              );
+        Stream.callback<Message>((queue) =>
+          Effect.acquireRelease(
+            Effect.sync(() => {
+              const onAfterSwap = (evt: Event) =>
+                Option.map(parseLikeSwapEvent(evt), (p) => Queue.offerUnsafe(queue, SwappedLikeButton(p)));
+              document.body.addEventListener("htmx:afterSwap", onAfterSwap);
+              return onAfterSwap;
             }),
-          ),
-          Stream.filter(Option.isSome),
-          Stream.map((opt) => opt.value),
+            (onAfterSwap) => Effect.sync(() => document.body.removeEventListener("htmx:afterSwap", onAfterSwap)),
+          ).pipe(Effect.flatMap(() => Effect.never)),
         ),
     },
   ),

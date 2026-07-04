@@ -204,16 +204,21 @@ describe("player-bar view", () => {
     );
   });
 
+  // Regression: the bar star rendered a hard-coded "btn-like" class, so the
+  // ★/☆ text and aria-pressed flipped but the CSS `.liked` color never did
+  // (issue #30). Assert the class alongside the text/state assertions below.
   test("liked track shows filled star ★; unliked shows ☆", () => {
     Scene.scene(
       { update, view },
       Scene.with(trackModel({ liked: true })),
       Scene.expect(Scene.selector("#player-like")).toContainText("★"),
+      Scene.expect(Scene.selector("#player-like")).toHaveClass("liked"),
     );
     Scene.scene(
       { update, view },
       Scene.with(trackModel({ liked: false })),
       Scene.expect(Scene.selector("#player-like")).toContainText("☆"),
+      Scene.expect(Scene.selector("#player-like")).not.toHaveClass("liked"),
     );
   });
 

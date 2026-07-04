@@ -9,7 +9,8 @@ import { defineConfig } from "vitest/config";
 // branching (e.g. an element being present/absent) that only a real Effect
 // run against happy-dom can exercise. *.unit.test.ts is for plain
 // Element-argument predicates (e.g. player/core.ts's keyboard-target
-// helpers) that need a DOM fixture but aren't Story/Scene/Command tests.
+// helpers, subscription.ts's htmx event parsers) that need a DOM fixture but
+// aren't Story/Scene/Command tests.
 export default defineConfig({
   test: {
     environment: "happy-dom",
