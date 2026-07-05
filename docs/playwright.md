@@ -1,12 +1,34 @@
 # Playwright tests
 
-#### Running in a restricted / proxied sandbox
+## Running normally
+
+```sh
+npx playwright test
+```
+
+Chromium launch args and worker count are environment-dependent — see
+`e2e/sandbox.js`, the single source of truth for this — so this works
+unchanged both on a normal machine and inside the Claude Code sandbox;
+detection is automatic. If Chromium isn't installed yet, see the install step
+below.
+
+`e2e/sandbox.js` decides which mode to use:
+- **Auto-detect**: sandbox mode is on iff `SANDBOX_RUNTIME` is set in the
+  environment (that's how the Claude Code sandbox marks itself; it's absent
+  in a normal terminal).
+- **Override**: set `E2E_SANDBOX=1` (force sandbox mode) or `E2E_SANDBOX=0`
+  (force normal mode) to bypass auto-detection — for example to reproduce a
+  sandbox-only failure locally, or to sanity-check the detection itself. Any
+  other value throws immediately rather than silently picking a mode.
+
+## Running in a restricted / proxied sandbox
 
 In a sandboxed environment (e.g. the Claude Code sandbox) `npx playwright
-test` fails out of the box with **Chromium failing to launch**. This is a
-host/egress-proxy problem, not a test bug, and it requires fixes at two
-independent layers: the Chromium *browser* process, and (if a test makes
-outbound HTTP) the `concert-web` *server* process.
+test` fails out of the box with **Chromium failing to launch**, unless the
+fixes below are applied. This is a host/egress-proxy problem, not a test bug,
+and it requires fixes at two independent layers: the Chromium *browser*
+process, and (if a test makes outbound HTTP) the `concert-web` *server*
+process.
 
 **1. One-time install — override `no_proxy` for the download:**
 
@@ -19,26 +41,36 @@ outbound HTTP) the `concert-web` *server* process.
 no_proxy="localhost" npx playwright install chromium
 ```
 
-**2. Already wired in — Chromium launch args.** `playwright.config.js` and
-`e2e/fixtures.js` already pass the args below to every browser launch, so
-`npx playwright test` should work once the browser is installed. They're
-documented here so the reasons are visible if they ever need to be touched:
+**2. Already wired in — Chromium launch args, conditional on sandbox
+detection.** `e2e/sandbox.js` computes the args below and both
+`playwright.config.js` and `e2e/fixtures.js` consume them, so
+`npx playwright test` works once the browser is installed — the
+sandbox-only flags are added automatically when `e2e/sandbox.js` detects the
+sandbox, and skipped otherwise (they crash Chromium at launch on a normal
+machine, since `--single-process` is an unsupported mode there):
 
-| Flag | Why |
-| --- | --- |
-| `--single-process` | The sandbox blocks the Mach-port IPC Chromium normally uses between its processes; without this every launch dies immediately with `bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer: Permission denied (1100)`. Runs browser + renderer + GPU in one process instead. |
-| `--no-proxy-server` | Chromium connects directly to the test's `127.0.0.1` server instead of routing through the egress proxy. |
-| `--autoplay-policy=no-user-gesture-required` | Lets the player start tracks programmatically (auto-advance, back/next) without a real user gesture. |
+| Flag | When | Why |
+| --- | --- | --- |
+| `--single-process` | sandbox only | The sandbox blocks the Mach-port IPC Chromium normally uses between its processes; without this every launch dies immediately with `bootstrap_check_in org.chromium.Chromium.MachPortRendezvousServer: Permission denied (1100)`. Runs browser + renderer + GPU in one process instead. Outside the sandbox this same flag crashes Chromium at launch, so it must not be passed there. |
+| `--no-proxy-server` | sandbox only | Chromium connects directly to the test's `127.0.0.1` server instead of routing through the egress proxy. |
+| `--autoplay-policy=no-user-gesture-required` | always | Lets the player start tracks programmatically (auto-advance, back/next) without a real user gesture. |
 
-`--single-process` has two structural consequences elsewhere in the suite,
-so they aren't mistaken for bugs:
-- `playwright.config.js` sets `workers: 1` — parallel single-process Chromium
-  instances crash under CPU contention, so the suite is serialized.
-- `e2e/fixtures.js` launches a **per-test** browser via a private
+`--single-process` has two structural consequences elsewhere in the suite
+when sandbox mode is active, so they aren't mistaken for bugs:
+- `playwright.config.js` sets `workers: 1` only in sandbox mode — parallel
+  single-process Chromium instances crash under CPU contention, so the suite
+  is serialized there. Outside the sandbox, `workers` is left at Playwright's
+  default (parallel), since each test already has its own server and DB copy
+  (see `e2e/fixtures.js`). If you see cross-test flakes under parallelism
+  outside the sandbox, `npx playwright test --workers=1` is a useful triage
+  step before assuming a real bug.
+- `e2e/fixtures.js` always launches a **per-test** browser via a private
   `_ownBrowser` fixture instead of Playwright's worker-scoped `browser`
-  fixture, because `--single-process` Chromium can crash during
-  `browserContext` cleanup — isolating each test to its own browser keeps
-  one crash from failing every subsequent test in the worker.
+  fixture (in both modes, for one code path), because in sandbox mode
+  `--single-process` Chromium can crash during `browserContext` cleanup —
+  isolating each test to its own browser keeps one crash from failing every
+  subsequent test in the worker. Outside the sandbox this per-test launch is
+  simply unnecessary overhead (~0.2s/test), not a correctness requirement.
 
 Each test also owns one `concert-web` child process and does not begin until
 the child prints its ephemeral `127.0.0.1` listening URL and `GET /` returns a
@@ -80,9 +112,17 @@ target/debug/concert-web --db test.db --workdir /tmp/tds --port 0 --no-proxy
 
 **4. Troubleshooting, if it still fails:**
 
+- **Every launch fails immediately with `Target page, context or browser has
+  been closed`, and this is a normal (non-sandbox) machine** — check that
+  `E2E_SANDBOX` isn't forced to `1` in the environment; that forces the
+  sandbox-only `--single-process` flag, which crashes Chromium outside the
+  sandbox. Conversely, forcing `E2E_SANDBOX=0` *inside* the sandbox produces
+  the identical error in the other direction (multi-process Chromium can't
+  start there). The error message is the same for both mismatches — check
+  `E2E_SANDBOX` and `SANDBOX_RUNTIME` before assuming a code regression.
 - **`bootstrap_check_in … MachPortRendezvousServer: Permission denied
   (1100)`** — `--single-process` is missing or was stripped from the launch
-  args.
+  args (or `E2E_SANDBOX=0` is forced while actually running in the sandbox).
 - **Install fails with `EAI_AGAIN` / DNS error** — use the
   `no_proxy="localhost"` override above; an empty or unset `no_proxy` isn't
   enough (see the note in step 1).
