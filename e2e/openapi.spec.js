@@ -8,13 +8,11 @@ const { test, expect } = require("./fixtures");
 
 test.describe("OpenAPI docs", () => {
   test("openapi.json is a well-formed 3.1 spec with the expected paths", async ({ page }) => {
-    const spec = await page.evaluate(async () => {
-      const r = await fetch("/api-docs/openapi.json");
-      return { status: r.status, body: await r.json() };
-    });
-    expect(spec.status).toBe(200);
-    expect(spec.body.openapi.startsWith("3.1")).toBe(true);
-    expect(Object.keys(spec.body.paths)).toEqual(
+    const response = await page.context().request.get("/api-docs/openapi.json");
+    expect(response.status()).toBe(200);
+    const spec = await response.json();
+    expect(spec.openapi.startsWith("3.1")).toBe(true);
+    expect(Object.keys(spec.paths)).toEqual(
       expect.arrayContaining(["/api/playlists", "/concerts/{id}/concert-playback"])
     );
   });
@@ -23,11 +21,17 @@ test.describe("OpenAPI docs", () => {
     await page.goto("/swagger-ui/");
     await expect(page.locator(".swagger-ui")).toBeVisible();
     // Tag groups from openapi.rs.
-    await expect(page.getByText("playlists", { exact: true })).toBeVisible();
-    await expect(page.getByText("playback", { exact: true })).toBeVisible();
-    await expect(page.getByText("splitting", { exact: true })).toBeVisible();
+    const tagNames = page.locator(".opblock-tag > a.nostyle > span");
+    await expect(tagNames.filter({ hasText: /^playlists$/ })).toBeVisible();
+    await expect(tagNames.filter({ hasText: /^playback$/ })).toBeVisible();
+    await expect(tagNames.filter({ hasText: /^splitting$/ })).toBeVisible();
     // A representative operation is listed under its tag.
-    await expect(page.locator(".opblock-summary-path", { hasText: "/api/playlists" }).first()).toBeVisible();
+    await expect(
+      page
+        .locator(".opblock-summary-path")
+        .filter({ hasText: /^\/api\/playlists$/ })
+        .first()
+    ).toBeVisible();
   });
 
   test("Try it out on GET /api/playlists returns 200", async ({ page }) => {
@@ -36,7 +40,11 @@ test.describe("OpenAPI docs", () => {
     // "Try it out" → "Execute" flow exactly as a user would.
     const opBlock = page
       .locator(".opblock-get")
-      .filter({ has: page.locator(".opblock-summary-path", { hasText: "/api/playlists" }) })
+      .filter({
+        has: page
+          .locator(".opblock-summary-path")
+          .filter({ hasText: /^\/api\/playlists$/ }),
+      })
       .first();
     await opBlock.locator(".opblock-summary").click();
     await opBlock.getByRole("button", { name: "Try it out" }).click();
