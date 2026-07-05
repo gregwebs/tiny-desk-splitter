@@ -40,6 +40,24 @@ so they aren't mistaken for bugs:
   `browserContext` cleanup — isolating each test to its own browser keeps
   one crash from failing every subsequent test in the worker.
 
+Each test also owns one `concert-web` child process and does not begin until
+the child prints its ephemeral `127.0.0.1` listening URL and `GET /` returns a
+successful response. Startup timeout, readiness exhaustion, and unexpected
+mid-test exits fail with the child exit code/signal plus separately captured
+stdout and stderr. Tests using the `killServer` fixture deliberately stop the
+child to exercise network-error behavior; that shutdown and normal fixture
+teardown are marked expected before the signal is sent.
+
+```text
+starting -> listening -> readiness
+   |                      |
+   +-- exit/timeout ------+-- non-2xx exhaustion -> diagnostic failure
+                          +-- 2xx -> running
+
+running -> killServer/teardown -> expected-stop -> cleaned
+running -> child exit/error    -> unexpected failure -> diagnostic failure -> cleaned
+```
+
 **3. Server-side proxy flags (only needed for manual/outbound runs).** The
 `concert-web` binary (`concert-tracker/src/bin/concert_web.rs`) has its own
 proxy flags, separate from Chromium's:
@@ -73,6 +91,10 @@ target/debug/concert-web --db test.db --workdir /tmp/tds --port 0 --no-proxy
   worker-scoped browser died; check that `e2e/fixtures.js`'s `_ownBrowser` /
   `context` / `page` fixtures (step 2) haven't been reverted to the
   Playwright defaults.
+- **A failure reports `concert-web failed unexpectedly during the test`** —
+  use the attached stdout/stderr and reported exit code or signal. This is a
+  server-process failure, not a generic browser connection error. Intentional
+  `killServer` tests must not produce this diagnostic.
 - **Flaky failures that pass solo but fail in a full run** — usually one of:
   media ending mid-test and auto-advance reacting (set
   `document.getElementById("player-audio").loop = true` for tests that need

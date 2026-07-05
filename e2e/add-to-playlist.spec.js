@@ -84,7 +84,7 @@ test.describe("Add-to-playlist (2b)", () => {
 
   test("clicking '+' on a track opens the add panel in the sidebar", async ({ page }) => {
     await openAddPanelForTrack(page);
-    await expect(page.locator("#player-sidebar")).toHaveClass(/showing-add/);
+    await expect(page.locator("body")).toHaveClass(/showing-add/);
     await expect(page.locator("#sidebar-queue-section")).not.toBeVisible();
     await expect(page.locator("#add-pl-list")).toBeVisible();
   });
@@ -145,7 +145,7 @@ test.describe("Add-to-playlist (2b)", () => {
 
     await page.locator(".add-pl-close").click();
 
-    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).not.toHaveClass(/showing-add/);
     await expect(page.locator("#sidebar-queue-section")).toBeVisible();
   });
 
@@ -284,7 +284,7 @@ test.describe("Add-to-playlist (2b)", () => {
     await expect(page.locator("#add-pl-filter")).toHaveValue("");
     await page.keyboard.press("Enter");
 
-    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).not.toHaveClass(/showing-add/);
     await expect(page.locator("#sidebar-queue-section")).toBeVisible();
   });
 
@@ -325,7 +325,7 @@ test.describe("Add-to-playlist (2b)", () => {
     await page.keyboard.press("Enter");
 
     // Add panel should be gone but sidebar must remain open.
-    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).not.toHaveClass(/showing-add/);
     await expect(page.locator("body")).toHaveClass(/sidebar-open/);
   });
 });
@@ -409,11 +409,11 @@ test.describe("Player bar add-to-playlist (2e)", () => {
 
     // Add panel should appear over the queue.
     await expect(page.locator("#sidebar-add-section")).toBeVisible();
-    await expect(page.locator("#player-sidebar")).toHaveClass(/showing-add/);
+    await expect(page.locator("body")).toHaveClass(/showing-add/);
 
     // Closing the add panel should restore the sidebar open state.
     await page.locator(".add-pl-close").click();
-    await expect(page.locator("#player-sidebar")).not.toHaveClass(/showing-add/);
+    await expect(page.locator("body")).not.toHaveClass(/showing-add/);
     await expect(page.locator("body")).toHaveClass(/sidebar-open/);
   });
 

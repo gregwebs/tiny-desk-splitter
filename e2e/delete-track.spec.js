@@ -14,7 +14,7 @@ const availableBtn = (idx) =>
   `#concert-${CONCERT_ID} ol.track-list button.btn-track-listen[data-track-idx="${idx}"]:not(.track-title-unavailable)`;
 const deleteBtn = (idx) =>
   `#concert-${CONCERT_ID} ol.track-list button.btn-delete[hx-post$="/tracks/${idx}/delete"]`;
-const tracksBtn = `#concert-${CONCERT_ID} button.btn-tracks`;
+const tracksBtn = `#concert-${CONCERT_ID} .card-tracks-row button.btn-tracks`;
 
 async function expandTracks(page) {
   await openTracks(page, CONCERT_ID);

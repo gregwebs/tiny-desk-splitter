@@ -42,7 +42,6 @@ test.describe("Sync button leaves the player running", () => {
 
   test("Sync swaps only #content — player keeps playing and DOM is not reloaded", async ({
     page,
-    baseURL,
   }) => {
     // Start a track playing.
     await playTrack(page, AUDIO, 0);
@@ -108,47 +107,39 @@ test.describe("Sync button leaves the player running", () => {
     await expect(page.locator("#player-title")).toHaveText("Celular");
   });
 
-  test("Sync preserves active filter in the HX-Location path", async ({
-    page,
-    baseURL,
-  }) => {
+  test("Sync preserves active filter in the HX-Location path", async ({ page }) => {
     // Navigate to /?filter=liked so a ?filter= param is in the current URL.
     await page.goto("/?filter=liked");
 
-    // Capture what path the server responds with in HX-Location.
+    // Derive the mocked response from the request header so this still verifies
+    // the browser-side HX-Current-URL wiring without contacting NPR.
     let capturedLocationPath = null;
     await page.route("**/sync/**", async (route) => {
-      // Let the real request go through so we can read the real response header.
-      const response = await route.fetch();
-      const locationHeader = response.headers()["hx-location"];
-      if (locationHeader) {
-        try {
-          capturedLocationPath = JSON.parse(locationHeader).path;
-        } catch (_) {
-          capturedLocationPath = locationHeader;
-        }
-      }
-      await route.fulfill({ response });
+      const currentUrl = await route.request().headerValue("HX-Current-URL");
+      expect(currentUrl).not.toBeNull();
+      const current = new URL(currentUrl);
+      capturedLocationPath = current.pathname + current.search;
+      await route.fulfill({
+        status: 200,
+        headers: {
+          "HX-Location": JSON.stringify({
+            path: capturedLocationPath,
+            target: "#content",
+            select: "#content",
+            swap: "outerHTML show:window:top",
+          }),
+        },
+        body: "",
+      });
     });
 
     const syncBtn = page.locator("button[hx-post*='/sync/']").first();
-    // Sync buttons may not be visible when the filter hides all un-synced months;
-    // skip rather than fail if none visible.
-    const count = await syncBtn.count();
-    if (count === 0) {
-      test.skip(
-        true,
-        "no Sync button visible under liked filter — skipping filter-preservation sub-test"
-      );
-      return;
-    }
+    await expect(syncBtn).toBeVisible();
     await syncBtn.evaluate((el) => el.click());
 
     await page.waitForFunction(() => !document.querySelector("[hx-request]"));
 
     // The server must echo back /?filter=liked in the HX-Location path.
-    if (capturedLocationPath !== null) {
-      expect(capturedLocationPath).toBe("/?filter=liked");
-    }
+    expect(capturedLocationPath).toBe("/?filter=liked");
   });
 });
