@@ -13,6 +13,11 @@ the Swagger tag and operation selectors. This change completes the repair:
   `.swagger-ui` class.
 - The exact `/api/playlists` operation selector from issue #44 remains the
   scope for the interactive request, avoiding similarly prefixed operations.
+- The interactive response assertion selects the response table body rather
+  than its `Code` header before checking for status `200`.
+- `scripts/check-playwright-job.sh` reports or waits for the current commit's
+  Playwright check, making CI browser acceptance directly observable when the
+  local host cannot launch Chromium.
 
 ## State transitions
 
@@ -35,6 +40,9 @@ Swagger page loading -> unique outer container visible
   discovered.
 - `cargo check --workspace --all-targets` — passed.
 - `just lint` — passed.
+- Pull request CI confirmed that the OpenAPI document and Swagger render tests
+  pass on Linux. Its first run also exposed the response-header ambiguity in
+  the third test, which is corrected by the final response-body selector.
 
 The complete browser run could not reach its UI assertions on the local host:
 Chromium exits with the documented `SIGTRAP` regression in normal mode, while

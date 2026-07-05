@@ -49,8 +49,8 @@ test.describe("OpenAPI docs", () => {
     await opBlock.locator(".opblock-summary").click();
     await opBlock.getByRole("button", { name: "Try it out" }).click();
     await opBlock.getByRole("button", { name: "Execute" }).click();
-    await expect(opBlock.locator(".response-col_status").first()).toHaveText(/200/, {
-      timeout: 10000,
-    });
+    await expect(
+      opBlock.locator(".responses-table tbody .response-col_status").first()
+    ).toHaveText("200", { timeout: 10000 });
   });
 });
