@@ -32,5 +32,6 @@ concerts.db-shm
 
 /e2e/.fixture/
 /test-results/
+/playwright-report/
 
 .DS_Store
