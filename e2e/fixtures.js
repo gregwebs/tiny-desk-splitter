@@ -14,6 +14,19 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..");
 const FIXTURE = path.join(__dirname, ".fixture");
 const BIN = path.join(REPO, "target", "debug", "concert-web");
+const SERVER_START_TIMEOUT_MS = 20_000;
+const READINESS_ATTEMPTS = 50;
+const READINESS_DELAY_MS = 100;
+const READINESS_REQUEST_TIMEOUT_MS = 1_000;
+
+const ServerState = Object.freeze({
+  STARTING: "starting",
+  READINESS: "readiness",
+  RUNNING: "running",
+  EXPECTED_STOP: "expected-stop",
+  UNEXPECTED_EXIT: "unexpected-exit",
+  STOPPED: "stopped",
+});
 
 // Args needed to run Chromium inside the Claude Code sandbox.
 // --single-process eliminates multi-process Mach port IPC (blocked by sandbox).
@@ -23,6 +36,46 @@ const BROWSER_ARGS = [
   "--no-proxy-server",
   "--single-process",
 ];
+
+function serverDiagnostics(server, summary) {
+  const exit =
+    server.exitCode !== null || server.signalCode !== null
+      ? `\nexit code: ${server.exitCode ?? "none"}; signal: ${server.signalCode ?? "none"}`
+      : "";
+  const processError = server.processError
+    ? `\nprocess error: ${server.processError.message}`
+    : "";
+  return new Error(
+    `${summary}\nstate: ${server.state}${exit}${processError}\nworkdir: ${server.tmp}\nstdout:\n${server.stdout || "(empty)"}\nstderr:\n${server.stderr || "(empty)"}`
+  );
+}
+
+async function waitForReadiness(server) {
+  let lastResult = "no request attempted";
+  for (let attempt = 1; attempt <= READINESS_ATTEMPTS; attempt++) {
+    if (server.exited) {
+      throw serverDiagnostics(
+        server,
+        `server exited while waiting for ${server.baseURL}/`
+      );
+    }
+    try {
+      const response = await fetch(`${server.baseURL}/`, {
+        signal: AbortSignal.timeout(READINESS_REQUEST_TIMEOUT_MS),
+      });
+      lastResult = `HTTP ${response.status}`;
+      await response.body?.cancel();
+      if (response.ok) return;
+    } catch (error) {
+      lastResult = error instanceof Error ? error.message : String(error);
+    }
+    await new Promise((resolve) => setTimeout(resolve, READINESS_DELAY_MS));
+  }
+  throw serverDiagnostics(
+    server,
+    `server readiness failed after ${READINESS_ATTEMPTS} attempts; last result: ${lastResult}`
+  );
+}
 
 // Spawn a concert-web bound to a copy of the fixture; resolve once it's ready.
 async function startServer() {
@@ -51,61 +104,143 @@ async function startServer() {
   );
 
   // child.exitCode stays null for signal-killed processes (signalCode is set
-  // instead), so track exit explicitly to avoid hanging teardown.
-  const server = { child, tmp, exited: false };
-  child.on("exit", () => (server.exited = true));
-
-  let out = "";
-  child.stdout.on("data", (d) => (out += d.toString()));
-  child.stderr.on("data", (d) => (out += d.toString()));
-
-  const port = await new Promise((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`server start timed out:\n${out}`)),
-      20000
-    );
-    child.stdout.on("data", () => {
-      const m = out.match(/Listening on http:\/\/127\.0\.0\.1:(\d+)/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(parseInt(m[1], 10));
-      }
-    });
-    child.on("exit", (code) => {
-      clearTimeout(timer);
-      reject(new Error(`server exited (${code}) before ready:\n${out}`));
-    });
+  // instead), so retain both values and an explicit lifecycle state.
+  const server = {
+    child,
+    tmp,
+    baseURL: null,
+    exited: false,
+    exitCode: null,
+    signalCode: null,
+    processError: null,
+    spawnFailed: false,
+    unexpectedProcessError: false,
+    state: ServerState.STARTING,
+    stdout: "",
+    stderr: "",
+  };
+  child.stdout.on("data", (data) => (server.stdout += data.toString()));
+  child.stderr.on("data", (data) => (server.stderr += data.toString()));
+  child.on("exit", (code, signal) => {
+    server.exited = true;
+    server.exitCode = code;
+    server.signalCode = signal;
+    if (server.state === ServerState.RUNNING) {
+      server.state = ServerState.UNEXPECTED_EXIT;
+    } else if (server.state === ServerState.EXPECTED_STOP) {
+      server.state = ServerState.STOPPED;
+    }
+  });
+  child.on("error", (error) => {
+    server.processError = error;
+    if (child.pid === undefined) {
+      server.spawnFailed = true;
+      server.exited = true;
+    } else if (server.state === ServerState.RUNNING) {
+      server.unexpectedProcessError = true;
+    }
   });
 
-  const baseURL = `http://127.0.0.1:${port}`;
-  // Readiness poll — the listener is bound when the port prints, but give the
-  // router a moment to start answering.
-  for (let i = 0; i < 50; i++) {
-    try {
-      const r = await fetch(`${baseURL}/`);
-      if (r.ok) break;
-    } catch (_) {
-      /* not up yet */
-    }
-    await new Promise((r) => setTimeout(r, 100));
-  }
+  try {
+    const port = await new Promise((resolve, reject) => {
+      const cleanupStartupListeners = () => {
+        clearTimeout(timer);
+        child.stdout.removeListener("data", onData);
+        child.removeListener("exit", onExit);
+        child.removeListener("error", onError);
+      };
+      const onData = () => {
+        const match = server.stdout.match(
+          /Listening on http:\/\/127\.0\.0\.1:(\d+)/
+        );
+        if (match) {
+          cleanupStartupListeners();
+          resolve(parseInt(match[1], 10));
+        }
+      };
+      const onExit = () => {
+        cleanupStartupListeners();
+        reject(serverDiagnostics(server, "server exited before listening"));
+      };
+      const onError = () => {
+        cleanupStartupListeners();
+        reject(serverDiagnostics(server, "server process failed to start"));
+      };
+      const timer = setTimeout(
+        () => {
+          cleanupStartupListeners();
+          reject(serverDiagnostics(server, "server start timed out"));
+        },
+        SERVER_START_TIMEOUT_MS
+      );
+      child.stdout.on("data", onData);
+      child.once("exit", onExit);
+      child.once("error", onError);
+    });
 
-  server.baseURL = baseURL;
-  return server;
+    server.baseURL = `http://127.0.0.1:${port}`;
+    server.state = ServerState.READINESS;
+    await waitForReadiness(server);
+    if (server.exited) {
+      throw serverDiagnostics(server, "server exited after readiness");
+    }
+    server.state = ServerState.RUNNING;
+    return server;
+  } catch (error) {
+    try {
+      await killChild(server);
+    } catch (killError) {
+      throw new AggregateError(
+        [error, killError],
+        "server startup failed and the child could not be stopped"
+      );
+    } finally {
+      if (server.exited || server.spawnFailed) cleanup(server);
+    }
+    throw error;
+  }
 }
 
 function killChild(server) {
-  return new Promise((resolve) => {
-    if (server.exited) return resolve();
-    server.child.on("exit", () => resolve());
-    server.child.kill("SIGKILL");
+  return new Promise((resolve, reject) => {
+    if (server.exited || server.spawnFailed) return resolve();
+    server.state = ServerState.EXPECTED_STOP;
+    const cleanupListeners = () => {
+      server.child.removeListener("exit", onExit);
+      server.child.removeListener("error", onError);
+    };
+    const onExit = () => {
+      cleanupListeners();
+      resolve();
+    };
+    const onError = () => {
+      cleanupListeners();
+      reject(serverDiagnostics(server, "server process reported a stop error"));
+    };
+    server.child.once("exit", onExit);
+    server.child.once("error", onError);
+    try {
+      if (!server.child.kill("SIGKILL")) {
+        cleanupListeners();
+        reject(serverDiagnostics(server, "failed to signal server process"));
+      }
+    } catch (error) {
+      server.processError = error;
+      cleanupListeners();
+      reject(serverDiagnostics(server, "failed to signal server process"));
+    }
   });
 }
 
 async function stopServer(server) {
   if (!server || !server.child) return;
-  await killChild(server);
-  cleanup(server);
+  try {
+    await killChild(server);
+  } finally {
+    // Removing a live child's workdir can corrupt its state. A stop failure
+    // therefore preserves the directory and reports its path for diagnosis.
+    if (server.exited || server.spawnFailed) cleanup(server);
+  }
 }
 
 function cleanup(server) {
@@ -137,15 +272,45 @@ const test = base.test.extend({
     const page = await context.newPage();
     await use(page);
   },
-  // Worker/test-scoped server; tears down (and removes the temp dir) even on
-  // test failure.
+  // Test-scoped server; teardown removes the temp dir after confirmed exit.
+  // A failed stop preserves it because deleting a live child's workdir is unsafe.
   _server: [
-    async ({}, use) => {
+    async ({}, use, testInfo) => {
       const server = await startServer();
       try {
         await use(server);
       } finally {
-        await stopServer(server);
+        let stopError = null;
+        try {
+          await stopServer(server);
+        } catch (error) {
+          stopError = error;
+        }
+        if (
+          server.state === ServerState.UNEXPECTED_EXIT ||
+          server.unexpectedProcessError
+        ) {
+          await testInfo.attach("concert-web-stdout", {
+            body: server.stdout,
+            contentType: "text/plain",
+          });
+          await testInfo.attach("concert-web-stderr", {
+            body: server.stderr,
+            contentType: "text/plain",
+          });
+          const unexpectedError = serverDiagnostics(
+            server,
+            "concert-web failed unexpectedly during the test"
+          );
+          if (stopError) {
+            throw new AggregateError(
+              [unexpectedError, stopError],
+              "concert-web failed during the test and could not be stopped"
+            );
+          }
+          throw unexpectedError;
+        }
+        if (stopError) throw stopError;
       }
     },
     { auto: false },

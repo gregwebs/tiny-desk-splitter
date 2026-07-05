@@ -59,7 +59,7 @@ test.describe("Sidebar close + resize", () => {
 
     // Sidebar is now in add mode (showing-add class).
     await page.waitForFunction(() =>
-      document.getElementById("player-sidebar").classList.contains("showing-add")
+      document.body.classList.contains("showing-add")
     );
 
     // Sidebar-level X must be hidden.
@@ -82,7 +82,7 @@ test.describe("Sidebar close + resize", () => {
 
     // Add mode must be gone.
     await page.waitForFunction(() =>
-      !document.getElementById("player-sidebar").classList.contains("showing-add")
+      !document.body.classList.contains("showing-add")
     );
     await expect(page.locator("#sidebar-add-section")).toBeHidden();
 
@@ -93,7 +93,7 @@ test.describe("Sidebar close + resize", () => {
     } else {
       // sidebar should have closed (or at least is no longer in add mode).
       const stillInAddMode = await page.evaluate(() =>
-        document.getElementById("player-sidebar").classList.contains("showing-add")
+        document.body.classList.contains("showing-add")
       );
       expect(stillInAddMode).toBe(false);
     }

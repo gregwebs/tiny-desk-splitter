@@ -18,7 +18,8 @@ const UNSPLIT = 6;
 
 const trackBtn = (concertId, idx) =>
   `[data-concert-id="${concertId}"][data-track-idx="${idx}"]`;
-const tracksBtn = (concertId) => `#concert-${concertId} button.btn-tracks`;
+const tracksBtn = (concertId) =>
+  `#concert-${concertId} .card-tracks-row button.btn-tracks`;
 const thumb = (concertId) => `#concert-${concertId} .card-thumb`;
 const tracksBox = (concertId) => `#concert-${concertId} .card-tracks-box`;
 

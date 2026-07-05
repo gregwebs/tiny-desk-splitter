@@ -113,7 +113,9 @@ test.describe("Player Queue", () => {
     // Use evaluate to bypass pointer-position interactions that can cause the
     // hover state (and thus button visibility) to be lost in --single-process.
     await openTracks(page, AUDIO);
-    await page.locator(`#concert-${AUDIO} button.btn-tracks`).evaluate(el => el.click());
+    await page
+      .locator(`#concert-${AUDIO} .card-tracks-row button.btn-tracks`)
+      .evaluate(el => el.click());
 
     await waitForPlaying(page);
     await expect(page.locator("#player-bar")).toHaveClass(/active/);
@@ -128,7 +130,9 @@ test.describe("Player Queue", () => {
     // tracks/0/media-info 404s. Play must start the first surviving track
     // ("Survivor One", #2) rather than show "Error".
     await openTracks(page, DELETED_FIRST);
-    await page.locator(`#concert-${DELETED_FIRST} button.btn-tracks`).evaluate(el => el.click());
+    await page
+      .locator(`#concert-${DELETED_FIRST} .card-tracks-row button.btn-tracks`)
+      .evaluate(el => el.click());
 
     await waitForPlaying(page);
     await expect(page.locator("#player-title")).toHaveText("Survivor One");
@@ -880,7 +884,7 @@ test.describe("Inline video", () => {
     // across cards (hover fetch + DOM injection mid-move) can crash the
     // sandbox's --single-process Chromium.
     await page
-      .locator(`#concert-${SECOND} button.btn-tracks`)
+      .locator(`#concert-${SECOND} .card-tracks-row button.btn-tracks`)
       .evaluate((el) => el.click());
     await expect(page.locator("#player-queue-badge")).toBeVisible();
 
@@ -1138,7 +1142,7 @@ test.describe("Player delete", () => {
     );
     // The card swap refreshes the tracks-button count and keeps the list.
     await expect(
-      page.locator(`#concert-${AUDIO} button.btn-tracks`)
+      page.locator(`#concert-${AUDIO} .card-tracks-row button.btn-tracks`)
     ).toHaveText("tracks (3/4)");
     await expect(
       page.locator(`#concert-${AUDIO} ol.track-list li`)
@@ -1155,7 +1159,9 @@ test.describe("Player delete", () => {
     await trackButton(page, AUDIO, 0).click();
     await waitForPlaying(page);
 
-    const tracksBtn = page.locator(`#concert-${AUDIO} button.btn-tracks`);
+    const tracksBtn = page.locator(
+      `#concert-${AUDIO} .card-tracks-row button.btn-tracks`
+    );
     await expect(tracksBtn).toHaveText("tracks (4)");
 
     await page.locator("#player-delete").click();
