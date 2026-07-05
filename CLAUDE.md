@@ -13,23 +13,23 @@ See README.md for an overview of the project
 - **Documentation**: Comments state design constraints, invariants, and why. Not what the code does. Do not write comments that restate what the next line does. write or refactor code to make what it is doing easier to understand
 - **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
 
+## Github auth
+
+For write access to the repo, use the github skill in .claude/skills/github/SKILL.md
+For read access, the repo is public.
+
 ## Agent Review
 
-If the Codex plugin is installed, use Codex for review.
-If Codex is not installed, use the engineering-lead agent for review.
+When running from Claude Code, if the Codex plugin is installed, use Codex review defined below.
+Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
 
 ### Codex review
 
-For nontrivial code changes, invoke the `codex:codex-rescue` subagent
-in the foreground and wait for its response at these checkpoints:
+Invoke the `codex:codex-rescue` subagent in the foreground and wait for its response.
 
-1. After preparing the implementation plan, before editing:
-   Ask Codex to review the included plan, challenge assumptions, identify
-   missing cases, and suggest safer alternatives. Read-only.
+1. For plan review ask Codex to review the included plan, challenge assumptions, identify missing cases, and suggest better alternatives. Read-only.
 
-2. After implementation and tests pass, before reporting completion:
-   Ask Codex to review the current git diff for correctness, regressions,
-   security issues, race conditions, and missing tests. Read-only.
+2. For code review ask Codex to review the current git diff Read-only.
    Require findings ordered by severity with file:line references.
 
 Address material findings, rerun tests, and request one follow-up Codex
