@@ -7,8 +7,8 @@
 const { test, expect } = require("./fixtures");
 
 test.describe("OpenAPI docs", () => {
-  test("openapi.json is a well-formed 3.1 spec with the expected paths", async ({ page }) => {
-    const response = await page.context().request.get("/api-docs/openapi.json");
+  test("openapi.json is a well-formed 3.1 spec with the expected paths", async ({ request }) => {
+    const response = await request.get("/api-docs/openapi.json");
     expect(response.status()).toBe(200);
     const spec = await response.json();
     expect(spec.openapi.startsWith("3.1")).toBe(true);
@@ -19,7 +19,7 @@ test.describe("OpenAPI docs", () => {
 
   test("swagger UI renders the grouped endpoints", async ({ page }) => {
     await page.goto("/swagger-ui/");
-    await expect(page.locator(".swagger-ui")).toBeVisible();
+    await expect(page.locator("section.swagger-ui.swagger-container")).toBeVisible();
     // Tag groups from openapi.rs.
     const tagNames = page.locator(".opblock-tag > a.nostyle > span");
     await expect(tagNames.filter({ hasText: /^playlists$/ })).toBeVisible();
@@ -49,8 +49,8 @@ test.describe("OpenAPI docs", () => {
     await opBlock.locator(".opblock-summary").click();
     await opBlock.getByRole("button", { name: "Try it out" }).click();
     await opBlock.getByRole("button", { name: "Execute" }).click();
-    await expect(opBlock.locator(".response-col_status").first()).toHaveText(/200/, {
-      timeout: 10000,
-    });
+    await expect(
+      opBlock.locator(".responses-table tbody .response-col_status").first()
+    ).toHaveText("200", { timeout: 10000 });
   });
 });

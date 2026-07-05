@@ -18,6 +18,17 @@ workflow run's **Artifacts** section and open `index.html` locally. A failure in
 `concert-web` also includes the server's captured stdout and stderr in the
 report.
 
+After pushing a branch, check the current commit's Playwright job with:
+
+```sh
+./scripts/check-playwright-job.sh
+./scripts/check-playwright-job.sh --wait
+```
+
+The script exits successfully only when the job completes successfully. It
+returns status 1 for a completed failure and status 2 when the job is pending
+or absent.
+
 ```text
 pull request or push to main
              |
