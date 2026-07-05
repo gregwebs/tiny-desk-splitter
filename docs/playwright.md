@@ -1,5 +1,45 @@
 # Playwright tests
 
+## GitHub Actions
+
+The `playwright` job in `.github/workflows/ci.yml` runs the complete suite on
+every pull request and every push to `main`. It provisions Node.js 22, the
+system `ffmpeg` executable, Chromium and its Linux libraries, and the pinned
+Rust toolchain used to build `concert-web`.
+
+CI uses the same fixture and per-test isolation as local runs. It does not
+enable sandbox mode, retries, sharding, or request mocking. The normal-host
+worker default therefore remains active, with each test owning its browser,
+server, database, and work directory.
+
+Every non-cancelled run where Playwright creates a report uploads a
+`playwright-report-<attempt>` HTML artifact for 14 days. Download it from the
+workflow run's **Artifacts** section and open `index.html` locally. A failure in
+`concert-web` also includes the server's captured stdout and stderr in the
+report.
+
+```text
+pull request or push to main
+             |
+             v
+provision Node, Rust, ffmpeg, and Chromium
+             |
+             v
+build concert-web and deterministic fixture
+             |
+             v
+run isolated browser/server tests in parallel
+             |
+        +----+----+
+        |         |
+      success   failure
+        |         |
+        +----+----+
+             |
+             v
+upload HTML report -> complete CI job
+```
+
 ## Running normally
 
 ```sh

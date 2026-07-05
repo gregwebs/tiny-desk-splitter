@@ -340,4 +340,8 @@ runs its own `concert-web` on an ephemeral port, driving the **real** endpoints
 (no request mocking). Requirements: `ffmpeg` on `PATH` and the Playwright
 browser (`npx playwright install chromium`).
 
+The full suite also runs in the `playwright` GitHub Actions job on every pull
+request and every push to `main`. When Playwright starts, its HTML report is
+attached to the non-cancelled workflow run.
+
 More documentation is in [./docs/playwright.md](docs/playwright.md)
