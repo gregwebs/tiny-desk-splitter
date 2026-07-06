@@ -28,14 +28,14 @@ the two actual secrets stay outside the repo, in `~/.config/github-app/`
 - `private-key.pem` — the App's private key, signs the JWT
 
 The installation ID is **not** a secret — it's just an opaque identifier for
-this repo's installation of the App, not usable without the private key — so
-it's now committed as `./scripts/github/installation-id`.
+this repo's installation of the App, not usable without the private key —
+but it is kept in the secrets dir since it should not be hard-coded here.
 
 - `scripts/github/gh-app-token.sh` (new, tracked) — moved from
   `~/.config/github-app/gh-app-token.sh`. Reads `client-id` and
   `private-key.pem` from `$GITHUB_APP_SECRETS_DIR` (renamed from
-  `GITHUB_APP_CONFIG_DIR`; default unchanged: `~/.config/github-app`), reads
-  `installation-id` from its own directory. Includes this session's fix: the
+  `GITHUB_APP_CONFIG_DIR`; default unchanged: `~/.config/github-app`).
+   Includes this session's fix: the
   JWT `iss` claim is quoted as a JSON string
   (`'{"iat":%d,"exp":%d,"iss":"%s"}'`, was unquoted before).
 - `scripts/github/credential-helper.sh` (new, tracked) — moved from
@@ -61,7 +61,7 @@ original setup); this doc supersedes it as the current reference.
 ## Now-unused files
 
 These can be deleted from `~/.config/github-app/` (superseded by the tracked
-copies above): `app-id`, `installation-id`, `gh-app-token.sh`,
+copies above): `app-id`, `gh-app-token.sh`,
 `credential-helper.sh`. Keep `client-id` and `private-key.pem`.
 
 ## Verification

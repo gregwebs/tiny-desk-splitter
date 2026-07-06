@@ -21,7 +21,6 @@ than a personal access token.
 ```
 ~/.config/github-app/
 ├── app-id                 # plain text App ID
-├── installation-id        # plain text installation ID for this repo's owner
 ├── private-key.pem        # App private key, chmod 600
 ├── gh-app-token.sh         # shared lib: signs a JWT, mints an installation
 │                           # access token (~9 min expiry). Provides gh_app_token().
