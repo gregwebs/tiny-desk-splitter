@@ -110,9 +110,8 @@ secrets:
 - `client-id` — the App's client ID (used as the JWT `iss` claim)
 - `private-key.pem` — the App's private key (signs the JWT)
 
-The installation ID isn't a secret and is committed as
-`./scripts/github/installation-id`. Override the secrets directory with
-`GITHUB_APP_SECRETS_DIR` if needed (default `~/.config/github-app`).
+The installation ID isn't a secret but should be placed in `~/.config/github-app/installation-id`.
+Override the secrets directory with `GITHUB_APP_SECRETS_DIR` if needed (default `~/.config/github-app`).
 
 Full write-up and history: `docs/change/2026-06-20-github-app-push.md` and
 `docs/change/2026-07-01-github-scripts-tracked.md`.
