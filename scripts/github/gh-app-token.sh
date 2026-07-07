@@ -15,11 +15,10 @@ _gh_app_b64url() {
 }
 
 gh_app_token() {
-  local secrets_dir script_dir client_id installation_id
+  local secrets_dir client_id installation_id
   secrets_dir="${GITHUB_APP_SECRETS_DIR:-$HOME/.config/github-app}"
-  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   client_id=$(cat "$secrets_dir/client-id")
-  installation_id=$(cat "$GITHUB_APP_SECRETS_DIR/installation-id")
+  installation_id=$(cat "$secrets_dir/installation-id")
 
   local now iat exp header claims signing_input signature jwt
   now=$(date +%s)
