@@ -38,6 +38,9 @@ Detailed scraping is also initiated by going to the concert detail page or click
 The concert has a download state, a split state, and an archive state.
 The download can be deleted and individual tracks or all tracks can be deleted.
 Archiving moves the concert directory to a configurable location and creates a symlink.
+State-transition policy for destructive lifecycle operations lives in
+`concert-tracker/src/lifecycle.rs`; HTTP handlers keep request/response behavior
+such as confirmation prompts and HTMX rendering.
 
 Key columns in the `concerts` table:
 
@@ -62,6 +65,46 @@ assumes `set_list_json` is **append-only** after first scrape. If a re-scrape
 reorders or replaces titles, both arrays will mis-attribute against the new
 positions. The current scraper overwrites `set_list_json` wholesale, so this
 is a known limitation.
+
+### Lifecycle Transitions
+
+Download deletion requires `downloaded_at` to be set. When the source file is
+present, the file is removed, download state is cleared, download errors are
+reset, and a `download_delete` event is recorded. Split state is preserved so
+existing tracks can continue to play. When the source file is missing, the web
+handler asks for confirmation unless `force=true`; forced deletion clears the
+same download state without probing the file.
+
+Redundant source deletion is a stricter download deletion path. The server
+re-checks that every second of the source is covered by present song tracks and
+interlude files using `tracks_present`, `user_split_timestamps_json`, and
+`media_duration`. On success it removes the source file if present, clears
+download state, and records both `download_delete` and
+`source_redundant_delete`.
+
+Split deletion is allowed for successful split state (`split_at IS NOT NULL`)
+or split-error state (`split_errors_json` non-empty). It clears `split_at`,
+`split_started_at`, `tracks_present`, and `split_errors_json`, then records
+`split_delete`. Stored timestamp columns are not cleared by deleting split
+state.
+
+Track deletion validates the track index against `set_list_json`, removes known
+track file extensions when possible, and ignores individual file deletion
+errors after logging them. It records `track_delete`, marks that track absent
+in `tracks_present`, and clears split state only when no tracks remain present.
+
+Cancellation distinguishes four outcomes: a running task was aborted and marked
+failed, a queued dependent was dropped before a task was spawned, a stale
+database in-progress flag was marked failed, or no active job existed. Running
+and stale cancellations append the relevant `*_error` with `cancelled by user`;
+dropping a queued dependent records no lifecycle event because no task started.
+
+Restart recovery marks stale in-progress rows failed instead of only clearing
+flags: `download_started_at` becomes `download_error`, `split_started_at`
+becomes `split_error`, and `archive_started_at` becomes `archive_error`, using
+`server restarted` as the error text at web startup. The CLI
+`reset-in-progress` command remains a manual escape hatch that only clears the
+started flags.
 
 ## Events
 
@@ -95,6 +138,9 @@ Events recorded:
 * archive_started
 * archived
 * archive_error
+* archive_delete
+* source_redundant_delete
+* interlude_delete
 * split_timestamps_user: JSON contains the user-submitted timestamps
 * split_timestamps_reset: recorded when user column is cleared back to auto (only when it was non-NULL)
 

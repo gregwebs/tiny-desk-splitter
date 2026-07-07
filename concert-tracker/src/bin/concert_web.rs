@@ -84,7 +84,8 @@ async fn main() -> Result<()> {
     // *Error so the slot UI exposes a retry button instead of pinning the
     // concert at an unactionable "splitting" / "downloading" badge.
     tracing::debug!("failing in-progress jobs");
-    let (stale_dl, stale_sp, stale_ar) = db::fail_in_progress_jobs(&conn, "server restarted")?;
+    let stale = concert_tracker::lifecycle::fail_in_progress_jobs(&conn, "server restarted")?;
+    let (stale_dl, stale_sp, stale_ar) = stale.as_tuple();
     if stale_dl + stale_sp + stale_ar > 0 {
         tracing::info!(
             "marked {} stale download(s), {} stale split(s), and {} stale archive(s) as failed on startup",
@@ -168,7 +169,8 @@ async fn main() -> Result<()> {
     if cancelled > 0 {
         tracing::info!("cancelled {} running job(s) during shutdown", cancelled);
         let conn = state.db.lock().unwrap();
-        let (dl, sp, ar) = db::fail_in_progress_jobs(&conn, "server shutdown")?;
+        let counts = concert_tracker::lifecycle::fail_in_progress_jobs(&conn, "server shutdown")?;
+        let (dl, sp, ar) = counts.as_tuple();
         tracing::info!(
             "marked {} download(s), {} split(s), and {} archive(s) as failed on shutdown",
             dl,

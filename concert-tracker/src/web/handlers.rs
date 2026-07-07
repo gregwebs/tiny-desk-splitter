@@ -17,6 +17,9 @@ use crate::jobs::download::start_download;
 use crate::jobs::find_downloaded_file;
 use crate::jobs::split::{auto_timestamps_with_backfill, start_split};
 use crate::jobs::{JobKey, JobKind, SplitMode};
+use crate::lifecycle::{
+    CancelJobOutcome, DeleteDownloadOutcome, DeleteRedundantSourceOutcome, DeleteSplitOutcome,
+};
 use crate::model::{
     concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
     PlaybackItemKind, SplitStatus, TrackInfo,
@@ -1071,19 +1074,11 @@ pub async fn delete_download(
 ) -> Result<Response, AppError> {
     let force = params.get("force").map(|v| v == "true").unwrap_or(false);
 
-    let (downloaded_at, album, title) = {
+    let title = {
         let conn = state.db.lock().unwrap();
         let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (c.downloaded_at, c.album, c.title)
+        c.title
     };
-
-    if downloaded_at.is_none() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            "Concert has no downloaded file to delete",
-        )
-            .into_response());
-    }
 
     tracing::info!(
         "delete-download started for concert {} ({}) force={}",
@@ -1092,48 +1087,38 @@ pub async fn delete_download(
         force
     );
 
-    if !force {
-        let path = album
-            .as_deref()
-            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
-        match path {
-            Some(p) => {
-                if let Err(e) = std::fs::remove_file(&p) {
-                    tracing::warn!(
-                        "delete-download failed to remove {} for concert {}: {}",
-                        p.display(),
-                        id,
-                        e
-                    );
-                    return Err(AppError::Internal(anyhow::anyhow!(
-                        "Failed to remove {}: {}",
-                        p.display(),
-                        e
-                    )));
-                }
-                tracing::info!("delete-download removed {} for concert {}", p.display(), id);
-            }
-            None => {
+    let outcome = {
+        let conn = state.db.lock().unwrap();
+        crate::lifecycle::delete_download(&conn, &state.jobs.working_dir, id, force)
+    };
+    match outcome {
+        Ok(DeleteDownloadOutcome::Deleted { removed_file }) => {
+            if let Some(path) = removed_file {
                 tracing::info!(
-                    "delete-download file not found for concert {}, returning confirm prompt",
+                    "delete-download removed {} for concert {}",
+                    path.display(),
                     id
                 );
-                let body = DeleteConfirmTemplate { id }
-                    .render()
-                    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-                return Ok(([("content-type", "text/html; charset=utf-8")], body).into_response());
             }
         }
-    } else {
-        tracing::info!(
-            "delete-download force=true for concert {}, skipping file check",
-            id
-        );
-    }
-
-    {
-        let conn = state.db.lock().unwrap();
-        db::clear_download_state(&conn, id)?;
+        Ok(DeleteDownloadOutcome::MissingFileRequiresConfirmation) => {
+            tracing::info!(
+                "delete-download file not found for concert {}, returning confirm prompt",
+                id
+            );
+            let body = DeleteConfirmTemplate { id }
+                .render()
+                .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+            return Ok(([("content-type", "text/html; charset=utf-8")], body).into_response());
+        }
+        Ok(DeleteDownloadOutcome::NotDownloaded) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                "Concert has no downloaded file to delete",
+            )
+                .into_response());
+        }
+        Err(e) => return Err(AppError::Internal(e)),
     }
     tracing::info!("delete-download completed for concert {}", id);
 
@@ -1167,71 +1152,38 @@ pub async fn delete_redundant_source(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let (concert, source_path) = {
+    let concert = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let source_path = concert
-            .album
-            .as_deref()
-            .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a));
-        (concert, source_path)
+        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-
-    // Re-check gate server-side (fail closed).
-    let album = concert.album.as_deref().unwrap_or("");
-    let stored_ts = {
-        let conn = state.db.lock().unwrap();
-        db::get_split_timestamps(&conn, id)
-            .map_err(AppError::Internal)?
-            .user
-    };
-    let is_redundant = crate::model::source_redundant(
-        &state.jobs.working_dir,
-        album,
-        &concert.tracks_present,
-        stored_ts.as_deref(),
-        concert.media_duration,
-    );
-    if !is_redundant {
-        return Ok((
-            StatusCode::CONFLICT,
-            "Source file is not yet fully covered by song and interlude tracks; cannot delete.",
-        )
-            .into_response());
-    }
 
     tracing::info!(
-        "delete-redundant-source: source is fully covered for concert {} ({})",
+        "delete-redundant-source started for concert {} ({})",
         id,
         concert.title
     );
 
-    if let Some(p) = source_path {
-        if let Err(e) = std::fs::remove_file(&p) {
-            tracing::warn!(
-                "delete-redundant-source failed to remove {} for concert {}: {}",
-                p.display(),
-                id,
-                e
-            );
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "Failed to remove {}: {}",
-                p.display(),
-                e
-            )));
-        }
-        tracing::info!(
-            "delete-redundant-source removed {} for concert {}",
-            p.display(),
-            id
-        );
-    }
-
-    {
+    let outcome = {
         let conn = state.db.lock().unwrap();
-        db::clear_download_state(&conn, id)?;
-        // Record a distinct event for auditing (separate from DownloadDelete).
-        crate::events::record_now(&conn, id, crate::events::Event::SourceRedundantDelete, None);
+        crate::lifecycle::delete_redundant_source(&conn, &state.jobs.working_dir, id)
+    }?;
+    match outcome {
+        DeleteRedundantSourceOutcome::Deleted { removed_file } => {
+            if let Some(path) = removed_file {
+                tracing::info!(
+                    "delete-redundant-source removed {} for concert {}",
+                    path.display(),
+                    id
+                );
+            }
+        }
+        DeleteRedundantSourceOutcome::NotRedundant => {
+            return Ok((
+                StatusCode::CONFLICT,
+                "Source file is not yet fully covered by song and interlude tracks; cannot delete.",
+            )
+                .into_response());
+        }
     }
 
     tracing::info!("delete-redundant-source completed for concert {}", id);
@@ -1255,24 +1207,27 @@ pub async fn delete_split(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let (split_at, title) = {
+    let title = {
         let conn = state.db.lock().unwrap();
         let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (c.split_at, c.title)
+        c.title
     };
 
-    if split_at.is_none() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            "Concert has no split state to delete",
-        )
-            .into_response());
-    }
-
     tracing::info!("delete-split started for concert {} ({})", id, title);
-    {
+    let result = {
         let conn = state.db.lock().unwrap();
-        db::clear_split_state(&conn, id)?;
+        crate::lifecycle::delete_split(&conn, id)
+    };
+    match result {
+        Ok(DeleteSplitOutcome::Deleted) => {}
+        Ok(DeleteSplitOutcome::NoSplitState) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                "Concert has no split state to delete",
+            )
+                .into_response());
+        }
+        Err(e) => return Err(AppError::Internal(e)),
     }
     tracing::info!("delete-split completed for concert {}", id);
 
@@ -2010,53 +1965,16 @@ pub async fn delete_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Response, AppError> {
-    let concert = {
+    let outcome = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        crate::lifecycle::delete_track(&conn, &state.jobs.working_dir, id, idx)
+            .map_err(|_| AppError::NotFound)?
     };
-
-    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let stem = crate::model::sanitize_filename(&title);
-    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
-
-    for ext in &["mp4", "m4a"] {
-        let path = dir.join(format!("{stem}.{ext}"));
-        if path.exists() {
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!("delete_track: failed to remove {}: {}", path.display(), e);
-            } else {
-                tracing::info!(
-                    "delete_track: removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-            }
-        }
-    }
-
-    {
-        let conn = state.db.lock().unwrap();
-        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
-        crate::events::record_now(&conn, id, crate::events::Event::TrackDelete, Some(&json));
-    }
-
-    let mut tracks_present = concert.tracks_present.clone();
-    if idx < tracks_present.len() {
-        tracks_present[idx] = false;
-    }
-
-    let split_cleared = tracks_present.iter().all(|&p| !p);
-    if split_cleared {
-        let conn = state.db.lock().unwrap();
-        db::clear_split_state(&conn, id)?;
+    if outcome.split_cleared {
         tracing::info!(
             "delete_track: no tracks remain, cleared split state for concert {}",
             id
         );
-    } else {
-        let conn = state.db.lock().unwrap();
-        db::set_tracks_present(&conn, id, &tracks_present)?;
     }
 
     // Respond with the whole card so the swap refreshes everything derived
@@ -2249,32 +2167,18 @@ pub async fn cancel_job(
         }
     };
 
-    let key = JobKey {
-        concert_id: id,
-        kind: job_kind,
+    let outcome = {
+        let conn = state.db.lock().unwrap();
+        crate::lifecycle::cancel_job(&conn, &state.registry, id, job_kind)?
     };
-
-    let was_running = state.registry.cancel(&key);
     tracing::info!(
-        "cancel_job: concert={} kind={} was_running={}",
+        "cancel_job: concert={} kind={} outcome={:?}",
         id,
         kind,
-        was_running
+        outcome
     );
-
-    {
-        let conn = state.db.lock().unwrap();
-        match job_kind {
-            JobKind::Download => {
-                db::mark_download_failed(&conn, id, "cancelled by user")?;
-            }
-            JobKind::Split => {
-                db::mark_split_failed(&conn, id, "cancelled by user")?;
-            }
-            JobKind::Archive => {
-                db::mark_archive_failed(&conn, id, "cancelled by user")?;
-            }
-        }
+    if matches!(outcome, CancelJobOutcome::NoSuchActiveJob) {
+        tracing::debug!("cancel_job: no active job found for concert {}", id);
     }
 
     let mut headers = HeaderMap::new();

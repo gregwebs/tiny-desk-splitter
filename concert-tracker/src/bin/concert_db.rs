@@ -215,7 +215,7 @@ fn main() -> Result<()> {
         }
 
         Command::ResetInProgress => {
-            let count = db::reset_in_progress(&conn)?;
+            let count = concert_tracker::lifecycle::reset_in_progress(&conn)?;
             println!("Cleared {} stale in-progress rows", count);
         }
 

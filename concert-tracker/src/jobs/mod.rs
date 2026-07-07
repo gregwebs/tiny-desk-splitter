@@ -40,6 +40,13 @@ pub struct JobRegistry {
     dependents: Mutex<HashMap<JobKey, Vec<JobKey>>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RegistryCancelOutcome {
+    CancelledRunning,
+    DroppedQueued,
+    NotFound,
+}
+
 impl JobRegistry {
     pub fn new() -> Self {
         JobRegistry {
@@ -94,30 +101,43 @@ impl JobRegistry {
     /// Drop every dependency edge touching `key`: jobs queued behind it, and
     /// its own queued entry under any upstream. Called when `key` fails or is
     /// cancelled so queued dependents never run.
-    pub fn drop_dependency_edges(&self, key: &JobKey) {
+    pub fn drop_dependency_edges(&self, key: &JobKey) -> bool {
         let mut map = self.dependents.lock().unwrap();
+        let mut dropped_any = false;
         if let Some(dropped) = map.remove(key) {
+            dropped_any = true;
             tracing::info!(?key, ?dropped, "dropped queued dependents");
         }
         for deps in map.values_mut() {
+            let before = deps.len();
             deps.retain(|d| d != key);
+            dropped_any |= deps.len() != before;
         }
         map.retain(|_, deps| !deps.is_empty());
+        dropped_any
     }
 
     /// Abort the task for `key` if it exists and is still running, dropping
     /// any dependency edges involving it. Returns `true` if a running task
     /// was aborted.
     pub fn cancel(&self, key: &JobKey) -> bool {
-        self.drop_dependency_edges(key);
+        self.cancel_with_outcome(key) == RegistryCancelOutcome::CancelledRunning
+    }
+
+    pub fn cancel_with_outcome(&self, key: &JobKey) -> RegistryCancelOutcome {
+        let dropped_queued = self.drop_dependency_edges(key);
         let mut map = self.running.lock().unwrap();
         if let Some(handle) = map.remove(key) {
             if !handle.is_finished() {
                 handle.abort();
-                return true;
+                return RegistryCancelOutcome::CancelledRunning;
             }
         }
-        false
+        if dropped_queued {
+            RegistryCancelOutcome::DroppedQueued
+        } else {
+            RegistryCancelOutcome::NotFound
+        }
     }
 
     /// Abort all running tasks and drop all queued dependents. Returns the
