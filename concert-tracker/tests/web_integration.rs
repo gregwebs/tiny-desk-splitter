@@ -25,9 +25,14 @@ const COND_MAX_POLLS: usize = 200;
 /// real worker progress, not just a flag flip): ~5s.
 const RECV_MAX_POLLS: usize = 500;
 
+fn disable_system_proxy_for_tests() {
+    tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
+}
+
 /// An idle background scrape queue for tests that never enqueue. Backed by a
 /// throwaway in-memory DB; the worker stays parked.
 fn idle_scrape_queue() -> ScrapeQueue {
+    disable_system_proxy_for_tests();
     ScrapeQueue::start(
         Arc::new(Mutex::new(db::open_in_memory().unwrap())),
         PathBuf::from("/tmp"),
@@ -163,6 +168,7 @@ async fn pending_card_shows_loading_then_thumbnail() {
 }
 
 fn test_state(conn: rusqlite::Connection) -> AppState {
+    disable_system_proxy_for_tests();
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
@@ -401,6 +407,7 @@ async fn download_endpoint_spawns_job_and_returns_row() {
 /// avoid hitting the network, while this test exercises the real call path.
 #[tokio::test]
 async fn detail_page_auto_scrape_failure_still_renders() {
+    disable_system_proxy_for_tests();
     let conn = db::open_in_memory().unwrap();
     // Port 1 with no listener — connection refuses immediately.
     seeded_concert(
@@ -447,6 +454,7 @@ async fn detail_page_auto_scrape_failure_still_renders() {
 }
 
 fn state_with_workdir(conn: rusqlite::Connection, workdir: PathBuf) -> AppState {
+    disable_system_proxy_for_tests();
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
