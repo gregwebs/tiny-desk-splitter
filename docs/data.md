@@ -41,6 +41,10 @@ Archiving moves the concert directory to a configurable location and creates a s
 State-transition policy for destructive lifecycle operations lives in
 `concert-tracker/src/lifecycle.rs`; HTTP handlers keep request/response behavior
 such as confirmation prompts and HTMX rendering.
+Playback availability policy lives in `concert-tracker/src/playback.rs`: it
+decides source playback, reconstruction playback, track media lookup, next/prev
+playable tracks, and track detail facts. HTTP handlers translate those facts
+into JSON, templates, and status codes.
 
 Key columns in the `concerts` table:
 

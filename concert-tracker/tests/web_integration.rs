@@ -1330,6 +1330,78 @@ async fn track_media_info_reports_has_prev() {
 }
 
 #[tokio::test]
+async fn track_details_returns_200_without_album() {
+    let conn = db::open_in_memory().unwrap();
+    seeded_concert(
+        &conn,
+        "https://npr.org/c/no-album-details",
+        "No Album Details",
+    );
+    let set_list_json = serde_json::to_string(&vec!["Song A"]).unwrap();
+    let tracks_present_json = serde_json::to_string(&vec![true]).unwrap();
+    let tracks_liked_json = serde_json::to_string(&vec![true]).unwrap();
+    conn.execute(
+        "UPDATE concerts
+         SET set_list_json = ?1, tracks_present = ?2, tracks_liked = ?3
+         WHERE id = 1",
+        rusqlite::params![set_list_json, tracks_present_json, tracks_liked_json],
+    )
+    .unwrap();
+    let app = router(test_state(conn));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/track-details")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["tracks_busy"], false);
+    assert_eq!(info["tracks"][0]["title"], "Song A");
+    assert_eq!(info["tracks"][0]["available"], true);
+    assert_eq!(info["tracks"][0]["is_video"], false);
+    assert_eq!(info["tracks"][0]["liked"], true);
+}
+
+#[tokio::test]
+async fn track_details_reports_busy_from_handler_state() {
+    let workdir = tempfile::tempdir().unwrap();
+    let album = "Busy Details Album";
+    let conn = db::open_in_memory().unwrap();
+    seed_split_concert(&conn, workdir.path(), album, vec!["Song A".into()], &[0]);
+    db::set_tracks_present(&conn, 1, &[true]).unwrap();
+    db::set_downloaded_at_if_missing(&conn, 1, "2026-07-07 00:00:00").unwrap();
+    db::try_mark_split_started(&conn, 1).unwrap();
+    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/concerts/1/track-details")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let info: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(info["tracks_busy"], true);
+    assert_eq!(info["tracks"][0]["available"], true);
+}
+
+#[tokio::test]
 async fn watch_returns_500_when_downloaded_but_file_missing() {
     // Concert is marked downloaded in the DB but the media file is not on
     // disk (e.g. an old import whose archive never contained the source).
