@@ -3,6 +3,7 @@ pub mod db;
 pub mod events;
 pub mod import;
 pub mod jobs;
+pub mod lifecycle;
 pub mod model;
 pub mod month_walk;
 pub mod normalize;
