@@ -21,9 +21,9 @@ use crate::lifecycle::{
     CancelJobOutcome, DeleteDownloadOutcome, DeleteRedundantSourceOutcome, DeleteSplitOutcome,
 };
 use crate::model::{
-    concert_dir, is_browser_playable, is_video_extension, ArchiveStatus, Concert, DownloadStatus,
-    PlaybackItemKind, SplitStatus, TrackInfo,
+    concert_dir, ArchiveStatus, Concert, DownloadStatus, PlaybackItemKind, SplitStatus, TrackInfo,
 };
+use crate::playback::{PlaybackLookupError, PlaybackPlan, SourceMedia, TrackMedia};
 use crate::split_timestamps::{song_timestamps_to_payload, TimestampPayload, ValidatedTimestamps};
 use crate::sync::{concerts_needing_scrape, sync_month, synced_months_set, YearMonth};
 use crate::web::AppState;
@@ -1321,76 +1321,23 @@ pub async fn concert_playback(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let sanitized_album = crate::model::sanitize_album(album);
-
-    // If the source file is present, return source mode.
-    if let Some(path) = find_downloaded_file(&working_dir, album) {
-        let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let filename = path
-            .file_name()
-            .and_then(|f| f.to_str())
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("invalid filename")))?;
-        let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-        return Ok(Json(ConcertPlaybackResponse::Source {
-            source: MediaInfo {
-                url,
-                title: album.to_string(),
-                artist: concert.artist.unwrap_or_default(),
-                is_video: is_video_extension(ext),
-                playable: is_browser_playable(ext),
-                track_index: None,
-                has_next: false,
-                has_prev: false,
-                liked: false,
-            },
-        }));
+    match crate::playback::concert_playback_plan(&working_dir, &concert, stored_ts.as_deref()) {
+        Ok(PlaybackPlan::Source(source)) => Ok(Json(ConcertPlaybackResponse::Source {
+            source: media_info_from_source(album, source),
+        })),
+        Ok(PlaybackPlan::Reconstruction(items)) => {
+            let artist = concert.artist.unwrap_or_default();
+            let sanitized_album = crate::model::sanitize_album(album);
+            let json_items: Vec<PlaybackItemJson> = items
+                .into_iter()
+                .map(|item| playback_item_json(&sanitized_album, &artist, item))
+                .collect();
+            Ok(Json(ConcertPlaybackResponse::Reconstruction {
+                items: json_items,
+            }))
+        }
+        Err(e) => Err(playback_error_to_app_error(e)),
     }
-
-    // Source absent: build reconstruction.
-    let items = crate::model::build_reconstruction(
-        &working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-        stored_ts.as_deref(),
-        concert.media_duration,
-    );
-    if items.is_empty() {
-        return Err(AppError::NotFound);
-    }
-    let artist = concert.artist.unwrap_or_default();
-    let json_items: Vec<PlaybackItemJson> = items
-        .into_iter()
-        .map(|item| {
-            let url = format!("/concert-files/{}/{}", sanitized_album, item.filename);
-            match item.kind {
-                PlaybackItemKind::Song { track_index, liked } => PlaybackItemJson {
-                    kind: "song",
-                    title: item.title,
-                    url,
-                    is_video: item.is_video,
-                    artist: artist.clone(),
-                    track_index: Some(track_index),
-                    interlude_index: None,
-                    liked,
-                },
-                PlaybackItemKind::Interlude { index } => PlaybackItemJson {
-                    kind: "interlude",
-                    title: item.title,
-                    url,
-                    is_video: item.is_video,
-                    artist: artist.clone(),
-                    track_index: None,
-                    interlude_index: Some(index),
-                    liked: false,
-                },
-            }
-        })
-        .collect();
-    Ok(Json(ConcertPlaybackResponse::Reconstruction {
-        items: json_items,
-    }))
 }
 
 pub async fn delete_interlude(
@@ -1469,16 +1416,12 @@ async fn concert_playback_tracks_fragment(state: &AppState, id: i64) -> Result<S
             .unwrap_or(None);
         (concert, stored_ts)
     };
-    let album = concert.album.as_deref().unwrap_or("");
-    let items = crate::model::build_reconstruction(
+    let items = crate::playback::reconstruction_items(
         &state.jobs.working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
+        &concert,
         stored_ts.as_deref(),
-        concert.media_duration,
-    );
+    )
+    .unwrap_or_default();
     ConcertPlaybackTracksTemplate { id, items }
         .render()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
@@ -1504,51 +1447,79 @@ pub struct MediaInfo {
     pub liked: bool,
 }
 
-/// Locate the next browser-playable track in `set_list` after `after_idx`.
-/// Returns its index, title, media URL and whether it is a video. Mirrors the
-/// auto-advance logic so `has_next` and `next_track_media_info` stay in sync.
-fn find_next_playable_track(
-    working_dir: &std::path::Path,
-    album: &str,
-    set_list: &[String],
-    after_idx: usize,
-) -> Option<(usize, String, String, bool)> {
+fn media_info_from_source(album: &str, source: SourceMedia) -> MediaInfo {
     let sanitized_album = crate::model::sanitize_album(album);
-    for (next_idx, title) in set_list.iter().enumerate().skip(after_idx + 1) {
-        if let Some(filename) = crate::model::find_track_file(working_dir, album, title) {
-            let ext = filename.rsplit('.').next().unwrap_or("");
-            if !is_browser_playable(ext) {
-                continue;
-            }
-            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-            return Some((next_idx, title.clone(), url, is_video_extension(ext)));
-        }
+    MediaInfo {
+        url: format!("/concert-files/{}/{}", sanitized_album, source.filename),
+        title: source.title,
+        artist: source.artist,
+        is_video: source.is_video,
+        playable: source.playable,
+        track_index: None,
+        has_next: false,
+        has_prev: false,
+        liked: false,
     }
-    None
 }
 
-/// Locate the nearest browser-playable track in `set_list` before `before_idx`.
-/// Returns its index, title, media URL and whether it is a video. The reverse of
-/// [`find_next_playable_track`]; used by the player's Back button.
-fn find_prev_playable_track(
-    working_dir: &std::path::Path,
-    album: &str,
-    set_list: &[String],
-    before_idx: usize,
-) -> Option<(usize, String, String, bool)> {
+fn media_info_from_track(album: &str, track: TrackMedia) -> MediaInfo {
     let sanitized_album = crate::model::sanitize_album(album);
-    for prev_idx in (0..before_idx).rev() {
-        let title = &set_list[prev_idx];
-        if let Some(filename) = crate::model::find_track_file(working_dir, album, title) {
-            let ext = filename.rsplit('.').next().unwrap_or("");
-            if !is_browser_playable(ext) {
-                continue;
-            }
-            let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-            return Some((prev_idx, title.clone(), url, is_video_extension(ext)));
+    MediaInfo {
+        url: format!("/concert-files/{}/{}", sanitized_album, track.filename),
+        title: track.title,
+        artist: track.artist,
+        is_video: track.is_video,
+        playable: track.playable,
+        track_index: Some(track.track_index),
+        has_next: track.has_next,
+        has_prev: track.has_prev,
+        liked: track.liked,
+    }
+}
+
+fn playback_item_json(
+    sanitized_album: &str,
+    artist: &str,
+    item: crate::model::PlaybackItem,
+) -> PlaybackItemJson {
+    let url = format!("/concert-files/{}/{}", sanitized_album, item.filename);
+    match item.kind {
+        PlaybackItemKind::Song { track_index, liked } => PlaybackItemJson {
+            kind: "song",
+            title: item.title,
+            url,
+            is_video: item.is_video,
+            artist: artist.to_string(),
+            track_index: Some(track_index),
+            interlude_index: None,
+            liked,
+        },
+        PlaybackItemKind::Interlude { index } => PlaybackItemJson {
+            kind: "interlude",
+            title: item.title,
+            url,
+            is_video: item.is_video,
+            artist: artist.to_string(),
+            track_index: None,
+            interlude_index: Some(index),
+            liked: false,
+        },
+    }
+}
+
+fn playback_error_to_app_error(e: PlaybackLookupError) -> AppError {
+    match e {
+        PlaybackLookupError::NotPlayable => AppError::NotFound,
+        PlaybackLookupError::MarkedDownloadedButMissing { concert_id } => {
+            AppError::Internal(anyhow::anyhow!(
+                "Concert {} is marked downloaded but the media file is missing on disk",
+                concert_id
+            ))
+        }
+        PlaybackLookupError::InvalidFilename => {
+            AppError::Internal(anyhow::anyhow!("invalid filename"))
         }
     }
-    None
 }
 
 #[utoipa::path(
@@ -1573,34 +1544,10 @@ pub async fn media_info(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let path = locate_full_concert_file(
-        &working_dir,
-        id,
-        Some(album),
-        concert.downloaded_at.as_deref(),
-    )?;
-    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let filename = path
-        .file_name()
-        .and_then(|f| f.to_str())
-        .ok_or_else(|| AppError::Internal(anyhow::anyhow!("invalid filename")))?;
-    let sanitized_album = crate::model::sanitize_album(album);
-    let url = format!("/concert-files/{}/{}", sanitized_album, filename);
+    let source = crate::playback::source_media(&working_dir, &concert)
+        .map_err(playback_error_to_app_error)?;
 
-    Ok(Json(MediaInfo {
-        url,
-        title: album.to_string(),
-        artist: concert.artist.unwrap_or_default(),
-        is_video: is_video_extension(ext),
-        playable: is_browser_playable(ext),
-        track_index: None,
-        // Whole-album playback does not auto-advance per track.
-        has_next: false,
-        // No per-track navigation for whole-album playback.
-        has_prev: false,
-        // No per-track like for whole-album playback; the star is hidden.
-        liked: false,
-    }))
+    Ok(Json(media_info_from_source(album, source)))
 }
 
 #[utoipa::path(
@@ -1626,28 +1573,11 @@ pub async fn track_media_info(
         (concert, state.jobs.working_dir.clone())
     };
 
-    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let filename =
-        crate::model::find_track_file(&working_dir, album, &title).ok_or(AppError::NotFound)?;
-    let ext = filename.rsplit('.').next().unwrap_or("");
-    let sanitized_album = crate::model::sanitize_album(album);
-    let url = format!("/concert-files/{}/{}", sanitized_album, filename);
-    let has_next = find_next_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
-    let has_prev = find_prev_playable_track(&working_dir, album, &concert.set_list, idx).is_some();
-    let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
+    let media = crate::playback::track_media(&working_dir, &concert, idx)
+        .map_err(playback_error_to_app_error)?;
 
-    Ok(Json(MediaInfo {
-        url,
-        title,
-        artist: concert.artist.unwrap_or_default(),
-        is_video: is_video_extension(ext),
-        playable: is_browser_playable(ext),
-        track_index: Some(idx),
-        has_next,
-        has_prev,
-        liked,
-    }))
+    Ok(Json(media_info_from_track(album, media)))
 }
 
 #[utoipa::path(
@@ -1674,29 +1604,9 @@ pub async fn next_track_media_info(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    // Read the liked flags before `artist` is moved out of `concert` below.
-    let tracks_liked = concert.tracks_liked.clone();
-    let artist = concert.artist.unwrap_or_default();
-
-    match find_next_playable_track(&working_dir, album, &concert.set_list, idx) {
-        Some((next_idx, title, url, is_video)) => Ok(Json(MediaInfo {
-            url,
-            title,
-            artist,
-            is_video,
-            playable: true,
-            track_index: Some(next_idx),
-            // Keep the Next button correct after auto-advancing onto this track.
-            has_next: find_next_playable_track(&working_dir, album, &concert.set_list, next_idx)
-                .is_some(),
-            // There is always a playable track before this one (the one we came
-            // from), so the Back button stays enabled after advancing.
-            has_prev: find_prev_playable_track(&working_dir, album, &concert.set_list, next_idx)
-                .is_some(),
-            liked: tracks_liked.get(next_idx).copied().unwrap_or(false),
-        })),
-        None => Err(AppError::NotFound),
-    }
+    let media = crate::playback::next_track_media(&working_dir, &concert, idx)
+        .map_err(playback_error_to_app_error)?;
+    Ok(Json(media_info_from_track(album, media)))
 }
 
 /// Media info for the nearest playable track *before* `idx` (the Back button).
@@ -1725,28 +1635,9 @@ pub async fn prev_track_media_info(
     };
 
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    // Read the liked flags before `artist` is moved out of `concert` below.
-    let tracks_liked = concert.tracks_liked.clone();
-    let artist = concert.artist.clone().unwrap_or_default();
-
-    match find_prev_playable_track(&working_dir, album, &concert.set_list, idx) {
-        Some((prev_idx, title, url, is_video)) => Ok(Json(MediaInfo {
-            url,
-            title,
-            artist,
-            is_video,
-            playable: true,
-            track_index: Some(prev_idx),
-            // There is always a playable track after this one (the one we came
-            // from), so the Next button stays enabled after going back.
-            has_next: find_next_playable_track(&working_dir, album, &concert.set_list, prev_idx)
-                .is_some(),
-            has_prev: find_prev_playable_track(&working_dir, album, &concert.set_list, prev_idx)
-                .is_some(),
-            liked: tracks_liked.get(prev_idx).copied().unwrap_or(false),
-        })),
-        None => Err(AppError::NotFound),
-    }
+    let media = crate::playback::prev_track_media(&working_dir, &concert, idx)
+        .map_err(playback_error_to_app_error)?;
+    Ok(Json(media_info_from_track(album, media)))
 }
 
 pub async fn watch(
@@ -1903,14 +1794,8 @@ pub async fn track_details(
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    let album = concert.album.as_deref().unwrap_or_default();
-    let tracks = crate::model::list_all_track_details(
-        &state.jobs.working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
+    let tracks = crate::playback::track_details(&state.jobs.working_dir, &concert)
+        .map_err(playback_error_to_app_error)?;
     let tracks_busy = tracks_busy(&concert, split_queued(&state, id));
     Ok(Json(TrackDetailsResponse {
         tracks_busy,
