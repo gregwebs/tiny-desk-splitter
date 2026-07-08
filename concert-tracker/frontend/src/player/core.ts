@@ -287,6 +287,20 @@ export function isPlainEscapeKey(e: KeyboardEvent): boolean {
   );
 }
 
+// True when a click on `anchor` should fall through to the native href
+// (new-tab, download, etc.) instead of being intercepted for an htmx partial
+// swap — mirrors Foldkit's own link-router guard (browserListeners.ts):
+// non-primary button, any modifier key, an already-handled event, a
+// non-_self target, or a download link.
+export function nativeClickShouldWin(e: MouseEvent, anchor: HTMLAnchorElement): boolean {
+  if (e.button !== 0) return true;
+  if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return true;
+  if (e.defaultPrevented) return true;
+  if (anchor.target !== "" && anchor.target !== "_self") return true;
+  if (anchor.hasAttribute("download")) return true;
+  return false;
+}
+
 // True for text-entry targets where native key behavior (typing a space,
 // clearing/blurring on Escape) must win over the global player shortcuts.
 export function isEditableTarget(target: EventTarget | null): boolean {

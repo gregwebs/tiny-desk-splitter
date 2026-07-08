@@ -15,6 +15,7 @@
 import { Runtime } from "foldkit";
 
 import type { PlayerApi } from "../shared/player-api";
+import { nativeClickShouldWin } from "./core";
 import { nowPlaying as mirrorNowPlaying } from "./mirror";
 import { type PlayerCommand, PlayerCommandValue } from "./widget/port";
 import { makeElement } from "./widget/widget";
@@ -95,10 +96,20 @@ window.Player = {
     return Promise.resolve();
   },
 
+  // #player-artist's onclick (view.ts). Navigation stays entirely in the host
+  // shim rather than round-tripping through the widget's command Port: it
+  // needs the click event (modifier-key/aux-button checks, preventDefault)
+  // and the anchor itself as htmx's `source` (so htmx reads that element's
+  // hx-target/hx-select/hx-swap/hx-push-url and does a partial #content swap
+  // instead of a full-page navigation that would kill playback).
   openConcert(e) {
-    if (e instanceof MouseEvent && (e.metaKey || e.ctrlKey || e.shiftKey)) return;
-    e?.preventDefault();
-    send(PlayerCommandValue.OpenConcert());
+    if (!(e instanceof MouseEvent) || !(e.currentTarget instanceof HTMLAnchorElement)) return;
+    const anchor = e.currentTarget;
+    if (nativeClickShouldWin(e, anchor)) return;
+    const href = anchor.getAttribute("href");
+    if (!href || href === "#" || !window.htmx) return; // nothing playing → inert link
+    e.preventDefault();
+    window.htmx.ajax("GET", href, { source: anchor });
   },
 
   // Must write body class synchronously so playlists/index.ts:openAdd() sees
