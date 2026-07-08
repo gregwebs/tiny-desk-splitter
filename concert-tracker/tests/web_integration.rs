@@ -2018,12 +2018,16 @@ async fn wait_for_split(app: &axum::Router, id: i64, tracks: usize) {
         let (_, j) = get_json(app, &format!("/concerts/{id}/prepare-status")).await;
         let present: Vec<bool> =
             serde_json::from_value(j["tracks_present"].clone()).unwrap_or_default();
-        if present.len() == tracks && present.iter().all(|&p| p) {
+        // tracks_present is read from disk and can flip true before the split
+        // job's DB write lands (src/jobs/split.rs writes the file, then only
+        // afterwards marks split succeeded in the DB). Wait for both so callers
+        // never observe a "split" assertion racing the DB update.
+        if present.len() == tracks && present.iter().all(|&p| p) && j["split"] == "split" {
             return;
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    panic!("chain never completed: tracks not all present after 10s");
+    panic!("chain never completed: split not finished with all tracks present after 10s");
 }
 
 /// POST /download on a not-downloaded concert with a set list runs the full
