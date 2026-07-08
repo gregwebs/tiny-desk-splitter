@@ -121,6 +121,11 @@ describe("player-bar view", () => {
       // No error or status text
       Scene.expect(Scene.selector("#player-error")).toContainText(""),
       Scene.expect(Scene.selector("#player-status")).toContainText(""),
+      // Both have a `display: none` CSS baseline (style.css) that an empty
+      // inline style would leave in effect — pin the explicit shown/hidden
+      // value the view must emit, not just the (baseline-blind) text content.
+      Scene.expect(Scene.selector("#player-error")).toHaveStyle("display", "none"),
+      Scene.expect(Scene.selector("#player-status")).toHaveStyle("display", "none"),
     );
   });
 
@@ -282,6 +287,12 @@ describe("player-bar view", () => {
       Scene.with({ ...noPlayback, status: StatusValue.Error({ message: "Playback blocked" }) }),
       Scene.expect(Scene.selector("#player-error")).toContainText("Playback blocked"),
       Scene.expect(Scene.selector("#player-status")).toContainText(""),
+      // Deliberate contract with the style.css `display: none` baseline —
+      // see the note on the idle-state assertions above. Regression: the
+      // Foldkit port set this text without a display style, so the CSS
+      // baseline always won and the error never appeared in a real browser.
+      Scene.expect(Scene.selector("#player-error")).toHaveStyle("display", "inline"),
+      Scene.expect(Scene.selector("#player-status")).toHaveStyle("display", "none"),
     );
   });
 
@@ -291,6 +302,8 @@ describe("player-bar view", () => {
       Scene.with({ ...noPlayback, status: StatusValue.Busy({ message: "Preparing…" }) }),
       Scene.expect(Scene.selector("#player-status")).toContainText("Preparing…"),
       Scene.expect(Scene.selector("#player-error")).toContainText(""),
+      Scene.expect(Scene.selector("#player-status")).toHaveStyle("display", "inline"),
+      Scene.expect(Scene.selector("#player-error")).toHaveStyle("display", "none"),
     );
   });
 

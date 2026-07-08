@@ -460,8 +460,17 @@ function playerBarView(model: Model): Html {
       ),
 
       // ── Status / error feedback ─────────────────────────────────
-      h.span([h.Id("player-error"), h.Role("alert")], [errorText]),
-      h.span([h.Id("player-status"), h.AriaLive("polite")], [busyText]),
+      // #player-error / #player-status have `display: none` CSS baselines
+      // (style.css), so they need an explicit shown value — "" would leave
+      // the baseline in effect (same rule as the action buttons below).
+      h.span(
+        [h.Id("player-error"), h.Role("alert"), h.Style({ display: errorText ? "inline" : "none" })],
+        [errorText],
+      ),
+      h.span(
+        [h.Id("player-status"), h.AriaLive("polite"), h.Style({ display: busyText ? "inline" : "none" })],
+        [busyText],
+      ),
 
       // ── Action buttons ──────────────────────────────────────────
       // Watch gates on isVideo alone: it only folds out the inline video
