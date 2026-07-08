@@ -576,16 +576,6 @@ export const OpenInNewTab = Command.define(
   Acked,
 )(({ url }) => Effect.sync(() => window.open(url, "_blank", "noopener")).pipe(Effect.as(Acked())));
 
-export const NavigateToConcert = Command.define(
-  "NavigateToConcert",
-  { concertId: S.Number },
-  Acked,
-)(({ concertId }) =>
-  Effect.sync(() => {
-    if (window.htmx) window.htmx.ajax("GET", `/concerts/${concertId}`, {});
-  }).pipe(Effect.as(Acked())),
-);
-
 export const RefreshCardStatus = Command.define(
   "RefreshCardStatus",
   { concertId: S.Number },

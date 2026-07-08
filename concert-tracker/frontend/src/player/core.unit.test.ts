@@ -4,6 +4,7 @@ import {
   isEditableTarget,
   isKeyboardShortcutIgnoredTarget,
   isPlayerPlaybackShortcutTarget,
+  nativeClickShouldWin,
 } from "./core";
 
 // Builds the DOM shape the keyboard-target predicates walk with closest():
@@ -144,5 +145,51 @@ describe("isKeyboardShortcutIgnoredTarget", () => {
   test("is false for non-Element targets", () => {
     expect(isKeyboardShortcutIgnoredTarget(null)).toBe(false);
     expect(isKeyboardShortcutIgnoredTarget(document)).toBe(false);
+  });
+});
+
+describe("nativeClickShouldWin", () => {
+  function anchor(attrs: Record<string, string> = {}): HTMLAnchorElement {
+    const a = document.createElement("a");
+    a.href = "/concerts/1";
+    for (const [k, v] of Object.entries(attrs)) a.setAttribute(k, v);
+    return a;
+  }
+
+  function click(init: MouseEventInit = {}): MouseEvent {
+    return new MouseEvent("click", { button: 0, cancelable: true, ...init });
+  }
+
+  test("is false for a plain left click on a same-tab, non-download link", () => {
+    expect(nativeClickShouldWin(click(), anchor())).toBe(false);
+  });
+
+  test("is true for a non-primary (e.g. middle) button click", () => {
+    expect(nativeClickShouldWin(click({ button: 1 }), anchor())).toBe(true);
+  });
+
+  test.each(["metaKey", "ctrlKey", "shiftKey", "altKey"] as const)(
+    "is true when %s is held",
+    (modifier) => {
+      expect(nativeClickShouldWin(click({ [modifier]: true }), anchor())).toBe(true);
+    },
+  );
+
+  test("is true when the event was already handled (defaultPrevented)", () => {
+    const e = click();
+    e.preventDefault();
+    expect(nativeClickShouldWin(e, anchor())).toBe(true);
+  });
+
+  test("is true for a link targeting a non-_self frame", () => {
+    expect(nativeClickShouldWin(click(), anchor({ target: "_blank" }))).toBe(true);
+  });
+
+  test("is false for a link explicitly targeting _self", () => {
+    expect(nativeClickShouldWin(click(), anchor({ target: "_self" }))).toBe(false);
+  });
+
+  test("is true for a download link", () => {
+    expect(nativeClickShouldWin(click(), anchor({ download: "" }))).toBe(true);
   });
 });

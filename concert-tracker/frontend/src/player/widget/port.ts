@@ -39,12 +39,6 @@ const OpenExternal = ts("OpenExternal");
 const WatchTrackDirect = ts("WatchTrackDirect", { concertId: S.Number, trackIdx: S.Number });
 const ToggleLike = ts("ToggleLike");
 const DeleteTrack = ts("DeleteTrack");
-/** player.ts's `openConcert(e?)` reads the event for the modifier-key skip
- *  (meta/ctrl/shift → let the native href win) and `preventDefault()`/the
- *  htmx `source` element; none of that can cross the Port boundary, so the
- *  host shim resolves the modifier-key check itself and only emits this when
- *  it has decided to proceed. */
-const OpenConcert = ts("OpenConcert");
 const OpenSidebar = ts("OpenSidebar");
 const CloseSidebar = ts("CloseSidebar");
 const ToggleSidebar = ts("ToggleSidebar");
@@ -92,7 +86,6 @@ export const PlayerCommand = S.Union([
   WatchTrackDirect,
   ToggleLike,
   DeleteTrack,
-  OpenConcert,
   OpenSidebar,
   CloseSidebar,
   ToggleSidebar,
@@ -128,7 +121,6 @@ export const PlayerCommandValue = {
   WatchTrackDirect,
   ToggleLike,
   DeleteTrack,
-  OpenConcert,
   OpenSidebar,
   CloseSidebar,
   ToggleSidebar,

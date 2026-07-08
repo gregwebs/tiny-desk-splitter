@@ -13,7 +13,6 @@ import {
   FetchTrackInfo,
   HideVideoPanel,
   MutateBodyClass,
-  NavigateToConcert,
   OpenAddToPlaylist,
   OpenExternalRequest,
   PauseAudio,
@@ -122,10 +121,6 @@ export const handleHostCommand =
                 [DeleteTrackRequest({ concertId: model.playback.concertId, trackIdx: model.playback.trackIdx, source: "bar" })],
               ],
 
-        OpenConcert: () =>
-          model.playback.concertId === null
-            ? [model, []]
-            : [model, [NavigateToConcert({ concertId: model.playback.concertId })]],
         OpenSidebar: () => {
           const model1 = evo(model, { sidebar: () => evo(model.sidebar, { open: () => true }) });
           // Whole-album mode: fetch the track list. Reconstruction mode (concert

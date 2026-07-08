@@ -329,6 +329,18 @@ describe("player-bar view", () => {
     );
   });
 
+  // Regression guard: a plain click on #player-artist must be intercepted by
+  // Player.openConcert (host shim) for an htmx partial swap, not fall through
+  // to a full-page navigation that would kill playback (see e2e
+  // back-navigation.spec.js "player-bar artist link").
+  test("artist link wires onclick to the host shim's openConcert", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel()),
+      Scene.expect(Scene.selector("#player-artist")).toHaveAttr("onclick", "Player.openConcert(event)"),
+    );
+  });
+
   test("clicking like optimistically flips the star ☆→★", () => {
     Scene.scene(
       { update, view },

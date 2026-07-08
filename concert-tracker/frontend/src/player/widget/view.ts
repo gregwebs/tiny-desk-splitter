@@ -437,12 +437,20 @@ function playerBarView(model: Model): Html {
               ),
             ],
           ),
-          // Concert navigation via hx-* — host shim intercepts modifier
-          // clicks before emitting OpenConcert (commit 7).
+          // Concert navigation: a plain click is intercepted by
+          // Player.openConcert (host shim, ../index.ts), which
+          // preventDefaults and calls htmx.ajax with this anchor as
+          // `source` — htmx then reads hx-target/hx-select/hx-swap/
+          // hx-push-url below to do a partial #content swap + history push
+          // so playback continues. Modifier/aux clicks and non-primary
+          // targets fall through to the native href (e.g. open in new
+          // tab). hx-boost=false keeps boost from double-handling the
+          // click.
           h.a(
             [
               h.Id("player-artist"),
               h.Attribute("hx-boost", "false"),
+              h.Attribute("onclick", "Player.openConcert(event)"),
               h.Href(hasMedia ? `/concerts/${p.concertId}` : "#"),
               h.Attribute("hx-target", "#content"),
               h.Attribute("hx-select", "#content"),
