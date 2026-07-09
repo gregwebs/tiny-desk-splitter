@@ -2443,6 +2443,20 @@ async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
     assert_eq!(auto_arr[0]["title"], "Old Song A");
 }
 
+#[tokio::test]
+async fn get_split_timestamps_uses_stored_media_duration_when_source_missing() {
+    let conn = db::open_in_memory().unwrap();
+    let songs = ["Song A", "Song B"];
+    let id = seed_ts_concert(&conn, "Stored Duration Album", &songs);
+    db::set_media_duration(&conn, id, 321.5).unwrap();
+
+    let app = router(test_state(conn));
+    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["media_duration"], 321.5);
+}
+
 // ── POST /concerts/:id/split-timestamps ──────────────────────────────────────
 
 async fn post_body_json(
@@ -2470,6 +2484,30 @@ async fn post_body_json(
     (status, json)
 }
 
+async fn post_body_text(
+    app: &axum::Router,
+    uri: &str,
+    body: serde_json::Value,
+) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(uri)
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(&body).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).into_owned())
+}
+
 #[tokio::test]
 async fn set_split_timestamps_returns_404_for_unknown_concert() {
     let conn = db::open_in_memory().unwrap();
@@ -2491,8 +2529,10 @@ async fn set_split_timestamps_returns_409_when_source_missing() {
         {"title": "A", "start_time": 0.0, "end_time": 55.0},
         {"title": "B", "start_time": 60.0, "end_time": 115.0}
     ]});
-    let (status, _) = post_body_json(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
+    let (status, text) =
+        post_body_text(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
     assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(text, "Source file not found — download the concert first");
 }
 
 #[tokio::test]
@@ -2516,8 +2556,10 @@ async fn set_split_timestamps_returns_422_on_count_mismatch() {
     let body = serde_json::json!({"songs": [
         {"title": "A", "start_time": 0.0, "end_time": 55.0}
     ]});
-    let (status, _) = post_body_json(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
+    let (status, text) =
+        post_body_text(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(text, "Expected 2 timestamps (one per set-list song), got 1");
 }
 
 /// Happy path: POST user timestamps → 202 and eventually the user column is set.
@@ -2613,8 +2655,26 @@ async fn reset_split_timestamps_returns_422_when_no_auto_timestamps() {
     let id = seed_ts_concert(&conn, "No Auto Album", &songs);
     let app = router(test_state(conn));
 
-    let (status, _) = post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/concerts/{id}/split-timestamps/reset"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let text = String::from_utf8_lossy(&bytes);
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        text,
+        "No automated split timestamps available — run analysis first"
+    );
 }
 
 #[tokio::test]
