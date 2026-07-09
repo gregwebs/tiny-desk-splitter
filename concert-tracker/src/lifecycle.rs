@@ -422,6 +422,41 @@ mod tests {
     }
 
     #[test]
+    fn delete_redundant_source_is_not_redundant_once_source_is_already_gone() {
+        let conn = db::open_in_memory().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let id = insert_concert(&conn, "Album", &["One"]);
+        downloaded_file(dir.path(), "Album");
+        db::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::set_tracks_present(&conn, id, &[true]).unwrap();
+        db::set_media_duration(&conn, id, 10.0).unwrap();
+        let timestamps = serde_json::to_string(&vec![concert_types::SongTimestamp {
+            title: "One".to_string(),
+            start_time: 0.0,
+            end_time: 10.0,
+            duration: 10.0,
+        }])
+        .unwrap();
+        conn.execute(
+            "UPDATE concerts SET user_split_timestamps_json = ?1 WHERE id = ?2",
+            rusqlite::params![timestamps, id],
+        )
+        .unwrap();
+
+        assert!(matches!(
+            delete_redundant_source(&conn, dir.path(), id).unwrap(),
+            DeleteRedundantSourceOutcome::Deleted { .. }
+        ));
+
+        // Re-checking now that the source file is gone must fail closed
+        // rather than report a second (fictitious) deletion.
+        assert_eq!(
+            delete_redundant_source(&conn, dir.path(), id).unwrap(),
+            DeleteRedundantSourceOutcome::NotRedundant
+        );
+    }
+
+    #[test]
     fn delete_split_clears_tracks_present_and_split_errors() {
         let conn = db::open_in_memory().unwrap();
         let id = insert_concert(&conn, "Album", &["One"]);

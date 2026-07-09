@@ -244,8 +244,40 @@ export const Model = S.Struct({
    *  by a later commit's AudioLoadedMetadata handling. */
   pendingSeek: S.Option(S.Number),
   status: Status,
+  /** Mirrors player.ts's onTimeUpdate, driven by the audioEvents
+   *  Subscription's timeupdate/loadedmetadata listeners (see
+   *  UpdatedAudioTime). Zeroed by beginPlayback/stopPlaybackPure so a new or
+   *  stopped track never shows the previous track's stale duration before
+   *  its own loadedmetadata arrives. */
+  audioTime: S.Struct({ currentTime: S.Number, duration: S.Number }),
+  /** Monotonic generation counter, incremented by every beginPlayback/
+   *  stopPlaybackPure alongside the audioTime reset. update.ts's
+   *  UpdatedAudioTime handler compares the message's `loadGen` against this
+   *  field and discards a mismatch — the guard against a stray
+   *  timeupdate/loadedmetadata from a track that's no longer current.
+   *
+   *  A model-only counter (bumped when the *message* was processed, checked
+   *  against when a later message was *received*) isn't sufficient by
+   *  itself: `PlayAudio`'s `audio.src = url` reassignment happens later, in
+   *  its own forked Command Effect, so a stray event from the *previous*
+   *  (still-loaded) resource could fire and get processed in the window
+   *  before that reassignment lands — indistinguishable from a legitimate
+   *  event of the new track if the comparison were against a value the
+   *  model alone tracks on both ends. So the generation isn't just kept
+   *  model-side: PlayAudio (command.ts) stamps this exact value onto the
+   *  audio element's own `dataset.audioLoadGen`, in the same synchronous
+   *  statement as `audio.src = url`. audioTimeMessage (subscription.ts)
+   *  reads that DOM-stamped value back, live, for every event — so the
+   *  message's `loadGen` always reflects which resource the element is
+   *  *actually* playing at read time, not merely which beginPlayback call
+   *  most recently ran. That's what makes the reducer's comparison correct
+   *  even for same-URL replays or Subscription-timing edge cases, where a
+   *  purely model/Subscription-side generation could still be fooled. */
+  audioLoadGen: S.Number,
 });
 export type Model = typeof Model.Type;
+
+export const initialAudioTime = { currentTime: 0, duration: 0 };
 
 export const initialModel: Model = {
   playback: initialPlayback,
@@ -257,6 +289,8 @@ export const initialModel: Model = {
   isPlaying: false,
   pendingSeek: Option.none(),
   status: StatusValue.Idle(),
+  audioTime: initialAudioTime,
+  audioLoadGen: 0,
 };
 
 /** The widget mounts with no flags, mirroring player.ts's module-load-time

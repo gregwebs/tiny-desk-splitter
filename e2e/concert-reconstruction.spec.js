@@ -18,6 +18,7 @@ const ID = 2;
 const toggle = ".splitter-toggle";
 const timeline = "#splitter .splitter-timeline";
 const seg = "#splitter .splitter-seg";
+const gap = "#splitter .splitter-gap";
 const detachBtn = "#splitter .splitter-detach";
 const submit = "#splitter .splitter-submit";
 const status = "#splitter .splitter-status";
@@ -38,12 +39,35 @@ async function openSplitter(page) {
   await expect(page.locator(seg)).toHaveCount(3);
 }
 
+// The gap block's width (0 while hidden) is derived from the *committed*
+// model, not from whatever an input's own DOM value happens to show — see
+// docs/change/2026-07-08-fix-failing-e2e-tests.md.
+async function gapWidthPx(page) {
+  const box = await page.locator(gap).first().boundingBox();
+  return box ? box.width : 0;
+}
+
 async function submitGapSplit(page) {
   await page.locator(detachBtn).first().click();
+  // The click resolves once the DOM event dispatches, not once Foldkit's
+  // handler has actually re-rendered — without waiting for that, a fast
+  // subsequent fill() can land while the boundary is still linked (linked
+  // boundaries move together, so no gap ever forms). Mirrors splitter.spec.js.
+  await expect(page.locator(detachBtn).first()).toContainText("Link");
   await endInput(page, 0).fill("0:05.0");
   await endInput(page, 0).blur();
+  // Generous timeout: under CI's parallel workers (this sandbox serializes
+  // to 1, see playwright.config.js), the render can lag well past the
+  // default 5s under contention.
+  await expect(page.locator(gap).first()).toBeVisible({ timeout: 15000 });
+  const widthAfterFirstEdit = await gapWidthPx(page);
+
   await startInput(page, 1).fill("0:08.0");
   await startInput(page, 1).blur();
+  await expect
+    .poll(() => gapWidthPx(page), { timeout: 15000 })
+    .toBeGreaterThan(widthAfterFirstEdit * 1.5);
+
   await page.click(submit);
   await expect(page.locator(status)).toContainText("Splitting");
 }
@@ -119,11 +143,15 @@ test.describe("Concert reconstruction playback", () => {
     await openSidebar(page);
     await waitForSidebarTracks(page);
 
-    // Sidebar should contain interlude buttons (data-interlude-idx).
-    const interludeBtn = page.locator(
+    // Sidebar should contain interlude buttons (data-interlude-idx). The
+    // fixture's auto split intentionally leaves the last ~1s of the source
+    // uncovered (see make_test_fixture.rs's auto_timestamps, TOTAL=19 over a
+    // ~20s file), so submitGapSplit's deliberate 5s-8s gap coexists with that
+    // baseline trailing gap: two interludes, not one.
+    const interludeBtns = page.locator(
       `#sidebar-concert-section .btn-interlude[data-interlude-idx]`
     );
-    await expect(interludeBtn).toBeVisible({ timeout: 5000 });
+    await expect(interludeBtns).toHaveCount(2, { timeout: 5000 });
 
     // Song buttons are also present (data-track-idx).
     const songBtns = page.locator(
@@ -131,15 +159,20 @@ test.describe("Concert reconstruction playback", () => {
     );
     await expect(songBtns).toHaveCount(3);
 
-    // Step 7: delete the interlude from the sidebar.
-    const interludeDeleteBtn = page.locator(
-      `#sidebar-concert-section li:has(.btn-interlude) .btn-delete`
-    ).first();
-    await expect(interludeDeleteBtn).toBeVisible();
-    await interludeDeleteBtn.click();
+    // Step 7: delete the interlude created by our own gap edit (idx 1, the
+    // 5s-8s gap) — not the fixture's baseline trailing interlude.
+    const editedInterlude = page.locator(
+      `#sidebar-concert-section .btn-interlude[data-interlude-idx="1"]`
+    );
+    const editedInterludeDeleteBtn = page.locator(
+      `#sidebar-concert-section li:has(.btn-interlude[data-interlude-idx="1"]) .btn-delete`
+    );
+    await expect(editedInterludeDeleteBtn).toBeVisible();
+    await editedInterludeDeleteBtn.click();
 
-    // After deletion the interlude button is gone from the sidebar.
-    await expect(interludeBtn).toHaveCount(0, { timeout: 5000 });
+    // After deletion that interlude is gone; the baseline trailing one remains.
+    await expect(editedInterlude).toHaveCount(0, { timeout: 5000 });
+    await expect(interludeBtns).toHaveCount(1);
 
     // Songs are still listed.
     await expect(songBtns).toHaveCount(3);

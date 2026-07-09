@@ -244,6 +244,22 @@ export const FailedOpenExternal = m("FailedOpenExternal");
 
 export const StartedAudio = m("StartedAudio");
 export const PausedAudio = m("PausedAudio");
+/** `timeupdate`/`loadedmetadata` on the audio element — mirrors player.ts's
+ *  onTimeUpdate, which drove #player-seek/#player-time directly from the DOM.
+ *  Model-owned here so view.ts can render the seek slider/time text
+ *  declaratively (see model.ts's audioTime doc comment for why it's read
+ *  live off the element rather than derived). `loadGen` is read from the
+ *  audio element's own DOM-stamped generation (see subscription.ts's
+ *  audioTimeMessage and command.ts's PlayAudio) — update.ts compares it
+ *  against model.audioLoadGen and discards a mismatch (see model.ts's
+ *  audioLoadGen doc comment for why this has to be DOM-stamped, not just
+ *  read off the model, to correctly reject a stray event from a
+ *  just-replaced track). */
+export const UpdatedAudioTime = m("UpdatedAudioTime", {
+  currentTime: S.Number,
+  duration: S.Number,
+  loadGen: S.Number,
+});
 /** Natural end of the current track/album: advanceOrCollapse() — try the
  *  queue, then the next set-list track, else collapse the video panel.
  *  Concert mode (state.concert set) advances within the concert item list
@@ -345,6 +361,7 @@ export const Message = S.Union([
   FailedOpenExternal,
   StartedAudio,
   PausedAudio,
+  UpdatedAudioTime,
   EndedAudio,
   ErroredAudio,
   RejectedAudioPlay,

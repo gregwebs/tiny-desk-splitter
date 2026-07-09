@@ -14,6 +14,7 @@ use tokio::process::Command;
 use tokio::task::JoinHandle;
 
 use crate::model::concert_dir;
+pub use crate::model::find_downloaded_file;
 use crate::model::sanitize_album;
 use crate::model::Concert;
 
@@ -377,38 +378,6 @@ impl JobConfig {
             }),
         }
     }
-}
-
-const MEDIA_EXTENSIONS: &[&str] = &[
-    "mp4", "m4a", "webm", "mkv", "mp3", "ogg", "opus", "wav", "flac",
-];
-
-/// Find the downloaded media file for an album inside its concert dir
-/// (`{working_dir}/concerts/{sanitize_album(album)}/`).
-///
-/// yt-dlp writes the file as `{sanitize_album(album)}.{ext}` where `ext` is
-/// picked at runtime (typically `mp4`). We don't know the extension up front,
-/// so we list the directory and return the first entry whose file stem matches
-/// the sanitized album and has a known media extension.
-pub fn find_downloaded_file(working_dir: &Path, album: &str) -> Option<PathBuf> {
-    let expected_stem = sanitize_album(album);
-    let cd = concert_dir(working_dir, album);
-    let entries = std::fs::read_dir(&cd).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
-            continue;
-        };
-        if stem != expected_stem {
-            continue;
-        }
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
-        if !MEDIA_EXTENSIONS.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
-            continue;
-        }
-        return Some(path);
-    }
-    None
 }
 
 /// How many of the most recent stderr lines to retain for the DB error message

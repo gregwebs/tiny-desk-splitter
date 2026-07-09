@@ -28,6 +28,18 @@ function endInput(page, i) {
   return page.locator(rows).nth(i).locator(".splitter-time").nth(1);
 }
 
+// The gap block's width (0 while hidden) is derived from the *committed*
+// model (editor.tracks), not from whatever an input's own DOM value happens
+// to show — so polling it (rather than the just-typed input's toHaveValue)
+// proves a `change` event actually landed before the next interaction, closing
+// the race where a second fill/blur can fire its `change` while a re-render
+// from the first edit is still in flight (see docs/change/
+// 2026-07-08-fix-failing-e2e-tests.md).
+async function gapWidthPx(page) {
+  const box = await page.locator(gap).first().boundingBox();
+  return box ? box.width : 0;
+}
+
 async function openSplitter(page) {
   await page.goto(`/concerts/${ID}`);
   await expect(page.locator(toggle)).toBeVisible();
@@ -84,10 +96,21 @@ test.describe("track splitter", () => {
     await expect(page.locator(detachBtn).first()).toContainText("Link");
     await endInput(page, 0).fill("0:05.0");
     await endInput(page, 0).blur();
+    // A gap block becomes visible once end[0] has actually committed away from
+    // the still-linked start[1] — proves the first edit reached the model.
+    // Generous timeout: under CI's parallel workers (this sandbox serializes
+    // to 1, see playwright.config.js), the render can lag well past the
+    // default 5s under contention.
+    await expect(page.locator(gap).first()).toBeVisible({ timeout: 15000 });
+    const widthAfterFirstEdit = await gapWidthPx(page);
+
     await startInput(page, 1).fill("0:08.0");
     await startInput(page, 1).blur();
-    // A gap block becomes visible between the first two tracks.
-    await expect(page.locator(gap).first()).toBeVisible();
+    // Wait for the gap to widen (start[1] moving from its stale auto value to
+    // 8.0) before submitting — proves the second edit committed too.
+    await expect
+      .poll(() => gapWidthPx(page), { timeout: 15000 })
+      .toBeGreaterThan(widthAfterFirstEdit * 1.5);
 
     await page.click(submit);
     await expect(page.locator(status)).toContainText("Splitting");

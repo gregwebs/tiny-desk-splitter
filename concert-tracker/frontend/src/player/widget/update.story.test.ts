@@ -70,6 +70,7 @@ import {
   SucceededTrackInfoForEnqueue,
   SwappedLikeButton,
   TrackMissing,
+  UpdatedAudioTime,
 } from "./message";
 import {
   defaultPlayOpts,
@@ -192,13 +193,15 @@ describe("player update — mirror invariant", () => {
   test("StopPlayback emits SyncNowPlayingMirror with null ids (mirror cleared)", () => {
     Story.story(
       update,
-      Story.with(playingModel),
+      Story.with({ ...playingModel, audioTime: { currentTime: 90, duration: 180 } }),
       Story.message(CommandReceived({ command: PlayerCommandValue.StopPlayback() })),
       Story.model((m) => {
         expect(m.playback.concertId).toBeNull();
         expect(m.playback.trackIdx).toBeNull();
         expect(m.queue).toEqual([]);
         expect(m.isPlaying).toBe(false);
+        expect(m.audioTime).toEqual({ currentTime: 0, duration: 0 });
+        expect(m.audioLoadGen).toBe(playingModel.audioLoadGen + 1);
       }),
       Story.Command.expectHas(ClearAudioSrc, SyncNowPlayingMirror),
       Story.Command.resolve(ClearAudioSrc, Acked()),
@@ -1154,6 +1157,59 @@ describe("player update — audio events", () => {
       Story.message(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
       Story.Command.expectHas(PauseAudio),
       Story.Command.resolve(PauseAudio, Acked()),
+    );
+  });
+
+  test("UpdatedAudioTime sets model.audioTime when loadGen matches", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(UpdatedAudioTime({ currentTime: 12.5, duration: 200, loadGen: playingModel.audioLoadGen })),
+      Story.model((m) => expect(m.audioTime).toEqual({ currentTime: 12.5, duration: 200 })),
+      Story.Command.expectNone(),
+    );
+  });
+
+  // The reducer-level guard: loadGen here is exactly what PlayAudio's Effect
+  // stamped onto the audio element's dataset (see subscription.ts's
+  // audioTimeMessage and command.ts's PlayAudio) — this test only exercises
+  // the comparison itself, not the DOM-stamping that makes it trustworthy
+  // (that's playAudio.command.test.ts's job).
+  test("UpdatedAudioTime with a stale loadGen (from a resource the model has moved past) is ignored", () => {
+    const withStaleTime: Model = { ...playingModel, audioTime: { currentTime: 90, duration: 180 } };
+    Story.story(
+      update,
+      Story.with(withStaleTime),
+      Story.message(
+        UpdatedAudioTime({ currentTime: 5, duration: 20, loadGen: withStaleTime.audioLoadGen - 1 }),
+      ),
+      Story.model((m) => expect(m.audioTime).toEqual({ currentTime: 90, duration: 180 })),
+      Story.Command.expectNone(),
+    );
+  });
+
+  test("a new track's SucceededMediaInfo clears a previous track's audioTime and bumps audioLoadGen before its own loadedmetadata arrives", () => {
+    const withStaleTime: Model = { ...playingModel, audioTime: { currentTime: 90, duration: 180 } };
+    Story.story(
+      update,
+      Story.with(withStaleTime),
+      Story.message(
+        SucceededMediaInfo({
+          source: PlaySourceValue.Track({ concertId: 1, trackIdx: 1 }),
+          info: { ...mediaInfo, track_index: 1 },
+          opts: defaultPlayOpts,
+        }),
+      ),
+      Story.model((m) => {
+        expect(m.audioTime).toEqual({ currentTime: 0, duration: 0 });
+        expect(m.audioLoadGen).toBe(withStaleTime.audioLoadGen + 1);
+      }),
+      Story.Command.expectHas(PlayAudio, MarkPlayingExternal, ClearPreparingExternal, RecordListenEvent, SyncNowPlayingMirror),
+      Story.Command.resolve(PlayAudio, Acked()),
+      Story.Command.resolve(MarkPlayingExternal, Acked()),
+      Story.Command.resolve(ClearPreparingExternal, Acked()),
+      Story.Command.resolve(RecordListenEvent, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
     );
   });
 });

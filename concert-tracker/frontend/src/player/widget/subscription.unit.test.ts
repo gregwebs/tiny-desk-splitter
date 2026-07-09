@@ -1,8 +1,21 @@
 import { Option } from "effect";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
-import { attachVideoControlsIdle, parseLikeSwapEvent } from "./subscription";
+import { audioTimeMessage, attachVideoControlsIdle, parseLikeSwapEvent } from "./subscription";
 import { VIDEO_CONTROLS_IDLE_MS } from "../core";
+import { UpdatedAudioTime } from "./message";
+
+// A real <audio> element with `.duration` overridden: happy-dom's `duration`
+// is a spec-readonly getter that silently ignores direct assignment, so
+// defineProperty is needed to simulate a loaded/unloaded element.
+// `loadGen` mirrors what PlayAudio's Effect stamps onto dataset.audioLoadGen.
+function mediaElement(duration: number, currentTime: number, loadGen?: number): HTMLMediaElement {
+  const audio = document.createElement("audio");
+  Object.defineProperty(audio, "duration", { value: duration, configurable: true });
+  audio.currentTime = currentTime;
+  if (loadGen !== undefined) audio.dataset.audioLoadGen = String(loadGen);
+  return audio;
+}
 
 // parseLikeSwapEvent must extract everything it needs synchronously from
 // evt.detail.elt (see the htmxSwap subscription entry's comment): htmx
@@ -55,6 +68,35 @@ describe("parseLikeSwapEvent", () => {
 
   test("returns none for a plain Event (no detail)", () => {
     expect(parseLikeSwapEvent(new Event("htmx:afterSwap"))).toEqual(Option.none());
+  });
+});
+
+// Mirrors player.ts's onTimeUpdate early-return guard: no message until
+// duration is known, matching the pre-Foldkit `<audio>` element's real
+// behavior of reporting NaN until loadedmetadata fires.
+describe("audioTimeMessage", () => {
+  test("returns None while duration is NaN (not yet loaded)", () => {
+    expect(audioTimeMessage(mediaElement(NaN, 0))).toEqual(Option.none());
+  });
+
+  test("returns None while duration is 0", () => {
+    expect(audioTimeMessage(mediaElement(0, 0))).toEqual(Option.none());
+  });
+
+  test("returns Some(UpdatedAudioTime) once duration is finite and positive, tagged with the element's DOM-stamped loadGen", () => {
+    expect(audioTimeMessage(mediaElement(180, 42.5, 3))).toEqual(
+      Option.some(UpdatedAudioTime({ currentTime: 42.5, duration: 180, loadGen: 3 })),
+    );
+  });
+
+  // -1 can never equal a real model.audioLoadGen (starts at 0, only
+  // increments), so an element PlayAudio has never touched is correctly
+  // rejected by the reducer's comparison rather than coincidentally
+  // matching on undefined === undefined or similar.
+  test("loadGen is -1 when PlayAudio has never stamped the element", () => {
+    expect(audioTimeMessage(mediaElement(180, 0))).toEqual(
+      Option.some(UpdatedAudioTime({ currentTime: 0, duration: 180, loadGen: -1 })),
+    );
   });
 });
 

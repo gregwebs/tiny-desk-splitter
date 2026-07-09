@@ -26,6 +26,10 @@ async function waitForPlaying(page) {
   });
 }
 
+// waitForPlaying only watches <audio>.paused, which flips before the Foldkit
+// view re-renders #player-title/#player-seek — wait for both so callers that
+// immediately interact with player-bar controls don't race those renders
+// (see player-queue.spec.js's playTrack for the fuller explanation).
 async function playTrack(page, concertId, trackIdx) {
   await openTracks(page, concertId);
   await page.waitForSelector(
@@ -33,6 +37,8 @@ async function playTrack(page, concertId, trackIdx) {
   );
   await trackButton(page, concertId, trackIdx).evaluate((el) => el.click());
   await waitForPlaying(page);
+  await expect(page.locator("#player-title")).not.toBeEmpty();
+  await expect(page.locator("#player-seek")).toBeEnabled();
 }
 
 test.describe("Sync button leaves the player running", () => {
