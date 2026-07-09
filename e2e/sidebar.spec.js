@@ -29,14 +29,15 @@ async function waitForPlaying(page) {
 }
 
 // waitForPlaying only watches <audio>.paused, which flips before the Foldkit
-// view re-renders #player-title — wait for the title too so callers that
-// immediately interact with player-bar controls don't race that render (see
-// player-queue.spec.js's playTrack for the fuller explanation).
+// view re-renders #player-title/#player-seek — wait for both so callers that
+// immediately interact with player-bar controls don't race those renders
+// (see player-queue.spec.js's playTrack for the fuller explanation).
 async function playTrack(page, concertId, trackIdx) {
   await expandTracks(page, concertId);
   await trackButton(page, concertId, trackIdx).click();
   await waitForPlaying(page);
   await expect(page.locator("#player-title")).not.toBeEmpty();
+  await expect(page.locator("#player-seek")).toBeEnabled();
 }
 
 // Use Player API directly to avoid real pointer events on the player bar.

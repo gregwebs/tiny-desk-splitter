@@ -18,6 +18,7 @@ const ID = 2;
 const toggle = ".splitter-toggle";
 const timeline = "#splitter .splitter-timeline";
 const seg = "#splitter .splitter-seg";
+const gap = "#splitter .splitter-gap";
 const detachBtn = "#splitter .splitter-detach";
 const submit = "#splitter .splitter-submit";
 const status = "#splitter .splitter-status";
@@ -38,12 +39,35 @@ async function openSplitter(page) {
   await expect(page.locator(seg)).toHaveCount(3);
 }
 
+// The gap block's width (0 while hidden) is derived from the *committed*
+// model, not from whatever an input's own DOM value happens to show — see
+// docs/change/2026-07-08-fix-failing-e2e-tests.md.
+async function gapWidthPx(page) {
+  const box = await page.locator(gap).first().boundingBox();
+  return box ? box.width : 0;
+}
+
 async function submitGapSplit(page) {
   await page.locator(detachBtn).first().click();
+  // The click resolves once the DOM event dispatches, not once Foldkit's
+  // handler has actually re-rendered — without waiting for that, a fast
+  // subsequent fill() can land while the boundary is still linked (linked
+  // boundaries move together, so no gap ever forms). Mirrors splitter.spec.js.
+  await expect(page.locator(detachBtn).first()).toContainText("Link");
   await endInput(page, 0).fill("0:05.0");
   await endInput(page, 0).blur();
+  // Generous timeout: under CI's parallel workers (this sandbox serializes
+  // to 1, see playwright.config.js), the render can lag well past the
+  // default 5s under contention.
+  await expect(page.locator(gap).first()).toBeVisible({ timeout: 15000 });
+  const widthAfterFirstEdit = await gapWidthPx(page);
+
   await startInput(page, 1).fill("0:08.0");
   await startInput(page, 1).blur();
+  await expect
+    .poll(() => gapWidthPx(page), { timeout: 15000 })
+    .toBeGreaterThan(widthAfterFirstEdit * 1.5);
+
   await page.click(submit);
   await expect(page.locator(status)).toContainText("Splitting");
 }

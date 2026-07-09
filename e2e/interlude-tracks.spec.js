@@ -53,6 +53,11 @@ async function gapWidthPx(page) {
 // Returns once the submit button is clicked (not once the split completes).
 async function submitGapSplit(page) {
   await page.locator(detachBtn).first().click();
+  // The click resolves once the DOM event dispatches, not once Foldkit's
+  // handler has actually re-rendered — without waiting for that, a fast
+  // subsequent fill() can land while the boundary is still linked (linked
+  // boundaries move together, so no gap ever forms). Mirrors splitter.spec.js.
+  await expect(page.locator(detachBtn).first()).toContainText("Link");
   await endInput(page, 0).fill("0:05.0");
   await endInput(page, 0).blur();
   // A gap block becomes visible once end[0] has actually committed away from
