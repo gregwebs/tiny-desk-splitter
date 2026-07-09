@@ -82,17 +82,55 @@ pub fn find_interlude_file(working_dir: &Path, album: &str, index: usize) -> boo
     find_interlude_track_file(working_dir, album, index).is_some()
 }
 
+/// Extensions probed when looking for the downloaded source file.
+const DOWNLOADED_MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "m4a", "webm", "mkv", "mp3", "ogg", "opus", "wav", "flac",
+];
+
+/// Find the downloaded media file for an album inside its concert dir
+/// (`{working_dir}/concerts/{sanitize_album(album)}/`).
+///
+/// yt-dlp writes the file as `{sanitize_album(album)}.{ext}` where `ext` is
+/// picked at runtime (typically `mp4`). We don't know the extension up front,
+/// so we list the directory and return the first entry whose file stem matches
+/// the sanitized album and has a known media extension.
+pub fn find_downloaded_file(working_dir: &Path, album: &str) -> Option<PathBuf> {
+    let expected_stem = sanitize_album(album);
+    let cd = concert_dir(working_dir, album);
+    let entries = std::fs::read_dir(&cd).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem != expected_stem {
+            continue;
+        }
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if !DOWNLOADED_MEDIA_EXTENSIONS
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(ext))
+        {
+            continue;
+        }
+        return Some(path);
+    }
+    None
+}
+
 /// Determine whether the original source file is **fully redundant** — every
 /// second of `[0, media_duration]` is covered by a present song track or an
 /// interlude file on disk, so the source can be safely deleted.
 ///
 /// Returns `false` (fails closed) when:
+/// - the source file itself is already gone (nothing left to call redundant),
 /// - `media_duration` is absent (not yet persisted),
 /// - `user_split_timestamps` are absent (no user split has been done),
 /// - any song track is missing (`tracks_present` has a `false`),
 /// - any required interlude file is not on disk.
 ///
-/// `working_dir` and `album` are needed to probe interlude files on disk.
+/// `working_dir` and `album` are needed to probe the source and interlude
+/// files on disk.
 pub fn source_redundant(
     working_dir: &Path,
     album: &str,
@@ -100,6 +138,9 @@ pub fn source_redundant(
     user_split_timestamps: Option<&[concert_types::SongTimestamp]>,
     media_duration: Option<f64>,
 ) -> bool {
+    if find_downloaded_file(working_dir, album).is_none() {
+        return false;
+    }
     let Some(duration) = media_duration else {
         return false;
     };
@@ -1727,9 +1768,35 @@ mod tests {
         ));
     }
 
+    // Writes `{album}.mp4` into the concert dir so `find_downloaded_file`
+    // (source_redundant's first gate) sees a source present, letting the
+    // rest of the test exercise the coverage logic it actually names.
+    fn write_source_file(working_dir: &Path, album: &str) -> PathBuf {
+        let cd = concert_dir(working_dir, album);
+        std::fs::create_dir_all(&cd).unwrap();
+        let path = cd.join(format!("{album}.mp4"));
+        std::fs::write(&path, b"data").unwrap();
+        path
+    }
+
+    #[test]
+    fn source_redundant_false_when_source_file_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        // Full coverage, no gaps — would be redundant if a source file existed.
+        let songs = vec![make_song(0.0, 100.0)];
+        assert!(!source_redundant(
+            dir.path(),
+            "No Source Album",
+            &[true],
+            Some(&songs),
+            Some(100.0)
+        ));
+    }
+
     #[test]
     fn source_redundant_false_when_a_song_track_is_missing() {
         let dir = tempfile::tempdir().unwrap();
+        write_source_file(dir.path(), "Album");
         let songs = vec![make_song(0.0, 50.0), make_song(50.0, 100.0)];
         // tracks_present says second track is missing
         assert!(!source_redundant(
@@ -1745,8 +1812,7 @@ mod tests {
     fn source_redundant_true_when_full_coverage_no_gaps() {
         let dir = tempfile::tempdir().unwrap();
         let album = "Full Album";
-        let cd = concert_dir(dir.path(), album);
-        std::fs::create_dir_all(&cd).unwrap();
+        write_source_file(dir.path(), album);
 
         // Songs cover [0, 200] with no gaps — no interlude files needed.
         let songs = vec![make_song(0.0, 100.0), make_song(100.0, 200.0)];
@@ -1763,8 +1829,7 @@ mod tests {
     fn source_redundant_false_when_interlude_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let album = "Gap Album";
-        let cd = concert_dir(dir.path(), album);
-        std::fs::create_dir_all(&cd).unwrap();
+        write_source_file(dir.path(), album);
 
         // Song covers [5, 100]; head gap [0, 5) needs an interlude file.
         let songs = vec![make_song(5.0, 100.0)];
@@ -1781,8 +1846,10 @@ mod tests {
     fn source_redundant_true_when_all_interlude_files_present() {
         let dir = tempfile::tempdir().unwrap();
         let album = "Gap Album";
-        let cd = concert_dir(dir.path(), album);
-        std::fs::create_dir_all(&cd).unwrap();
+        let cd = write_source_file(dir.path(), album)
+            .parent()
+            .unwrap()
+            .to_path_buf();
 
         // Head gap [0, 5] + tail gap [95, 100] — two interlude files needed.
         let songs = vec![make_song(5.0, 95.0)];

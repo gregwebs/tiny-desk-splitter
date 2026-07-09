@@ -420,16 +420,24 @@ export const OpenExternalRequest = Command.define(
 
 // ── Audio element ────────────────────────────────────────────────────────
 
+// `loadGen` is stamped onto the element's dataset in the same synchronous
+// statement as `audio.src = url` — the two mutations happen atomically, so
+// the audioTime Subscription's `audioTimeMessage` (subscription.ts) can read
+// `audio.dataset.audioLoadGen` back as ground truth for "which resource is
+// actually loaded right now," independent of when this Command's Effect
+// happens to run relative to the model update that triggered it (see
+// model.ts's audioLoadGen doc comment for the race this closes).
 export const PlayAudio = Command.define(
   "PlayAudio",
-  { url: S.String },
+  { url: S.String, loadGen: S.Number },
   Acked,
   RejectedAudioPlay,
-)(({ url }) =>
+)(({ url, loadGen }) =>
   Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
     Effect.flatMap((audio) => {
       if (!audio) return Effect.succeed(RejectedAudioPlay());
       audio.src = url;
+      audio.dataset.audioLoadGen = String(loadGen);
       return Effect.tryPromise(() => audio.play()).pipe(
         Effect.as(Acked()),
         Effect.catch(() => Effect.succeed(RejectedAudioPlay())),

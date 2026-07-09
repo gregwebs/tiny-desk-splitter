@@ -117,9 +117,15 @@ test.describe("Delete track via ✕ button", () => {
     await page.goto("/");
     await expandTracks(page);
 
-    for (const idx of [0, 1, 2, 3]) {
+    // Each delete swaps the whole card (hx-target="closest .card"); the swap
+    // fragment's tracks-count text is server-rendered, so waiting for it (not
+    // just the clicked button's own absence) proves the full replacement
+    // settled before the next click fires on the new DOM.
+    const remainingCounts = ["tracks (3/4)", "tracks (2/4)", "tracks (1/4)", "not-split (0/4)"];
+    for (const [i, idx] of [0, 1, 2, 3].entries()) {
       await page.locator(deleteBtn(idx)).click();
       await expect(page.locator(deleteBtn(idx))).toHaveCount(0);
+      await expect(page.locator(tracksBtn)).toHaveText(remainingCounts[i]);
     }
 
     // The last delete clears the split record: the tracks button flips to

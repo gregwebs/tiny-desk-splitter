@@ -12,6 +12,7 @@ import {
   MutateBodyClass,
   OpenAddToPlaylist,
   PauseAudio,
+  SeekAudio,
   SyncLikeButtonsExternal,
   ToggleLikeRequest,
 } from "./command";
@@ -278,6 +279,52 @@ describe("player-bar view", () => {
       Scene.with(trackModel({ hasNext: true, hasPrev: true })),
       Scene.expect(Scene.selector("#player-next")).not.toBeDisabled(),
       Scene.expect(Scene.selector("#player-prev")).not.toBeDisabled(),
+    );
+  });
+
+  // Regression: the Foldkit port hardcoded #player-seek to Disabled(true)
+  // with no audio Subscription wired, so seek/time never worked — see
+  // docs/change/2026-07-08-fix-failing-e2e-tests.md.
+  test("seek is disabled and time reads 0:00 / 0:00 before any duration is known", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel()),
+      Scene.expect(Scene.selector("#player-seek")).toBeDisabled(),
+      Scene.expect(Scene.selector("#player-time")).toContainText("0:00 / 0:00"),
+    );
+  });
+
+  test("seek is enabled and valued once model.audioTime has a duration", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({}, { audioTime: { currentTime: 65, duration: 130 } })),
+      Scene.expect(Scene.selector("#player-seek")).not.toBeDisabled(),
+      Scene.expect(Scene.selector("#player-seek")).toHaveAttr("max", "130"),
+      Scene.expect(Scene.selector("#player-seek")).toHaveAttr("value", "65"),
+      Scene.expect(Scene.selector("#player-time")).toContainText("1:05 / 2:10"),
+    );
+  });
+
+  test("typing into the seek slider dispatches Seek with the parsed seconds", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({}, { audioTime: { currentTime: 10, duration: 130 } })),
+      Scene.type(Scene.selector("#player-seek"), "42"),
+      // Command.resolve alone only matches by definition, not args (it would
+      // pass even for a wrong seconds value) — expectHas the exact instance
+      // first to actually prove the parsed value made it through.
+      Scene.Command.expectHas(SeekAudio({ seconds: 42 })),
+      Scene.Command.resolve(SeekAudio, Acked()),
+    );
+  });
+
+  test("an unparseable seek input value is a no-op seek to the current position, not NaN", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(trackModel({}, { audioTime: { currentTime: 10, duration: 130 } })),
+      Scene.type(Scene.selector("#player-seek"), "not-a-number"),
+      Scene.Command.expectHas(SeekAudio({ seconds: 10 })),
+      Scene.Command.resolve(SeekAudio, Acked()),
     );
   });
 

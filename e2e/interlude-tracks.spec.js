@@ -15,6 +15,7 @@ const ID = 2;
 const toggle = ".splitter-toggle";
 const timeline = "#splitter .splitter-timeline";
 const seg = "#splitter .splitter-seg";
+const gap = "#splitter .splitter-gap";
 const detachBtn = "#splitter .splitter-detach";
 const submit = "#splitter .splitter-submit";
 const status = "#splitter .splitter-status";
@@ -36,14 +37,37 @@ async function openSplitter(page) {
   await expect(page.locator(seg)).toHaveCount(3);
 }
 
+// The gap block's width (0 while hidden) is derived from the *committed*
+// model (editor.tracks), not from whatever an input's own DOM value happens
+// to show — so polling it (rather than the just-typed input's toHaveValue)
+// proves a `change` event actually landed before the next interaction, closing
+// the race where a second fill/blur can fire its `change` while a re-render
+// from the first edit is still in flight (see docs/change/
+// 2026-07-08-fix-failing-e2e-tests.md).
+async function gapWidthPx(page) {
+  const box = await page.locator(gap).first().boundingBox();
+  return box ? box.width : 0;
+}
+
 // Detach the first boundary, open a 3-second gap (5s–8s), and submit.
 // Returns once the submit button is clicked (not once the split completes).
 async function submitGapSplit(page) {
   await page.locator(detachBtn).first().click();
   await endInput(page, 0).fill("0:05.0");
   await endInput(page, 0).blur();
+  // A gap block becomes visible once end[0] has actually committed away from
+  // the still-linked start[1] — proves the first edit reached the model.
+  await expect(page.locator(gap).first()).toBeVisible();
+  const widthAfterFirstEdit = await gapWidthPx(page);
+
   await startInput(page, 1).fill("0:08.0");
   await startInput(page, 1).blur();
+  // Wait for the gap to widen (start[1] moving from its stale auto value to
+  // 8.0) before submitting — proves the second edit committed too.
+  await expect
+    .poll(() => gapWidthPx(page), { timeout: 5000 })
+    .toBeGreaterThan(widthAfterFirstEdit * 1.5);
+
   await page.click(submit);
   await expect(page.locator(status)).toContainText("Splitting");
 }

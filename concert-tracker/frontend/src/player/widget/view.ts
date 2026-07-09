@@ -1,7 +1,7 @@
 import { Option } from "effect";
 import { type Html, html } from "foldkit/html";
 
-import { buildQueueRows, nextEnabled, prevEnabled } from "../core";
+import { buildQueueRows, formatTime, nextEnabled, prevEnabled } from "../core";
 import { CommandReceived, type Message } from "./message";
 import type { ConcertPlaybackState, Model, PlaybackItem, SidebarTrack, SidebarTrackList } from "./model";
 import { PlayerCommandValue } from "./port";
@@ -556,19 +556,33 @@ function playerBarView(model: Model): Html {
         ],
         ["⏭"],
       ),
-      // Seek + time: static until audio Subscription adds currentTime/duration,
-      // so it's disabled rather than presented as a working control.
+      // Seek + time: driven by model.audioTime, which the audioEvents
+      // Subscription updates from the audio element's timeupdate/
+      // loadedmetadata events (see subscription.ts). Disabled until a
+      // duration is known — mirrors player.ts's onTimeUpdate, which only
+      // ever wrote seek.max/value once duration was finite and positive.
       h.input([
         h.Id("player-seek"),
         h.Type("range"),
         h.AriaLabel("Seek"),
         h.Min("0"),
-        h.Max("100"),
-        h.Value("0"),
+        h.Max(String(Math.ceil(model.audioTime.duration))),
+        h.Value(String(model.audioTime.currentTime)),
         h.Step("1"),
-        h.Disabled(true),
+        h.Disabled(model.audioTime.duration <= 0),
+        h.OnInput((value) => {
+          const parsed = Number(value);
+          // OnInput must always return a Message; an unparseable value (should
+          // not happen for a range input, but this guards it) becomes a no-op
+          // seek to the current position rather than jumping to NaN/0.
+          const seconds = Number.isFinite(parsed) ? parsed : model.audioTime.currentTime;
+          return CommandReceived({ command: PlayerCommandValue.Seek({ seconds }) });
+        }),
       ]),
-      h.span([h.Id("player-time")], ["0:00 / 0:00"]),
+      h.span(
+        [h.Id("player-time")],
+        [`${formatTime(model.audioTime.currentTime)} / ${formatTime(model.audioTime.duration)}`],
+      ),
     ],
   );
 }

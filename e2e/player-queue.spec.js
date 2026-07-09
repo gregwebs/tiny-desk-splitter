@@ -45,11 +45,17 @@ async function focusPageBody(page) {
   });
 }
 
-// Expand a concert's tracks and start the given track playing.
+// Expand a concert's tracks and start the given track playing. Waits for the
+// player bar to actually render the track title before returning: waitForPlaying
+// only observes the external <audio> element's `paused` flag, which flips before
+// the Foldkit view re-renders #player-title — a caller that immediately
+// interacts with player-bar controls (e.g. `.focus()`, which silently no-ops on
+// a not-yet-visible element) can otherwise race that render.
 async function playTrack(page, concertId, trackIdx) {
   await expandTracks(page, concertId);
   await trackButton(page, concertId, trackIdx).click();
   await waitForPlaying(page);
+  await expect(page.locator("#player-title")).not.toBeEmpty();
 }
 
 // Wait until the whole media file is buffered, so killing the server (to force a

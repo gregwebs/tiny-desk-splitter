@@ -256,6 +256,13 @@ export const update = (model: Model, message: Message): UpdateReturn =>
 
       StartedAudio: () => [evo(model, { isPlaying: () => true }), []],
       PausedAudio: () => [evo(model, { isPlaying: () => false }), []],
+      // loadGen is DOM-stamped (see model.ts's doc comment) — a mismatch
+      // means this event is from a resource the element is no longer
+      // actually playing. No-op rather than let it overwrite audioTime.
+      UpdatedAudioTime: ({ currentTime, duration, loadGen }) =>
+        loadGen === model.audioLoadGen
+          ? [evo(model, { audioTime: () => ({ currentTime, duration }) }), []]
+          : [model, []],
       EndedAudio: () =>
         advanceOrCollapse(evo(model, { playback: () => evo(model.playback, { ended: () => true }) })),
       ErroredAudio: () =>

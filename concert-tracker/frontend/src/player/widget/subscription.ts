@@ -25,6 +25,7 @@ import {
   SettledHtmxContent,
   ReleasedSidebarDrag,
   SwappedLikeButton,
+  UpdatedAudioTime,
 } from "./message";
 import type { Model } from "./model";
 import { ports } from "./port";
@@ -80,6 +81,29 @@ export function attachVideoControlsIdle(panel: HTMLElement | null): () => void {
   };
 }
 
+/** Read `audio`'s current position into an `UpdatedAudioTime` message tagged
+ *  with the DOM-stamped `audioLoadGen`, or `None` while duration isn't known
+ *  yet — mirrors player.ts's onTimeUpdate early-return guard (a freshly-
+ *  loaded/reset element reports `duration: NaN` until metadata arrives).
+ *  `loadGen` is read from `audio.dataset.audioLoadGen` — PlayAudio
+ *  (command.ts) stamps it there in the same synchronous statement as
+ *  `audio.src = url`, so it's ground truth for "which resource is actually
+ *  loaded right now" at the moment this function runs, regardless of when
+ *  the Subscription itself last (re)acquired relative to that Command's
+ *  Effect — see model.ts's audioLoadGen doc comment for the race this closes
+ *  that a same-track-identity or Subscription-timing check alone can't. */
+export function audioTimeMessage(audio: HTMLMediaElement): Option.Option<Message> {
+  if (!Number.isFinite(audio.duration) || audio.duration <= 0) return Option.none();
+  const loadGen = Number(audio.dataset.audioLoadGen);
+  return Option.some(
+    UpdatedAudioTime({
+      currentTime: audio.currentTime,
+      duration: audio.duration,
+      loadGen: Number.isFinite(loadGen) ? loadGen : -1,
+    }),
+  );
+}
+
 /** Extracted from a `htmx:afterSwap` event fired by a like button's
  *  `hx-post="/concerts/:id/tracks/:idx/like"` swap. Must be called
  *  synchronously from the DOM listener — see the `htmxSwap` subscription
@@ -101,6 +125,12 @@ export function parseLikeSwapEvent(
 // ── Subscriptions ─────────────────────────────────────────────────────────
 
 export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
+  // timeupdate/loadedmetadata staleness (a stray event from a just-replaced
+  // track) is handled by audioTimeMessage reading the DOM-stamped
+  // audioLoadGen (see its doc comment and command.ts's PlayAudio), not by
+  // gating this Subscription's own acquisition — so unlike keyboard/
+  // outsideVideo/videoControlsIdle below, it doesn't need dependencies keyed
+  // on anything track-specific; `{}` is correct and this can stay one entry.
   audioEvents: entry(
     {},
     {
@@ -108,15 +138,26 @@ export const subscriptions = Subscription.make<Model, Message>()((entry) => ({
       dependenciesToStream: (): Stream.Stream<Message> => {
         const audio = byIdOfOrNull("player-audio", HTMLMediaElement);
         if (!audio) return Stream.empty;
-        return Stream.merge(
-          Stream.merge(
-            Stream.fromEventListener(audio, "play").pipe(Stream.map(() => StartedAudio())),
-            Stream.fromEventListener(audio, "pause").pipe(Stream.map(() => PausedAudio())),
-          ),
-          Stream.merge(
-            Stream.fromEventListener(audio, "ended").pipe(Stream.map(() => EndedAudio())),
-            Stream.fromEventListener(audio, "error").pipe(Stream.map(() => ErroredAudio())),
-          ),
+        return Stream.mergeAll(
+          [
+            Stream.merge(
+              Stream.fromEventListener(audio, "play").pipe(Stream.map(() => StartedAudio())),
+              Stream.fromEventListener(audio, "pause").pipe(Stream.map(() => PausedAudio())),
+            ),
+            Stream.merge(
+              Stream.fromEventListener(audio, "ended").pipe(Stream.map(() => EndedAudio())),
+              Stream.fromEventListener(audio, "error").pipe(Stream.map(() => ErroredAudio())),
+            ),
+            Stream.merge(
+              Stream.fromEventListener(audio, "timeupdate"),
+              Stream.fromEventListener(audio, "loadedmetadata"),
+            ).pipe(
+              Stream.map(() => audioTimeMessage(audio)),
+              Stream.filter(Option.isSome),
+              Stream.map((opt) => opt.value),
+            ),
+          ],
+          { concurrency: "unbounded" },
         );
       },
     },

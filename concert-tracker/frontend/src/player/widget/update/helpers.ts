@@ -26,6 +26,7 @@ import type { Message } from "../message";
 import {
   type AdvancePlan,
   defaultPlayOpts,
+  initialAudioTime,
   initialPlayback,
   type MediaInfo,
   type Model,
@@ -140,6 +141,10 @@ export const beginPlayback = (
   const watchUrl = watchUrlFor(source, info);
   // Mirrors `if (!isVideo) hideVideoPanel()` + watchTrackDirect's forceOpen.
   const newVideoOpen = !info.is_video ? false : opts.openVideoPanel ? true : model.video.open;
+  // Shared with the PlayAudio command below, which stamps this exact value
+  // onto the audio element's dataset — see model.ts's audioLoadGen doc
+  // comment for why the model-side counter alone isn't enough.
+  const newLoadGen = model.audioLoadGen + 1;
 
   const model1 = evo(model, {
     playback: () => ({
@@ -160,6 +165,11 @@ export const beginPlayback = (
     video: () => ({ open: newVideoOpen }),
     pending: () => Option.none(),
     status: () => StatusValue.Idle(),
+    // A new PlayAudio load resets the element's own currentTime/duration;
+    // clear the mirrored model state too so the seek slider/time text don't
+    // show the previous track's stale duration until its own loadedmetadata.
+    audioTime: () => initialAudioTime,
+    audioLoadGen: () => newLoadGen,
   });
 
   const videoPanelToggle = newVideoOpen !== model.video.open ? [newVideoOpen ? ShowVideoPanel() : HideVideoPanel()] : [];
@@ -169,7 +179,7 @@ export const beginPlayback = (
     onSome: (seconds) => [SeekAudio({ seconds })],
   });
   const commands: Command<Message>[] = [
-    PlayAudio({ url: info.url }),
+    PlayAudio({ url: info.url, loadGen: newLoadGen }),
     MarkPlayingExternal({ concertId, trackIdx: Option.fromNullishOr(trackIdx) }),
     ClearPreparingExternal(),
     ...videoPanelToggle,
@@ -234,6 +244,14 @@ export const stopPlaybackPure = (model: Model): UpdateReturn =>
       status: () => StatusValue.Idle(),
       // pending intentionally untouched — stopPlayback() cancels auto-advance,
       // never a prepare-in-flight (cancelPendingPlay is never called there).
+      audioTime: () => initialAudioTime,
+      // Bumping (without a matching PlayAudio to re-stamp the DOM) is
+      // enough on its own here: any stray event between now and
+      // ClearAudioSrc's Effect actually running still carries the *old*
+      // generation from whatever PlayAudio last stamped, which now
+      // mismatches this new model value — see model.ts's audioLoadGen doc
+      // comment.
+      audioLoadGen: () => model.audioLoadGen + 1,
     }),
     model.video.open ? [ClearAudioSrc(), HideVideoPanel()] : [ClearAudioSrc()],
   );

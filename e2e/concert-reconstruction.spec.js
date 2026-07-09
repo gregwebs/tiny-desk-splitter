@@ -119,11 +119,15 @@ test.describe("Concert reconstruction playback", () => {
     await openSidebar(page);
     await waitForSidebarTracks(page);
 
-    // Sidebar should contain interlude buttons (data-interlude-idx).
-    const interludeBtn = page.locator(
+    // Sidebar should contain interlude buttons (data-interlude-idx). The
+    // fixture's auto split intentionally leaves the last ~1s of the source
+    // uncovered (see make_test_fixture.rs's auto_timestamps, TOTAL=19 over a
+    // ~20s file), so submitGapSplit's deliberate 5s-8s gap coexists with that
+    // baseline trailing gap: two interludes, not one.
+    const interludeBtns = page.locator(
       `#sidebar-concert-section .btn-interlude[data-interlude-idx]`
     );
-    await expect(interludeBtn).toBeVisible({ timeout: 5000 });
+    await expect(interludeBtns).toHaveCount(2, { timeout: 5000 });
 
     // Song buttons are also present (data-track-idx).
     const songBtns = page.locator(
@@ -131,15 +135,20 @@ test.describe("Concert reconstruction playback", () => {
     );
     await expect(songBtns).toHaveCount(3);
 
-    // Step 7: delete the interlude from the sidebar.
-    const interludeDeleteBtn = page.locator(
-      `#sidebar-concert-section li:has(.btn-interlude) .btn-delete`
-    ).first();
-    await expect(interludeDeleteBtn).toBeVisible();
-    await interludeDeleteBtn.click();
+    // Step 7: delete the interlude created by our own gap edit (idx 1, the
+    // 5s-8s gap) — not the fixture's baseline trailing interlude.
+    const editedInterlude = page.locator(
+      `#sidebar-concert-section .btn-interlude[data-interlude-idx="1"]`
+    );
+    const editedInterludeDeleteBtn = page.locator(
+      `#sidebar-concert-section li:has(.btn-interlude[data-interlude-idx="1"]) .btn-delete`
+    );
+    await expect(editedInterludeDeleteBtn).toBeVisible();
+    await editedInterludeDeleteBtn.click();
 
-    // After deletion the interlude button is gone from the sidebar.
-    await expect(interludeBtn).toHaveCount(0, { timeout: 5000 });
+    // After deletion that interlude is gone; the baseline trailing one remains.
+    await expect(editedInterlude).toHaveCount(0, { timeout: 5000 });
+    await expect(interludeBtns).toHaveCount(1);
 
     // Songs are still listed.
     await expect(songBtns).toHaveCount(3);
