@@ -57,7 +57,10 @@ async function submitGapSplit(page) {
   await endInput(page, 0).blur();
   // A gap block becomes visible once end[0] has actually committed away from
   // the still-linked start[1] — proves the first edit reached the model.
-  await expect(page.locator(gap).first()).toBeVisible();
+  // Generous timeout: under CI's parallel workers (this sandbox serializes
+  // to 1, see playwright.config.js), the render can lag well past the
+  // default 5s under contention.
+  await expect(page.locator(gap).first()).toBeVisible({ timeout: 15000 });
   const widthAfterFirstEdit = await gapWidthPx(page);
 
   await startInput(page, 1).fill("0:08.0");
@@ -65,7 +68,7 @@ async function submitGapSplit(page) {
   // Wait for the gap to widen (start[1] moving from its stale auto value to
   // 8.0) before submitting — proves the second edit committed too.
   await expect
-    .poll(() => gapWidthPx(page), { timeout: 5000 })
+    .poll(() => gapWidthPx(page), { timeout: 15000 })
     .toBeGreaterThan(widthAfterFirstEdit * 1.5);
 
   await page.click(submit);
