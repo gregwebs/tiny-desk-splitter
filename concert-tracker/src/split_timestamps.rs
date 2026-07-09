@@ -1,7 +1,15 @@
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use anyhow::Context;
 use concert_types::{SongTimestamp, TimestampsFile};
+use rusqlite::Connection;
 use serde::Deserialize;
 use std::fmt;
 use utoipa::ToSchema;
+
+use crate::db;
+use crate::jobs::{self, find_downloaded_file, JobConfig, JobRegistry, SplitMode};
 
 const MIN_SONG_DURATION_SECONDS: f64 = 1.0;
 
@@ -16,6 +24,79 @@ pub struct TimestampPayloadSong {
     pub title: String,
     pub start_time: f64,
     pub end_time: f64,
+}
+
+/// Response body for GET /concerts/:id/split-timestamps.
+#[derive(serde::Serialize, ToSchema)]
+pub struct SplitTimestampsResponse {
+    pub set_list: Vec<String>,
+    pub auto: Option<Vec<SongTimestamp>>,
+    pub user: Option<Vec<SongTimestamp>>,
+    /// Total source-media duration in seconds, from `ffprobe`. `None` when the
+    /// source isn't downloaded or `ffprobe` is unavailable/fails. The frontend
+    /// timeline uses this for its scale and right-edge clamp.
+    pub media_duration: Option<f64>,
+}
+
+/// Success body for the split-start endpoints.
+#[derive(serde::Serialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitStartStatus {
+    Splitting,
+    AlreadyAuto,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct SplitStartResponse {
+    pub status: SplitStartStatus,
+}
+
+pub struct SplitTimestampsRead {
+    pub set_list: Vec<String>,
+    pub auto: Option<Vec<SongTimestamp>>,
+    pub user: Option<Vec<SongTimestamp>>,
+    pub media_duration: Option<f64>,
+}
+
+impl From<SplitTimestampsRead> for SplitTimestampsResponse {
+    fn from(read: SplitTimestampsRead) -> Self {
+        SplitTimestampsResponse {
+            set_list: read.set_list,
+            auto: read.auto,
+            user: read.user,
+            media_duration: read.media_duration,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitStartOutcome {
+    Splitting,
+    AlreadyAuto,
+}
+
+impl From<SplitStartOutcome> for SplitStartResponse {
+    fn from(outcome: SplitStartOutcome) -> Self {
+        let status = match outcome {
+            SplitStartOutcome::Splitting => SplitStartStatus::Splitting,
+            SplitStartOutcome::AlreadyAuto => SplitStartStatus::AlreadyAuto,
+        };
+        SplitStartResponse { status }
+    }
+}
+
+#[derive(Debug)]
+pub enum SplitTimestampWorkflowError {
+    NotFound,
+    Conflict(String),
+    Unprocessable(String),
+    Internal(anyhow::Error),
+}
+
+impl From<anyhow::Error> for SplitTimestampWorkflowError {
+    fn from(e: anyhow::Error) -> Self {
+        SplitTimestampWorkflowError::Internal(e)
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -110,6 +191,211 @@ impl fmt::Display for TimestampValidationError {
                 message
             ),
         }
+    }
+}
+
+pub async fn read_split_timestamps(
+    database: Arc<Mutex<Connection>>,
+    working_dir: &Path,
+    concert_id: i64,
+) -> Result<SplitTimestampsRead, SplitTimestampWorkflowError> {
+    let (set_list, auto, user, source_path, stored_media_duration) = {
+        let conn = database.lock().unwrap();
+        let concert = db::get_concert(&conn, concert_id)
+            .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
+        let auto = jobs::split::auto_timestamps_with_backfill(&conn, working_dir, &concert)
+            .map_err(SplitTimestampWorkflowError::Internal)?;
+        let stored = db::get_split_timestamps(&conn, concert_id)
+            .map_err(SplitTimestampWorkflowError::Internal)?;
+        let source_path = concert
+            .album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(working_dir, a));
+        (
+            concert.set_list,
+            auto,
+            stored.user,
+            source_path,
+            concert.media_duration,
+        )
+    };
+
+    Ok(SplitTimestampsRead {
+        set_list,
+        auto,
+        user,
+        media_duration: media_duration_for_read(source_path, stored_media_duration).await,
+    })
+}
+
+pub async fn apply_user_timestamps(
+    database: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    jobs: JobConfig,
+    concert_id: i64,
+    payload: TimestampPayload,
+) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
+    let (concert, source_path) = {
+        let conn = database.lock().unwrap();
+        let concert = db::get_concert(&conn, concert_id)
+            .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
+        let source_path = concert
+            .album
+            .as_deref()
+            .and_then(|a| find_downloaded_file(&jobs.working_dir, a));
+        (concert, source_path)
+    };
+
+    let source_path = source_path.ok_or_else(|| {
+        SplitTimestampWorkflowError::Conflict(
+            "Source file not found — download the concert first".to_string(),
+        )
+    })?;
+
+    if payload.songs.len() != concert.set_list.len() {
+        return Err(SplitTimestampWorkflowError::Unprocessable(format!(
+            "Expected {} timestamps (one per set-list song), got {}",
+            concert.set_list.len(),
+            payload.songs.len()
+        )));
+    }
+
+    let media_duration = match probe_media_duration(&source_path).await {
+        Ok(duration) => duration,
+        Err(e) => {
+            tracing::warn!("ffprobe failed for {}: {}", source_path.display(), e);
+            return Err(SplitTimestampWorkflowError::Internal(e));
+        }
+    };
+    let validated =
+        ValidatedTimestamps::validate(&concert.set_list, Some(media_duration), &payload.songs)
+            .map_err(|e| SplitTimestampWorkflowError::Unprocessable(e.to_string()))?;
+
+    reconcile_downloaded_at_if_missing(&database, concert_id, concert.downloaded_at.is_none());
+
+    start_split_timestamp_job(
+        database,
+        registry,
+        jobs,
+        concert_id,
+        SplitMode::UserTimestamps {
+            ts: validated,
+            media_duration,
+        },
+    )
+    .await
+}
+
+pub async fn reset_to_auto_timestamps(
+    database: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    jobs: JobConfig,
+    concert_id: i64,
+) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
+    let (concert, auto_ts, user_is_null) = {
+        let conn = database.lock().unwrap();
+        let concert = db::get_concert(&conn, concert_id)
+            .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
+        let auto_ts =
+            jobs::split::auto_timestamps_with_backfill(&conn, &jobs.working_dir, &concert)
+                .map_err(SplitTimestampWorkflowError::Internal)?;
+        let stored = db::get_split_timestamps(&conn, concert_id)
+            .map_err(SplitTimestampWorkflowError::Internal)?;
+        (concert, auto_ts, stored.user.is_none())
+    };
+
+    let auto_ts = auto_ts.ok_or_else(|| {
+        SplitTimestampWorkflowError::Unprocessable(
+            "No automated split timestamps available — run analysis first".to_string(),
+        )
+    })?;
+    if user_is_null {
+        return Ok(SplitStartOutcome::AlreadyAuto);
+    }
+
+    let payload_songs = song_timestamps_to_payload(&auto_ts);
+    let validated = ValidatedTimestamps::validate_for_reset(&concert.set_list, &payload_songs)
+        .map_err(|e| SplitTimestampWorkflowError::Unprocessable(e.to_string()))?;
+
+    reconcile_downloaded_at_if_missing(&database, concert_id, concert.downloaded_at.is_none());
+
+    start_split_timestamp_job(
+        database,
+        registry,
+        jobs,
+        concert_id,
+        SplitMode::ResetToAuto(validated),
+    )
+    .await
+}
+
+/// Probe a media file using ffprobe on the blocking pool.
+pub async fn probe_media_duration(path: &Path) -> anyhow::Result<f64> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || crate::scan::ffprobe_duration_sync(&path))
+        .await
+        .context("ffprobe task panicked")?
+}
+
+async fn media_duration_for_read(
+    source_path: Option<PathBuf>,
+    stored_media_duration: Option<f64>,
+) -> Option<f64> {
+    match source_path {
+        Some(path) => match probe_media_duration(&path).await {
+            Ok(d) => Some(d),
+            Err(e) => {
+                tracing::warn!(
+                    "ffprobe failed for {}: {}; falling back to stored duration",
+                    path.display(),
+                    e
+                );
+                stored_media_duration
+            }
+        },
+        None => stored_media_duration,
+    }
+}
+
+fn reconcile_downloaded_at_if_missing(
+    database: &Arc<Mutex<Connection>>,
+    concert_id: i64,
+    downloaded_at_missing: bool,
+) {
+    if !downloaded_at_missing {
+        return;
+    }
+    let conn = database.lock().unwrap();
+    let now = db::now_string();
+    if let Err(e) = db::set_downloaded_at_if_missing(&conn, concert_id, &now) {
+        tracing::warn!(
+            "set_downloaded_at_if_missing failed for concert {}: {}",
+            concert_id,
+            e
+        );
+    }
+}
+
+async fn start_split_timestamp_job(
+    database: Arc<Mutex<Connection>>,
+    registry: Arc<JobRegistry>,
+    jobs: JobConfig,
+    concert_id: i64,
+    mode: SplitMode,
+) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
+    match jobs::split::start_split(database, registry, jobs, concert_id, mode)
+        .await
+        .map_err(SplitTimestampWorkflowError::Internal)?
+    {
+        jobs::split::StartOutcome::Spawned | jobs::split::StartOutcome::AlreadySplit => {
+            Ok(SplitStartOutcome::Splitting)
+        }
+        jobs::split::StartOutcome::AlreadyRunning => Err(SplitTimestampWorkflowError::Conflict(
+            "A split job is already running for this concert".to_string(),
+        )),
+        jobs::split::StartOutcome::NotDownloaded => Err(SplitTimestampWorkflowError::Conflict(
+            "Concert source file not downloaded".to_string(),
+        )),
     }
 }
 
@@ -273,6 +559,10 @@ impl TimestampPayloadSong {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::jobs::{JobConfig, JobRegistry};
+    use crate::model::concert_dir;
+    use std::sync::{Arc, Mutex};
 
     fn set_list() -> Vec<String> {
         vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()]
@@ -296,6 +586,63 @@ mod tests {
                 end_time: 350.0,
             },
         ]
+    }
+
+    fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> i64 {
+        db::upsert_listing(
+            conn,
+            &NewListing {
+                source_url: format!("https://npr.org/split-timestamps/{album}"),
+                title: format!("{album} Concert"),
+                concert_date: Some("2024-06-01".to_string()),
+                teaser: None,
+            },
+        )
+        .unwrap();
+        let id = db::get_concert_by_url(conn, &format!("https://npr.org/split-timestamps/{album}"))
+            .unwrap()
+            .unwrap()
+            .id;
+        db::update_metadata(
+            conn,
+            id,
+            &MetadataUpdate {
+                artist: "Test Artist".to_string(),
+                album: album.to_string(),
+                description: None,
+                set_list: songs.iter().map(|s| s.to_string()).collect(),
+                musicians: vec![],
+            },
+        )
+        .unwrap();
+        id
+    }
+
+    fn sample_timestamps(songs: &[&str]) -> Vec<SongTimestamp> {
+        songs
+            .iter()
+            .enumerate()
+            .map(|(i, title)| SongTimestamp {
+                title: title.to_string(),
+                start_time: (i * 60) as f64,
+                end_time: (i * 60 + 55) as f64,
+                duration: 55.0,
+            })
+            .collect()
+    }
+
+    fn payload_for(songs: &[&str]) -> TimestampPayload {
+        TimestampPayload {
+            songs: songs
+                .iter()
+                .enumerate()
+                .map(|(i, title)| TimestampPayloadSong {
+                    title: title.to_string(),
+                    start_time: (i * 60) as f64,
+                    end_time: (i * 60 + 55) as f64,
+                })
+                .collect(),
+        }
     }
 
     #[test]
@@ -447,5 +794,238 @@ mod tests {
         assert_eq!(payload[0].title, "Alpha");
         assert_eq!(payload[0].start_time, 0.0);
         assert_eq!(payload[0].end_time, 100.0);
+    }
+
+    #[test]
+    fn split_timestamps_response_serializes_media_duration() {
+        let resp = SplitTimestampsResponse {
+            set_list: vec!["Song A".to_string()],
+            auto: Some(vec![SongTimestamp {
+                title: "Song A".to_string(),
+                start_time: 0.0,
+                end_time: 180.0,
+                duration: 180.0,
+            }]),
+            user: None,
+            media_duration: Some(212.5),
+        };
+        let v: serde_json::Value = serde_json::to_value(&resp).unwrap();
+        assert_eq!(v["media_duration"], 212.5);
+        assert!(v["user"].is_null());
+        assert_eq!(v["auto"][0]["end_time"], 180.0);
+
+        let resp2 = SplitTimestampsResponse {
+            set_list: vec![],
+            auto: None,
+            user: None,
+            media_duration: None,
+        };
+        let v2: serde_json::Value = serde_json::to_value(&resp2).unwrap();
+        assert!(v2["media_duration"].is_null());
+    }
+
+    #[tokio::test]
+    async fn read_workflow_returns_stored_auto_and_user_timestamps() {
+        let conn = db::open_in_memory().unwrap();
+        let songs = ["Alpha", "Beta"];
+        let id = seed_ts_concert(&conn, "Stored Workflow Album", &songs);
+        let auto = sample_timestamps(&songs);
+        db::set_auto_split_timestamps(&conn, id, &auto).unwrap();
+        let user = vec![
+            SongTimestamp {
+                title: "Alpha".to_string(),
+                start_time: 1.0,
+                end_time: 50.0,
+                duration: 49.0,
+            },
+            SongTimestamp {
+                title: "Beta".to_string(),
+                start_time: 55.0,
+                end_time: 100.0,
+                duration: 45.0,
+            },
+        ];
+        db::set_user_split_timestamps(&conn, id, &user).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let read = read_split_timestamps(db, workdir.path(), id).await.unwrap();
+
+        assert_eq!(read.set_list, vec!["Alpha", "Beta"]);
+        assert_eq!(read.auto.unwrap()[0].title, "Alpha");
+        assert_eq!(read.user.unwrap()[0].start_time, 1.0);
+        assert_eq!(read.media_duration, None);
+    }
+
+    #[tokio::test]
+    async fn read_workflow_lazy_backfills_auto_timestamps_from_disk() {
+        let conn = db::open_in_memory().unwrap();
+        let album = "Backfill Workflow Album";
+        let songs = ["Old A", "Old B"];
+        let id = seed_ts_concert(&conn, album, &songs);
+        let workdir = tempfile::tempdir().unwrap();
+        let concert_dir = concert_dir(workdir.path(), album);
+        std::fs::create_dir_all(&concert_dir).unwrap();
+        let timestamps_json = serde_json::to_string(&concert_types::ConcertInfo {
+            artist: "Test".to_string(),
+            source: String::new(),
+            show: String::new(),
+            date: None,
+            album: album.to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+            preview_image_url: None,
+            teaser: None,
+            timestamps: Some(sample_timestamps(&songs)),
+        })
+        .unwrap();
+        std::fs::write(concert_dir.join("timestamps.json"), timestamps_json).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let read = read_split_timestamps(db.clone(), workdir.path(), id)
+            .await
+            .unwrap();
+
+        assert_eq!(read.auto.unwrap().len(), 2);
+        let stored = db::get_split_timestamps(&db.lock().unwrap(), id).unwrap();
+        assert!(
+            stored.auto.is_some(),
+            "backfill should persist auto timestamps"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_workflow_uses_stored_duration_when_source_absent() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_ts_concert(&conn, "Duration Workflow Album", &["A"]);
+        db::set_media_duration(&conn, id, 123.5).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let read = read_split_timestamps(db, workdir.path(), id).await.unwrap();
+
+        assert_eq!(read.media_duration, Some(123.5));
+    }
+
+    #[tokio::test]
+    async fn apply_user_timestamps_conflicts_when_source_missing() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_ts_concert(&conn, "Missing Source Workflow Album", &["A", "B"]);
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let err = apply_user_timestamps(
+            db.clone(),
+            Arc::new(JobRegistry::new()),
+            JobConfig::test(workdir.path().to_path_buf()),
+            id,
+            payload_for(&["A", "B"]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SplitTimestampWorkflowError::Conflict(ref msg)
+                if msg == "Source file not found — download the concert first"
+        ));
+    }
+
+    #[tokio::test]
+    async fn apply_user_timestamps_rejects_count_mismatch_before_ffprobe() {
+        let conn = db::open_in_memory().unwrap();
+        let album = "Count Workflow Album";
+        let id = seed_ts_concert(&conn, album, &["A", "B"]);
+        let workdir = tempfile::tempdir().unwrap();
+        let concert_dir = concert_dir(workdir.path(), album);
+        std::fs::create_dir_all(&concert_dir).unwrap();
+        std::fs::write(concert_dir.join(format!("{album}.mp4")), b"not media").unwrap();
+        let db = Arc::new(Mutex::new(conn));
+
+        let err = apply_user_timestamps(
+            db,
+            Arc::new(JobRegistry::new()),
+            JobConfig::test(workdir.path().to_path_buf()),
+            id,
+            payload_for(&["A"]),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SplitTimestampWorkflowError::Unprocessable(ref msg)
+                if msg == "Expected 2 timestamps (one per set-list song), got 1"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reset_to_auto_returns_already_auto_when_user_timestamps_are_absent() {
+        let conn = db::open_in_memory().unwrap();
+        let songs = ["A", "B"];
+        let id = seed_ts_concert(&conn, "Already Auto Workflow Album", &songs);
+        db::set_auto_split_timestamps(&conn, id, &sample_timestamps(&songs)).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let outcome = reset_to_auto_timestamps(
+            db,
+            Arc::new(JobRegistry::new()),
+            JobConfig::test(workdir.path().to_path_buf()),
+            id,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, SplitStartOutcome::AlreadyAuto);
+    }
+
+    #[tokio::test]
+    async fn reset_to_auto_rejects_missing_auto_timestamps() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_ts_concert(&conn, "No Auto Workflow Album", &["A"]);
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let err = reset_to_auto_timestamps(
+            db,
+            Arc::new(JobRegistry::new()),
+            JobConfig::test(workdir.path().to_path_buf()),
+            id,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SplitTimestampWorkflowError::Unprocessable(ref msg)
+                if msg == "No automated split timestamps available — run analysis first"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reset_to_auto_rejects_stale_auto_timestamps() {
+        let conn = db::open_in_memory().unwrap();
+        let id = seed_ts_concert(&conn, "Stale Auto Workflow Album", &["A", "B"]);
+        db::set_auto_split_timestamps(&conn, id, &sample_timestamps(&["A"])).unwrap();
+        db::set_user_split_timestamps(&conn, id, &sample_timestamps(&["A", "B"])).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let workdir = tempfile::tempdir().unwrap();
+
+        let err = reset_to_auto_timestamps(
+            db,
+            Arc::new(JobRegistry::new()),
+            JobConfig::test(workdir.path().to_path_buf()),
+            id,
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            SplitTimestampWorkflowError::Unprocessable(ref msg)
+                if msg.contains("set list has 2 tracks but automated timestamps have 1")
+        ));
     }
 }

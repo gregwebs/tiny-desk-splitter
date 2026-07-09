@@ -45,6 +45,10 @@ Playback availability policy lives in `concert-tracker/src/playback.rs`: it
 decides source playback, reconstruction playback, track media lookup, next/prev
 playable tracks, and track detail facts. HTTP handlers translate those facts
 into JSON, templates, and status codes.
+Split timestamp editing workflow lives in `concert-tracker/src/split_timestamps.rs`:
+it validates timestamp payloads, reads/backfills stored automatic and user
+timestamps, probes source duration for the editor, and starts user/reset split
+jobs. HTTP handlers translate those outcomes into route status codes.
 
 Key columns in the `concerts` table:
 
