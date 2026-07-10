@@ -8,7 +8,7 @@ Otherwise ask the engineering-lead agent for a review.
 ### Codex review
 
 Use /codex:adversarial-review to question the plan/implementation.
-* Plan/spec review: if there are multiple good alternative approaches, ask the user to choose between them, but give a recommended choice.
+* Plan/spec review. Pass the plan/spec as text, starting with "Review the following plan/spec". If the review suggests a good alternative approach that is significantly different, ask the user to choose between them, and recommended a choice.
 * Code review: only ask the user to help resolve review issues if a resolution would end up altering the plan/spec.
 
 After making changes based on the adversarial review, perform a non-adversarial review using /codex:review.
