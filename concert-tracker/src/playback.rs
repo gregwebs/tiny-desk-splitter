@@ -1,6 +1,9 @@
 use std::path::Path;
 
-use crate::jobs::find_downloaded_file;
+use crate::concert_media::{
+    build_reconstruction, find_downloaded_file, find_track_file, is_video_extension,
+    list_all_track_details,
+};
 use crate::model::{self, Concert, PlaybackItem, TrackDetailItem};
 
 #[derive(Debug, Clone)]
@@ -81,7 +84,7 @@ pub fn concert_playback_plan(
         return source_media_from_path(concert, album, &path).map(PlaybackPlan::Source);
     }
 
-    let items = model::build_reconstruction(
+    let items = build_reconstruction(
         working_dir,
         album,
         &concert.set_list,
@@ -111,7 +114,7 @@ pub fn reconstruction_items(
         .album
         .as_deref()
         .ok_or(PlaybackLookupError::NotPlayable)?;
-    let items = model::build_reconstruction(
+    let items = build_reconstruction(
         working_dir,
         album,
         &concert.set_list,
@@ -180,7 +183,7 @@ pub fn track_details(
     concert: &Concert,
 ) -> Result<Vec<TrackDetailItem>, PlaybackLookupError> {
     let album = concert.album.as_deref().unwrap_or_default();
-    Ok(model::list_all_track_details(
+    Ok(list_all_track_details(
         working_dir,
         album,
         &concert.set_list,
@@ -204,7 +207,7 @@ fn source_media_from_path(
         filename,
         title: album.to_string(),
         artist: concert.artist.clone().unwrap_or_default(),
-        is_video: model::is_video_extension(ext),
+        is_video: is_video_extension(ext),
         playable: model::is_browser_playable(ext),
     })
 }
@@ -224,11 +227,11 @@ fn track_media_inner(
         .get(track_index)
         .ok_or(PlaybackLookupError::NotPlayable)?
         .clone();
-    let filename = model::find_track_file(working_dir, album, &title)
-        .ok_or(PlaybackLookupError::NotPlayable)?;
+    let filename =
+        find_track_file(working_dir, album, &title).ok_or(PlaybackLookupError::NotPlayable)?;
     let ext = filename.rsplit('.').next().unwrap_or("");
     let playable = model::is_browser_playable(ext);
-    let is_video = model::is_video_extension(ext);
+    let is_video = is_video_extension(ext);
     if require_browser_playable && !playable {
         tracing::debug!(
             concert_id = concert.id,
@@ -273,7 +276,7 @@ where
         let Some(title) = concert.set_list.get(index) else {
             continue;
         };
-        let Some(filename) = model::find_track_file(working_dir, album, title) else {
+        let Some(filename) = find_track_file(working_dir, album, title) else {
             continue;
         };
         let ext = filename.rsplit('.').next().unwrap_or("");

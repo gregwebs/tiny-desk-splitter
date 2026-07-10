@@ -11,9 +11,9 @@ use axum::{
 use rusqlite::Connection;
 use utoipa::ToSchema;
 
+use crate::concert_media::{find_downloaded_file, find_track_file, ConcertMediaInventory};
 use crate::db;
 use crate::jobs::download::start_download;
-use crate::jobs::find_downloaded_file;
 use crate::jobs::split::start_split;
 use crate::jobs::{JobKey, JobKind, SplitMode};
 use crate::lifecycle::{
@@ -398,16 +398,10 @@ fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
         &concert.tracks_present,
         &concert.tracks_liked,
     );
-    let album = concert.album.as_deref().unwrap_or("");
-    let source_redundant = crate::model::source_redundant(
-        &state.jobs.working_dir,
-        album,
-        &concert.tracks_present,
-        stored_ts.as_deref(),
-        concert.media_duration,
-    );
-    let can_play_concert =
-        compute_can_play_concert(&state.jobs.working_dir, &concert, stored_ts.as_deref());
+    let inventory =
+        ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, stored_ts.as_deref());
+    let source_redundant = inventory.source_redundant();
+    let can_play_concert = inventory.can_play_concert();
     render_row_inner(
         &concert,
         has_archive_location(state),
@@ -437,7 +431,8 @@ fn render_row(
     // a filesystem probe per card). Known limitation: once the source is deleted
     // as redundant, download_status() becomes NotDownloaded and the listing
     // hides "Play concert" even though reconstruction would succeed. The
-    // detail/single-card paths use compute_can_play_concert for the real check.
+    // detail/single-card paths use ConcertMediaInventory::can_play_concert for
+    // the real check.
     let can_play_concert = matches!(c.download_status(), DownloadStatus::Downloaded);
     render_row_inner(
         c,
@@ -466,15 +461,9 @@ fn render_detail_card(
 ) -> Result<String, askama::Error> {
     let tracks =
         crate::model::list_all_tracks_from_db(&c.set_list, &c.tracks_present, &c.tracks_liked);
-    let album = c.album.as_deref().unwrap_or("");
-    let source_redundant = crate::model::source_redundant(
-        working_dir,
-        album,
-        &c.tracks_present,
-        stored_user_ts,
-        c.media_duration,
-    );
-    let can_play_concert = compute_can_play_concert(working_dir, c, stored_user_ts);
+    let inventory = ConcertMediaInventory::for_concert(working_dir, c, stored_user_ts);
+    let source_redundant = inventory.source_redundant();
+    let can_play_concert = inventory.can_play_concert();
     render_row_inner(
         c,
         has_archive_location,
@@ -570,35 +559,6 @@ fn render_row_inner(
 /// Whether `id` is currently queued/in-flight in the background scrape worker.
 fn scrape_pending(state: &AppState, id: i64) -> bool {
     state.scrape_queue.is_pending(id)
-}
-
-/// True when "Play concert" is meaningful for this concert: either the source
-/// file is present on disk (whole-album mode) or at least one reconstruction
-/// item exists (tracks + interludes cover something playable).
-fn compute_can_play_concert(
-    working_dir: &std::path::Path,
-    concert: &Concert,
-    user_ts: Option<&[concert_types::SongTimestamp]>,
-) -> bool {
-    if let Some(album) = concert.album.as_deref() {
-        // Source present → can always play it as a whole album.
-        if crate::jobs::find_downloaded_file(working_dir, album).is_some() {
-            return true;
-        }
-        // Source gone → check whether reconstruction has anything.
-        !crate::model::build_reconstruction(
-            working_dir,
-            album,
-            &concert.set_list,
-            &concert.tracks_present,
-            &concert.tracks_liked,
-            user_ts,
-            concert.media_duration,
-        )
-        .is_empty()
-    } else {
-        false
-    }
 }
 
 fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -> Vec<TrackInfo> {
@@ -964,16 +924,8 @@ fn prepare_status_payload(state: &AppState, id: i64) -> Result<PrepareStatus, Ap
         let conn = state.db.lock().unwrap();
         db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
-    let tracks_present = match concert.album.as_deref() {
-        Some(album) => concert
-            .set_list
-            .iter()
-            .map(|title| {
-                crate::model::find_track_file(&state.jobs.working_dir, album, title).is_some()
-            })
-            .collect(),
-        None => vec![false; concert.set_list.len()],
-    };
+    let inventory = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None);
+    let tracks_present = inventory.tracks_present_on_disk();
     Ok(PrepareStatus {
         download: concert.download_status().slug().to_string(),
         split: concert.split_status().slug().to_string(),
@@ -1689,8 +1641,8 @@ pub async fn watch_track(
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?;
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let filename = crate::model::find_track_file(&state.jobs.working_dir, album, title)
-        .ok_or(AppError::NotFound)?;
+    let filename =
+        find_track_file(&state.jobs.working_dir, album, title).ok_or(AppError::NotFound)?;
     let path = concert_dir(&state.jobs.working_dir, album).join(&filename);
 
     tracing::info!(
@@ -1816,8 +1768,7 @@ pub async fn listen_track(
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let file_exists =
-        crate::model::find_track_file(&state.jobs.working_dir, album, &title).is_some();
+    let file_exists = find_track_file(&state.jobs.working_dir, album, &title).is_some();
 
     let render_state = if file_exists {
         tracing::info!(

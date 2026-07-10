@@ -4,9 +4,10 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 
+use crate::concert_media::{find_downloaded_file, source_redundant};
 use crate::db;
 use crate::events::{self, Event};
-use crate::jobs::{find_downloaded_file, JobKey, JobKind, JobRegistry, RegistryCancelOutcome};
+use crate::jobs::{JobKey, JobKind, JobRegistry, RegistryCancelOutcome};
 
 const CANCELLED_BY_USER: &str = "cancelled by user";
 
@@ -95,7 +96,7 @@ pub fn delete_redundant_source(
     let concert = db::get_concert(conn, id)?;
     let album = concert.album.as_deref().unwrap_or("");
     let stored_ts = db::get_split_timestamps(conn, id)?.user;
-    let is_redundant = crate::model::source_redundant(
+    let is_redundant = source_redundant(
         working_dir,
         album,
         &concert.tracks_present,

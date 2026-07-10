@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::path::Path;
 
+use crate::concert_media::tracks_present_on_disk;
 use crate::db;
 use crate::model::{
     concert_dir, decide_backfill_duration, sanitize_album, DurationSource, SourceState,
@@ -52,13 +53,7 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
                 Ok(at) => {
                     db::set_split_at_if_missing(conn, concert.id, &at)?;
                     if concert.tracks_present.is_empty() && !concert.set_list.is_empty() {
-                        let present: Vec<bool> = concert
-                            .set_list
-                            .iter()
-                            .map(|title| {
-                                crate::model::find_track_file(dir, &album, title).is_some()
-                            })
-                            .collect();
+                        let present = tracks_present_on_disk(dir, &album, &concert.set_list);
                         db::set_tracks_present(conn, concert.id, &present)?;
                     }
                     report.splits_found += 1;
@@ -117,11 +112,7 @@ pub fn backfill_tracks_present(conn: &Connection, working_dir: &Path) -> usize {
     let mut count = 0;
     for c in &concerts {
         if let Some(album) = c.album.as_deref() {
-            let present: Vec<bool> = c
-                .set_list
-                .iter()
-                .map(|title| crate::model::find_track_file(working_dir, album, title).is_some())
-                .collect();
+            let present = tracks_present_on_disk(working_dir, album, &c.set_list);
             if db::set_tracks_present(conn, c.id, &present).is_ok() {
                 count += 1;
             }
@@ -168,7 +159,7 @@ pub fn backfill_media_duration(
             continue;
         };
 
-        let downloaded = crate::jobs::find_downloaded_file(working_dir, album);
+        let downloaded = crate::concert_media::find_downloaded_file(working_dir, album);
         let source_present = downloaded.is_some();
         let source = match downloaded {
             Some(path) => SourceState::Present(ffprobe_duration_sync(&path)),
@@ -204,7 +195,7 @@ pub fn backfill_media_duration(
             let mut durations = Vec::with_capacity(c.set_list.len());
             let mut complete = true;
             for title in &c.set_list {
-                let probed = crate::model::find_track_file(working_dir, album, title)
+                let probed = crate::concert_media::find_track_file(working_dir, album, title)
                     .map(|filename| concert_dir(working_dir, album).join(filename))
                     .and_then(|path| ffprobe_duration_sync(&path).ok());
                 match probed {

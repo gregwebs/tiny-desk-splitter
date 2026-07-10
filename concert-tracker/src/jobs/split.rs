@@ -7,10 +7,10 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 
+use crate::concert_media::{find_downloaded_file, tracks_present_on_disk};
 use crate::db;
 use crate::jobs::{
-    find_downloaded_file, persist_job_log, run_with_logging, JobConfig, JobKey, JobKind,
-    JobRegistry, SplitJob, SplitMode,
+    persist_job_log, run_with_logging, JobConfig, JobKey, JobKind, JobRegistry, SplitJob, SplitMode,
 };
 use crate::model::{concert_dir, Concert, Musician};
 use crate::split_timestamps::ValidatedTimestamps;
@@ -183,13 +183,7 @@ pub async fn start_split(
         if matches!(mode, SplitMode::Analyze) {
             let cd = concert_dir(&config.working_dir, album);
             if !concert.set_list.is_empty() && crate::scan::has_split_tracks(&cd, album) {
-                let present: Vec<bool> = concert
-                    .set_list
-                    .iter()
-                    .map(|title| {
-                        crate::model::find_track_file(&config.working_dir, album, title).is_some()
-                    })
-                    .collect();
+                let present = tracks_present_on_disk(&config.working_dir, album, &concert.set_list);
                 let conn = db.lock().unwrap();
                 db::set_tracks_present(&conn, concert_id, &present)?;
                 db::mark_split_succeeded(&conn, concert_id)?;
@@ -392,14 +386,8 @@ async fn run_split(
                 let concert = db::get_concert(&conn, concert_id);
                 if let Ok(c) = concert {
                     if let Some(album) = c.album.as_deref() {
-                        let present: Vec<bool> = c
-                            .set_list
-                            .iter()
-                            .map(|title| {
-                                crate::model::find_track_file(&config.working_dir, album, title)
-                                    .is_some()
-                            })
-                            .collect();
+                        let present =
+                            tracks_present_on_disk(&config.working_dir, album, &c.set_list);
                         let _ = db::set_tracks_present(&conn, concert_id, &present);
                     }
                 }

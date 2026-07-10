@@ -217,7 +217,7 @@ pub fn backfill_track_deletes(
             _ => continue,
         };
 
-        let tracks = crate::model::list_all_tracks(working_dir, album, &c.set_list);
+        let tracks = crate::concert_media::list_all_tracks(working_dir, album, &c.set_list);
         for t in &tracks {
             if t.available {
                 continue;

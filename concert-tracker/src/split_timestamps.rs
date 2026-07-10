@@ -8,8 +8,9 @@ use serde::Deserialize;
 use std::fmt;
 use utoipa::ToSchema;
 
+use crate::concert_media::find_downloaded_file;
 use crate::db;
-use crate::jobs::{self, find_downloaded_file, JobConfig, JobRegistry, SplitMode};
+use crate::jobs::{self, JobConfig, JobRegistry, SplitMode};
 
 const MIN_SONG_DURATION_SECONDS: f64 = 1.0;
 
