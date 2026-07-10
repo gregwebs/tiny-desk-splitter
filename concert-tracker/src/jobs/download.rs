@@ -80,7 +80,7 @@ async fn run_download(
         Ok((status, _)) if status.success() => {
             tracing::info!("download completed for concert {}", concert_id);
             drop(temp_file);
-            let ext = crate::jobs::find_downloaded_file(&config.working_dir, &job.album)
+            let ext = crate::concert_media::find_downloaded_file(&config.working_dir, &job.album)
                 .and_then(|p| {
                     p.extension()
                         .and_then(|e| e.to_str())

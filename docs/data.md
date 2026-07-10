@@ -41,10 +41,17 @@ Archiving moves the concert directory to a configurable location and creates a s
 State-transition policy for destructive lifecycle operations lives in
 `concert-tracker/src/lifecycle.rs`; HTTP handlers keep request/response behavior
 such as confirmation prompts and HTMX rendering.
-Playback availability policy lives in `concert-tracker/src/playback.rs`: it
-decides source playback, reconstruction playback, track media lookup, next/prev
-playable tracks, and track detail facts. HTTP handlers translate those facts
-into JSON, templates, and status codes.
+Concert filesystem media facts (downloaded source lookup, split-track lookup,
+interlude lookup, all-tracks-present, reconstruction-item construction, source
+redundancy, and track detail media facts) live in the **Concert Media
+Inventory**, `concert-tracker/src/concert_media.rs`, whose primary test seam is
+`ConcertMediaInventory`. Playback policy — plan selection (source vs.
+reconstruction), playback-facing response structs/errors, and next/prev
+playable-track policy — lives in `concert-tracker/src/playback.rs` and calls
+into `concert_media` for the underlying facts. HTTP handlers translate those
+facts into JSON, templates, and status codes. See
+`docs/change/2026-07-09-concert-media-inventory.md` for the module boundary
+and migration notes.
 Split timestamp editing workflow lives in `concert-tracker/src/split_timestamps.rs`:
 it validates timestamp payloads, reads/backfills stored automatic and user
 timestamps, probes source duration for the editor, and starts user/reset split

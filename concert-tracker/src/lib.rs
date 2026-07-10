@@ -1,4 +1,5 @@
 pub mod archive_import;
+pub mod concert_media;
 pub mod db;
 pub mod events;
 pub mod import;

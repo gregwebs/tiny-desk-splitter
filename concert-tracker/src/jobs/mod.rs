@@ -13,8 +13,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
 
+pub use crate::concert_media::find_downloaded_file;
 use crate::model::concert_dir;
-pub use crate::model::find_downloaded_file;
 use crate::model::sanitize_album;
 use crate::model::Concert;
 
@@ -528,73 +528,7 @@ pub fn download_job_from_concert(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs::{self, File};
-
-    fn make_concert_dir(working_dir: &Path, album: &str) -> PathBuf {
-        let cd = concert_dir(working_dir, album);
-        fs::create_dir_all(&cd).unwrap();
-        cd
-    }
-
-    #[test]
-    fn find_downloaded_file_returns_match_for_known_extension() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "Foo Album");
-        File::create(cd.join("Foo Album.mp4")).unwrap();
-        let found = find_downloaded_file(dir.path(), "Foo Album").unwrap();
-        assert_eq!(found, cd.join("Foo Album.mp4"));
-    }
-
-    #[test]
-    fn find_downloaded_file_ignores_json_sidecar() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "Foo Album");
-        File::create(cd.join("Foo Album.json")).unwrap();
-        File::create(cd.join("Foo Album.mp4")).unwrap();
-        let found = find_downloaded_file(dir.path(), "Foo Album").unwrap();
-        assert_eq!(found, cd.join("Foo Album.mp4"));
-    }
-
-    #[test]
-    fn find_downloaded_file_returns_none_when_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(find_downloaded_file(dir.path(), "Foo Album").is_none());
-    }
-
-    #[test]
-    fn find_downloaded_file_handles_colons_in_album() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "A: B");
-        File::create(cd.join("A B.mp4")).unwrap();
-        let found = find_downloaded_file(dir.path(), "A: B").unwrap();
-        assert_eq!(found, cd.join("A B.mp4"));
-    }
-
-    #[test]
-    fn find_downloaded_file_returns_none_when_only_json_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "Foo Album");
-        File::create(cd.join("Foo Album.json")).unwrap();
-        assert!(find_downloaded_file(dir.path(), "Foo Album").is_none());
-    }
-
-    #[test]
-    fn find_downloaded_file_skips_jpg_preview_image() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "Foo Album");
-        File::create(cd.join("Foo Album.jpg")).unwrap();
-        File::create(cd.join("Foo Album.mp4")).unwrap();
-        let found = find_downloaded_file(dir.path(), "Foo Album").unwrap();
-        assert_eq!(found, cd.join("Foo Album.mp4"));
-    }
-
-    #[test]
-    fn find_downloaded_file_returns_none_when_only_image_exists() {
-        let dir = tempfile::tempdir().unwrap();
-        let cd = make_concert_dir(dir.path(), "Foo Album");
-        File::create(cd.join("Foo Album.jpg")).unwrap();
-        assert!(find_downloaded_file(dir.path(), "Foo Album").is_none());
-    }
+    use std::fs::File;
 
     #[tokio::test]
     async fn run_with_logging_captures_stderr_tail_and_exit_code() {
