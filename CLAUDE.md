@@ -3,6 +3,8 @@
 ## Agent Review
 
 When running from Claude Code, if the codex plugin is installed, use Codex for review as defined below.
+If the codex plugin is installed but not working (probably needs re-authentication), stop and ask the user if they want to fix this.
+
 Otherwise ask the engineering-lead agent for a review.
 
 ### Codex review
