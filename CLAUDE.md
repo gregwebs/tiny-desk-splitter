@@ -7,17 +7,13 @@ Otherwise ask the engineering-lead agent for a review.
 
 ### Codex review
 
-Invoke the `codex:codex-rescue` subagent in the foreground and wait for its response.
+Use /codex:adversarial-review to question the plan/implementation.
+* Plan/spec review: if there are multiple good alternative approaches, ask the user to choose between them, but give a recommended choice.
+* Code review: only ask the user to help resolve review issues if a resolution would end up altering the plan/spec.
 
-1. For plan review ask Codex to review the included plan, challenge assumptions, identify missing cases, and suggest better alternatives. Read-only.
-
-2. For code review ask Codex to review the current git diff Read-only.
-   Require findings ordered by severity with file:line references.
-
-Address material findings, rerun tests, and request one follow-up Codex
-review if the implementation changed substantially.
+After making changes based on the adversarial review, perform a non-adversarial review using /codex:review.
 
 Do not substitute Claude's own review for these checkpoints.
 Do not invoke Codex for trivial documentation or formatting-only changes.
 
-Use the engineeering-lead instructions in .claude/agents/engineering-lead.md
+Use the engineeering-lead in .claude/agents/engineering-lead.md as the persona for the review.
