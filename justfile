@@ -40,6 +40,10 @@ ts-watch:
 test-ts:
     ./scripts/ts-test.sh
 
+# This is faster than "cargo test"
+test-rs:
+	cargo nextest run --tests
+
 # Run fmt-check + clippy + shellcheck + ts-check + ts-lint (the full standard lint suite).
 lint: fmt-check clippy shellcheck ts-check ts-lint
 

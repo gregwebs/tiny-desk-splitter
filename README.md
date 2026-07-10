@@ -320,7 +320,7 @@ cargo build --release
 ## Testing
 
 ```sh
-cargo test                    # all crates
+just test                     # test all crates quicker than `cargo test`.
 cargo test -p concert-tracker # just the tracker
 cargo test -p tiny-desk-scraper
 ```
