@@ -2,8 +2,8 @@ import { Option } from "effect";
 import { Scene } from "foldkit";
 import { describe, test } from "vitest";
 
-import { ScrollActiveIntoView } from "./command";
-import { CompletedScrollActiveIntoView } from "./message";
+import { CreateAndAdd, ScrollActiveIntoView } from "./command";
+import { CompletedMutation, CompletedScrollActiveIntoView } from "./message";
 import { type AddTarget, type Model, PhaseValue, type RowId } from "./model";
 import { update } from "./update";
 import { view } from "./view";
@@ -95,6 +95,25 @@ describe("add-panel view", () => {
       // A partial match to an existing non-member auto-highlights nothing, so no
       // scroll Command is emitted.
       Scene.Command.expectNone(),
+    );
+  });
+
+  test("clicking the Create row creates and adds the target", () => {
+    Scene.scene(
+      { update, view },
+      Scene.with(loaded({ playlists: [], filter: "New Mix", activeId: Option.some("new") })),
+      Scene.click(Scene.text("Create “New Mix”")),
+      Scene.Command.expectHas(CreateAndAdd),
+      Scene.Command.resolve(
+        CreateAndAdd,
+        CompletedMutation({
+          forTarget: trackA,
+          playlists: [{ id: 7, name: "New Mix" }],
+          members: [{ playlistId: 7, itemId: 9 }],
+        }),
+      ),
+      Scene.expect(Scene.text("New Mix")).toExist(),
+      Scene.expect(Scene.text("✓")).toExist(),
     );
   });
 

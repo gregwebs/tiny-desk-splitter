@@ -238,6 +238,28 @@ describe("add-panel update", () => {
     );
   });
 
+  test("clicking the create row creates and adds the current target", () => {
+    Story.story(
+      update,
+      Story.with(loaded({ playlists: [], filter: "New Mix", activeId: Option.some("new") })),
+      Story.message(ClickedRow({ id: "new" })),
+      Story.Command.expectHas(CreateAndAdd),
+      Story.Command.resolve(
+        CreateAndAdd,
+        CompletedMutation({
+          forTarget: trackA,
+          playlists: [{ id: 7, name: "New Mix" }],
+          members: [{ playlistId: 7, itemId: 9 }],
+        }),
+      ),
+      Story.model((m) => {
+        const phase = asLoaded(m);
+        expect(phase.playlists).toContainEqual({ id: 7, name: "New Mix" });
+        expect(phase.members).toContainEqual({ playlistId: 7, itemId: 9 });
+      }),
+    );
+  });
+
   test("a stale CompletedMutation for a superseded target is ignored", () => {
     Story.story(
       update,
