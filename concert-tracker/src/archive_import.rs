@@ -98,7 +98,7 @@ fn import_one(
     let info: ArchiveJson = serde_json::from_str(&content)
         .with_context(|| format!("Bad JSON in {}", json_path.display()))?;
 
-    let concert = match db::get_concert_by_album(conn, &info.album)? {
+    let concert = match db::concerts::get_concert_by_album(conn, &info.album)? {
         Some(c) => c,
         None => return Ok(ImportResult::NotInDb(info.album)),
     };
@@ -109,10 +109,10 @@ fn import_one(
 
     if concert.metadata_scraped_at.is_none() {
         let set_list: Vec<String> = info.set_list.iter().map(|s| s.title.clone()).collect();
-        db::update_metadata(
+        db::concerts::update_metadata(
             conn,
             concert.id,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: info.artist.clone(),
                 album: info.album.clone(),
                 description: None,
@@ -123,10 +123,10 @@ fn import_one(
     }
 
     let mtime = dir_mtime(dir_path);
-    db::set_downloaded_at_if_missing(conn, concert.id, &mtime)?;
-    db::set_split_at_if_missing(conn, concert.id, &mtime)?;
+    db::lifecycle::set_downloaded_at_if_missing(conn, concert.id, &mtime)?;
+    db::lifecycle::set_split_at_if_missing(conn, concert.id, &mtime)?;
 
-    db::mark_archive_succeeded(conn, concert.id)?;
+    db::lifecycle::mark_archive_succeeded(conn, concert.id)?;
 
     let symlink_path = working_dir
         .join("concerts")
@@ -187,10 +187,10 @@ mod tests {
     use crate::db;
 
     fn setup_db_with_concert(album: &str) -> Connection {
-        let conn = db::open_in_memory().unwrap();
-        db::upsert_listing(
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
             &conn,
-            &db::NewListing {
+            &db::concerts::NewListing {
                 source_url: format!("https://npr.org/{}", album),
                 title: album.to_string(),
                 concert_date: Some("2024-01-01".to_string()),
@@ -198,10 +198,10 @@ mod tests {
             },
         )
         .unwrap();
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             1,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Test".to_string(),
                 album: album.to_string(),
                 description: None,
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(report.skipped, 0);
         assert!(report.errors.is_empty());
 
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.archived_at.is_some());
         assert!(c.downloaded_at.is_some());
         assert!(c.split_at.is_some());
@@ -290,7 +290,7 @@ mod tests {
         std::fs::write(concert_dir.join("info.json"), json.to_string()).unwrap();
 
         let working_dir = tmp.path().join("workdir");
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
 
         let report = import_archive(&conn, &archive_dir, &working_dir).unwrap();
         assert_eq!(report.imported, 0);

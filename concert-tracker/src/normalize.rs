@@ -35,7 +35,7 @@ pub fn normalize_metadata(
         return Ok(report);
     }
 
-    let concerts = db::list_concerts(conn)?;
+    let concerts = db::concerts::list_concerts(conn)?;
     let album_lookup: HashMap<String, &crate::model::Concert> = concerts
         .iter()
         .filter_map(|c| c.album.as_deref().map(|a| (sanitize_album(a), c)))
@@ -229,7 +229,7 @@ mod tests {
     fn setup_db() -> (TempDir, Connection) {
         let td = TempDir::new().unwrap();
         let db_path = td.path().join("test.db");
-        let conn = db::open(&db_path).unwrap();
+        let conn = db::connection::open(&db_path).unwrap();
         (td, conn)
     }
 

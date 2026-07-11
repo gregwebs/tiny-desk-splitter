@@ -5,7 +5,8 @@ use chrono::{Datelike, Month, Utc};
 use rusqlite::Connection;
 use tiny_desk_scraper::{fetch_archive_month, ConcertListing};
 
-use crate::db::{self, NewListing};
+use crate::db;
+use crate::db::concerts::NewListing;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct YearMonth {
@@ -81,9 +82,9 @@ impl YearMonth {
 }
 
 /// Build the set of fully synced months from the database (months synced only
-/// while still in progress are excluded; see `db::list_fully_synced_months`).
+/// while still in progress are excluded; see `db::sync::list_fully_synced_months`).
 pub fn synced_months_set(conn: &Connection) -> Result<HashSet<YearMonth>> {
-    let pairs = db::list_fully_synced_months(conn)?;
+    let pairs = db::sync::list_fully_synced_months(conn)?;
     Ok(pairs
         .into_iter()
         .map(|(y, m)| YearMonth { year: y, month: m })
@@ -155,7 +156,7 @@ pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<Vec<SyncedConcert
     }
 
     let synced = import_listings(conn, &kept)?;
-    db::mark_month_synced(conn, ym.year, ym.month)?;
+    db::sync::mark_month_synced(conn, ym.year, ym.month)?;
     Ok(synced)
 }
 
@@ -171,7 +172,7 @@ pub fn sync_month(conn: &Connection, ym: &YearMonth) -> Result<Vec<SyncedConcert
 fn import_listings(conn: &Connection, kept: &[ConcertListing]) -> Result<Vec<SyncedConcert>> {
     let mut synced = Vec::new();
     for listing in kept {
-        match db::get_concert_by_url(conn, &listing.url)? {
+        match db::concerts::get_concert_by_url(conn, &listing.url)? {
             // Already fully scraped: leave it completely untouched.
             Some(c) if c.metadata_scraped_at.is_some() => continue,
             // Present but not (successfully) scraped: don't overwrite its listing
@@ -183,7 +184,7 @@ fn import_listings(conn: &Connection, kept: &[ConcertListing]) -> Result<Vec<Syn
             }),
             // Brand new: insert (records an `Import` event), then read back for its id.
             None => {
-                db::upsert_listing(
+                db::concerts::upsert_listing(
                     conn,
                     &NewListing {
                         source_url: listing.url.clone(),
@@ -192,7 +193,7 @@ fn import_listings(conn: &Connection, kept: &[ConcertListing]) -> Result<Vec<Syn
                         teaser: (!listing.teaser.is_empty()).then(|| listing.teaser.clone()),
                     },
                 )?;
-                if let Some(c) = db::get_concert_by_url(conn, &listing.url)? {
+                if let Some(c) = db::concerts::get_concert_by_url(conn, &listing.url)? {
                     synced.push(SyncedConcert {
                         id: c.id,
                         source_url: c.source_url,
@@ -429,10 +430,10 @@ mod tests {
     // --- idempotent import --------------------------------------------------
 
     fn scrape(conn: &Connection, id: i64) {
-        db::update_metadata(
+        db::concerts::update_metadata(
             conn,
             id,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -445,17 +446,17 @@ mod tests {
 
     #[test]
     fn import_listings_inserts_new_and_returns_it_for_scrape() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let kept = vec![listing("https://npr.org/c/new", "New", "2026-05-20")];
         let synced = import_listings(&conn, &kept).unwrap();
         assert_eq!(synced.len(), 1);
         assert!(synced[0].metadata_scraped_at.is_none());
-        assert_eq!(db::list_concerts(&conn).unwrap().len(), 1);
+        assert_eq!(db::concerts::list_concerts(&conn).unwrap().len(), 1);
     }
 
     #[test]
     fn import_listings_inserts_undated_new_with_null_date_and_teaser() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         // An undated listing is kept by `listings_for_month` and inserted here;
         // empty date/teaser map to NULL (not the empty string).
         let kept = vec![ConcertListing {
@@ -466,7 +467,7 @@ mod tests {
         }];
         let synced = import_listings(&conn, &kept).unwrap();
         assert_eq!(synced.len(), 1);
-        let c = db::get_concert_by_url(&conn, "https://npr.org/c/nodate")
+        let c = db::concerts::get_concert_by_url(&conn, "https://npr.org/c/nodate")
             .unwrap()
             .unwrap();
         assert!(c.concert_date.is_none());
@@ -475,10 +476,10 @@ mod tests {
 
     #[test]
     fn import_listings_skips_existing_scraped_without_overwriting() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://npr.org/c/done";
         // Seed an existing, already-scraped concert with a clean title.
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             &conn,
             &NewListing {
                 source_url: url.to_string(),
@@ -488,7 +489,10 @@ mod tests {
             },
         )
         .unwrap();
-        let id = db::get_concert_by_url(&conn, url).unwrap().unwrap().id;
+        let id = db::concerts::get_concert_by_url(&conn, url)
+            .unwrap()
+            .unwrap()
+            .id;
         scrape(&conn, id);
 
         // A re-sync whose archive listing carries the raw title must NOT touch it.
@@ -496,16 +500,18 @@ mod tests {
         let synced = import_listings(&conn, &kept).unwrap();
 
         assert!(synced.is_empty(), "scraped concert is not re-queued");
-        let c = db::get_concert_by_url(&conn, url).unwrap().unwrap();
+        let c = db::concerts::get_concert_by_url(&conn, url)
+            .unwrap()
+            .unwrap();
         assert_eq!(c.title, "Clean Title", "listing fields preserved");
         assert!(c.metadata_scraped_at.is_some());
     }
 
     #[test]
     fn import_listings_requeues_existing_unscraped_without_overwriting() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://npr.org/c/halfdone";
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             &conn,
             &NewListing {
                 source_url: url.to_string(),
@@ -515,7 +521,10 @@ mod tests {
             },
         )
         .unwrap();
-        let original_id = db::get_concert_by_url(&conn, url).unwrap().unwrap().id;
+        let original_id = db::concerts::get_concert_by_url(&conn, url)
+            .unwrap()
+            .unwrap()
+            .id;
 
         // Existing but never scraped (e.g. a prior NAS-write failure) → retried.
         let kept = vec![listing(url, "Raw Title: Tiny Desk Concert", "2026-05-20")];
@@ -527,11 +536,13 @@ mod tests {
             "same row, not a duplicate import"
         );
         assert!(synced[0].metadata_scraped_at.is_none());
-        let c = db::get_concert_by_url(&conn, url).unwrap().unwrap();
+        let c = db::concerts::get_concert_by_url(&conn, url)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             c.title, "Original Title",
             "listing fields untouched on retry"
         );
-        assert_eq!(db::list_concerts(&conn).unwrap().len(), 1);
+        assert_eq!(db::concerts::list_concerts(&conn).unwrap().len(), 1);
     }
 }

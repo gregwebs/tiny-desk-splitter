@@ -65,7 +65,7 @@ pub fn delete_download(
     id: i64,
     force: bool,
 ) -> Result<DeleteDownloadOutcome> {
-    let concert = db::get_concert(conn, id)?;
+    let concert = db::concerts::get_concert(conn, id)?;
     if concert.downloaded_at.is_none() {
         return Ok(DeleteDownloadOutcome::NotDownloaded);
     }
@@ -84,7 +84,7 @@ pub fn delete_download(
         removed_file = Some(path);
     }
 
-    db::clear_download_state(conn, id)?;
+    db::lifecycle::clear_download_state(conn, id)?;
     Ok(DeleteDownloadOutcome::Deleted { removed_file })
 }
 
@@ -93,9 +93,9 @@ pub fn delete_redundant_source(
     working_dir: &Path,
     id: i64,
 ) -> Result<DeleteRedundantSourceOutcome> {
-    let concert = db::get_concert(conn, id)?;
+    let concert = db::concerts::get_concert(conn, id)?;
     let album = concert.album.as_deref().unwrap_or("");
-    let stored_ts = db::get_split_timestamps(conn, id)?.user;
+    let stored_ts = db::split_timestamps::get_split_timestamps(conn, id)?.user;
     let is_redundant = source_redundant(
         working_dir,
         album,
@@ -116,7 +116,7 @@ pub fn delete_redundant_source(
             .with_context(|| format!("Failed to remove {}", path.display()))?;
     }
 
-    db::clear_download_state(conn, id)?;
+    db::lifecycle::clear_download_state(conn, id)?;
     events::record_now(conn, id, Event::SourceRedundantDelete, None);
     Ok(DeleteRedundantSourceOutcome::Deleted {
         removed_file: source_path,
@@ -124,13 +124,13 @@ pub fn delete_redundant_source(
 }
 
 pub fn delete_split(conn: &Connection, id: i64) -> Result<DeleteSplitOutcome> {
-    let concert = db::get_concert(conn, id)?;
+    let concert = db::concerts::get_concert(conn, id)?;
     let has_split_error = !concert.split_errors.is_empty();
     if concert.split_at.is_none() && !has_split_error {
         return Ok(DeleteSplitOutcome::NoSplitState);
     }
 
-    db::clear_split_state(conn, id)?;
+    db::lifecycle::clear_split_state(conn, id)?;
     Ok(DeleteSplitOutcome::Deleted)
 }
 
@@ -140,7 +140,7 @@ pub fn delete_track(
     id: i64,
     track_index: usize,
 ) -> Result<DeleteTrackOutcome> {
-    let concert = db::get_concert(conn, id)?;
+    let concert = db::concerts::get_concert(conn, id)?;
     let track_title = concert
         .set_list
         .get(track_index)
@@ -186,9 +186,9 @@ pub fn delete_track(
 
     let split_cleared = tracks_present.iter().all(|present| !present);
     if split_cleared {
-        db::clear_split_state(conn, id)?;
+        db::lifecycle::clear_split_state(conn, id)?;
     } else {
-        db::set_tracks_present(conn, id, &tracks_present)?;
+        db::split_timestamps::set_tracks_present(conn, id, &tracks_present)?;
     }
 
     Ok(DeleteTrackOutcome {
@@ -230,17 +230,17 @@ pub fn cancel_job(
 pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<InProgressFailureCount> {
     let download_ids = ids_with_column(conn, "download_started_at")?;
     for id in &download_ids {
-        db::mark_download_failed(conn, *id, error)?;
+        db::lifecycle::mark_download_failed(conn, *id, error)?;
     }
 
     let split_ids = ids_with_column(conn, "split_started_at")?;
     for id in &split_ids {
-        db::mark_split_failed(conn, *id, error)?;
+        db::lifecycle::mark_split_failed(conn, *id, error)?;
     }
 
     let archive_ids = ids_with_column(conn, "archive_started_at")?;
     for id in &archive_ids {
-        db::mark_archive_failed(conn, *id, error)?;
+        db::lifecycle::mark_archive_failed(conn, *id, error)?;
     }
 
     Ok(InProgressFailureCount {
@@ -263,9 +263,9 @@ pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
 
 fn mark_job_failed(conn: &Connection, id: i64, job_kind: JobKind, error: &str) -> Result<()> {
     match job_kind {
-        JobKind::Download => db::mark_download_failed(conn, id, error),
-        JobKind::Split => db::mark_split_failed(conn, id, error),
-        JobKind::Archive => db::mark_archive_failed(conn, id, error),
+        JobKind::Download => db::lifecycle::mark_download_failed(conn, id, error),
+        JobKind::Split => db::lifecycle::mark_split_failed(conn, id, error),
+        JobKind::Archive => db::lifecycle::mark_archive_failed(conn, id, error),
     }
 }
 
@@ -298,12 +298,12 @@ mod tests {
     use std::fs;
     use tokio::sync::oneshot;
 
-    use crate::db::{MetadataUpdate, NewListing};
+    use crate::db::concerts::{MetadataUpdate, NewListing};
     use crate::model::{concert_dir, sanitize_filename};
 
     fn insert_concert(conn: &Connection, album: &str, tracks: &[&str]) -> i64 {
         let source_url = format!("https://example.test/{album}");
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             conn,
             &NewListing {
                 source_url: source_url.clone(),
@@ -320,7 +320,7 @@ mod tests {
                 |row| row.get::<_, i64>(0),
             )
             .unwrap();
-        db::update_metadata(
+        db::concerts::update_metadata(
             conn,
             id,
             &MetadataUpdate {
@@ -360,13 +360,13 @@ mod tests {
 
     #[test]
     fn delete_download_preserves_split_state() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let id = insert_concert(&conn, "Album", &["One", "Two"]);
         let source = downloaded_file(dir.path(), "Album");
-        db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        db::mark_split_succeeded(&conn, id).unwrap();
-        db::set_tracks_present(&conn, id, &[true, true]).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true, true]).unwrap();
 
         let outcome = delete_download(&conn, dir.path(), id, false).unwrap();
 
@@ -376,7 +376,7 @@ mod tests {
                 removed_file: Some(source)
             }
         );
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.downloaded_at.is_none());
         assert!(concert.split_at.is_some());
         assert_eq!(concert.tracks_present, vec![true, true]);
@@ -385,13 +385,13 @@ mod tests {
 
     #[test]
     fn delete_redundant_source_requires_coverage_and_records_both_events() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let id = insert_concert(&conn, "Album", &["One"]);
         let source = downloaded_file(dir.path(), "Album");
-        db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        db::set_tracks_present(&conn, id, &[true]).unwrap();
-        db::set_media_duration(&conn, id, 10.0).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true]).unwrap();
+        db::split_timestamps::set_media_duration(&conn, id, 10.0).unwrap();
 
         assert_eq!(
             delete_redundant_source(&conn, dir.path(), id).unwrap(),
@@ -424,13 +424,13 @@ mod tests {
 
     #[test]
     fn delete_redundant_source_is_not_redundant_once_source_is_already_gone() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let id = insert_concert(&conn, "Album", &["One"]);
         downloaded_file(dir.path(), "Album");
-        db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        db::set_tracks_present(&conn, id, &[true]).unwrap();
-        db::set_media_duration(&conn, id, 10.0).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true]).unwrap();
+        db::split_timestamps::set_media_duration(&conn, id, 10.0).unwrap();
         let timestamps = serde_json::to_string(&vec![concert_types::SongTimestamp {
             title: "One".to_string(),
             start_time: 0.0,
@@ -459,19 +459,19 @@ mod tests {
 
     #[test]
     fn delete_split_clears_tracks_present_and_split_errors() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = insert_concert(&conn, "Album", &["One"]);
-        db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        db::mark_split_succeeded(&conn, id).unwrap();
-        db::set_tracks_present(&conn, id, &[true]).unwrap();
-        db::mark_split_failed(&conn, id, "bad split").unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true]).unwrap();
+        db::lifecycle::mark_split_failed(&conn, id, "bad split").unwrap();
 
         assert_eq!(
             delete_split(&conn, id).unwrap(),
             DeleteSplitOutcome::Deleted
         );
 
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.split_at.is_none());
         assert!(concert.split_started_at.is_none());
         assert!(concert.tracks_present.is_empty());
@@ -480,37 +480,37 @@ mod tests {
 
     #[test]
     fn delete_track_clears_split_only_when_last_present_track_is_removed() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let id = insert_concert(&conn, "Album", &["One", "Two"]);
         track_file(dir.path(), "Album", "One", "mp4");
         track_file(dir.path(), "Album", "Two", "m4a");
-        db::mark_split_succeeded(&conn, id).unwrap();
-        db::set_tracks_present(&conn, id, &[true, true]).unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true, true]).unwrap();
 
         let first = delete_track(&conn, dir.path(), id, 0).unwrap();
         assert!(!first.split_cleared);
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.split_at.is_some());
         assert_eq!(concert.tracks_present, vec![false, true]);
 
         let second = delete_track(&conn, dir.path(), id, 1).unwrap();
         assert!(second.split_cleared);
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.split_at.is_none());
         assert!(concert.tracks_present.is_empty());
     }
 
     #[tokio::test]
     async fn cancel_distinguishes_running_queued_stale_and_absent_jobs() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
         let running_id = insert_concert(&conn, "Running", &["One"]);
         let queued_id = insert_concert(&conn, "Queued", &["One"]);
         let stale_id = insert_concert(&conn, "Stale", &["One"]);
         let absent_id = insert_concert(&conn, "Absent", &["One"]);
 
-        db::try_mark_download_started(&conn, running_id).unwrap();
+        db::lifecycle::try_mark_download_started(&conn, running_id).unwrap();
         let (_tx, rx) = oneshot::channel::<()>();
         registry.insert(
             JobKey {
@@ -533,8 +533,8 @@ mod tests {
             },
         );
 
-        db::mark_download_succeeded(&conn, stale_id, "mp4").unwrap();
-        db::try_mark_split_started(&conn, stale_id).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, stale_id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, stale_id).unwrap();
 
         assert_eq!(
             cancel_job(&conn, &registry, queued_id, JobKind::Split).unwrap(),
@@ -553,11 +553,11 @@ mod tests {
             CancelJobOutcome::NoSuchActiveJob
         );
 
-        assert!(db::get_concert(&conn, running_id)
+        assert!(db::concerts::get_concert(&conn, running_id)
             .unwrap()
             .download_started_at
             .is_none());
-        assert!(db::get_concert(&conn, stale_id)
+        assert!(db::concerts::get_concert(&conn, stale_id)
             .unwrap()
             .split_started_at
             .is_none());
@@ -565,15 +565,15 @@ mod tests {
 
     #[test]
     fn restart_recovery_marks_stale_download_split_and_archive_jobs_failed() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let download_id = insert_concert(&conn, "Download", &["One"]);
         let split_id = insert_concert(&conn, "Split", &["One"]);
         let archive_id = insert_concert(&conn, "Archive", &["One"]);
 
-        db::try_mark_download_started(&conn, download_id).unwrap();
-        db::mark_download_succeeded(&conn, split_id, "mp4").unwrap();
-        db::try_mark_split_started(&conn, split_id).unwrap();
-        db::try_mark_archive_started(&conn, archive_id).unwrap();
+        db::lifecycle::try_mark_download_started(&conn, download_id).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, split_id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, split_id).unwrap();
+        db::lifecycle::try_mark_archive_started(&conn, archive_id).unwrap();
 
         let counts = fail_in_progress_jobs(&conn, "server restarted").unwrap();
 
@@ -586,15 +586,24 @@ mod tests {
             }
         );
         assert_eq!(
-            db::get_concert(&conn, download_id).unwrap().download_errors[0].error,
+            db::concerts::get_concert(&conn, download_id)
+                .unwrap()
+                .download_errors[0]
+                .error,
             "server restarted"
         );
         assert_eq!(
-            db::get_concert(&conn, split_id).unwrap().split_errors[0].error,
+            db::concerts::get_concert(&conn, split_id)
+                .unwrap()
+                .split_errors[0]
+                .error,
             "server restarted"
         );
         assert_eq!(
-            db::get_concert(&conn, archive_id).unwrap().archive_errors[0].error,
+            db::concerts::get_concert(&conn, archive_id)
+                .unwrap()
+                .archive_errors[0]
+                .error,
             "server restarted"
         );
     }

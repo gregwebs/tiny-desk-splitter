@@ -41,7 +41,7 @@ fn expand_inner(
     }
 
     let mut out = Vec::new();
-    for item in db::list_playlist_items(conn, playlist_id)? {
+    for item in db::playlists::list_playlist_items(conn, playlist_id)? {
         match item.kind {
             PlaylistItemKind::Track {
                 concert_id,
@@ -77,14 +77,14 @@ fn resolve_track(
     track_index: usize,
 ) -> Result<Option<ResolvedTrack>> {
     // Genuinely-missing concert → skip (None); a real DB error propagates.
-    let concert = match db::get_concert_opt(conn, concert_id)? {
+    let concert = match db::concerts::get_concert_opt(conn, concert_id)? {
         Some(c) => c,
         None => return Ok(None),
     };
     if track_index >= concert.set_list.len() {
         return Ok(None);
     }
-    let durations = db::track_durations(conn, concert_id)?;
+    let durations = db::split_timestamps::track_durations(conn, concert_id)?;
     Ok(Some(ResolvedTrack {
         concert_id,
         track_index,
@@ -102,11 +102,11 @@ fn resolve_track(
 /// concert + one for its durations, shared across the tracks).
 fn resolve_concert(conn: &Connection, concert_id: i64) -> Result<Vec<ResolvedTrack>> {
     // Genuinely-missing concert → no tracks; a real DB error propagates.
-    let concert = match db::get_concert_opt(conn, concert_id)? {
+    let concert = match db::concerts::get_concert_opt(conn, concert_id)? {
         Some(c) => c,
         None => return Ok(Vec::new()),
     };
-    let durations = db::track_durations(conn, concert_id)?;
+    let durations = db::split_timestamps::track_durations(conn, concert_id)?;
     let tracks = model::list_all_tracks_from_db(
         &concert.set_list,
         &concert.tracks_present,
@@ -149,11 +149,12 @@ pub fn summarize_playlist(conn: &Connection, playlist_id: i64) -> Result<Playlis
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::db;
+    use crate::db::concerts::{MetadataUpdate, NewListing};
     use crate::model::PlaylistItemKind;
 
     fn seed_concert(conn: &Connection, url: &str, title: &str, set_list: &[&str]) -> i64 {
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             conn,
             &NewListing {
                 source_url: url.to_string(),
@@ -163,8 +164,11 @@ mod tests {
             },
         )
         .unwrap();
-        let id = db::get_concert_by_url(conn, url).unwrap().unwrap().id;
-        db::update_metadata(
+        let id = db::concerts::get_concert_by_url(conn, url)
+            .unwrap()
+            .unwrap()
+            .id;
+        db::concerts::update_metadata(
             conn,
             id,
             &MetadataUpdate {
@@ -190,13 +194,13 @@ mod tests {
 
     #[test]
     fn flattens_track_concert_and_nested_playlist_in_order() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let a = seed_concert(&conn, "https://npr.org/a", "A", &["a0", "a1"]);
         let b = seed_concert(&conn, "https://npr.org/b", "B", &["b0", "b1", "b2"]);
-        db::set_tracks_present(&conn, a, &[true, true]).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, a, &[true, true]).unwrap();
 
-        let child = db::create_playlist(&conn, "Child", None).unwrap();
-        db::add_playlist_item(
+        let child = db::playlists::create_playlist(&conn, "Child", None).unwrap();
+        db::playlists::add_playlist_item(
             &conn,
             child,
             &PlaylistItemKind::Track {
@@ -206,8 +210,8 @@ mod tests {
         )
         .unwrap();
 
-        let pl = db::create_playlist(&conn, "Parent", None).unwrap();
-        db::add_playlist_item(
+        let pl = db::playlists::create_playlist(&conn, "Parent", None).unwrap();
+        db::playlists::add_playlist_item(
             &conn,
             pl,
             &PlaylistItemKind::Track {
@@ -216,8 +220,9 @@ mod tests {
             },
         )
         .unwrap();
-        db::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: b }).unwrap();
-        db::add_playlist_item(
+        db::playlists::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: b })
+            .unwrap();
+        db::playlists::add_playlist_item(
             &conn,
             pl,
             &PlaylistItemKind::Playlist {
@@ -248,11 +253,11 @@ mod tests {
 
     #[test]
     fn track_item_out_of_range_after_shrink_is_skipped_not_errored() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let c = seed_concert(&conn, "https://npr.org/a", "A", &["t0", "t1", "t2"]);
-        let pl = db::create_playlist(&conn, "P", None).unwrap();
+        let pl = db::playlists::create_playlist(&conn, "P", None).unwrap();
         // Valid at add-time (index 2 of 3).
-        db::add_playlist_item(
+        db::playlists::add_playlist_item(
             &conn,
             pl,
             &PlaylistItemKind::Track {
@@ -261,7 +266,7 @@ mod tests {
             },
         )
         .unwrap();
-        db::add_playlist_item(
+        db::playlists::add_playlist_item(
             &conn,
             pl,
             &PlaylistItemKind::Track {
@@ -272,7 +277,7 @@ mod tests {
         .unwrap();
 
         // Re-scrape shrinks the set list to one track, orphaning index 2.
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             c,
             &MetadataUpdate {
@@ -294,16 +299,22 @@ mod tests {
 
     #[test]
     fn summary_sums_known_and_counts_unknown() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         // A has durations; B has none.
         let a = seed_concert(&conn, "https://npr.org/a", "A", &["a0", "a1"]);
         let b = seed_concert(&conn, "https://npr.org/b", "B", &["b0"]);
-        db::set_auto_split_timestamps(&conn, a, &[ts("a0", 0.0, 10.0), ts("a1", 10.0, 30.0)])
-            .unwrap();
+        db::split_timestamps::set_auto_split_timestamps(
+            &conn,
+            a,
+            &[ts("a0", 0.0, 10.0), ts("a1", 10.0, 30.0)],
+        )
+        .unwrap();
 
-        let pl = db::create_playlist(&conn, "P", None).unwrap();
-        db::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: a }).unwrap();
-        db::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: b }).unwrap();
+        let pl = db::playlists::create_playlist(&conn, "P", None).unwrap();
+        db::playlists::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: a })
+            .unwrap();
+        db::playlists::add_playlist_item(&conn, pl, &PlaylistItemKind::Concert { concert_id: b })
+            .unwrap();
 
         let s = summarize_playlist(&conn, pl).unwrap();
         assert_eq!(s.track_count, 3);
@@ -314,8 +325,8 @@ mod tests {
 
     #[test]
     fn empty_playlist_summarizes_to_zero() {
-        let conn = db::open_in_memory().unwrap();
-        let pl = db::create_playlist(&conn, "Empty", None).unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let pl = db::playlists::create_playlist(&conn, "Empty", None).unwrap();
         let s = summarize_playlist(&conn, pl).unwrap();
         assert_eq!(s.track_count, 0);
         assert_eq!(s.known_duration_secs, 0.0);

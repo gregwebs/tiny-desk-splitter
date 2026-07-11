@@ -36,7 +36,7 @@ pub async fn start_archive(
 
     let (album, title) = {
         let conn = db.lock().unwrap();
-        let concert = db::get_concert(&conn, concert_id)?;
+        let concert = db::concerts::get_concert(&conn, concert_id)?;
         if concert.downloaded_at.is_none() && concert.split_at.is_none() {
             return Ok(StartOutcome::NothingToArchive);
         }
@@ -48,7 +48,7 @@ pub async fn start_archive(
 
     {
         let conn = db.lock().unwrap();
-        if !db::try_mark_archive_started(&conn, concert_id)? {
+        if !db::lifecycle::try_mark_archive_started(&conn, concert_id)? {
             tracing::info!("archive already running for concert {}", concert_id);
             return Ok(StartOutcome::AlreadyRunning);
         }
@@ -82,21 +82,21 @@ async fn run_archive(db: Arc<Mutex<Connection>>, job: ArchiveJob) {
         Ok(Ok(())) => {
             tracing::info!("archive completed for concert {}", concert_id);
             let conn = db.lock().unwrap();
-            let _ = db::mark_archive_succeeded(&conn, concert_id);
+            let _ = db::lifecycle::mark_archive_succeeded(&conn, concert_id);
         }
         Ok(Err(e)) => {
             let error = format!("{:#}", e);
             tracing::warn!("archive failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
-            let _ = db::mark_archive_failed(&conn, concert_id, &error);
-            let _ = db::insert_failed_job(&conn, concert_id, "archive", &error);
+            let _ = db::lifecycle::mark_archive_failed(&conn, concert_id, &error);
+            let _ = db::failed_jobs::insert_failed_job(&conn, concert_id, "archive", &error);
         }
         Err(e) => {
             let error = format!("task panicked: {}", e);
             tracing::warn!("archive failed for concert {}: {}", concert_id, error);
             let conn = db.lock().unwrap();
-            let _ = db::mark_archive_failed(&conn, concert_id, &error);
-            let _ = db::insert_failed_job(&conn, concert_id, "archive", &error);
+            let _ = db::lifecycle::mark_archive_failed(&conn, concert_id, &error);
+            let _ = db::failed_jobs::insert_failed_job(&conn, concert_id, "archive", &error);
         }
     }
 }

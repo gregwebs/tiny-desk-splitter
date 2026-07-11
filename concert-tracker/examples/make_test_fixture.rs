@@ -13,7 +13,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-use concert_tracker::db::{self, MetadataUpdate, NewListing};
+use concert_tracker::db;
+use concert_tracker::db::concerts::{MetadataUpdate, NewListing};
 use concert_tracker::model::{concert_dir, sanitize_album, sanitize_filename};
 use concert_tracker::scrape::{ensure_thumbnail, preview_image_path};
 
@@ -176,7 +177,7 @@ fn main() -> Result<()> {
     // Start from a clean slate so autoincrement ids are deterministic (1..=N).
     let _ = std::fs::remove_file(&db_path);
     std::fs::create_dir_all(&workdir).context("create workdir")?;
-    let conn = db::open(&db_path).context("open fixture db")?;
+    let conn = db::connection::open(&db_path).context("open fixture db")?;
 
     for (i, fc) in fixtures().into_iter().enumerate() {
         let expected_id = (i + 1) as i64;
@@ -186,7 +187,7 @@ fn main() -> Result<()> {
     // A representative failed background metadata scrape (e.g. an archived-NAS
     // write failure) so the Jobs page has a "Scrape" failed-job row for e2e to
     // assert on.
-    db::insert_failed_job(
+    db::failed_jobs::insert_failed_job(
         &conn,
         1,
         concert_tracker::jobs::scrape_queue::SCRAPE_JOB_NAME,
@@ -233,7 +234,7 @@ fn build_concert(
     fc: &FixtureConcert,
     expected_id: i64,
 ) -> Result<()> {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: fc.url.to_string(),
@@ -242,7 +243,7 @@ fn build_concert(
             teaser: Some(format!("{} teaser", fc.title)),
         },
     )?;
-    let concert = db::get_concert_by_url(conn, fc.url)?
+    let concert = db::concerts::get_concert_by_url(conn, fc.url)?
         .with_context(|| format!("concert {} missing after upsert", fc.url))?;
     // Deterministic ids are load-bearing: the specs reference #concert-1..5.
     if concert.id != expected_id {
@@ -256,7 +257,7 @@ fn build_concert(
     let id = concert.id;
 
     // Sets metadata_scraped_at, so preview/thumbnail URLs render in the UI.
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         id,
         &MetadataUpdate {
@@ -267,19 +268,19 @@ fn build_concert(
             musicians: vec![],
         },
     )?;
-    db::try_mark_download_started(conn, id)?;
-    db::mark_download_succeeded(conn, id, "wav")?;
+    db::lifecycle::try_mark_download_started(conn, id)?;
+    db::lifecycle::mark_download_succeeded(conn, id, "wav")?;
     if fc.split {
-        db::try_mark_split_started(conn, id)?;
-        db::mark_split_succeeded(conn, id)?;
+        db::lifecycle::try_mark_split_started(conn, id)?;
+        db::lifecycle::mark_split_succeeded(conn, id)?;
         let tracks_present: Vec<bool> = fc.tracks.iter().map(|t| t.present).collect();
-        db::set_tracks_present(conn, id, &tracks_present)?;
+        db::split_timestamps::set_tracks_present(conn, id, &tracks_present)?;
         // Seed automated split timestamps (one contiguous segment per set-list
         // song, spread over the ~20s full-concert file with a margin under its
         // duration) so the splitter editor has data to load.
-        db::set_auto_split_timestamps(conn, id, &auto_timestamps(fc))?;
+        db::split_timestamps::set_auto_split_timestamps(conn, id, &auto_timestamps(fc))?;
     }
-    db::set_tracks_liked(conn, id, &fc.liked)?;
+    db::split_timestamps::set_tracks_liked(conn, id, &fc.liked)?;
     // Record a delete event for each absent track so the track list shows it
     // unavailable, mirroring the post-delete_track state in production.
     for (idx, t) in fc.tracks.iter().enumerate() {

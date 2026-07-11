@@ -18,7 +18,7 @@ pub struct ScanReport {
 /// Scan a directory for existing MP4 downloads and split directories.
 /// Sets downloaded_at / split_at timestamps from filesystem mtimes when missing.
 pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
-    let concerts = db::list_concerts(conn)?;
+    let concerts = db::concerts::list_concerts(conn)?;
     let mut report = ScanReport {
         downloads_found: 0,
         splits_found: 0,
@@ -35,12 +35,12 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
         if mp4_path.exists() {
             match mtime_iso(&mp4_path) {
                 Ok(at) => {
-                    db::set_downloaded_at_if_missing(conn, concert.id, &at)?;
+                    db::lifecycle::set_downloaded_at_if_missing(conn, concert.id, &at)?;
                     let ext = mp4_path
                         .extension()
                         .and_then(|e| e.to_str())
                         .unwrap_or("mp4");
-                    db::set_downloaded_extension_if_missing(conn, concert.id, ext)?;
+                    db::lifecycle::set_downloaded_extension_if_missing(conn, concert.id, ext)?;
                     report.downloads_found += 1;
                 }
                 Err(e) => report.errors.push(format!("{}: {}", mp4_path.display(), e)),
@@ -51,10 +51,10 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
         if split_dir.exists() && has_split_tracks(&split_dir, &album) {
             match mtime_iso(&split_dir) {
                 Ok(at) => {
-                    db::set_split_at_if_missing(conn, concert.id, &at)?;
+                    db::lifecycle::set_split_at_if_missing(conn, concert.id, &at)?;
                     if concert.tracks_present.is_empty() && !concert.set_list.is_empty() {
                         let present = tracks_present_on_disk(dir, &album, &concert.set_list);
-                        db::set_tracks_present(conn, concert.id, &present)?;
+                        db::split_timestamps::set_tracks_present(conn, concert.id, &present)?;
                     }
                     report.splits_found += 1;
                 }
@@ -102,7 +102,7 @@ pub fn has_split_tracks(dir: &Path, album: &str) -> bool {
 }
 
 pub fn backfill_tracks_present(conn: &Connection, working_dir: &Path) -> usize {
-    let concerts = match db::list_concerts_needing_tracks_backfill(conn) {
+    let concerts = match db::split_timestamps::list_concerts_needing_tracks_backfill(conn) {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!("tracks_present backfill query failed: {}", e);
@@ -113,7 +113,7 @@ pub fn backfill_tracks_present(conn: &Connection, working_dir: &Path) -> usize {
     for c in &concerts {
         if let Some(album) = c.album.as_deref() {
             let present = tracks_present_on_disk(working_dir, album, &c.set_list);
-            if db::set_tracks_present(conn, c.id, &present).is_ok() {
+            if db::split_timestamps::set_tracks_present(conn, c.id, &present).is_ok() {
                 count += 1;
             }
         }
@@ -147,7 +147,7 @@ pub fn backfill_media_duration(
     working_dir: &Path,
     apply: bool,
 ) -> Result<MediaDurationBackfillReport> {
-    let concerts = db::list_concerts_missing_media_duration(conn)?;
+    let concerts = db::split_timestamps::list_concerts_missing_media_duration(conn)?;
     let mut report = MediaDurationBackfillReport {
         planned: Vec::new(),
         skipped: Vec::new(),
@@ -168,7 +168,7 @@ pub fn backfill_media_duration(
 
         // Timestamps, in priority order: user split -> automated split (DB) ->
         // automated split (on-disk timestamps.json, lazy backfill).
-        let stored = match db::get_split_timestamps(conn, c.id) {
+        let stored = match db::split_timestamps::get_split_timestamps(conn, c.id) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
@@ -214,7 +214,7 @@ pub fn backfill_media_duration(
         match decide_backfill_duration(source, timestamps.as_deref(), track_durations.as_deref()) {
             Some((duration, source_kind)) => {
                 if apply {
-                    if let Err(e) = db::set_media_duration(conn, c.id, duration) {
+                    if let Err(e) = db::split_timestamps::set_media_duration(conn, c.id, duration) {
                         tracing::warn!(
                             "media_duration backfill: failed to write concert {}: {}",
                             c.id,
@@ -289,7 +289,8 @@ pub fn ffprobe_duration_sync(path: &Path) -> Result<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::db;
+    use crate::db::concerts::{MetadataUpdate, NewListing};
     use std::fs;
     use tempfile::TempDir;
 
@@ -298,7 +299,7 @@ mod tests {
     }
 
     fn seed_concert_with_album(conn: &rusqlite::Connection, url: &str, album: &str) -> i64 {
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             conn,
             &NewListing {
                 source_url: url.to_string(),
@@ -308,8 +309,10 @@ mod tests {
             },
         )
         .unwrap();
-        let c = db::get_concert_by_url(conn, url).unwrap().unwrap();
-        db::update_metadata(
+        let c = db::concerts::get_concert_by_url(conn, url)
+            .unwrap()
+            .unwrap();
+        db::concerts::update_metadata(
             conn,
             c.id,
             &MetadataUpdate {
@@ -395,7 +398,7 @@ mod tests {
     #[test]
     fn scan_detects_mp4_and_sets_downloaded_at() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/1", "Test Album");
         let cd = make_concert_dir(dir.path(), "Test Album");
         fs::write(cd.join("Test Album.mp4"), b"fake mp4").unwrap();
@@ -403,27 +406,33 @@ mod tests {
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.downloads_found, 1);
         assert!(report.errors.is_empty());
-        assert!(db::get_concert(&conn, id).unwrap().downloaded_at.is_some());
+        assert!(db::concerts::get_concert(&conn, id)
+            .unwrap()
+            .downloaded_at
+            .is_some());
     }
 
     #[test]
     fn scan_detects_split_dir_and_sets_split_at() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/2", "Split Album");
         let cd = make_concert_dir(dir.path(), "Split Album");
         fs::write(cd.join("01 - Track.mp3"), b"").unwrap();
 
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.splits_found, 1);
-        assert!(db::get_concert(&conn, id).unwrap().split_at.is_some());
+        assert!(db::concerts::get_concert(&conn, id)
+            .unwrap()
+            .split_at
+            .is_some());
     }
 
     #[test]
     fn scan_skips_concerts_without_album() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
-        db::upsert_listing(
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
             &conn,
             &NewListing {
                 source_url: "https://npr.org/c/noalbum".to_string(),
@@ -442,21 +451,21 @@ mod tests {
     #[test]
     fn scan_does_not_overwrite_existing_downloaded_at() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/3", "Existing Download");
-        db::set_downloaded_at_if_missing(&conn, id, "2020-01-01T00:00:00Z").unwrap();
+        db::lifecycle::set_downloaded_at_if_missing(&conn, id, "2020-01-01T00:00:00Z").unwrap();
         let cd = make_concert_dir(dir.path(), "Existing Download");
         fs::write(cd.join("Existing Download.mp4"), b"").unwrap();
 
         scan(&conn, dir.path()).unwrap();
-        let c = db::get_concert(&conn, id).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert_eq!(c.downloaded_at, Some("2020-01-01T00:00:00Z".to_string()));
     }
 
     #[test]
     fn scan_does_not_count_split_when_only_full_mp4_present() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_concert_with_album(&conn, "https://npr.org/c/4", "Just Downloaded");
         let cd = make_concert_dir(dir.path(), "Just Downloaded");
         fs::write(cd.join("Just Downloaded.mp4"), b"").unwrap();
@@ -464,7 +473,10 @@ mod tests {
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.downloads_found, 1);
         assert_eq!(report.splits_found, 0);
-        assert!(db::get_concert(&conn, id).unwrap().split_at.is_none());
+        assert!(db::concerts::get_concert(&conn, id)
+            .unwrap()
+            .split_at
+            .is_none());
     }
 
     // ── backfill_media_duration tests ─────────────────────────────────────────
@@ -498,10 +510,10 @@ mod tests {
         songs: &[&str],
     ) -> i64 {
         let id = seed_concert_with_album(conn, url, album);
-        db::update_metadata(
+        db::concerts::update_metadata(
             conn,
             id,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: album.to_string(),
                 description: None,
@@ -516,7 +528,7 @@ mod tests {
     #[test]
     fn backfill_media_duration_ffprobes_present_source() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(&conn, "https://npr.org/m/1", "Probe Album", &[]);
         let cd = make_concert_dir(dir.path(), "Probe Album");
         let source = cd.join("Probe Album.m4a");
@@ -535,7 +547,7 @@ mod tests {
             report.planned[0].duration
         );
 
-        let c = db::get_concert(&conn, id).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         let stored = c.media_duration.expect("media_duration should be set");
         assert!((stored - 5.0).abs() < 0.5);
     }
@@ -543,7 +555,7 @@ mod tests {
     #[test]
     fn backfill_media_duration_absent_source_uses_stored_auto_timestamps() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(
             &conn,
             "https://npr.org/m/2",
@@ -565,7 +577,7 @@ mod tests {
                 duration: 65.0,
             },
         ];
-        db::set_auto_split_timestamps(&conn, id, &ts).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &ts).unwrap();
 
         let report = backfill_media_duration(&conn, dir.path(), true).unwrap();
         assert_eq!(report.skipped, Vec::new());
@@ -573,7 +585,7 @@ mod tests {
         assert_eq!(report.planned[0].source, DurationSource::Timestamps);
         assert_eq!(report.planned[0].duration, 120.0);
         assert_eq!(
-            db::get_concert(&conn, id).unwrap().media_duration,
+            db::concerts::get_concert(&conn, id).unwrap().media_duration,
             Some(120.0)
         );
     }
@@ -581,14 +593,14 @@ mod tests {
     #[test]
     fn backfill_media_duration_absent_source_no_timestamps_sums_tracks() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(
             &conn,
             "https://npr.org/m/3",
             "TrackSum Album",
             &["Song A", "Song B"],
         );
-        db::set_tracks_present(&conn, id, &[true, true]).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true, true]).unwrap();
         let cd = make_concert_dir(dir.path(), "TrackSum Album");
         if !create_test_audio_sync(&cd.join("Song A.m4a"), 3)
             || !create_test_audio_sync(&cd.join("Song B.m4a"), 4)
@@ -611,7 +623,7 @@ mod tests {
     #[test]
     fn backfill_media_duration_skips_when_track_set_incomplete() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(
             &conn,
             "https://npr.org/m/4",
@@ -619,7 +631,7 @@ mod tests {
             &["Song A", "Song B"],
         );
         // tracks_present says both are there, but only one file actually exists.
-        db::set_tracks_present(&conn, id, &[true, true]).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, id, &[true, true]).unwrap();
         let cd = make_concert_dir(dir.path(), "Incomplete Album");
         if !create_test_audio_sync(&cd.join("Song A.m4a"), 3) {
             eprintln!("skipping: ffmpeg not available");
@@ -630,13 +642,16 @@ mod tests {
         assert_eq!(report.planned, Vec::new());
         assert_eq!(report.skipped.len(), 1);
         assert_eq!(report.skipped[0].0, id);
-        assert!(db::get_concert(&conn, id).unwrap().media_duration.is_none());
+        assert!(db::concerts::get_concert(&conn, id)
+            .unwrap()
+            .media_duration
+            .is_none());
     }
 
     #[test]
     fn backfill_media_duration_dry_run_does_not_write() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(&conn, "https://npr.org/m/5", "DryRun Album", &[]);
         let ts = vec![concert_types::SongTimestamp {
             title: "Only Song".to_string(),
@@ -644,13 +659,16 @@ mod tests {
             end_time: 42.0,
             duration: 42.0,
         }];
-        db::set_auto_split_timestamps(&conn, id, &ts).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &ts).unwrap();
 
         let report = backfill_media_duration(&conn, dir.path(), false).unwrap();
         assert_eq!(report.planned.len(), 1);
         assert_eq!(report.planned[0].duration, 42.0);
         assert!(
-            db::get_concert(&conn, id).unwrap().media_duration.is_none(),
+            db::concerts::get_concert(&conn, id)
+                .unwrap()
+                .media_duration
+                .is_none(),
             "dry run must not write to the database"
         );
     }
@@ -658,7 +676,7 @@ mod tests {
     #[test]
     fn backfill_media_duration_is_idempotent_and_excludes_already_set_rows() {
         let dir = temp_dir();
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_media_duration_concert(&conn, "https://npr.org/m/6", "Idempotent Album", &[]);
         let ts = vec![concert_types::SongTimestamp {
             title: "Only Song".to_string(),
@@ -666,12 +684,12 @@ mod tests {
             end_time: 33.0,
             duration: 33.0,
         }];
-        db::set_auto_split_timestamps(&conn, id, &ts).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &ts).unwrap();
 
         let first = backfill_media_duration(&conn, dir.path(), true).unwrap();
         assert_eq!(first.planned.len(), 1);
         assert_eq!(
-            db::get_concert(&conn, id).unwrap().media_duration,
+            db::concerts::get_concert(&conn, id).unwrap().media_duration,
             Some(33.0)
         );
 
@@ -681,7 +699,7 @@ mod tests {
         assert!(second.planned.is_empty());
         assert!(second.skipped.is_empty());
         assert_eq!(
-            db::get_concert(&conn, id).unwrap().media_duration,
+            db::concerts::get_concert(&conn, id).unwrap().media_duration,
             Some(33.0)
         );
     }

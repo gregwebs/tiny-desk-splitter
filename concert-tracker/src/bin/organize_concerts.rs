@@ -76,8 +76,9 @@ fn main() -> Result<()> {
         cli.dry_run
     );
 
-    let conn = db::open(&cli.db).with_context(|| format!("open db {}", cli.db.display()))?;
-    let concerts = db::list_concerts(&conn)?;
+    let conn =
+        db::connection::open(&cli.db).with_context(|| format!("open db {}", cli.db.display()))?;
+    let concerts = db::concerts::list_concerts(&conn)?;
 
     let mut stats = Stats::default();
     let mut plan: Vec<Move> = Vec::new();
