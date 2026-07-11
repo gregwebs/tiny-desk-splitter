@@ -93,6 +93,18 @@ attached to the non-cancelled workflow run.
 
 More documentation is in [./docs/playwright.md](docs/playwright.md).
 
+### Black-box HTTP tests (Hurl)
+
+```sh
+just test-hurl   # requires the Hurl CLI: https://hurl.dev/docs/installation.html
+```
+
+Optional local tests that exercise a real `concert-web` process over HTTP,
+independent of axum/router internals — complementary to the in-process
+`concert-tracker/tests/web_integration.rs` suite. See
+[./hurl/README.md](hurl/README.md) for setup, how fixture seeding and
+assertions work, and why some `web_integration.rs` tests aren't migrated.
+
 ## Frontend (TypeScript)
 
 `concert-tracker/static/{player,playlists,splitter}.js` are **generated build
