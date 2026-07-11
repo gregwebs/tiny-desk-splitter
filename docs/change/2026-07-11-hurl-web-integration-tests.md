@@ -1,5 +1,16 @@
 # Hurl Web Integration Tests
 
+## Progress
+
+Tracks the stacked PR series implementing this spec (parent issue #84):
+
+- [x] #78 Feature-Gated Test Control Server — `test.reset` JSON-RPC method, `--test-control-port` flag, release-build guard.
+- [ ] #79 Seed Listing Through Hurl
+- [ ] #80 Seed Scraped Concert Status Cases
+- [ ] #82 Migrate Listing Filter And Ignore Cases
+- [ ] #81 Add Semantic Assertion API When Needed
+- [ ] #83 Document And Stabilize The Hurl Workflow
+
 ## Problem
 
 `concert-tracker/tests/web_integration.rs` exercises HTTP behavior by linking directly to the Rust web implementation. The tests construct `AppState`, call the axum router with `tower::ServiceExt::oneshot`, seed SQLite directly, inject job command closures, and sometimes inspect DB or filesystem state after requests.

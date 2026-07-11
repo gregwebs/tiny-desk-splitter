@@ -68,11 +68,18 @@ fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
 }
 
 /// Removes generated files under `<workdir>/concerts` and
-/// `<workdir>/thumbnails`, then deletes concert/event/playlist/job rows
-/// (`playlist_items` cascades off `playlists`) and resets the singleton
-/// `settings` row back to its migration defaults. Uses the same
-/// connection/workdir as the app server so Test Control and product HTTP
-/// requests observe the same state.
+/// `<workdir>/thumbnails`, then deletes concert/event/playlist/job/
+/// synced-month rows (`playlist_items` cascades off `playlists`) and resets
+/// the singleton `settings` row back to its migration defaults. Uses the
+/// same connection/workdir as the app server so Test Control and product
+/// HTTP requests observe the same state.
+///
+/// `synced_months` is cleared too even though the spec's contract only names
+/// "concert, event, playlist, job, and settings" data: the real
+/// `/sync/:year/:month` route (see `sync.rs`) persists rows there, and a
+/// stale row would leave a later Hurl case observing a month as already
+/// synced — the exact kind of cross-test pollution `reset` exists to
+/// prevent.
 ///
 /// Filesystem cleanup runs *before* the DB reset on purpose: `concert_dir`
 /// (see `model.rs`) keys a concert's directory by its sanitized *album name*,
@@ -118,6 +125,7 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
          DELETE FROM jobs;
          DELETE FROM events;
          DELETE FROM concerts;
+         DELETE FROM synced_months;
          UPDATE settings SET archive_location = NULL, theme = 'system' WHERE id = 1;",
     )?;
     Ok(())
@@ -173,6 +181,7 @@ mod tests {
         .unwrap();
         settings::update_archive_location(&conn, "/nas/media").unwrap();
         settings::update_theme(&conn, settings::Theme::Dark).unwrap();
+        db::sync::mark_month_synced(&conn, 2024, 1).unwrap();
 
         let workdir = tempfile::tempdir().unwrap();
         let concerts_dir = workdir.path().join("concerts");
@@ -181,6 +190,11 @@ mod tests {
         std::fs::create_dir_all(&thumbnails_dir).unwrap();
         std::fs::write(concerts_dir.join("leftover.mp4"), b"x").unwrap();
         std::fs::write(thumbnails_dir.join("leftover.jpg"), b"x").unwrap();
+        assert_eq!(
+            db::sync::list_fully_synced_months(&conn).unwrap(),
+            vec![(2024, 1)],
+            "precondition: the synced-month row must be visible before reset"
+        );
 
         let state = test_state(conn, workdir.path().to_path_buf());
         reset_test_data(&state).unwrap();
@@ -193,6 +207,9 @@ mod tests {
         let s = settings::get_settings(&conn).unwrap();
         assert!(s.archive_location.is_none());
         assert_eq!(s.theme, settings::Theme::System);
+        assert!(db::sync::list_fully_synced_months(&conn)
+            .unwrap()
+            .is_empty());
 
         assert!(std::fs::read_dir(&concerts_dir).unwrap().next().is_none());
         assert!(std::fs::read_dir(&thumbnails_dir).unwrap().next().is_none());
