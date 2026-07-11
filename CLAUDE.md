@@ -23,7 +23,7 @@ Pass the instructions from the codex:adversarial-review skill to the agent.
 * Code review: Pass the plan/spec for the changes. If there is only a conversation to go off of, summarize the conversation to a spec.
   Only ask the user to help resolve review issues if a resolution would end up altering the plan/spec.
 
-If changes are made based on the adversarial review, perform a non-adversarial review passing instructions from the codex:review skill.
+If changes are made based on the adversarial review, perform a non-adversarial review using the same procedure as above but passing instructions from the codex:review skill rather than codex:adversarial-review.
 
 Do not substitute Claude's own review for these checkpoints.
 Do not invoke Codex for trivial documentation or formatting-only changes.
