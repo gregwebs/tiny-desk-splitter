@@ -32,9 +32,11 @@ cross-cutting domain type, not owned by any one persistence module.
 
 ## Dependency direction
 
-Domain modules depend on `connection` (for the `Connection` type) and on
-`crate::events`, not the other way around, with one specific exception that's
-easy to get backwards:
+Domain modules depend on `crate::events`, not the other way around, with one
+specific exception that's easy to get backwards. (`connection` is not itself
+a runtime dependency of the other domain modules — they take `rusqlite::
+Connection` directly; `db::connection::{open, open_in_memory}` are only
+imported by `#[cfg(test)]` code to construct one.)
 
 `db::connection::run_migrations` calls `events::backfill`, which reads
 concerts via `db::concerts::list_concerts`. So `events` may depend on concert
@@ -47,9 +49,12 @@ cycle constraint is specifically about reads used during migration/backfill.
 
 `db::lifecycle` depends on `db::concerts` for `get_concert`/`concert_from_row`
 (e.g. `mark_split_succeeded` reads the concert back to build the `Split`
-event's JSON payload). No other cross-domain-module dependencies exist among
-`concerts`, `lifecycle`, `split_timestamps`, `sync`, `playlists`, `settings`,
-and `failed_jobs`.
+event's JSON payload). `db::split_timestamps` also depends on `db::concerts`
+for the same two functions (used by `toggle_track_liked` and the
+`list_concerts_needing_tracks_backfill`/`list_concerts_missing_media_duration`
+queries). `db::sync` depends on `db::time` for `now_string`. No other
+cross-domain-module dependencies exist among `concerts`, `lifecycle`,
+`split_timestamps`, `sync`, `playlists`, `settings`, and `failed_jobs`.
 
 ## Event emission invariants
 
@@ -62,11 +67,15 @@ patterns recur:
   `toggle_ignored`, ...) always record their event.
 - **Guarded state transitions** (`try_mark_download_started`,
   `try_mark_split_started`, `try_mark_archive_started`,
-  `clear_archive_state`) run an `UPDATE ... WHERE <guard>` and only record an
-  event when `rows > 0` — i.e. when the guard actually matched and the state
-  changed. A no-op call (e.g. starting a download that's already in progress)
-  emits **no event**. This is deliberate: the events table is meant to be a
-  true transition log, not a call log.
+  `clear_archive_state`, ...) run an `UPDATE ... WHERE <guard>` and only
+  record an event when `rows > 0` — i.e. when the guard actually matched and
+  the state changed. A no-op call (e.g. starting a download that's already
+  in progress) emits **no event**. `split_timestamps::clear_user_split_timestamps`
+  is the same pattern with a SELECT-then-conditional-record instead of a
+  `rows > 0` check: it reads whether the user-timestamps column is currently
+  set and only records `SplitTimestampsReset` when it was. This is
+  deliberate: the events table is meant to be a true transition log, not a
+  call log.
 
 Read-only queries (`list_concerts`, `get_split_timestamps`,
 `list_fully_synced_months`, ...) never record events.

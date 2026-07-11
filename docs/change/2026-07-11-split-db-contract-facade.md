@@ -97,8 +97,8 @@ transaction scope, or timestamp format was touched.
 - `just lint` — `cargo fmt --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, shellcheck, and the frontend TypeScript/oxlint checks all
   pass with no warnings.
-- Codex review of this change against #68's acceptance criteria found two
-  issues, both fixed before the PR: (1) `docs/backend-persistence.md`
+- Codex adversarial review of this change against #68's acceptance criteria
+  found two issues, both fixed before the PR: (1) `docs/backend-persistence.md`
   incorrectly claimed `execute_batch` runs each migration step as one
   implicit transaction — verified against `rusqlite::Connection::execute_batch`
   (prepares and steps statements one at a time, no `BEGIN`/`COMMIT`) and the
@@ -109,3 +109,17 @@ transaction scope, or timestamp format was touched.
   `concert-tracker/src`/`tests`/`examples`; reworded above to state that
   scope explicitly and to explain why pre-#68 `docs/change` entries
   intentionally keep their original (now-historical) top-level `db::` paths.
+- Follow-up engineering-lead review (per CLAUDE.md, since `codex:review`
+  isn't available in the installed plugin version) confirmed both Codex fixes
+  against the rusqlite source and migration SQL independently, confirmed the
+  code changes are behavior-preserving, and confirmed the historical-docs
+  exemption is consistent with `AGENTS.md`. It found three further accuracy
+  issues in `docs/backend-persistence.md`'s dependency-direction and
+  event-emission sections, all fixed before the PR: a missing
+  `split_timestamps → concerts` dependency (used by `toggle_track_liked` and
+  two `list_concerts_*` queries) and a missing `sync → time` dependency; an
+  incorrect claim that domain modules depend on `db::connection` for the
+  `Connection` type (they import `rusqlite::Connection` directly —
+  `db::connection` is only used by `#[cfg(test)]` code); and an incomplete
+  guarded-emitter list missing `split_timestamps::clear_user_split_timestamps`
+  (a SELECT-then-conditional-record variant of the guard pattern).
