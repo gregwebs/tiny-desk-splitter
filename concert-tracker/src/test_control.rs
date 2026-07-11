@@ -67,28 +67,36 @@ fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
     )
 }
 
-/// Deletes concert/event/playlist/job rows (`playlist_items` cascades off
-/// `playlists`), resets the singleton `settings` row back to its migration
-/// defaults, and removes generated files under `<workdir>/concerts` and
-/// `<workdir>/thumbnails`. Uses the same connection/workdir as the app server
-/// so Test Control and product HTTP requests observe the same state.
+/// Removes generated files under `<workdir>/concerts` and
+/// `<workdir>/thumbnails`, then deletes concert/event/playlist/job rows
+/// (`playlist_items` cascades off `playlists`) and resets the singleton
+/// `settings` row back to its migration defaults. Uses the same
+/// connection/workdir as the app server so Test Control and product HTTP
+/// requests observe the same state.
+///
+/// Filesystem cleanup runs *before* the DB reset on purpose: `concert_dir`
+/// (see `model.rs`) keys a concert's directory by its sanitized *album name*,
+/// not its numeric id, so a same-named concert seeded after a failed reset
+/// would otherwise silently inherit a stale directory's leftover files —
+/// pollution a Hurl test has no way to detect. Doing the filesystem step
+/// first means a failure here aborts before any DB row is touched, leaving
+/// the previous concerts (and their now-still-matching directories) intact
+/// and the error visible, instead of an empty concert list paired with
+/// orphaned media.
 ///
 /// `settings` is reset in place (never deleted): migration 0002 inserts its
 /// `id = 1` row exactly once at first connection-open, so a bare `DELETE`
 /// would leave every later request against that singleton 404ing on a
 /// "Query returned no rows" error for the lifetime of the process.
+///
+/// Deliberately out of scope for this first slice (see "Out Of Scope For
+/// First Slice" in docs/change/2026-07-11-hurl-web-integration-tests.md):
+/// this does not quiesce in-flight download/split jobs or the background
+/// scrape worker. A reset run concurrently with one of those can still race
+/// with writes it makes after reset returns. Job-command stubbing and scrape
+/// queue controls are explicitly deferred to a later migration slice, and
+/// the first slice's Hurl cases never trigger those paths.
 fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
-    {
-        let conn = state.db.lock().unwrap();
-        conn.execute_batch(
-            "DELETE FROM playlist_items;
-             DELETE FROM playlists;
-             DELETE FROM jobs;
-             DELETE FROM events;
-             DELETE FROM concerts;
-             UPDATE settings SET archive_location = NULL, theme = 'system' WHERE id = 1;",
-        )?;
-    }
     for dir_name in ["concerts", "thumbnails"] {
         let dir = state.jobs.working_dir.join(dir_name);
         if !dir.is_dir() {
@@ -103,6 +111,15 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
             }
         }
     }
+    let conn = state.db.lock().unwrap();
+    conn.execute_batch(
+        "DELETE FROM playlist_items;
+         DELETE FROM playlists;
+         DELETE FROM jobs;
+         DELETE FROM events;
+         DELETE FROM concerts;
+         UPDATE settings SET archive_location = NULL, theme = 'system' WHERE id = 1;",
+    )?;
     Ok(())
 }
 
@@ -179,6 +196,54 @@ mod tests {
 
         assert!(std::fs::read_dir(&concerts_dir).unwrap().next().is_none());
         assert!(std::fs::read_dir(&thumbnails_dir).unwrap().next().is_none());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn reset_leaves_db_rows_intact_when_filesystem_cleanup_fails() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
+            &conn,
+            &NewListing {
+                source_url: "https://npr.org/c/reset-fs-fail".to_string(),
+                title: "Reset FS Fail Concert".to_string(),
+                concert_date: Some("2024-01-15".to_string()),
+                teaser: None,
+            },
+        )
+        .unwrap();
+
+        let workdir = tempfile::tempdir().unwrap();
+        let blocked = workdir.path().join("concerts").join("blocked");
+        std::fs::create_dir_all(&blocked).unwrap();
+        std::fs::write(blocked.join("file.mp4"), b"x").unwrap();
+        // Strip all permissions from the subdirectory so removing its
+        // contents fails partway through, simulating a filesystem cleanup
+        // failure (e.g. a permissions or transient I/O error).
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let state = test_state(conn, workdir.path().to_path_buf());
+        let result = reset_test_data(&state);
+
+        // Restore permissions so the tempdir's own Drop cleanup can succeed.
+        std::fs::set_permissions(&blocked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(
+            result.is_err(),
+            "a filesystem cleanup failure must surface as an error, not be swallowed"
+        );
+        let conn = state.db.lock().unwrap();
+        // Filesystem cleanup runs before the DB reset specifically so a
+        // failure here leaves prior concert rows (and their now-still-valid
+        // directories) intact rather than deleting the DB rows first and
+        // leaving orphaned files a later same-named seed could inherit.
+        assert_eq!(
+            db::concerts::list_concerts(&conn).unwrap().len(),
+            1,
+            "DB must be untouched when filesystem cleanup fails first"
+        );
     }
 
     #[tokio::test]
