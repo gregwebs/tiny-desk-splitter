@@ -495,7 +495,7 @@ pub fn persist_job_log(
     temp_file: Option<tempfile::NamedTempFile>,
     log_dir: &Path,
 ) {
-    match crate::db::insert_failed_job(conn, concert_id, name, error) {
+    match crate::db::failed_jobs::insert_failed_job(conn, concert_id, name, error) {
         Ok(job_id) => {
             if let Some(tf) = temp_file {
                 let final_path = log_dir.join(format!("{}.log", job_id));

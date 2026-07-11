@@ -202,11 +202,11 @@ pub async fn read_split_timestamps(
 ) -> Result<SplitTimestampsRead, SplitTimestampWorkflowError> {
     let (set_list, auto, user, source_path, stored_media_duration) = {
         let conn = database.lock().unwrap();
-        let concert = db::get_concert(&conn, concert_id)
+        let concert = db::concerts::get_concert(&conn, concert_id)
             .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
         let auto = jobs::split::auto_timestamps_with_backfill(&conn, working_dir, &concert)
             .map_err(SplitTimestampWorkflowError::Internal)?;
-        let stored = db::get_split_timestamps(&conn, concert_id)
+        let stored = db::split_timestamps::get_split_timestamps(&conn, concert_id)
             .map_err(SplitTimestampWorkflowError::Internal)?;
         let source_path = concert
             .album
@@ -238,7 +238,7 @@ pub async fn apply_user_timestamps(
 ) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
     let (concert, source_path) = {
         let conn = database.lock().unwrap();
-        let concert = db::get_concert(&conn, concert_id)
+        let concert = db::concerts::get_concert(&conn, concert_id)
             .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
         let source_path = concert
             .album
@@ -295,12 +295,12 @@ pub async fn reset_to_auto_timestamps(
 ) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
     let (concert, auto_ts, user_is_null) = {
         let conn = database.lock().unwrap();
-        let concert = db::get_concert(&conn, concert_id)
+        let concert = db::concerts::get_concert(&conn, concert_id)
             .map_err(|_| SplitTimestampWorkflowError::NotFound)?;
         let auto_ts =
             jobs::split::auto_timestamps_with_backfill(&conn, &jobs.working_dir, &concert)
                 .map_err(SplitTimestampWorkflowError::Internal)?;
-        let stored = db::get_split_timestamps(&conn, concert_id)
+        let stored = db::split_timestamps::get_split_timestamps(&conn, concert_id)
             .map_err(SplitTimestampWorkflowError::Internal)?;
         (concert, auto_ts, stored.user.is_none())
     };
@@ -367,8 +367,8 @@ fn reconcile_downloaded_at_if_missing(
         return;
     }
     let conn = database.lock().unwrap();
-    let now = db::now_string();
-    if let Err(e) = db::set_downloaded_at_if_missing(&conn, concert_id, &now) {
+    let now = db::time::now_string();
+    if let Err(e) = db::lifecycle::set_downloaded_at_if_missing(&conn, concert_id, &now) {
         tracing::warn!(
             "set_downloaded_at_if_missing failed for concert {}: {}",
             concert_id,
@@ -560,7 +560,8 @@ impl TimestampPayloadSong {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::db;
+    use crate::db::concerts::{MetadataUpdate, NewListing};
     use crate::jobs::{JobConfig, JobRegistry};
     use crate::model::concert_dir;
     use std::sync::{Arc, Mutex};
@@ -590,7 +591,7 @@ mod tests {
     }
 
     fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> i64 {
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             conn,
             &NewListing {
                 source_url: format!("https://npr.org/split-timestamps/{album}"),
@@ -600,11 +601,14 @@ mod tests {
             },
         )
         .unwrap();
-        let id = db::get_concert_by_url(conn, &format!("https://npr.org/split-timestamps/{album}"))
-            .unwrap()
-            .unwrap()
-            .id;
-        db::update_metadata(
+        let id = db::concerts::get_concert_by_url(
+            conn,
+            &format!("https://npr.org/split-timestamps/{album}"),
+        )
+        .unwrap()
+        .unwrap()
+        .id;
+        db::concerts::update_metadata(
             conn,
             id,
             &MetadataUpdate {
@@ -827,11 +831,11 @@ mod tests {
 
     #[tokio::test]
     async fn read_workflow_returns_stored_auto_and_user_timestamps() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let songs = ["Alpha", "Beta"];
         let id = seed_ts_concert(&conn, "Stored Workflow Album", &songs);
         let auto = sample_timestamps(&songs);
-        db::set_auto_split_timestamps(&conn, id, &auto).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &auto).unwrap();
         let user = vec![
             SongTimestamp {
                 title: "Alpha".to_string(),
@@ -846,7 +850,7 @@ mod tests {
                 duration: 45.0,
             },
         ];
-        db::set_user_split_timestamps(&conn, id, &user).unwrap();
+        db::split_timestamps::set_user_split_timestamps(&conn, id, &user).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
 
@@ -860,7 +864,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_workflow_lazy_backfills_auto_timestamps_from_disk() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let album = "Backfill Workflow Album";
         let songs = ["Old A", "Old B"];
         let id = seed_ts_concert(&conn, album, &songs);
@@ -889,7 +893,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(read.auto.unwrap().len(), 2);
-        let stored = db::get_split_timestamps(&db.lock().unwrap(), id).unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&db.lock().unwrap(), id).unwrap();
         assert!(
             stored.auto.is_some(),
             "backfill should persist auto timestamps"
@@ -898,9 +902,9 @@ mod tests {
 
     #[tokio::test]
     async fn read_workflow_uses_stored_duration_when_source_absent() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_ts_concert(&conn, "Duration Workflow Album", &["A"]);
-        db::set_media_duration(&conn, id, 123.5).unwrap();
+        db::split_timestamps::set_media_duration(&conn, id, 123.5).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
 
@@ -911,7 +915,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_user_timestamps_conflicts_when_source_missing() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_ts_concert(&conn, "Missing Source Workflow Album", &["A", "B"]);
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
@@ -935,7 +939,7 @@ mod tests {
 
     #[tokio::test]
     async fn apply_user_timestamps_rejects_count_mismatch_before_ffprobe() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let album = "Count Workflow Album";
         let id = seed_ts_concert(&conn, album, &["A", "B"]);
         let workdir = tempfile::tempdir().unwrap();
@@ -963,10 +967,11 @@ mod tests {
 
     #[tokio::test]
     async fn reset_to_auto_returns_already_auto_when_user_timestamps_are_absent() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let songs = ["A", "B"];
         let id = seed_ts_concert(&conn, "Already Auto Workflow Album", &songs);
-        db::set_auto_split_timestamps(&conn, id, &sample_timestamps(&songs)).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &sample_timestamps(&songs))
+            .unwrap();
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
 
@@ -984,7 +989,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_to_auto_rejects_missing_auto_timestamps() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_ts_concert(&conn, "No Auto Workflow Album", &["A"]);
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
@@ -1007,10 +1012,12 @@ mod tests {
 
     #[tokio::test]
     async fn reset_to_auto_rejects_stale_auto_timestamps() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_ts_concert(&conn, "Stale Auto Workflow Album", &["A", "B"]);
-        db::set_auto_split_timestamps(&conn, id, &sample_timestamps(&["A"])).unwrap();
-        db::set_user_split_timestamps(&conn, id, &sample_timestamps(&["A", "B"])).unwrap();
+        db::split_timestamps::set_auto_split_timestamps(&conn, id, &sample_timestamps(&["A"]))
+            .unwrap();
+        db::split_timestamps::set_user_split_timestamps(&conn, id, &sample_timestamps(&["A", "B"]))
+            .unwrap();
         let db = Arc::new(Mutex::new(conn));
         let workdir = tempfile::tempdir().unwrap();
 

@@ -62,7 +62,7 @@ pub async fn prepare(
 ) -> Result<PrepareOutcome> {
     let concert = {
         let conn = db.lock().unwrap();
-        db::get_concert(&conn, concert_id)?
+        db::concerts::get_concert(&conn, concert_id)?
     };
     if concert.album.is_none() || concert.set_list.is_empty() {
         return Err(NoSetList { concert_id }.into());
@@ -98,7 +98,11 @@ pub async fn prepare(
         // restored backup) — reconcile so the split can run.
         {
             let conn = db.lock().unwrap();
-            db::set_downloaded_at_if_missing(&conn, concert_id, &db::now_string())?;
+            db::lifecycle::set_downloaded_at_if_missing(
+                &conn,
+                concert_id,
+                &db::time::now_string(),
+            )?;
         }
         tracing::info!("prepare: starting split for concert {}", concert_id);
         split::start_split(db, registry, config, concert_id, SplitMode::Analyze).await?;
@@ -152,10 +156,10 @@ mod tests {
     const ALBUM: &str = "Prepare Album";
 
     fn seeded_db(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
-        let conn = db::open_in_memory().unwrap();
-        db::upsert_listing(
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
             &conn,
-            &db::NewListing {
+            &db::concerts::NewListing {
                 source_url: "https://npr.org/test/prepare".to_string(),
                 title: "Prepare Concert".to_string(),
                 concert_date: None,
@@ -163,10 +167,10 @@ mod tests {
             },
         )
         .unwrap();
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             1,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Test Artist".to_string(),
                 album: ALBUM.to_string(),
                 description: None,
@@ -213,7 +217,7 @@ mod tests {
         for _ in 0..100 {
             {
                 let conn = db.lock().unwrap();
-                if let Ok(c) = db::get_concert(&conn, 1) {
+                if let Ok(c) = db::concerts::get_concert(&conn, 1) {
                     if check(&c) {
                         return;
                     }
@@ -261,7 +265,7 @@ mod tests {
         let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -277,7 +281,7 @@ mod tests {
         assert_eq!(outcome, PrepareOutcome::Splitting);
         wait_for(&db, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert_eq!(c.tracks_present, vec![true, true]);
     }
 
@@ -304,7 +308,7 @@ mod tests {
         assert_eq!(outcome, PrepareOutcome::Splitting);
         wait_for(&db, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.downloaded_at.is_some(), "downloaded_at reconciled");
         assert_eq!(c.tracks_present, vec![true]);
     }
@@ -328,7 +332,7 @@ mod tests {
         assert_eq!(outcome, PrepareOutcome::Downloading);
         wait_for(&db, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.downloaded_at.is_some());
         assert!(c.split_at.is_some());
         assert_eq!(c.tracks_present, vec![true, true]);
@@ -347,10 +351,10 @@ mod tests {
         let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
-            db::try_mark_split_started(&conn, 1).unwrap();
-            db::mark_split_succeeded(&conn, 1).unwrap();
-            db::set_tracks_present(&conn, 1, &[false, true]).unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+            db::split_timestamps::set_tracks_present(&conn, 1, &[false, true]).unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -366,7 +370,7 @@ mod tests {
         assert_eq!(outcome, PrepareOutcome::Splitting);
         wait_for(&db, |c| c.tracks_present == vec![true, true]).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert_eq!(c.tracks_present, vec![true, true], "deleted track restored");
     }
 
@@ -379,7 +383,7 @@ mod tests {
         let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -395,7 +399,7 @@ mod tests {
         assert_eq!(outcome, PrepareOutcome::Downloading);
         wait_for(&db, |c| c.tracks_present == vec![true]).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert_eq!(c.tracks_present, vec![true]);
     }
 
@@ -440,7 +444,7 @@ mod tests {
 
         wait_for(&db, |c| c.tracks_present == vec![true]).await;
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert_eq!(c.tracks_present, vec![true]);
         assert!(c.download_errors.is_empty());
         assert!(c.split_errors.is_empty());

@@ -31,7 +31,7 @@ pub async fn start_download(
 
     {
         let conn = db.lock().unwrap();
-        if !db::try_mark_download_started(&conn, concert_id)? {
+        if !db::lifecycle::try_mark_download_started(&conn, concert_id)? {
             tracing::info!("download already running for concert {}", concert_id);
             return Ok(StartOutcome::AlreadyRunning);
         }
@@ -39,7 +39,7 @@ pub async fn start_download(
 
     let (job, title) = {
         let conn = db.lock().unwrap();
-        let concert = db::get_concert(&conn, concert_id)?;
+        let concert = db::concerts::get_concert(&conn, concert_id)?;
         let title = concert.title.clone();
         let job = download_job_from_concert(&concert, &config.working_dir)?;
         (job, title)
@@ -89,7 +89,7 @@ async fn run_download(
                 .unwrap_or_else(|| "mp4".to_string());
             {
                 let conn = db.lock().unwrap();
-                let _ = db::mark_download_succeeded(&conn, concert_id, &ext);
+                let _ = db::lifecycle::mark_download_succeeded(&conn, concert_id, &ext);
             }
             crate::jobs::spawn_dependents(db, registry, config, &key);
         }
@@ -98,7 +98,7 @@ async fn run_download(
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_download_failed(&conn, concert_id, &error);
+            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
         }
         Err(e) => {
@@ -111,7 +111,7 @@ async fn run_download(
             tracing::warn!("download failed for concert {}: {}", concert_id, error);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_download_failed(&conn, concert_id, &error);
+            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
         }
     }
@@ -149,10 +149,10 @@ mod tests {
     }
 
     fn seeded_db_with_set_list(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
-        let conn = db::open_in_memory().unwrap();
-        db::upsert_listing(
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
             &conn,
-            &db::NewListing {
+            &db::concerts::NewListing {
                 source_url: "https://npr.org/test/dl".to_string(),
                 title: "Test Concert".to_string(),
                 concert_date: None,
@@ -160,10 +160,10 @@ mod tests {
             },
         )
         .unwrap();
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             1,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Test Artist".to_string(),
                 album: "Test Album".to_string(),
                 description: None,
@@ -184,7 +184,7 @@ mod tests {
         for _ in 0..100 {
             {
                 let conn = db.lock().unwrap();
-                if let Ok(c) = db::get_concert(&conn, 1) {
+                if let Ok(c) = db::concerts::get_concert(&conn, 1) {
                     if check(&c) {
                         return;
                     }
@@ -203,7 +203,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let conn = db.lock().unwrap();
-        let concert = db::get_concert(&conn, 1).unwrap();
+        let concert = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(concert.downloaded_at.is_some());
         assert!(concert.download_errors.is_empty());
     }
@@ -217,7 +217,7 @@ mod tests {
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let conn = db.lock().unwrap();
-        let concert = db::get_concert(&conn, 1).unwrap();
+        let concert = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(concert.downloaded_at.is_none());
         assert!(!concert.download_errors.is_empty());
     }
@@ -265,7 +265,7 @@ mod tests {
         wait_for(&db, |c| c.split_at.is_some()).await;
 
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.downloaded_at.is_some(), "download should have succeeded");
         assert!(c.split_at.is_some(), "dependent split should have run");
         assert_eq!(c.tracks_present, vec![true, true]);
@@ -292,7 +292,7 @@ mod tests {
         wait_for(&db, |c| !c.download_errors.is_empty()).await;
 
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(!c.download_errors.is_empty());
         assert!(c.split_started_at.is_none(), "split must never start");
         assert!(c.split_at.is_none());

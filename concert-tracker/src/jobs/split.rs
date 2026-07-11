@@ -103,8 +103,8 @@ pub async fn start_split(
 
     let (ok, concert) = {
         let conn = db.lock().unwrap();
-        let ok = db::try_mark_split_started(&conn, concert_id)?;
-        let concert = db::get_concert(&conn, concert_id)?;
+        let ok = db::lifecycle::try_mark_split_started(&conn, concert_id)?;
+        let concert = db::concerts::get_concert(&conn, concert_id)?;
         (ok, concert)
     };
 
@@ -136,7 +136,7 @@ pub async fn start_split(
             );
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_split_failed(&conn, concert_id, &e.to_string());
+            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &e.to_string());
             return Err(e);
         }
     }
@@ -185,8 +185,8 @@ pub async fn start_split(
             if !concert.set_list.is_empty() && crate::scan::has_split_tracks(&cd, album) {
                 let present = tracks_present_on_disk(&config.working_dir, album, &concert.set_list);
                 let conn = db.lock().unwrap();
-                db::set_tracks_present(&conn, concert_id, &present)?;
-                db::mark_split_succeeded(&conn, concert_id)?;
+                db::split_timestamps::set_tracks_present(&conn, concert_id, &present)?;
+                db::lifecycle::mark_split_succeeded(&conn, concert_id)?;
                 return Ok(SetupResult::AlreadySplit);
             }
         }
@@ -217,7 +217,7 @@ pub async fn start_split(
             // and surface the error.
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_split_failed(&conn, concert_id, &e.to_string());
+            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &e.to_string());
             return Err(e);
         }
     };
@@ -306,7 +306,7 @@ pub fn auto_timestamps_with_backfill(
     working_dir: &Path,
     concert: &Concert,
 ) -> Result<Option<Vec<concert_types::SongTimestamp>>> {
-    let stored = db::get_split_timestamps(conn, concert.id)?;
+    let stored = db::split_timestamps::get_split_timestamps(conn, concert.id)?;
     if stored.auto.is_some() {
         return Ok(stored.auto);
     }
@@ -318,7 +318,7 @@ pub fn auto_timestamps_with_backfill(
     let output_dir = concert_dir(working_dir, album);
     match read_analysis_timestamps(&output_dir) {
         Ok(ts) => {
-            db::set_auto_split_timestamps(conn, concert.id, &ts)?;
+            db::split_timestamps::set_auto_split_timestamps(conn, concert.id, &ts)?;
             tracing::debug!(
                 "auto_timestamps_with_backfill: backfilled {} timestamps for concert {} from disk",
                 ts.len(),
@@ -382,13 +382,14 @@ async fn run_split(
             drop(temp_file);
             {
                 let conn = db.lock().unwrap();
-                let _ = db::mark_split_succeeded(&conn, concert_id);
-                let concert = db::get_concert(&conn, concert_id);
+                let _ = db::lifecycle::mark_split_succeeded(&conn, concert_id);
+                let concert = db::concerts::get_concert(&conn, concert_id);
                 if let Ok(c) = concert {
                     if let Some(album) = c.album.as_deref() {
                         let present =
                             tracks_present_on_disk(&config.working_dir, album, &c.set_list);
-                        let _ = db::set_tracks_present(&conn, concert_id, &present);
+                        let _ =
+                            db::split_timestamps::set_tracks_present(&conn, concert_id, &present);
                     }
                 }
                 // Persist timestamp state by mode. Never fail the job over a
@@ -397,9 +398,9 @@ async fn run_split(
                     SplitMode::Analyze => {
                         match read_analysis_timestamps(&job.output_dir) {
                             Ok(ts) => {
-                                if let Err(e) =
-                                    db::set_auto_split_timestamps(&conn, concert_id, &ts)
-                                {
+                                if let Err(e) = db::split_timestamps::set_auto_split_timestamps(
+                                    &conn, concert_id, &ts,
+                                ) {
                                     tracing::warn!(
                                         "failed to store auto timestamps for concert {}: {}",
                                         concert_id,
@@ -407,7 +408,9 @@ async fn run_split(
                                     );
                                 }
                                 // Successful re-analysis supersedes any user cut.
-                                if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
+                                if let Err(e) = db::split_timestamps::clear_user_split_timestamps(
+                                    &conn, concert_id,
+                                ) {
                                     tracing::warn!(
                                         "failed to clear user timestamps for concert {}: {}",
                                         concert_id,
@@ -425,8 +428,11 @@ async fn run_split(
                         }
                     }
                     SplitMode::UserTimestamps { ts, media_duration } => {
-                        if let Err(e) = db::set_user_split_timestamps(&conn, concert_id, ts.songs())
-                        {
+                        if let Err(e) = db::split_timestamps::set_user_split_timestamps(
+                            &conn,
+                            concert_id,
+                            ts.songs(),
+                        ) {
                             tracing::warn!(
                                 "failed to store user timestamps for concert {}: {}",
                                 concert_id,
@@ -435,7 +441,11 @@ async fn run_split(
                         }
                         // Persist media_duration so the coverage gate survives
                         // source-file deletion. Never overwrites a good value.
-                        if let Err(e) = db::set_media_duration(&conn, concert_id, *media_duration) {
+                        if let Err(e) = db::split_timestamps::set_media_duration(
+                            &conn,
+                            concert_id,
+                            *media_duration,
+                        ) {
                             tracing::warn!(
                                 "failed to store media_duration for concert {}: {}",
                                 concert_id,
@@ -444,7 +454,9 @@ async fn run_split(
                         }
                     }
                     SplitMode::ResetToAuto(_) => {
-                        if let Err(e) = db::clear_user_split_timestamps(&conn, concert_id) {
+                        if let Err(e) =
+                            db::split_timestamps::clear_user_split_timestamps(&conn, concert_id)
+                        {
                             tracing::warn!(
                                 "failed to clear user timestamps for concert {}: {}",
                                 concert_id,
@@ -461,7 +473,7 @@ async fn run_split(
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_split_failed(&conn, concert_id, &error);
+            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
         }
         Err(e) => {
@@ -474,7 +486,7 @@ async fn run_split(
             tracing::warn!("split failed for concert {}: {}", concert_id, error);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::mark_split_failed(&conn, concert_id, &error);
+            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &error);
             persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
         }
     }
@@ -505,10 +517,10 @@ mod tests {
     }
 
     fn seeded_db(album: &str, set_list: Vec<String>) -> Arc<Mutex<Connection>> {
-        let conn = db::open_in_memory().unwrap();
-        db::upsert_listing(
+        let conn = db::connection::open_in_memory().unwrap();
+        db::concerts::upsert_listing(
             &conn,
-            &db::NewListing {
+            &db::concerts::NewListing {
                 source_url: format!("https://npr.org/c/{}", album),
                 title: album.to_string(),
                 concert_date: None,
@@ -516,10 +528,10 @@ mod tests {
             },
         )
         .unwrap();
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             1,
-            &db::MetadataUpdate {
+            &db::concerts::MetadataUpdate {
                 artist: "Test Artist".to_string(),
                 album: album.to_string(),
                 description: None,
@@ -528,7 +540,7 @@ mod tests {
             },
         )
         .unwrap();
-        db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01T00:00:00Z").unwrap();
+        db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01T00:00:00Z").unwrap();
         Arc::new(Mutex::new(conn))
     }
 
@@ -566,7 +578,7 @@ mod tests {
 
         assert!(matches!(outcome, StartOutcome::AlreadySplit));
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.split_at.is_some(), "split_at should be set");
         assert_eq!(c.tracks_present, vec![true; 4]);
         assert!(c.split_errors.is_empty(), "no error should be recorded");
@@ -602,7 +614,7 @@ mod tests {
 
         assert!(matches!(outcome, StartOutcome::AlreadySplit));
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.split_at.is_some());
         assert_eq!(c.tracks_present, vec![true, false, true]);
     }
@@ -628,7 +640,7 @@ mod tests {
 
         assert!(err.to_string().contains("Downloaded file"));
         let conn = db.lock().unwrap();
-        let c = db::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, 1).unwrap();
         assert!(c.split_at.is_none());
         assert!(!c.split_errors.is_empty(), "split error should be recorded");
     }
@@ -758,7 +770,7 @@ mod tests {
         }
 
         let conn = db.lock().unwrap();
-        let stored = db::get_split_timestamps(&conn, 1).unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&conn, 1).unwrap();
         assert!(stored.auto.is_some(), "auto timestamps should be stored");
         assert!(stored.user.is_none(), "user timestamps should be cleared");
         let auto = stored.auto.unwrap();
@@ -820,7 +832,7 @@ mod tests {
         }
 
         let conn = db.lock().unwrap();
-        let stored = db::get_split_timestamps(&conn, 1).unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&conn, 1).unwrap();
         assert!(stored.user.is_some(), "user timestamps should be stored");
         let user = stored.user.unwrap();
         assert_eq!(user.len(), 2);
@@ -899,12 +911,15 @@ mod tests {
         // Simulate a prior successful split
         {
             let conn = db.lock().unwrap();
-            db::try_mark_split_started(&conn, 1).unwrap();
-            db::mark_split_succeeded(&conn, 1).unwrap();
+            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
         }
         let initial_errors = {
             let conn = db.lock().unwrap();
-            db::get_concert(&conn, 1).unwrap().split_errors.len()
+            db::concerts::get_concert(&conn, 1)
+                .unwrap()
+                .split_errors
+                .len()
         };
 
         let registry = Arc::new(JobRegistry::new());
@@ -927,7 +942,10 @@ mod tests {
 
         let post_errors = {
             let conn = db.lock().unwrap();
-            db::get_concert(&conn, 1).unwrap().split_errors.len()
+            db::concerts::get_concert(&conn, 1)
+                .unwrap()
+                .split_errors
+                .len()
         };
         assert_eq!(
             post_errors, initial_errors,
@@ -951,12 +969,15 @@ mod tests {
         // Simulate a prior successful split
         {
             let conn = db.lock().unwrap();
-            db::try_mark_split_started(&conn, 1).unwrap();
-            db::mark_split_succeeded(&conn, 1).unwrap();
+            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
         }
         let initial_errors = {
             let conn = db.lock().unwrap();
-            db::get_concert(&conn, 1).unwrap().split_errors.len()
+            db::concerts::get_concert(&conn, 1)
+                .unwrap()
+                .split_errors
+                .len()
         };
 
         let registry = Arc::new(JobRegistry::new());
@@ -979,7 +1000,10 @@ mod tests {
 
         let post_errors = {
             let conn = db.lock().unwrap();
-            db::get_concert(&conn, 1).unwrap().split_errors.len()
+            db::concerts::get_concert(&conn, 1)
+                .unwrap()
+                .split_errors
+                .len()
         };
         assert!(
             post_errors > initial_errors,

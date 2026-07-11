@@ -42,7 +42,8 @@ pub const SCRAPE_JOB_NAME: &str = "scrape";
 /// Best-effort: a failed insert is logged, never propagated — it must not mask
 /// the original scrape error. Caller must hold the DB lock (`conn`).
 fn record_scrape_failure(conn: &Connection, concert_id: i64, err: &anyhow::Error) {
-    if let Err(e) = db::insert_failed_job(conn, concert_id, SCRAPE_JOB_NAME, &format!("{:#}", err))
+    if let Err(e) =
+        db::failed_jobs::insert_failed_job(conn, concert_id, SCRAPE_JOB_NAME, &format!("{:#}", err))
     {
         tracing::warn!(
             target: LOG_TARGET,
@@ -154,7 +155,7 @@ fn scrape_item(db: &Arc<Mutex<Connection>>, working_dir: &Path, req: &ScrapeRequ
     // indexed read here avoids a redundant NPR fetch.
     {
         let conn = db.lock().unwrap();
-        match db::get_concert(&conn, req.concert_id) {
+        match db::concerts::get_concert(&conn, req.concert_id) {
             Ok(c) if c.metadata_scraped_at.is_some() => {
                 tracing::info!(target: LOG_TARGET, "concert {} already scraped; skipping", req.concert_id);
                 return;
@@ -213,7 +214,7 @@ mod tests {
     const RECV_MAX_POLLS: usize = 500;
 
     fn dummy_db() -> Arc<Mutex<Connection>> {
-        Arc::new(Mutex::new(db::open_in_memory().unwrap()))
+        Arc::new(Mutex::new(db::connection::open_in_memory().unwrap()))
     }
 
     /// Poll `cond` until true, failing the test if it never becomes true.
@@ -314,7 +315,7 @@ mod tests {
         record_scrape_failure(&conn, 42, &anyhow::anyhow!("Failed to write JSON file foo"));
         record_scrape_failure(&conn, 42, &anyhow::anyhow!("second failure"));
 
-        let failed = db::list_failed_jobs(&conn, 100).unwrap();
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 100).unwrap();
         assert_eq!(failed.len(), 2, "each failure appends its own row");
         assert!(failed.iter().all(|j| j.name == SCRAPE_JOB_NAME));
         assert!(failed
@@ -328,9 +329,9 @@ mod tests {
         let url = "https://npr.org/c/already-scraped";
         let id = {
             let conn = db.lock().unwrap();
-            db::upsert_listing(
+            db::concerts::upsert_listing(
                 &conn,
-                &db::NewListing {
+                &db::concerts::NewListing {
                     source_url: url.to_string(),
                     title: "X".to_string(),
                     concert_date: Some("2026-05-01".to_string()),
@@ -338,11 +339,13 @@ mod tests {
                 },
             )
             .unwrap();
-            let c = db::get_concert_by_url(&conn, url).unwrap().unwrap();
-            db::update_metadata(
+            let c = db::concerts::get_concert_by_url(&conn, url)
+                .unwrap()
+                .unwrap();
+            db::concerts::update_metadata(
                 &conn,
                 c.id,
-                &db::MetadataUpdate {
+                &db::concerts::MetadataUpdate {
                     artist: "Artist".to_string(),
                     album: "Album".to_string(),
                     description: None,
@@ -363,6 +366,8 @@ mod tests {
         scrape_item(&db, Path::new("/tmp"), &req);
 
         let conn = db.lock().unwrap();
-        assert!(db::list_failed_jobs(&conn, 100).unwrap().is_empty());
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 100)
+            .unwrap()
+            .is_empty());
     }
 }

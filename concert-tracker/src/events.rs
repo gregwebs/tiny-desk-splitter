@@ -123,7 +123,7 @@ pub fn record_now(conn: &Connection, concert_id: i64, event: Event, json: Option
 /// Generate historical events from existing concert data. Idempotent: skips
 /// concerts that already have events.
 pub fn backfill(conn: &Connection) -> anyhow::Result<usize> {
-    let concerts = crate::db::list_concerts(conn)?;
+    let concerts = crate::db::concerts::list_concerts(conn)?;
 
     let mut stmt = conn.prepare("SELECT DISTINCT concert_id FROM events")?;
     let existing: std::collections::HashSet<i64> = stmt
@@ -208,7 +208,7 @@ pub fn backfill_track_deletes(
     conn: &Connection,
     working_dir: &std::path::Path,
 ) -> anyhow::Result<usize> {
-    let concerts = crate::db::list_concerts(conn)?;
+    let concerts = crate::db::concerts::list_concerts(conn)?;
     let mut count = 0;
 
     for c in &concerts {
@@ -263,7 +263,7 @@ pub fn backfill_split_tracks(conn: &Connection) -> anyhow::Result<usize> {
 
     let mut count = 0;
     for (event_id, concert_id) in &rows {
-        let concert = match crate::db::get_concert(conn, *concert_id) {
+        let concert = match crate::db::concerts::get_concert(conn, *concert_id) {
             Ok(c) => c,
             Err(_) => continue,
         };
@@ -297,13 +297,13 @@ mod tests {
     use super::*;
 
     fn setup() -> Connection {
-        crate::db::open_in_memory().unwrap()
+        crate::db::connection::open_in_memory().unwrap()
     }
 
     fn seed(conn: &Connection) -> i64 {
-        crate::db::upsert_listing(
+        crate::db::concerts::upsert_listing(
             conn,
-            &crate::db::NewListing {
+            &crate::db::concerts::NewListing {
                 source_url: "https://npr.org/c/1".to_string(),
                 title: "Test Concert".to_string(),
                 concert_date: Some("2024-06-01".to_string()),
@@ -311,7 +311,7 @@ mod tests {
             },
         )
         .unwrap();
-        let c = crate::db::get_concert_by_url(conn, "https://npr.org/c/1")
+        let c = crate::db::concerts::get_concert_by_url(conn, "https://npr.org/c/1")
             .unwrap()
             .unwrap();
         c.id
@@ -435,9 +435,9 @@ mod tests {
         let _id = seed(&conn);
         let count_before = event_count(&conn);
 
-        crate::db::upsert_listing(
+        crate::db::concerts::upsert_listing(
             &conn,
-            &crate::db::NewListing {
+            &crate::db::concerts::NewListing {
                 source_url: "https://npr.org/c/1".to_string(),
                 title: "Updated Title".to_string(),
                 concert_date: None,
@@ -453,10 +453,10 @@ mod tests {
     fn scraped_event_on_update_metadata() {
         let conn = setup();
         let id = seed(&conn);
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -476,12 +476,12 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        let is_ignored = crate::db::toggle_ignored(&conn, id).unwrap();
+        let is_ignored = crate::db::concerts::toggle_ignored(&conn, id).unwrap();
         assert!(is_ignored);
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "ignored");
 
-        let is_ignored = crate::db::toggle_ignored(&conn, id).unwrap();
+        let is_ignored = crate::db::concerts::toggle_ignored(&conn, id).unwrap();
         assert!(!is_ignored);
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "ignored_delete");
@@ -493,12 +493,12 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        let is_wanted = crate::db::toggle_wanted(&conn, id).unwrap();
+        let is_wanted = crate::db::concerts::toggle_wanted(&conn, id).unwrap();
         assert!(is_wanted);
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "wanted");
 
-        let is_wanted = crate::db::toggle_wanted(&conn, id).unwrap();
+        let is_wanted = crate::db::concerts::toggle_wanted(&conn, id).unwrap();
         assert!(!is_wanted);
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "wanted_delete");
@@ -510,8 +510,8 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
 
         let events = events_for(&conn, id);
         let event_types: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
@@ -524,8 +524,8 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_failed(&conn, id, "timeout").unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_failed(&conn, id, "timeout").unwrap();
 
         let json = event_json_for(&conn, id, "download_error").unwrap();
         assert!(json.contains("timeout"));
@@ -537,10 +537,10 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
 
         let events = events_for(&conn, id);
         let event_types: Vec<&str> = events.iter().map(|(e, _)| e.as_str()).collect();
@@ -556,10 +556,10 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_failed(&conn, id, "ffmpeg error").unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_failed(&conn, id, "ffmpeg error").unwrap();
 
         let json = event_json_for(&conn, id, "split_error").unwrap();
         assert!(json.contains("ffmpeg error"));
@@ -571,9 +571,9 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::clear_download_state(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::clear_download_state(&conn, id).unwrap();
 
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "download_delete");
@@ -585,11 +585,11 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
-        crate::db::clear_split_state(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::clear_split_state(&conn, id).unwrap();
 
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "split_delete");
@@ -601,8 +601,8 @@ mod tests {
         let id = seed(&conn);
         // Simulate a concert that was imported and downloaded before events existed
         conn.execute("DELETE FROM events", []).unwrap();
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
         assert_eq!(event_count(&conn), 0);
 
@@ -620,7 +620,7 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
-        crate::db::toggle_wanted(&conn, id).unwrap();
+        crate::db::concerts::toggle_wanted(&conn, id).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         let count1 = backfill(&conn).unwrap();
@@ -634,9 +634,9 @@ mod tests {
     fn backfill_skips_concerts_with_existing_events() {
         let conn = setup();
         let _id1 = seed(&conn); // has import event from seed
-        crate::db::upsert_listing(
+        crate::db::concerts::upsert_listing(
             &conn,
-            &crate::db::NewListing {
+            &crate::db::concerts::NewListing {
                 source_url: "https://npr.org/c/2".to_string(),
                 title: "Concert B".to_string(),
                 concert_date: None,
@@ -657,8 +657,8 @@ mod tests {
         conn.execute("DELETE FROM events", []).unwrap();
 
         // Add a download error directly to the concert
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_failed(&conn, id, "403 forbidden").unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_failed(&conn, id, "403 forbidden").unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         backfill(&conn).unwrap();
@@ -672,7 +672,7 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
-        crate::db::toggle_wanted(&conn, id).unwrap();
+        crate::db::concerts::toggle_wanted(&conn, id).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         backfill(&conn).unwrap();
@@ -688,10 +688,10 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
 
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Test Album".to_string(),
                 description: None,
@@ -704,10 +704,10 @@ mod tests {
             },
         )
         .unwrap();
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
 
         // Create only Song One on disk — Song Two and Song Three are "deleted"
         let concert_dir = crate::model::concert_dir(dir.path(), "Test Album");
@@ -734,10 +734,10 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
 
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -748,10 +748,10 @@ mod tests {
         .unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
 
         let json = event_json_for(&conn, id, "split").unwrap();
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -766,10 +766,10 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
 
         let json = event_json_for(&conn, id, "split");
         assert!(json.is_none());
@@ -780,10 +780,10 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
 
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -815,10 +815,10 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
 
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -856,10 +856,10 @@ mod tests {
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        crate::db::update_metadata(
+        crate::db::concerts::update_metadata(
             &conn,
             id,
-            &crate::db::MetadataUpdate {
+            &crate::db::concerts::MetadataUpdate {
                 artist: "Artist".to_string(),
                 album: "Album".to_string(),
                 description: None,
@@ -868,10 +868,10 @@ mod tests {
             },
         )
         .unwrap();
-        crate::db::try_mark_download_started(&conn, id).unwrap();
-        crate::db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-        crate::db::try_mark_split_started(&conn, id).unwrap();
-        crate::db::mark_split_succeeded(&conn, id).unwrap();
+        crate::db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        crate::db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        crate::db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         backfill(&conn).unwrap();

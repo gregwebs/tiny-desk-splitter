@@ -135,7 +135,7 @@ fn main() -> Result<()> {
         cli.no_proxy,
         cli.proxy_from_env,
     ));
-    let conn = db::open(&cli.db)?;
+    let conn = db::connection::open(&cli.db)?;
 
     match cli.command {
         Command::Sync { from, to } => {
@@ -182,7 +182,7 @@ fn main() -> Result<()> {
         }
 
         Command::List { filter } => {
-            let concerts = db::list_concerts(&conn)?;
+            let concerts = db::concerts::list_concerts(&conn)?;
             let filtered: Vec<&Concert> = concerts
                 .iter()
                 .filter(|c| match filter.as_str() {
@@ -205,12 +205,12 @@ fn main() -> Result<()> {
         }
 
         Command::Ignore { id } => {
-            db::toggle_ignored(&conn, id)?;
+            db::concerts::toggle_ignored(&conn, id)?;
             println!("Toggled ignored for concert {}", id);
         }
 
         Command::Want { id } => {
-            db::toggle_wanted(&conn, id)?;
+            db::concerts::toggle_wanted(&conn, id)?;
             println!("Toggled wanted for concert {}", id);
         }
 
@@ -220,7 +220,7 @@ fn main() -> Result<()> {
         }
 
         Command::ClearStaleDownloadErrors => {
-            let count = db::clear_stale_download_errors(&conn)?;
+            let count = db::lifecycle::clear_stale_download_errors(&conn)?;
             println!("Cleared stale download errors for {count} concert(s)");
         }
 
@@ -234,7 +234,7 @@ fn main() -> Result<()> {
         }
 
         Command::BackfillTeasers => {
-            let concerts = db::list_concerts_missing_teaser(&conn)?;
+            let concerts = db::concerts::list_concerts_missing_teaser(&conn)?;
             println!("Found {} concerts missing teasers", concerts.len());
             let mut success = 0;
             let mut failed = 0;
@@ -258,7 +258,7 @@ fn main() -> Result<()> {
         }
 
         Command::BackfillThumbnails => {
-            let concerts = db::list_concerts(&conn)?;
+            let concerts = db::concerts::list_concerts(&conn)?;
             let mut created = 0;
             let mut present = 0;
             let mut failed = 0;
@@ -359,7 +359,7 @@ fn main() -> Result<()> {
         }
 
         Command::UpdateJsonTeasers => {
-            let concerts = db::list_concerts(&conn)?;
+            let concerts = db::concerts::list_concerts(&conn)?;
             let mut updated = 0;
             let mut skipped = 0;
             for c in &concerts {
@@ -403,7 +403,7 @@ fn main() -> Result<()> {
         }
 
         Command::Resplit { dry_run, confirm } => {
-            let candidates = db::list_resplit_candidates(&conn)?;
+            let candidates = db::lifecycle::list_resplit_candidates(&conn)?;
             println!("Found {} resplit candidate(s)", candidates.len());
 
             if dry_run {
@@ -481,7 +481,7 @@ fn main() -> Result<()> {
                                 // keeps the old split_at but always appends an error entry.
                                 let post_errors = {
                                     let conn = db.lock().unwrap();
-                                    db::get_concert(&conn, id)
+                                    db::concerts::get_concert(&conn, id)
                                         .map(|c| c.split_errors.len())
                                         .unwrap_or(initial_errors + 1)
                                 };
@@ -561,7 +561,7 @@ fn main() -> Result<()> {
 
             // Back up the database before mutating it (project rule: always back
             // up before changing database data). The connection runs in WAL mode
-            // (see db::open), so checkpoint first — otherwise a plain file copy
+            // (see db::connection::open), so checkpoint first — otherwise a plain file copy
             // can miss writes still sitting in the `-wal` file and the backup
             // would silently omit recent data.
             conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -602,7 +602,7 @@ fn backfill_teaser(conn: &rusqlite::Connection, concert: &Concert) -> Result<boo
     let html = tiny_desk_scraper::fetch_html(&concert.source_url)?;
     match tiny_desk_scraper::extract_teaser_from_html(&html) {
         Some(teaser) => {
-            db::set_teaser(conn, concert.id, &teaser)?;
+            db::concerts::set_teaser(conn, concert.id, &teaser)?;
             Ok(true)
         }
         None => Ok(false),

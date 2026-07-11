@@ -8,7 +8,8 @@ use tiny_desk_scraper::{
     fetch_bytes, fetch_html, parse_concert_info, save_concert_info, ConcertInfo,
 };
 
-use crate::db::{self, MetadataUpdate, NewListing};
+use crate::db;
+use crate::db::concerts::{MetadataUpdate, NewListing};
 use crate::model::{concert_dir, sanitize_album, Musician};
 
 /// Maximum width (px) of a generated listing thumbnail. The source preview is
@@ -153,7 +154,7 @@ fn write_file(dest: &Path, bytes: &[u8]) -> Result<()> {
 
 /// Upsert a parsed ConcertInfo into the database, converting Song structs to plain strings.
 pub fn apply_concert_info(conn: &Connection, info: &ConcertInfo) -> Result<()> {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: info.source.clone(),
@@ -163,7 +164,7 @@ pub fn apply_concert_info(conn: &Connection, info: &ConcertInfo) -> Result<()> {
         },
     )?;
 
-    let concert = db::get_concert_by_url(conn, &info.source)?
+    let concert = db::concerts::get_concert_by_url(conn, &info.source)?
         .ok_or_else(|| anyhow::anyhow!("Concert not found after upsert"))?;
 
     let set_list: Vec<String> = info.set_list.iter().map(|s| s.title.clone()).collect();
@@ -176,7 +177,7 @@ pub fn apply_concert_info(conn: &Connection, info: &ConcertInfo) -> Result<()> {
         })
         .collect();
 
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         concert.id,
         &MetadataUpdate {

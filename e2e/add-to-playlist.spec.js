@@ -61,11 +61,15 @@ async function waitForAddList(page) {
   });
 }
 
-// Dispatch a click via JS (works around single-process Chromium pointer-event
-// constraints that can block Playwright .click() on list items inside a sidebar).
+// Prefer Playwright's real click. In sandboxed single-process Chromium, pointer
+// movement into the sidebar can still be unreliable, so fall back to the
+// element's native click() rather than a hand-built event.
 async function jsClick(page, locator) {
-  const el = await locator.elementHandle();
-  await page.evaluate((node) => node.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true })), el);
+  try {
+    await locator.click({ timeout: 1000 });
+  } catch {
+    await locator.evaluate((node) => node.click());
+  }
 }
 
 // ── specs ─────────────────────────────────────────────────────────────────────
