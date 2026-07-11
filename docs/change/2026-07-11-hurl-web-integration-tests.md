@@ -7,9 +7,21 @@ Tracks the stacked PR series implementing this spec (parent issue #84):
 - [x] #78 Feature-Gated Test Control Server — `test.reset` JSON-RPC method, `--test-control-port` flag, release-build guard.
 - [x] #79 Seed Listing Through Hurl — `test.seed_listing`, `hurl/listing_status.hurl`, `scripts/hurl-test.js`, `just test-hurl`.
 - [x] #80 Seed Scraped Concert Status Cases — `test.seed_scraped_concert`; removed the equivalent Rust test.
-- [ ] #82 Migrate Listing Filter And Ignore Cases
+- [x] #82 Migrate Listing Filter And Ignore Cases — removed the two equivalent Rust tests.
 - [ ] #81 Add Semantic Assertion API When Needed
 - [ ] #83 Document And Stabilize The Hurl Workflow
+
+**Known gap for #83 to document**: as of #82, the four removed Rust integration
+tests (`not_downloaded_row_hides_download_badge_and_shows_button`,
+`ignore_endpoint_toggles_flag_and_returns_row`,
+`list_filter_by_status_narrows_results`, and the listing case from #79) are
+covered only by `hurl/listing_status.hurl`, which nothing in CI runs yet —
+`.github/workflows/ci.yml`'s `rust` job runs `cargo nextest run --tests` only.
+This matches "CI enforcement of Hurl tests" being explicitly Out Of Scope For
+First Slice below, but it is a real, currently-undetected regression risk for
+those four behaviors until CI runs `just test-hurl` (or equivalent). #83
+should call this out explicitly, not just classify the remaining *Rust*
+tests.
 
 ## Problem
 
