@@ -172,7 +172,9 @@ concert-db clear-stale-download-errors
 
 ### Database schema
 
-See [./docs/data.md](./docs/data.md) for an overview of the data model.
+See [./docs/data.md](./docs/data.md) for an overview of the data model, and
+[./docs/backend-persistence.md](./docs/backend-persistence.md) for how the
+persistence layer's Rust modules are organized.
 
 ---
 

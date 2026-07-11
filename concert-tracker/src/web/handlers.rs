@@ -3052,7 +3052,10 @@ pub async fn playlists_js() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, MetadataUpdate, NewListing};
+    use crate::db::{
+        self,
+        concerts::{MetadataUpdate, NewListing},
+    };
     use crate::model::Musician;
     use std::cell::Cell;
 
