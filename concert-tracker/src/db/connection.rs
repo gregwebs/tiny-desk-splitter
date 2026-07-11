@@ -173,10 +173,20 @@ fn add_column_if_missing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::tests::{concert_ts, seed};
-    use crate::db::{get_concert, mark_download_succeeded, try_mark_download_started};
+    use crate::db::tests::seed;
+    use crate::db::{get_concert, mark_download_succeeded, set_notes, try_mark_download_started};
     use crate::events;
     use rusqlite::params;
+
+    /// Read a single TEXT/NULL column for one concert.
+    fn concert_ts(conn: &Connection, id: i64, column: &str) -> Option<String> {
+        conn.query_row(
+            &format!("SELECT {} FROM concerts WHERE id = ?1", column),
+            params![id],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
 
     #[test]
     fn backfill_sets_mp4_for_existing_downloads() {
@@ -334,5 +344,31 @@ mod tests {
             })
             .unwrap();
         assert_eq!(value2, "2024-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn insert_sets_updated_at_via_trigger() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        assert!(
+            concert_ts(&conn, id, "updated_at").is_some(),
+            "AFTER INSERT trigger should populate updated_at"
+        );
+    }
+
+    #[test]
+    fn update_bumps_updated_at_via_trigger() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        // Pin updated_at to an old sentinel, then perform a normal update and
+        // confirm the trigger advanced it (avoids 1-second now() flakiness).
+        conn.execute(
+            "UPDATE concerts SET updated_at = '2000-01-01T00:00:00Z' WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+        set_notes(&conn, id, "changed").unwrap();
+        let after = concert_ts(&conn, id, "updated_at").unwrap();
+        assert_ne!(after, "2000-01-01T00:00:00Z", "updated_at must be bumped");
     }
 }
