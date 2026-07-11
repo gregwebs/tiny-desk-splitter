@@ -6,7 +6,7 @@ Tracks the stacked PR series implementing this spec (parent issue #84):
 
 - [x] #78 Feature-Gated Test Control Server — `test.reset` JSON-RPC method, `--test-control-port` flag, release-build guard.
 - [x] #79 Seed Listing Through Hurl — `test.seed_listing`, `hurl/listing_status.hurl`, `scripts/hurl-test.js`, `just test-hurl`.
-- [ ] #80 Seed Scraped Concert Status Cases
+- [x] #80 Seed Scraped Concert Status Cases — `test.seed_scraped_concert`; removed the equivalent Rust test.
 - [ ] #82 Migrate Listing Filter And Ignore Cases
 - [ ] #81 Add Semantic Assertion API When Needed
 - [ ] #83 Document And Stabilize The Hurl Workflow
