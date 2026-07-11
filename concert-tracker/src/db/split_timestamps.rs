@@ -177,6 +177,18 @@ pub fn list_concerts_missing_media_duration(conn: &Connection) -> Result<Vec<Con
     Ok(concerts)
 }
 
+/// Per-track durations for a concert, preferring user timestamps over auto.
+/// Index i is `Some(secs)` when that track has a known duration, else `None`.
+/// An empty vec means no timestamps at all (every track unknown).
+pub fn track_durations(conn: &Connection, concert_id: i64) -> Result<Vec<Option<f64>>> {
+    let stored = get_split_timestamps(conn, concert_id)?;
+    let chosen = stored.user.or(stored.auto);
+    Ok(match chosen {
+        Some(v) => v.into_iter().map(|s| Some(s.duration)).collect(),
+        None => Vec::new(),
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -452,5 +464,37 @@ pub(crate) mod tests {
         let v: serde_json::Value = serde_json::from_str(&json.unwrap()).unwrap();
         let parsed: Vec<concert_types::SongTimestamp> = serde_json::from_value(v).unwrap();
         assert_eq!(parsed, ts);
+    }
+
+    fn ts(title: &str, start: f64, end: f64) -> concert_types::SongTimestamp {
+        concert_types::SongTimestamp {
+            title: title.to_string(),
+            start_time: start,
+            end_time: end,
+            duration: end - start,
+        }
+    }
+
+    #[test]
+    fn track_durations_prefers_user_then_auto() {
+        let conn = open_in_memory().unwrap();
+        let concert = seed_with_album(&conn); // 2-song set list: "Song A", "Song B"
+        assert!(
+            track_durations(&conn, concert).unwrap().is_empty(),
+            "no timestamps yet"
+        );
+        set_auto_split_timestamps(&conn, concert, &[ts("t0", 0.0, 10.0), ts("t1", 10.0, 25.0)])
+            .unwrap();
+        assert_eq!(
+            track_durations(&conn, concert).unwrap(),
+            vec![Some(10.0), Some(15.0)]
+        );
+        set_user_split_timestamps(&conn, concert, &[ts("t0", 0.0, 5.0), ts("t1", 5.0, 25.0)])
+            .unwrap();
+        assert_eq!(
+            track_durations(&conn, concert).unwrap(),
+            vec![Some(5.0), Some(20.0)],
+            "user wins"
+        );
     }
 }
