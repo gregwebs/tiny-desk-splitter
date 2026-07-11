@@ -1,17 +1,6 @@
-See README.md for an overview of the project
-
-## Linting
-- `just lint` — run the full standard lint suite (`cargo fmt --all -- --check` + `cargo clippy --workspace --all-targets -- -D warnings`)
-- `just fmt` — auto-format the workspace
-
-## Code Quality Guidelines
-- **DRY**: Avoid code duplication. Use variables, functions, and modules to share code
-- **Types**: Use strong typing. For example, after a string is validated/parsed it should be given a new type.
-- **Testing**: Refactor code into small testable functions. Write lots of tests without using mocks.
-- **Error Handling**: Use Result/Option. Do not ignore errors. An error should be passed up callers until it reaches an error handler that properly handles the error by terminating the program in an exit state or returning an HTTP error code.
-- **Constants**: Define thresholds and parameters as named constants
-- **Documentation**: Comments state design constraints, invariants, and why. Not what the code does. Do not write comments that restate what the next line does. write or refactor code to make what it is doing easier to understand
-- **Tracing**: Add lots of debug level logging statements. Programs should be able to set the log level via an environment variable or CLI. Info level statements should show what is happening in the program at a high level.
+* README.md for an overview of the project
+* CONTRIBUTING.md for development
+* CODING_STANDARDS.md for how to write code
 
 ## Curl
 
@@ -22,14 +11,33 @@ See README.md for an overview of the project
 For write access to the repo, use the github skill in .claude/skills/github/SKILL.md
 For read access, the repo is public.
 
+
+# Workflow
+
 ## Agent Review
 
 Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
 
-# Workflow
+## Bug Fix
+
+Use /plan mode to investigate a bug in read-only mode.
+If a bug is difficult, use /diagnosing-bugs to investigate it.
+
+Generate a root cause analysis of the defect.
+If the root cause is complicated, use /to-spec to 
+When there is a straightforward fix, use /to-spec to generate a specification for the fix.
+If the fix requires user input, generate an explanation.
+If the fix
+Generate a plan on how to fix t
+
+## Improve Codebase Architecture
+
+This is provided by the /improve-codebase-architecture skill.
+
 - update the local main to the latest from origin and branch from that.
 - Planning
-  * Create a plan
+  * If there is already a detailed implementation in an issue/spec you can skip planning.
+  * Create a plan using the /to-spec skill
     * Describe the changes at different levels of detail
       * start with the high-level architecture of the changes
       * end with code implementation details
@@ -54,6 +62,7 @@ Reviews should be done be the engineeering-lead agent defined in .claude/agents/
     * Add state change diagrams to documentation
     * Put information from this change into a file in ./docs/change
       * If older change documentation is outdated, remove it.
+    * Put
 - Code review
   * Perform an Agent Review before verification
     * Do a follow up Agent Review of any changes made during verification

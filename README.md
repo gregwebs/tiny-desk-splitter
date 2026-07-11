@@ -13,6 +13,9 @@ Tools for downloading and splitting NPR Tiny Desk Concerts into individual track
 See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, linting, and
 testing.
 
+See [CODING_STANDARDS.md](CODING_STANDARDS.md) for how code should be written and reviewed.
+testing.
+
 ## Quick start
 
 ```sh
