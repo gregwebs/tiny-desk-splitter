@@ -17,6 +17,7 @@ For read access, the repo is public.
 ## Agent Review
 
 Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
+Reviews should be adversarial. After an initial adversarial review, follow up reviews should not be adversarial.
 
 ## Bug Fix
 
@@ -74,4 +75,5 @@ This is provided by the /improve-codebase-architecture skill.
     * maintain playwright scripts as e2e tests. this is only necessary where Foldkit tests are not adequate.
 - Pull request
   * send a pull request using ./scripts/github/gh-app-pr-create.sh
-  * for the commit and PR description point to what is added in ./docs/change 
+  * for the commit and PR description point to what is added in ./docs/change
+  * Check on the CI status after sending the PR. If there are failures, investigate them and change the PR following the Coding instructions.
