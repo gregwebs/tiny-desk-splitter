@@ -8,7 +8,10 @@ use tokio::process::Command;
 use tower::ServiceExt;
 
 use concert_tracker::{
-    db::{self, MetadataUpdate, NewListing},
+    db::{
+        self,
+        concerts::{MetadataUpdate, NewListing},
+    },
     jobs::{
         scrape_queue::{ScrapeItemFn, ScrapeQueue},
         JobConfig, JobRegistry,

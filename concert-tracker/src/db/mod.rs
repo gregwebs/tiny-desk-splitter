@@ -1,14 +1,18 @@
-//! Dependency direction between `db::connection`, `db::concerts`, and `events`
-//! (pinned down here per #63, updated per #64 now that concert reads live in
-//! their own module): `db::connection::run_migrations` calls `events::backfill`,
-//! which reads concerts via `db::concerts::list_concerts`. So `events` may
-//! depend on concert read operations, and `db::connection` may depend on
-//! `events` — but concert read operations must never depend back on
-//! `db::connection` internals or on `events`, or the migration startup path
-//! forms a cycle. Concert *write* operations (e.g. `db::concerts::upsert_listing`
-//! recording an `Import` event) depending on `events` is a separate, permitted
-//! relationship — the constraint above is specifically about reads used during
-//! migration/backfill.
+//! Persistence layer entry point. Organized into domain modules — see
+//! `docs/backend-persistence.md` for the full module map, type ownership,
+//! dependency-direction rules, event-emission invariants, transaction
+//! invariants, and lifecycle state diagram.
+//!
+//! One dependency-direction rule worth restating here because it constrains
+//! `db::connection` directly: `db::connection::run_migrations` calls
+//! `events::backfill`, which reads concerts via `db::concerts::list_concerts`.
+//! So `events` may depend on concert read operations, and `db::connection`
+//! may depend on `events` — but concert read operations must never depend
+//! back on `db::connection` internals or on `events`, or the migration
+//! startup path forms a cycle. Concert *write* operations (e.g.
+//! `db::concerts::upsert_listing` recording an `Import` event) depending on
+//! `events` is a separate, permitted relationship — the constraint above is
+//! specifically about reads used during migration/backfill.
 
 pub mod concerts;
 pub mod connection;
@@ -20,47 +24,10 @@ pub mod split_timestamps;
 pub mod sync;
 pub mod time;
 
-// TEMPORARY compatibility facade (#63 expand step of the db-domain-split
-// refactor, issue #69; extended in #64, extended again in #65 now that
-// playlists and track_durations have moved out): re-exports so existing
-// `db::...` call sites keep compiling unchanged while callers migrate to
-// domain paths in #66/#67. Removed by #68.
-pub use concerts::{
-    get_concert, get_concert_by_album, get_concert_by_url, get_concert_opt, list_concerts,
-    list_concerts_missing_teaser, set_notes, set_teaser, toggle_ignored, toggle_wanted,
-    update_metadata, upsert_listing, MetadataUpdate, NewListing,
-};
-pub use connection::{open, open_in_memory};
-pub use failed_jobs::{get_failed_job, insert_failed_job, list_failed_jobs, FailedJob};
-pub use lifecycle::{
-    clear_archive_state, clear_download_state, clear_split_state, clear_stale_download_errors,
-    count_active_jobs, fail_in_progress_jobs, list_in_progress, list_resplit_candidates,
-    mark_archive_failed, mark_archive_succeeded, mark_download_failed, mark_download_succeeded,
-    mark_split_failed, mark_split_succeeded, reset_in_progress, set_downloaded_at_if_missing,
-    set_downloaded_extension_if_missing, set_split_at_if_missing, try_mark_archive_started,
-    try_mark_download_started, try_mark_split_started,
-};
-pub use playlists::{
-    add_playlist_item, create_playlist, delete_playlist, find_playlist_by_name, get_playlist,
-    list_playlist_items, list_playlists, playlists_containing_concert, playlists_containing_track,
-    playlists_nesting_playlist, remove_playlist_item, reorder_playlist_items, update_playlist,
-    would_create_cycle, PlaylistError, PlaylistMembership,
-};
-pub use settings::{get_settings, update_archive_location, update_theme, Settings, Theme};
-pub use split_timestamps::{
-    clear_user_split_timestamps, get_split_timestamps, list_concerts_missing_media_duration,
-    list_concerts_needing_tracks_backfill, set_auto_split_timestamps, set_media_duration,
-    set_tracks_liked, set_tracks_present, set_user_split_timestamps, toggle_track_liked,
-    track_durations, StoredSplitTimestamps,
-};
-pub use sync::{
-    earliest_concert_date, list_fully_synced_months, mark_month_synced, mark_month_synced_at,
-};
-pub use time::now_string;
-
 #[cfg(test)]
 pub mod tests {
-    use super::*;
+    use super::concerts::{get_concert_by_url, update_metadata, upsert_listing};
+    use super::concerts::{MetadataUpdate, NewListing};
     use crate::model::Musician;
     use rusqlite::{params, Connection};
 

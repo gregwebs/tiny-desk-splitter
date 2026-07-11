@@ -173,8 +173,9 @@ fn add_column_if_missing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::concerts::{get_concert, set_notes};
+    use crate::db::lifecycle::{mark_download_succeeded, try_mark_download_started};
     use crate::db::tests::seed;
-    use crate::db::{get_concert, mark_download_succeeded, set_notes, try_mark_download_started};
     use crate::events;
     use rusqlite::params;
 
