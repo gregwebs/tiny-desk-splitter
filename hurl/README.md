@@ -97,9 +97,11 @@ cargo build --release --bin concert-web --features test-control
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
 As of this first slice, `concert-tracker/tests/web_integration.rs` still has
-~60 tests. None were left out by oversight — each falls into one of these
-categories, matching the spec's "Out Of Scope For First Slice" list plus a
-couple of pre-existing areas this slice never touched:
+~60 tests. This groups them by *why*, matching the spec's "Out Of Scope For
+First Slice" list plus a couple of pre-existing areas this slice never
+touched. It's a categorization of the shape of the remaining suite, not an
+exhaustive per-test audit — several examples are named under each bucket, but
+the buckets (especially the last one) cover more tests than are named here.
 
 - **Job command stubbing for download/split chains** (spec: explicitly out of
   scope). The largest group: everything that injects a fake download/split
@@ -140,13 +142,23 @@ couple of pre-existing areas this slice never touched:
   compares two in-process Rust values (the built OpenAPI doc vs. what's
   served) — a pure Rust-internal consistency check with no black-box
   equivalent.
-- **In-scope but not yet migrated**: `available_concert_row_shows_want_and_ignore_buttons`
-  checks a pure public-HTTP fragment (no job stubbing) similar in spirit to
-  what's already migrated, but wasn't in the first slice's five-bullet
-  "Initial Hurl coverage" list from the spec. It's a reasonable candidate for
-  the *next* slice, not a defect in this one — the spec's own decision is to
-  migrate in slices and delete Rust duplicates as each Hurl equivalent lands,
-  not to migrate everything reachable in the first pass.
+- **In-scope but not yet migrated — the largest remaining bucket.** Tests that
+  check pure public-HTTP behavior (status codes, response bodies/fragments)
+  with no job stubbing, no real media files, and no worker-timing control —
+  today's Test Control API (`test.seed_listing`, `test.seed_scraped_concert`,
+  `test.assert_concert_state`) could support migrating them, but they weren't
+  in the first slice's five-bullet "Initial Hurl coverage" list from the
+  spec. Representative examples, not an exhaustive list:
+  `available_concert_row_shows_want_and_ignore_buttons`,
+  `notes_endpoint_persists_text`, `downloaded_filter_includes_split_concerts`,
+  `prepare_returns_422_without_set_list`,
+  `prepare_returns_404_for_unknown_concert`,
+  `set_split_timestamps_returns_404_for_unknown_concert`, and other
+  404/409/422-validation-style tests across the split-timestamps and prepare
+  endpoints. These are reasonable candidates for a *next* slice, not defects
+  in this one — the spec's own decision is to migrate in slices and delete
+  Rust duplicates as each Hurl equivalent lands, not to migrate everything
+  reachable in the first pass.
 
 ## Known gaps
 
