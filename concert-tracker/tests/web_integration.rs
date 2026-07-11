@@ -34,7 +34,7 @@ fn disable_system_proxy_for_tests() {
 fn idle_scrape_queue() -> ScrapeQueue {
     disable_system_proxy_for_tests();
     ScrapeQueue::start(
-        Arc::new(Mutex::new(db::open_in_memory().unwrap())),
+        Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
         PathBuf::from("/tmp"),
     )
 }
@@ -88,7 +88,7 @@ async fn get_status_html(app: &axum::Router, id: i64) -> String {
 async fn pending_card_shows_loading_then_thumbnail() {
     use std::sync::mpsc as std_mpsc;
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/pending", "Pending Concert");
     let db = Arc::new(Mutex::new(conn));
 
@@ -102,7 +102,7 @@ async fn pending_card_shows_loading_then_thumbnail() {
         let _ = release_rx.lock().unwrap().recv();
         {
             let conn = db_for_item.lock().unwrap();
-            db::update_metadata(
+            db::concerts::update_metadata(
                 &conn,
                 req.concert_id,
                 &MetadataUpdate {
@@ -178,7 +178,7 @@ fn test_state(conn: rusqlite::Connection) -> AppState {
 }
 
 fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: url.to_string(),
@@ -192,7 +192,7 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
 
 #[tokio::test]
 async fn list_page_renders_seeded_concert() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/1", "Test Concert");
     let app = router(test_state(conn));
 
@@ -210,7 +210,7 @@ async fn list_page_renders_seeded_concert() {
 
 #[tokio::test]
 async fn ignore_endpoint_toggles_flag_and_returns_row() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/2", "Another Concert");
     let app = router(test_state(conn));
 
@@ -247,7 +247,7 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
     // In the Available state the concert-status slot exposes the two action
     // buttons. The redesign moved them from a trailing actions row into the
     // status slot itself, replacing the prior "available" badge.
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/avail", "Avail Concert");
     let app = router(test_state(conn));
 
@@ -280,9 +280,9 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
 async fn not_downloaded_row_hides_download_badge_and_shows_button() {
     // Replaces the prior "not-downloaded" grey badge with the Download
     // action button in the same slot.
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/fresh", "Fresh Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -321,10 +321,10 @@ async fn not_downloaded_row_hides_download_badge_and_shows_button() {
 
 #[tokio::test]
 async fn list_filter_by_status_narrows_results() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/3", "Concert A");
     seeded_concert(&conn, "https://npr.org/c/4", "Concert B");
-    db::toggle_ignored(&conn, 1).unwrap();
+    db::concerts::toggle_ignored(&conn, 1).unwrap();
     let app = router(test_state(conn));
 
     let response = app
@@ -348,7 +348,7 @@ async fn list_filter_by_status_narrows_results() {
 
 #[tokio::test]
 async fn notes_endpoint_persists_text() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/5", "Notes Concert");
     let app = router(test_state(conn));
 
@@ -369,9 +369,9 @@ async fn notes_endpoint_persists_text() {
 
 #[tokio::test]
 async fn download_endpoint_spawns_job_and_returns_row() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/6", "Download Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -408,7 +408,7 @@ async fn download_endpoint_spawns_job_and_returns_row() {
 #[tokio::test]
 async fn detail_page_auto_scrape_failure_still_renders() {
     disable_system_proxy_for_tests();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     // Port 1 with no listener — connection refuses immediately.
     seeded_concert(
         &conn,
@@ -447,7 +447,7 @@ async fn detail_page_auto_scrape_failure_still_renders() {
     // metadata_scraped_at must remain NULL so the next view retries.
     let reread = {
         let conn = db_arc.lock().unwrap();
-        db::get_concert(&conn, 1).unwrap()
+        db::concerts::get_concert(&conn, 1).unwrap()
     };
     assert!(reread.metadata_scraped_at.is_none());
     assert!(reread.artist.is_none());
@@ -464,7 +464,7 @@ fn state_with_workdir(conn: rusqlite::Connection, workdir: PathBuf) -> AppState 
 }
 
 fn seed_downloaded(conn: &rusqlite::Connection, url: &str, album: &str) {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: url.to_string(),
@@ -474,7 +474,7 @@ fn seed_downloaded(conn: &rusqlite::Connection, url: &str, album: &str) {
         },
     )
     .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         1,
         &MetadataUpdate {
@@ -486,8 +486,8 @@ fn seed_downloaded(conn: &rusqlite::Connection, url: &str, album: &str) {
         },
     )
     .unwrap();
-    db::try_mark_download_started(conn, 1).unwrap();
-    db::mark_download_succeeded(conn, 1, "mp4").unwrap();
+    db::lifecycle::try_mark_download_started(conn, 1).unwrap();
+    db::lifecycle::mark_download_succeeded(conn, 1, "mp4").unwrap();
 }
 
 #[tokio::test]
@@ -499,7 +499,7 @@ async fn delete_download_removes_file_and_clears_state() {
     let mp4 = cd.join(format!("{}.mp4", album));
     std::fs::write(&mp4, b"fake mp4 bytes").unwrap();
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/1", album);
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
@@ -559,7 +559,7 @@ async fn delete_download_removes_file_and_clears_state() {
 
     let c = {
         let conn = db_arc.lock().unwrap();
-        db::get_concert(&conn, 1).unwrap()
+        db::concerts::get_concert(&conn, 1).unwrap()
     };
     assert!(c.downloaded_at.is_none(), "downloaded_at must be cleared");
     assert!(c.split_at.is_none(), "split_at must be cleared");
@@ -577,10 +577,10 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     let mp4 = cd.join(format!("{}.mp4", album));
     std::fs::write(&mp4, b"fake mp4 bytes").unwrap();
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/prior-err", album);
-    db::try_mark_split_started(&conn, 1).unwrap();
-    db::mark_split_failed(&conn, 1, "ffmpeg crashed").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+    db::lifecycle::mark_split_failed(&conn, 1, "ffmpeg crashed").unwrap();
 
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
@@ -643,12 +643,12 @@ async fn downloaded_filter_includes_split_concerts() {
     // if it has also been split. (Previously the filter carried a hidden
     // `&& !Split` guard, which surprised users when their split concerts
     // disappeared from the Downloaded filter despite showing the badge.)
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     // First concert: downloaded only. `seed_downloaded` hardcodes id=1.
     seed_downloaded(&conn, "https://npr.org/d/dl-only", "Album One");
     // Second concert: downloaded + split. Set up inline because seed_downloaded
     // only handles a single id=1 concert.
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         &conn,
         &NewListing {
             source_url: "https://npr.org/d/dl-split".to_string(),
@@ -658,11 +658,11 @@ async fn downloaded_filter_includes_split_concerts() {
         },
     )
     .unwrap();
-    let id2 = db::get_concert_by_url(&conn, "https://npr.org/d/dl-split")
+    let id2 = db::concerts::get_concert_by_url(&conn, "https://npr.org/d/dl-split")
         .unwrap()
         .unwrap()
         .id;
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         id2,
         &MetadataUpdate {
@@ -674,10 +674,10 @@ async fn downloaded_filter_includes_split_concerts() {
         },
     )
     .unwrap();
-    db::try_mark_download_started(&conn, id2).unwrap();
-    db::mark_download_succeeded(&conn, id2, "mp4").unwrap();
-    db::try_mark_split_started(&conn, id2).unwrap();
-    db::mark_split_succeeded(&conn, id2).unwrap();
+    db::lifecycle::try_mark_download_started(&conn, id2).unwrap();
+    db::lifecycle::mark_download_succeeded(&conn, id2, "mp4").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, id2).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, id2).unwrap();
 
     let app = router(test_state(conn));
     let resp = app
@@ -722,9 +722,9 @@ async fn play_button_visible_after_successful_split() {
     std::fs::create_dir_all(&cd).unwrap();
     std::fs::write(cd.join(format!("{}.mp4", album)), b"fake mp4 bytes").unwrap();
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/split-listen", album);
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -736,9 +736,9 @@ async fn play_button_visible_after_successful_split() {
         },
     )
     .unwrap();
-    db::try_mark_split_started(&conn, 1).unwrap();
-    db::mark_split_succeeded(&conn, 1).unwrap();
-    db::set_tracks_present(&conn, 1, &[true, true]).unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &[true, true]).unwrap();
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
     let response = app
@@ -810,7 +810,7 @@ async fn delete_download_missing_file_returns_confirm_fragment() {
     let workdir = tempfile::tempdir().unwrap();
     // Deliberately don't create the mp4 — the file is "missing".
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/2", "Some Album");
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
@@ -845,7 +845,7 @@ async fn delete_download_missing_file_returns_confirm_fragment() {
 #[tokio::test]
 async fn delete_download_force_clears_state_when_file_missing() {
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/3", "Some Album");
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
@@ -885,17 +885,17 @@ async fn delete_download_force_clears_state_when_file_missing() {
     assert!(String::from_utf8_lossy(&body).contains("id=\"concert-1\""));
     let c = {
         let conn = db_arc.lock().unwrap();
-        db::get_concert(&conn, 1).unwrap()
+        db::concerts::get_concert(&conn, 1).unwrap()
     };
     assert!(c.downloaded_at.is_none());
 }
 
 #[tokio::test]
 async fn delete_split_clears_state() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/4", "Some Album");
-    db::try_mark_split_started(&conn, 1).unwrap();
-    db::mark_split_succeeded(&conn, 1).unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
         db: db_arc.clone(),
@@ -935,7 +935,7 @@ async fn delete_split_clears_state() {
     );
     let c = {
         let conn = db_arc.lock().unwrap();
-        db::get_concert(&conn, 1).unwrap()
+        db::concerts::get_concert(&conn, 1).unwrap()
     };
     assert!(c.split_at.is_none());
     assert!(c.downloaded_at.is_some(), "download must be untouched");
@@ -943,7 +943,7 @@ async fn delete_split_clears_state() {
 
 #[tokio::test]
 async fn delete_split_when_not_split_returns_400() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/d/5", "Not Split Concert");
     let app = router(test_state(conn));
 
@@ -963,9 +963,9 @@ async fn delete_split_when_not_split_returns_400() {
 
 #[tokio::test]
 async fn detail_page_renders_set_list_and_state() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/7", "Detail Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1009,9 +1009,9 @@ async fn ignore_deletes_preview_image() {
     std::fs::write(&preview, b"fake jpg").unwrap();
     assert!(preview.exists());
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/ign", album);
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1056,7 +1056,7 @@ fn seed_split_concert(
     set_list: Vec<String>,
     available_indices: &[usize],
 ) {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: format!("https://npr.org/c/{}", album),
@@ -1066,7 +1066,7 @@ fn seed_split_concert(
         },
     )
     .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         1,
         &MetadataUpdate {
@@ -1091,7 +1091,7 @@ fn seed_split_concert(
 async fn next_media_info_returns_next_available_track() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Next Track Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1125,7 +1125,7 @@ async fn next_media_info_returns_next_available_track() {
 async fn next_media_info_skips_unavailable_tracks() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Skip Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     // Track 1 ("Song B") has no file on disk — should be skipped
     seed_split_concert(
         &conn,
@@ -1159,7 +1159,7 @@ async fn next_media_info_skips_unavailable_tracks() {
 async fn next_media_info_returns_404_at_last_track() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Last Track Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1186,7 +1186,7 @@ async fn next_media_info_returns_404_at_last_track() {
 async fn prev_media_info_returns_prev_available_track() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Prev Track Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1223,7 +1223,7 @@ async fn prev_media_info_returns_prev_available_track() {
 async fn prev_media_info_skips_unavailable_tracks() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Prev Skip Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     // Track 1 ("Song B") has no file on disk — should be skipped going back.
     seed_split_concert(
         &conn,
@@ -1258,7 +1258,7 @@ async fn prev_media_info_skips_unavailable_tracks() {
 async fn prev_media_info_returns_404_at_first_track() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "First Track Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1285,7 +1285,7 @@ async fn prev_media_info_returns_404_at_first_track() {
 async fn track_media_info_reports_has_prev() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Has Prev Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1331,7 +1331,7 @@ async fn track_media_info_reports_has_prev() {
 
 #[tokio::test]
 async fn track_details_returns_200_without_album() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(
         &conn,
         "https://npr.org/c/no-album-details",
@@ -1375,11 +1375,11 @@ async fn track_details_returns_200_without_album() {
 async fn track_details_reports_busy_from_handler_state() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Busy Details Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(&conn, workdir.path(), album, vec!["Song A".into()], &[0]);
-    db::set_tracks_present(&conn, 1, &[true]).unwrap();
-    db::set_downloaded_at_if_missing(&conn, 1, "2026-07-07 00:00:00").unwrap();
-    db::try_mark_split_started(&conn, 1).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &[true]).unwrap();
+    db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2026-07-07 00:00:00").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
     let resp = app
@@ -1408,7 +1408,7 @@ async fn watch_returns_500_when_downloaded_but_file_missing() {
     // The handler must signal a server-side data-integrity issue, not a 404,
     // so the UI can surface an error indicator to the user.
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/no-file", "Missing File Album");
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
@@ -1452,7 +1452,7 @@ async fn watch_uses_injected_opener_and_succeeds() {
     // The injected opener (`true`) is invoked instead of the real `open`, so the
     // handler returns 200 without launching a media player.
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/open-ok", "Opener Album");
     let cd = concert_dir(workdir.path(), "Opener Album");
     std::fs::create_dir_all(&cd).unwrap();
@@ -1482,7 +1482,7 @@ async fn watch_returns_500_when_opener_fails() {
     // A failing opener (`false`, exit 1) escalates to 500 even though the file
     // exists — proving the handler runs the injected command and checks status.
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/open-fail", "Opener Fail Album");
     let cd = concert_dir(workdir.path(), "Opener Fail Album");
     std::fs::create_dir_all(&cd).unwrap();
@@ -1510,7 +1510,7 @@ async fn watch_returns_500_when_opener_fails() {
 #[tokio::test]
 async fn media_info_returns_500_when_downloaded_but_file_missing() {
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_downloaded(&conn, "https://npr.org/d/no-file-mi", "Missing File Album");
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
@@ -1532,8 +1532,8 @@ async fn watch_returns_404_when_concert_not_downloaded() {
     // Regression: only the "downloaded but file missing" case escalates to
     // 500. A concert that simply hasn't been downloaded yet still 404s.
     let workdir = tempfile::tempdir().unwrap();
-    let conn = db::open_in_memory().unwrap();
-    db::upsert_listing(
+    let conn = db::connection::open_in_memory().unwrap();
+    db::concerts::upsert_listing(
         &conn,
         &NewListing {
             source_url: "https://npr.org/d/not-dl".to_string(),
@@ -1543,7 +1543,7 @@ async fn watch_returns_404_when_concert_not_downloaded() {
         },
     )
     .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1573,9 +1573,9 @@ async fn watch_returns_404_when_concert_not_downloaded() {
 
 #[tokio::test]
 async fn like_track_toggles_state_and_renders_star() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/1", "Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1588,7 +1588,7 @@ async fn like_track_toggles_state_and_renders_star() {
     )
     .unwrap();
     // Mark both tracks present; starring is only allowed on available tracks.
-    db::set_tracks_present(&conn, 1, &[true, true]).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &[true, true]).unwrap();
     let app = router(test_state(conn));
 
     let resp = app
@@ -1617,9 +1617,9 @@ async fn like_track_toggles_state_and_renders_star() {
 #[tokio::test]
 async fn like_track_unavailable_returns_404() {
     // Starring a deleted / unavailable track must be rejected.
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/2", "Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1632,7 +1632,7 @@ async fn like_track_unavailable_returns_404() {
     )
     .unwrap();
     // Track 0 present, track 1 absent (simulates deletion).
-    db::set_tracks_present(&conn, 1, &[true, false]).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &[true, false]).unwrap();
     let app = router(test_state(conn));
 
     let resp = app
@@ -1652,7 +1652,7 @@ async fn like_track_unavailable_returns_404() {
 async fn track_media_info_reports_liked_state() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Liked Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1661,7 +1661,7 @@ async fn track_media_info_reports_liked_state() {
         &[0, 1],
     );
     // Like only the second track.
-    db::toggle_track_liked(&conn, 1, 1).unwrap();
+    db::split_timestamps::toggle_track_liked(&conn, 1, 1).unwrap();
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
     let liked: serde_json::Value = {
@@ -1708,7 +1708,7 @@ async fn track_media_info_liked_false_when_tracks_liked_unset() {
     // rather than panic.
     let workdir = tempfile::tempdir().unwrap();
     let album = "No Likes Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1739,7 +1739,7 @@ async fn track_media_info_liked_false_when_tracks_liked_unset() {
 async fn next_media_info_carries_liked_state() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Next Liked Album";
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_split_concert(
         &conn,
         workdir.path(),
@@ -1748,7 +1748,7 @@ async fn next_media_info_carries_liked_state() {
         &[0, 1, 2],
     );
     // Like the track that auto-advance will land on (index 1).
-    db::toggle_track_liked(&conn, 1, 1).unwrap();
+    db::split_timestamps::toggle_track_liked(&conn, 1, 1).unwrap();
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
 
     let resp = app
@@ -1771,9 +1771,9 @@ async fn next_media_info_carries_liked_state() {
 
 #[tokio::test]
 async fn like_track_out_of_range_returns_404() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seeded_concert(&conn, "https://npr.org/c/1", "Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -1806,7 +1806,7 @@ async fn like_track_out_of_range_returns_404() {
 /// Seed a scraped concert (id=1) with the given album and set list.
 fn seed_scraped(conn: &rusqlite::Connection, album: &str, set_list: Vec<String>) {
     seeded_concert(conn, "https://npr.org/c/prepare", "Prepare Concert");
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         1,
         &MetadataUpdate {
@@ -1874,7 +1874,7 @@ async fn prepare_endpoint_runs_download_then_split_chain() {
         cd.join("Song B.m4a").display()
     );
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(
         &conn,
         album,
@@ -1934,7 +1934,7 @@ async fn prepare_status_reports_filesystem_track_state() {
     // Only the second track exists on disk.
     std::fs::write(cd.join("Song B.m4a"), b"audio").unwrap();
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(
         &conn,
         album,
@@ -1952,7 +1952,7 @@ async fn prepare_status_reports_filesystem_track_state() {
 
 #[tokio::test]
 async fn prepare_returns_422_without_set_list() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, "Empty Album", vec![]);
     let app = router(test_state(conn));
 
@@ -1962,7 +1962,7 @@ async fn prepare_returns_422_without_set_list() {
 
 #[tokio::test]
 async fn prepare_returns_404_for_unknown_concert() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
 
     let (status, _) = post_json(&app, "/concerts/99/prepare").await;
@@ -2038,7 +2038,7 @@ async fn download_auto_split_runs_full_chain() {
     let album = "Auto Split Album";
     let songs = ["Song A", "Song B"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
     let app = router(state_with_chain(conn, workdir.path(), album, &songs));
 
@@ -2061,7 +2061,7 @@ async fn download_auto_split_reconciles_source_present_downloaded_at_null() {
     let album = "Reconcile Album";
     let songs = ["Track 1"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
 
     // Manually place the source file without setting downloaded_at.
@@ -2088,10 +2088,10 @@ async fn download_auto_split_retries_on_split_error() {
     let album = "Split Error Album";
     let songs = ["Song X"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
     // Record a split failure (split_at stays NULL, split_started_at = NULL).
-    db::mark_split_failed(&conn, 1, "previous split failed").unwrap();
+    db::lifecycle::mark_split_failed(&conn, 1, "previous split failed").unwrap();
 
     let app = router(state_with_chain(conn, workdir.path(), album, &songs));
 
@@ -2110,7 +2110,7 @@ async fn download_no_set_list_plain_download_no_split_queued() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "No Setlist Album";
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, vec![]);
 
     let app = router(state_with_chain(conn, workdir.path(), album, &[]));
@@ -2136,19 +2136,19 @@ async fn download_does_not_resplit_already_split_concert() {
     let album = "Already Split Album";
     let songs = ["Keep Track"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
 
     // Set up a concert that is split (split_at set) with surviving track files.
     let cd = concert_dir(workdir.path(), album);
     std::fs::create_dir_all(&cd).unwrap();
     std::fs::write(cd.join("Keep Track.m4a"), b"original-audio").unwrap();
-    db::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+    db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
     {
-        let started = db::try_mark_split_started(&conn, 1).unwrap();
+        let started = db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
         assert!(started);
-        db::mark_split_succeeded(&conn, 1).unwrap();
-        db::set_tracks_present(&conn, 1, &[true]).unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+        db::split_timestamps::set_tracks_present(&conn, 1, &[true]).unwrap();
     }
     // Simulate source file deleted (downloaded_at still set).
     // (The source file is not on disk — workdir has only the track file.)
@@ -2175,7 +2175,7 @@ async fn download_double_click_does_not_drop_split_edge() {
     let album = "Double Click Album";
     let songs = ["Song 1"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
 
     // Slow download so the second POST arrives mid-job.
@@ -2228,7 +2228,7 @@ async fn download_force_starts_when_tracks_present_but_source_missing() {
     let album = "Tracks Present Album";
     let songs = ["Existing Track"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     seed_scraped(&conn, album, songs.iter().map(|s| s.to_string()).collect());
 
     // Track files exist on disk but no source video.
@@ -2253,7 +2253,7 @@ async fn download_force_starts_when_tracks_present_but_source_missing() {
 
 // ── split-timestamps API tests ────────────────────────────────────────────────
 
-use concert_tracker::db::{
+use concert_tracker::db::split_timestamps::{
     get_split_timestamps, set_auto_split_timestamps, set_user_split_timestamps,
 };
 
@@ -2273,7 +2273,7 @@ fn sample_song_timestamps(songs: &[&str]) -> Vec<concert_types::SongTimestamp> {
 /// Seed a concert with scraped metadata and a set_list. Returns the concert id.
 /// Uses a unique URL per album to avoid collisions between tests.
 fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> i64 {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: format!("https://npr.org/ts/{}", album),
@@ -2290,7 +2290,7 @@ fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> 
             |r| r.get::<_, i64>(0),
         )
         .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         conn,
         id,
         &MetadataUpdate {
@@ -2336,7 +2336,7 @@ async fn create_test_audio(dir: &std::path::Path, name: &str) -> Option<std::pat
 
 #[tokio::test]
 async fn get_split_timestamps_returns_404_for_unknown_id() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
     let (status, _) = get_json(&app, "/concerts/999/split-timestamps").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2344,7 +2344,7 @@ async fn get_split_timestamps_returns_404_for_unknown_id() {
 
 #[tokio::test]
 async fn get_split_timestamps_returns_null_auto_and_user_initially() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["Song A", "Song B"];
     let id = seed_ts_concert(&conn, "Null Album", &songs);
     let app = router(test_state(conn));
@@ -2360,7 +2360,7 @@ async fn get_split_timestamps_returns_null_auto_and_user_initially() {
 
 #[tokio::test]
 async fn get_split_timestamps_returns_seeded_auto_timestamps() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["Track One", "Track Two"];
     let id = seed_ts_concert(&conn, "Auto Album", &songs);
     let ts = sample_song_timestamps(&songs);
@@ -2377,7 +2377,7 @@ async fn get_split_timestamps_returns_seeded_auto_timestamps() {
 
 #[tokio::test]
 async fn get_split_timestamps_returns_both_auto_and_user() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["Alpha", "Beta"];
     let id = seed_ts_concert(&conn, "Both Album", &songs);
     let auto_ts = sample_song_timestamps(&songs);
@@ -2413,7 +2413,7 @@ async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
     let album = "Backfill Album";
     let songs = ["Old Song A", "Old Song B"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let id = seed_ts_concert(&conn, album, &songs);
 
     // Write timestamps.json to the concert dir (simulating a pre-feature split).
@@ -2445,10 +2445,10 @@ async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
 
 #[tokio::test]
 async fn get_split_timestamps_uses_stored_media_duration_when_source_missing() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["Song A", "Song B"];
     let id = seed_ts_concert(&conn, "Stored Duration Album", &songs);
-    db::set_media_duration(&conn, id, 321.5).unwrap();
+    db::split_timestamps::set_media_duration(&conn, id, 321.5).unwrap();
 
     let app = router(test_state(conn));
     let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
@@ -2510,7 +2510,7 @@ async fn post_body_text(
 
 #[tokio::test]
 async fn set_split_timestamps_returns_404_for_unknown_concert() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
     let body = serde_json::json!({"songs": []});
     let (status, _) = post_body_json(&app, "/concerts/999/split-timestamps", body).await;
@@ -2519,7 +2519,7 @@ async fn set_split_timestamps_returns_404_for_unknown_concert() {
 
 #[tokio::test]
 async fn set_split_timestamps_returns_409_when_source_missing() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["A", "B"];
     let id = seed_ts_concert(&conn, "No Source Album", &songs);
     // No source file on disk — workdir points to /tmp (no files).
@@ -2542,7 +2542,7 @@ async fn set_split_timestamps_returns_422_on_count_mismatch() {
     let album = "Count Mismatch Album";
     let songs = ["A", "B"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let id = seed_ts_concert(&conn, album, &songs);
 
     // Touch a fake source file so the handler gets past the 409 check.
@@ -2570,7 +2570,7 @@ async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
     let album = "User TS Album";
     let songs = ["Song One", "Song Two"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let id = seed_ts_concert(&conn, album, &songs);
 
     // Create real audio file for ffprobe.
@@ -2642,7 +2642,7 @@ async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
 
 #[tokio::test]
 async fn reset_split_timestamps_returns_404_for_unknown_concert() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
     let (status, _) = post_json(&app, "/concerts/999/split-timestamps/reset").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
@@ -2650,7 +2650,7 @@ async fn reset_split_timestamps_returns_404_for_unknown_concert() {
 
 #[tokio::test]
 async fn reset_split_timestamps_returns_422_when_no_auto_timestamps() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["A", "B"];
     let id = seed_ts_concert(&conn, "No Auto Album", &songs);
     let app = router(test_state(conn));
@@ -2679,7 +2679,7 @@ async fn reset_split_timestamps_returns_422_when_no_auto_timestamps() {
 
 #[tokio::test]
 async fn reset_split_timestamps_returns_already_auto_when_user_is_null() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let songs = ["A", "B"];
     let id = seed_ts_concert(&conn, "Already Auto Album", &songs);
     let ts = sample_song_timestamps(&songs);
@@ -2706,7 +2706,7 @@ async fn reset_split_timestamps_happy_path_returns_202_and_clears_user_column() 
     let album = "Reset Album";
     let songs = ["Reset A", "Reset B"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let id = seed_ts_concert(&conn, album, &songs);
 
     // Need a real source file for start_split (downloaded_at reconcile + path check).
@@ -2788,14 +2788,14 @@ async fn delete_split_preserves_split_timestamp_columns() {
     let album = "Preserve TS Album";
     let songs = ["Keep A", "Keep B"];
 
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let id = seed_ts_concert(&conn, album, &songs);
 
     // Put the concert in split state so delete-split accepts it.
-    db::try_mark_download_started(&conn, id).unwrap();
-    db::mark_download_succeeded(&conn, id, "mp4").unwrap();
-    db::try_mark_split_started(&conn, id).unwrap();
-    db::mark_split_succeeded(&conn, id).unwrap();
+    db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+    db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
 
     let auto_ts = sample_song_timestamps(&songs);
     set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
@@ -2847,7 +2847,7 @@ fn seed_playlist_concert(
     album: &str,
     songs: &[&str],
 ) -> i64 {
-    db::upsert_listing(
+    db::concerts::upsert_listing(
         conn,
         &NewListing {
             source_url: url.to_string(),
@@ -2857,8 +2857,11 @@ fn seed_playlist_concert(
         },
     )
     .unwrap();
-    let id = db::get_concert_by_url(conn, url).unwrap().unwrap().id;
-    db::update_metadata(
+    let id = db::concerts::get_concert_by_url(conn, url)
+        .unwrap()
+        .unwrap()
+        .id;
+    db::concerts::update_metadata(
         conn,
         id,
         &MetadataUpdate {
@@ -2875,7 +2878,7 @@ fn seed_playlist_concert(
 
 #[tokio::test]
 async fn playlist_api_crud_and_resolution() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let cid = seed_playlist_concert(&conn, "https://npr.org/p1", "Album One", &["t0", "t1"]);
     set_auto_split_timestamps(&conn, cid, &sample_song_timestamps(&["t0", "t1"])).unwrap();
     let app = router(test_state(conn));
@@ -2972,7 +2975,7 @@ async fn playlist_api_crud_and_resolution() {
 
 #[tokio::test]
 async fn playlist_api_validation_status_codes() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let cid = seed_playlist_concert(&conn, "https://npr.org/p1", "Album One", &["t0"]);
     let app = router(test_state(conn));
 
@@ -3031,7 +3034,7 @@ async fn get_html(app: &axum::Router, uri: &str) -> (StatusCode, String) {
 
 #[tokio::test]
 async fn playlists_html_pages_render() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let cid = seed_playlist_concert(
         &conn,
         "https://npr.org/h1",
@@ -3102,7 +3105,7 @@ async fn playlists_html_pages_render() {
 
 #[tokio::test]
 async fn playlist_detail_page_unknown_id_is_404() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
     let (s, _) = get_html(&app, "/playlists/999").await;
     assert_eq!(s, StatusCode::NOT_FOUND);
@@ -3115,8 +3118,8 @@ fn seed_split_concert_with_files(
     songs: &[&str],
     workdir: &std::path::Path,
 ) -> rusqlite::Connection {
-    let conn = db::open_in_memory().unwrap();
-    db::upsert_listing(
+    let conn = db::connection::open_in_memory().unwrap();
+    db::concerts::upsert_listing(
         &conn,
         &NewListing {
             source_url: "https://npr.org/d/recon".to_string(),
@@ -3126,7 +3129,7 @@ fn seed_split_concert_with_files(
         },
     )
     .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -3138,11 +3141,11 @@ fn seed_split_concert_with_files(
         },
     )
     .unwrap();
-    db::try_mark_download_started(&conn, 1).unwrap();
-    db::mark_download_succeeded(&conn, 1, "mp4").unwrap();
-    db::try_mark_split_started(&conn, 1).unwrap();
-    db::mark_split_succeeded(&conn, 1).unwrap();
-    db::set_tracks_present(&conn, 1, &vec![true; songs.len()]).unwrap();
+    db::lifecycle::try_mark_download_started(&conn, 1).unwrap();
+    db::lifecycle::mark_download_succeeded(&conn, 1, "mp4").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &vec![true; songs.len()]).unwrap();
 
     let cd = concert_dir(workdir, album);
     std::fs::create_dir_all(&cd).unwrap();
@@ -3211,7 +3214,7 @@ async fn concert_playback_reconstruction_includes_interlude() {
         },
     ];
     set_user_split_timestamps(&conn, 1, &ts).unwrap();
-    db::set_media_duration(&conn, 1, 120.0).unwrap();
+    db::split_timestamps::set_media_duration(&conn, 1, 120.0).unwrap();
 
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
     let (status, json) = get_json(&app, "/concerts/1/concert-playback").await;
@@ -3228,8 +3231,8 @@ async fn concert_playback_reconstruction_includes_interlude() {
 async fn concert_playback_returns_404_when_nothing_playable() {
     let workdir = tempfile::tempdir().unwrap();
     let album = "Empty Album";
-    let conn = db::open_in_memory().unwrap();
-    db::upsert_listing(
+    let conn = db::connection::open_in_memory().unwrap();
+    db::concerts::upsert_listing(
         &conn,
         &NewListing {
             source_url: "https://npr.org/d/empty".to_string(),
@@ -3239,7 +3242,7 @@ async fn concert_playback_returns_404_when_nothing_playable() {
         },
     )
     .unwrap();
-    db::update_metadata(
+    db::concerts::update_metadata(
         &conn,
         1,
         &MetadataUpdate {
@@ -3251,11 +3254,11 @@ async fn concert_playback_returns_404_when_nothing_playable() {
         },
     )
     .unwrap();
-    db::try_mark_download_started(&conn, 1).unwrap();
-    db::mark_download_succeeded(&conn, 1, "mp4").unwrap();
-    db::try_mark_split_started(&conn, 1).unwrap();
-    db::mark_split_succeeded(&conn, 1).unwrap();
-    db::set_tracks_present(&conn, 1, &[false]).unwrap();
+    db::lifecycle::try_mark_download_started(&conn, 1).unwrap();
+    db::lifecycle::mark_download_succeeded(&conn, 1, "mp4").unwrap();
+    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
+    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+    db::split_timestamps::set_tracks_present(&conn, 1, &[false]).unwrap();
     std::fs::create_dir_all(concert_dir(workdir.path(), album)).unwrap();
 
     let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
@@ -3287,7 +3290,7 @@ async fn delete_interlude_removes_file_records_event_returns_fragment() {
         },
     ];
     set_user_split_timestamps(&conn, 1, &ts).unwrap();
-    db::set_media_duration(&conn, 1, 120.0).unwrap();
+    db::split_timestamps::set_media_duration(&conn, 1, 120.0).unwrap();
     let db_arc = Arc::new(Mutex::new(conn));
     let state = AppState {
         db: db_arc.clone(),
@@ -3339,7 +3342,7 @@ async fn delete_interlude_removes_file_records_event_returns_fragment() {
 /// see `web::router_with_opts`.
 #[tokio::test]
 async fn prod_router_serves_embedded_js_without_livereload() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
 
     let resp = app
@@ -3391,7 +3394,7 @@ async fn prod_router_serves_embedded_js_without_livereload() {
 /// served, defeating the type-safety the frontend conversion relies on.
 #[tokio::test]
 async fn served_openapi_spec_matches_built_api_doc() {
-    let conn = db::open_in_memory().unwrap();
+    let conn = db::connection::open_in_memory().unwrap();
     let app = router(test_state(conn));
 
     let resp = app
