@@ -36,7 +36,7 @@ use crate::web::AppState;
 /// `layout.html`. Lives here (not in each handler) so that adding a new
 /// layout-scoped value doesn't require touching five template structs.
 pub struct Chrome {
-    pub theme: db::Theme,
+    pub theme: db::settings::Theme,
 }
 
 impl Chrome {
@@ -47,9 +47,9 @@ impl Chrome {
             .db
             .lock()
             .ok()
-            .and_then(|conn| db::get_settings(&conn).ok())
+            .and_then(|conn| db::settings::get_settings(&conn).ok())
             .map(|s| s.theme)
-            .unwrap_or(db::Theme::System);
+            .unwrap_or(db::settings::Theme::System);
         Self { theme }
     }
 }
@@ -225,7 +225,7 @@ struct JobsTemplate {
 #[template(path = "job_log.html")]
 struct JobLogTemplate {
     chrome: Chrome,
-    job: db::FailedJob,
+    job: db::failed_jobs::FailedJob,
     content: String,
 }
 
@@ -251,11 +251,11 @@ impl AppError {
     /// `.map_err(AppError::from_playlist)` rather than `From`/`?`, because the
     /// blanket `From<E: Into<anyhow::Error>>` would otherwise collapse every
     /// `PlaylistError` into a 500 and erase the 404/422 distinction.
-    fn from_playlist(e: db::PlaylistError) -> Self {
+    fn from_playlist(e: db::playlists::PlaylistError) -> Self {
         match e {
-            db::PlaylistError::NotFound => AppError::NotFound,
-            db::PlaylistError::Invalid(msg) => AppError::BadRequest(msg),
-            db::PlaylistError::Db(err) => AppError::Internal(err),
+            db::playlists::PlaylistError::NotFound => AppError::NotFound,
+            db::playlists::PlaylistError::Invalid(msg) => AppError::BadRequest(msg),
+            db::playlists::PlaylistError::Db(err) => AppError::Internal(err),
         }
     }
 }
@@ -315,7 +315,7 @@ where
     match fetch_and_apply(conn, &concert.source_url) {
         Ok(()) => {
             tracing::info!("auto-scrape completed for concert {}", concert.id);
-            db::get_concert(conn, concert.id).unwrap_or(concert)
+            db::concerts::get_concert(conn, concert.id).unwrap_or(concert)
         }
         Err(e) => {
             tracing::warn!("auto-scrape failed for concert {}: {}", concert.id, e);
@@ -351,7 +351,7 @@ fn locate_full_concert_file(
 
 fn has_archive_location(state: &AppState) -> bool {
     let conn = state.db.lock().unwrap();
-    db::get_settings(&conn)
+    db::settings::get_settings(&conn)
         .map(|s| s.archive_location.is_some())
         .unwrap_or(false)
 }
@@ -387,8 +387,8 @@ fn split_queued(state: &AppState, id: i64) -> bool {
 fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
     let (concert, stored_ts) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::get_split_timestamps(&conn, id)
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
             .map(|s| s.user)
             .unwrap_or(None);
         (concert, stored_ts)
@@ -591,10 +591,12 @@ pub async fn list(
 
     let (concerts, synced, earliest_date, has_archive_location) = {
         let conn = state.db.lock().unwrap();
-        let concerts = db::list_concerts(&conn)?;
+        let concerts = db::concerts::list_concerts(&conn)?;
         let synced = synced_months_set(&conn)?;
-        let earliest = db::earliest_concert_date(&conn)?;
-        let has_al = db::get_settings(&conn)?.archive_location.is_some();
+        let earliest = db::sync::earliest_concert_date(&conn)?;
+        let has_al = db::settings::get_settings(&conn)?
+            .archive_location
+            .is_some();
         (concerts, synced, earliest, has_al)
     };
 
@@ -657,7 +659,7 @@ pub async fn detail(
 ) -> Result<impl IntoResponse, AppError> {
     let initial = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     // Auto-scrape on first view. The scrape itself is blocking (reqwest::blocking
@@ -689,7 +691,7 @@ pub async fn detail(
     // Fetch user split timestamps for the source-redundant gate.
     let stored_user_ts = {
         let conn = state.db.lock().unwrap();
-        db::get_split_timestamps(&conn, id)
+        db::split_timestamps::get_split_timestamps(&conn, id)
             .map(|s| s.user)
             .unwrap_or(None)
     };
@@ -724,8 +726,8 @@ pub async fn ignore(
 ) -> Result<impl IntoResponse, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::toggle_ignored(&conn, id)?;
-        db::get_concert(&conn, id)?
+        db::concerts::toggle_ignored(&conn, id)?;
+        db::concerts::get_concert(&conn, id)?
     };
     if concert.ignored {
         if let Some(album) = concert.album.as_deref() {
@@ -756,7 +758,7 @@ pub async fn want(
 ) -> Result<impl IntoResponse, AppError> {
     {
         let conn = state.db.lock().unwrap();
-        db::toggle_wanted(&conn, id)?;
+        db::concerts::toggle_wanted(&conn, id)?;
     }
     render_card(&state, id)
 }
@@ -769,7 +771,7 @@ pub async fn notes(
     let text = form.get("notes").map(|s| s.as_str()).unwrap_or("");
     {
         let conn = state.db.lock().unwrap();
-        db::set_notes(&conn, id, text)?;
+        db::concerts::set_notes(&conn, id, text)?;
     }
     render_card(&state, id)
 }
@@ -780,7 +782,7 @@ pub async fn scrape_concert(
 ) -> Result<impl IntoResponse, AppError> {
     let (url, title) = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (c.source_url, c.title)
     };
 
@@ -811,7 +813,7 @@ pub async fn scrape_concert(
 async fn ensure_scraped_blocking(state: &AppState, id: i64) -> Result<(), AppError> {
     let needs_scrape = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         c.metadata_scraped_at.is_none()
     };
     if needs_scrape {
@@ -819,7 +821,7 @@ async fn ensure_scraped_blocking(state: &AppState, id: i64) -> Result<(), AppErr
         let working_dir = state.jobs.working_dir.clone();
         let _ = tokio::task::spawn_blocking(move || {
             let conn = db.lock().unwrap();
-            let c = db::get_concert(&conn, id)?;
+            let c = db::concerts::get_concert(&conn, id)?;
             ensure_scraped(&conn, c, |conn, url| {
                 crate::scrape::scrape_url(conn, url, &working_dir)
             });
@@ -839,7 +841,7 @@ pub async fn download(
     // Reload after scrape — metadata may have just been populated.
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     let should_auto_split = concert.album.is_some()
@@ -922,7 +924,7 @@ pub struct PrepareStatus {
 fn prepare_status_payload(state: &AppState, id: i64) -> Result<PrepareStatus, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
     let inventory = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None);
     let tracks_present = inventory.tracks_present_on_disk();
@@ -965,7 +967,7 @@ pub async fn prepare_concert(
     // 404 before scraping so an unknown id doesn't trigger a scrape attempt.
     {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
     }
     ensure_scraped_blocking(&state, id).await?;
 
@@ -1030,7 +1032,7 @@ pub async fn delete_download(
 
     let title = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         c.title
     };
 
@@ -1108,7 +1110,7 @@ pub async fn delete_redundant_source(
 ) -> Result<Response, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     tracing::info!(
@@ -1163,7 +1165,7 @@ pub async fn delete_split(
 ) -> Result<Response, AppError> {
     let title = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         c.title
     };
 
@@ -1197,7 +1199,7 @@ pub async fn listen(
 ) -> Result<impl IntoResponse, AppError> {
     let album = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         concert.album
     };
 
@@ -1266,8 +1268,8 @@ pub async fn concert_playback(
 ) -> Result<Json<ConcertPlaybackResponse>, AppError> {
     let (concert, stored_ts, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::get_split_timestamps(&conn, id)
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
             .map(|s| s.user)
             .unwrap_or(None);
         let working_dir = state.jobs.working_dir.clone();
@@ -1300,7 +1302,7 @@ pub async fn delete_interlude(
 ) -> Result<impl IntoResponse, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
     let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
@@ -1364,8 +1366,8 @@ pub async fn delete_interlude(
 async fn concert_playback_tracks_fragment(state: &AppState, id: i64) -> Result<String, AppError> {
     let (concert, stored_ts) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::get_split_timestamps(&conn, id)
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
             .map(|s| s.user)
             .unwrap_or(None);
         (concert, stored_ts)
@@ -1493,7 +1495,7 @@ pub async fn media_info(
 ) -> Result<Json<MediaInfo>, AppError> {
     let (concert, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (concert, state.jobs.working_dir.clone())
     };
 
@@ -1523,7 +1525,7 @@ pub async fn track_media_info(
 ) -> Result<Json<MediaInfo>, AppError> {
     let (concert, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (concert, state.jobs.working_dir.clone())
     };
 
@@ -1553,7 +1555,7 @@ pub async fn next_track_media_info(
 ) -> Result<Json<MediaInfo>, AppError> {
     let (concert, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (concert, state.jobs.working_dir.clone())
     };
 
@@ -1584,7 +1586,7 @@ pub async fn prev_track_media_info(
 ) -> Result<Json<MediaInfo>, AppError> {
     let (concert, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (concert, state.jobs.working_dir.clone())
     };
 
@@ -1600,7 +1602,7 @@ pub async fn watch(
 ) -> Result<StatusCode, AppError> {
     let (album, downloaded_at, working_dir) = {
         let conn = state.db.lock().unwrap();
-        let concert = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         (
             concert.album,
             concert.downloaded_at,
@@ -1636,7 +1638,7 @@ pub async fn watch_track(
 ) -> Result<StatusCode, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?;
@@ -1695,7 +1697,7 @@ pub async fn tracks(
 
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     let mut tracks = crate::model::list_all_tracks_from_db(
@@ -1746,7 +1748,7 @@ pub async fn track_details(
 ) -> Result<Json<TrackDetailsResponse>, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
     let tracks = crate::playback::track_details(&state.jobs.working_dir, &concert)
         .map_err(playback_error_to_app_error)?;
@@ -1763,7 +1765,7 @@ pub async fn listen_track(
 ) -> Result<impl IntoResponse, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
@@ -1828,7 +1830,7 @@ pub async fn like_track(
 ) -> Result<impl IntoResponse, AppError> {
     let concert = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         if idx >= c.set_list.len() {
             return Err(AppError::NotFound);
         }
@@ -1840,8 +1842,8 @@ pub async fn like_track(
             );
             return Err(AppError::NotFound);
         }
-        db::toggle_track_liked(&conn, id, idx)?;
-        db::get_concert(&conn, id)?
+        db::split_timestamps::toggle_track_liked(&conn, id, idx)?;
+        db::concerts::get_concert(&conn, id)?
     };
 
     // Swap only the star itself: the response is rendered into the clicked
@@ -1873,8 +1875,8 @@ pub async fn jobs_list(
 
     let (concerts, failed) = {
         let conn = state.db.lock().unwrap();
-        let concerts = db::list_in_progress(&conn)?;
-        let failed = db::list_failed_jobs(&conn, 100)?;
+        let concerts = db::lifecycle::list_in_progress(&conn)?;
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 100)?;
         (concerts, failed)
     };
 
@@ -1960,7 +1962,7 @@ pub async fn job_log(
 ) -> Result<impl IntoResponse, AppError> {
     let job = {
         let conn = state.db.lock().unwrap();
-        db::get_failed_job(&conn, id).map_err(|_| AppError::NotFound)?
+        db::failed_jobs::get_failed_job(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
     let log_path = state.jobs.log_dir().join(format!("{}.log", id));
@@ -1978,7 +1980,7 @@ pub async fn job_log(
 pub async fn jobs_count(State(state): State<AppState>) -> Result<String, AppError> {
     let count = {
         let conn = state.db.lock().unwrap();
-        db::count_active_jobs(&conn)?
+        db::lifecycle::count_active_jobs(&conn)?
     };
     if count > 0 {
         Ok(format!(
@@ -2030,7 +2032,7 @@ pub async fn settings_page(
 ) -> Result<impl IntoResponse, AppError> {
     let settings = {
         let conn = state.db.lock().unwrap();
-        db::get_settings(&conn)?
+        db::settings::get_settings(&conn)?
     };
     let saved = params.get("saved").map(|v| v == "1").unwrap_or(false);
     Ok(SettingsTemplate {
@@ -2052,14 +2054,14 @@ pub async fn settings_save(
         .unwrap_or("");
     let theme = form
         .get("theme")
-        .map(|s| db::Theme::parse(s))
+        .map(|s| db::settings::Theme::parse(s))
         .transpose()
         .map_err(|_| AppError::Internal(anyhow::anyhow!("invalid theme value")))?;
     {
         let conn = state.db.lock().unwrap();
-        db::update_archive_location(&conn, location)?;
+        db::settings::update_archive_location(&conn, location)?;
         if let Some(t) = theme {
-            db::update_theme(&conn, t)?;
+            db::settings::update_theme(&conn, t)?;
         }
     }
     tracing::info!(
@@ -2077,7 +2079,7 @@ pub async fn archive(
 ) -> Result<Response, AppError> {
     let archive_location = {
         let conn = state.db.lock().unwrap();
-        db::get_settings(&conn)?
+        db::settings::get_settings(&conn)?
             .archive_location
             .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Archive location not configured")))?
     };
@@ -2102,7 +2104,7 @@ pub async fn unarchive(
 ) -> Result<Response, AppError> {
     let album = {
         let conn = state.db.lock().unwrap();
-        let c = db::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
+        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
         if c.archived_at.is_none() {
             return Err(AppError::Internal(anyhow::anyhow!(
                 "concert {} is not archived",
@@ -2138,15 +2140,15 @@ pub async fn unarchive(
     match result {
         Ok(()) => {
             let conn = state.db.lock().unwrap();
-            db::clear_archive_state(&conn, id)?;
+            db::lifecycle::clear_archive_state(&conn, id)?;
             tracing::info!("unarchive completed for concert {}", id);
         }
         Err(e) => {
             let error = format!("{:#}", e);
             tracing::warn!("unarchive failed for concert {}: {}", id, error);
             let conn = state.db.lock().unwrap();
-            let _ = db::mark_archive_failed(&conn, id, &error);
-            let _ = db::insert_failed_job(&conn, id, "unarchive", &error);
+            let _ = db::lifecycle::mark_archive_failed(&conn, id, &error);
+            let _ = db::failed_jobs::insert_failed_job(&conn, id, "unarchive", &error);
             return Err(AppError::Internal(anyhow::anyhow!(error)));
         }
     }
@@ -2437,8 +2439,8 @@ pub struct MembershipJson {
     item_id: i64,
 }
 
-impl From<crate::db::PlaylistMembership> for MembershipJson {
-    fn from(m: crate::db::PlaylistMembership) -> Self {
+impl From<crate::db::playlists::PlaylistMembership> for MembershipJson {
+    fn from(m: crate::db::playlists::PlaylistMembership) -> Self {
         MembershipJson {
             id: m.playlist.id,
             name: m.playlist.name,
@@ -2579,7 +2581,7 @@ pub struct CreatedItemJson {
 
 /// Validate the request body into a typed item kind (presence of the right
 /// fields for the declared `type`); the deeper reference/cycle checks happen in
-/// `db::add_playlist_item`.
+/// `db::playlists::add_playlist_item`.
 fn parse_item_kind(req: &AddItemReq) -> Result<crate::model::PlaylistItemKind, AppError> {
     use crate::model::PlaylistItemKind;
     match req.item_type.as_str() {
@@ -2627,7 +2629,7 @@ pub async fn create_playlist(
     Json(req): Json<CreatePlaylistReq>,
 ) -> Result<Json<CreatedPlaylistJson>, AppError> {
     let conn = state.db.lock().unwrap();
-    let id = db::create_playlist(&conn, &req.name, req.description.as_deref())
+    let id = db::playlists::create_playlist(&conn, &req.name, req.description.as_deref())
         .map_err(AppError::from_playlist)?;
     Ok(Json(CreatedPlaylistJson { id }))
 }
@@ -2645,7 +2647,7 @@ pub async fn list_playlists(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<PlaylistListEntry>>, AppError> {
     let conn = state.db.lock().unwrap();
-    let playlists = db::list_playlists(&conn)?;
+    let playlists = db::playlists::list_playlists(&conn)?;
     let mut out = Vec::with_capacity(playlists.len());
     for p in playlists {
         let summary = crate::playlist::summarize_playlist(&conn, p.id)?;
@@ -2673,8 +2675,8 @@ pub async fn get_playlist(
     Path(id): Path<i64>,
 ) -> Result<Json<PlaylistDetailJson>, AppError> {
     let conn = state.db.lock().unwrap();
-    let playlist = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
-    let items = db::list_playlist_items(&conn, id)?;
+    let playlist = db::playlists::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+    let items = db::playlists::list_playlist_items(&conn, id)?;
     let resolved = crate::playlist::expand_playlist(&conn, id)?;
     Ok(Json(PlaylistDetailJson {
         playlist: playlist.into(),
@@ -2702,12 +2704,12 @@ pub async fn update_playlist(
     Json(req): Json<UpdatePlaylistReq>,
 ) -> Result<StatusCode, AppError> {
     let conn = state.db.lock().unwrap();
-    let existing = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+    let existing = db::playlists::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
     let name = req.name.unwrap_or(existing.name);
     // PATCH semantics: a provided description (incl. empty) replaces; omitted
     // keeps the current value. Clearing to NULL is not supported in this phase.
     let description = req.description.or(existing.description);
-    db::update_playlist(&conn, id, &name, description.as_deref())
+    db::playlists::update_playlist(&conn, id, &name, description.as_deref())
         .map_err(AppError::from_playlist)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -2728,7 +2730,7 @@ pub async fn delete_playlist(
     Path(id): Path<i64>,
 ) -> Result<StatusCode, AppError> {
     let conn = state.db.lock().unwrap();
-    if db::delete_playlist(&conn, id)? {
+    if db::playlists::delete_playlist(&conn, id)? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)
@@ -2755,7 +2757,8 @@ pub async fn add_playlist_item(
 ) -> Result<Json<CreatedItemJson>, AppError> {
     let kind = parse_item_kind(&req)?;
     let conn = state.db.lock().unwrap();
-    let item_id = db::add_playlist_item(&conn, id, &kind).map_err(AppError::from_playlist)?;
+    let item_id =
+        db::playlists::add_playlist_item(&conn, id, &kind).map_err(AppError::from_playlist)?;
     Ok(Json(CreatedItemJson { item_id }))
 }
 
@@ -2778,7 +2781,7 @@ pub async fn remove_playlist_item(
     Path((id, item_id)): Path<(i64, i64)>,
 ) -> Result<StatusCode, AppError> {
     let conn = state.db.lock().unwrap();
-    if db::remove_playlist_item(&conn, id, item_id)? {
+    if db::playlists::remove_playlist_item(&conn, id, item_id)? {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(AppError::NotFound)
@@ -2804,7 +2807,8 @@ pub async fn reorder_playlist_items(
     Json(req): Json<ReorderReq>,
 ) -> Result<StatusCode, AppError> {
     let mut conn = state.db.lock().unwrap();
-    db::reorder_playlist_items(&mut conn, id, &req.item_ids).map_err(AppError::from_playlist)?;
+    db::playlists::reorder_playlist_items(&mut conn, id, &req.item_ids)
+        .map_err(AppError::from_playlist)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -2826,7 +2830,7 @@ pub async fn track_playlists(
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
-    let out = db::playlists_containing_track(&conn, id, idx)?;
+    let out = db::playlists::playlists_containing_track(&conn, id, idx)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
@@ -2845,7 +2849,7 @@ pub async fn concert_playlists(
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
-    let out = db::playlists_containing_concert(&conn, id)?;
+    let out = db::playlists::playlists_containing_concert(&conn, id)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
@@ -2864,7 +2868,7 @@ pub async fn playlist_nested_in(
     Path(id): Path<i64>,
 ) -> Result<Json<Vec<MembershipJson>>, AppError> {
     let conn = state.db.lock().unwrap();
-    let out = db::playlists_nesting_playlist(&conn, id)?;
+    let out = db::playlists::playlists_nesting_playlist(&conn, id)?;
     Ok(Json(out.into_iter().map(Into::into).collect()))
 }
 
@@ -2915,7 +2919,7 @@ pub async fn playlists_page(State(state): State<AppState>) -> Result<impl IntoRe
     // `Chrome::from_state` (which takes its own lock — the Mutex is not reentrant).
     let rows = {
         let conn = state.db.lock().unwrap();
-        let playlists = db::list_playlists(&conn)?;
+        let playlists = db::playlists::list_playlists(&conn)?;
         let mut rows = Vec::with_capacity(playlists.len());
         for p in playlists {
             let summary = crate::playlist::summarize_playlist(&conn, p.id)?;
@@ -2944,8 +2948,8 @@ pub async fn playlist_detail_page(
 ) -> Result<impl IntoResponse, AppError> {
     let (name, description, track_count, total_time, items) = {
         let conn = state.db.lock().unwrap();
-        let playlist = db::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
-        let raw_items = db::list_playlist_items(&conn, id)?;
+        let playlist = db::playlists::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
+        let raw_items = db::playlists::list_playlist_items(&conn, id)?;
         let summary = crate::playlist::summarize_playlist(&conn, id)?;
         let mut items = Vec::with_capacity(raw_items.len());
         for it in raw_items {
@@ -2985,7 +2989,7 @@ fn build_item_row(
         Track {
             concert_id,
             track_index,
-        } => match db::get_concert_opt(conn, concert_id)? {
+        } => match db::concerts::get_concert_opt(conn, concert_id)? {
             Some(c) => PlaylistItemRow {
                 item_id: item.id,
                 kind: "track",
@@ -3008,7 +3012,7 @@ fn build_item_row(
             },
         },
         Concert { concert_id } => {
-            let concert = db::get_concert_opt(conn, concert_id)?;
+            let concert = db::concerts::get_concert_opt(conn, concert_id)?;
             PlaylistItemRow {
                 item_id: item.id,
                 kind: "concert",
@@ -3027,7 +3031,7 @@ fn build_item_row(
         Playlist { child_playlist_id } => PlaylistItemRow {
             item_id: item.id,
             kind: "playlist",
-            label: db::get_playlist(conn, child_playlist_id)?
+            label: db::playlists::get_playlist(conn, child_playlist_id)?
                 .map(|p| p.name)
                 .unwrap_or_else(|| "(missing playlist)".to_string()),
             sublabel: String::new(),
@@ -3053,7 +3057,7 @@ mod tests {
     use std::cell::Cell;
 
     fn seed_listing(conn: &Connection, url: &str) -> i64 {
-        db::upsert_listing(
+        db::concerts::upsert_listing(
             conn,
             &NewListing {
                 source_url: url.to_string(),
@@ -3073,10 +3077,10 @@ mod tests {
 
     #[test]
     fn render_row_includes_thumbnail_when_scraped_with_album() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://example.org/with-album";
         let id = seed_listing(&conn, url);
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             id,
             &MetadataUpdate {
@@ -3088,7 +3092,7 @@ mod tests {
             },
         )
         .unwrap();
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
 
         // Listing card uses the small thumbnail.
         let html = render_row(&concert, false, false, false).unwrap();
@@ -3110,10 +3114,10 @@ mod tests {
 
     #[test]
     fn render_row_omits_thumbnail_when_not_scraped() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://example.org/unscraped";
         let id = seed_listing(&conn, url);
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.metadata_scraped_at.is_none());
 
         let html = render_row(&concert, false, false, false).unwrap();
@@ -3124,7 +3128,7 @@ mod tests {
     /// (3 of 4 present).
     fn split_concert(conn: &Connection, url: &str) -> Concert {
         let id = seed_listing(conn, url);
-        db::update_metadata(
+        db::concerts::update_metadata(
             conn,
             id,
             &MetadataUpdate {
@@ -3141,7 +3145,7 @@ mod tests {
             },
         )
         .unwrap();
-        let mut concert = db::get_concert(conn, id).unwrap();
+        let mut concert = db::concerts::get_concert(conn, id).unwrap();
         concert.downloaded_at = Some("2026-01-01T00:00:00Z".to_string());
         concert.split_at = Some("2026-01-01T01:00:00Z".to_string());
         concert.tracks_present = vec![true, true, false, true];
@@ -3150,7 +3154,7 @@ mod tests {
 
     #[test]
     fn render_row_with_tracks_embeds_expanded_list_with_fresh_count() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let concert = split_concert(&conn, "https://example.org/split");
         let tracks = crate::model::list_all_tracks_from_db(
             &concert.set_list,
@@ -3178,7 +3182,7 @@ mod tests {
 
     #[test]
     fn render_row_without_tracks_renders_collapsed_card() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let concert = split_concert(&conn, "https://example.org/split-collapsed");
 
         let html = render_row(&concert, false, false, false).unwrap();
@@ -3189,9 +3193,9 @@ mod tests {
 
     #[test]
     fn render_row_shows_tracks_row_before_split_without_action_buttons() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_listing(&conn, "https://example.org/unsplit");
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             id,
             &MetadataUpdate {
@@ -3203,7 +3207,7 @@ mod tests {
             },
         )
         .unwrap();
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
 
         let html = render_row(&concert, true, false, false).unwrap();
         // Tracks row renders pre-split with the not-split status and 0/N count.
@@ -3222,7 +3226,7 @@ mod tests {
 
     #[test]
     fn render_row_disables_tracks_button_while_busy() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let mut concert = split_concert(&conn, "https://example.org/busy");
         concert.split_at = None;
         concert.split_started_at = Some("2026-01-01T00:00:00Z".to_string());
@@ -3336,10 +3340,10 @@ mod tests {
 
     #[test]
     fn ensure_scraped_skips_when_already_scraped() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://example.org/already";
         let id = seed_listing(&conn, url);
-        db::update_metadata(
+        db::concerts::update_metadata(
             &conn,
             id,
             &MetadataUpdate {
@@ -3354,7 +3358,7 @@ mod tests {
             },
         )
         .unwrap();
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.metadata_scraped_at.is_some());
 
         let called = Cell::new(false);
@@ -3373,10 +3377,10 @@ mod tests {
 
     #[test]
     fn ensure_scraped_runs_closure_when_missing_and_merges_result() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://example.org/fresh";
         let id = seed_listing(&conn, url);
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.metadata_scraped_at.is_none());
         assert!(concert.set_list.is_empty());
 
@@ -3384,7 +3388,7 @@ mod tests {
         let result = ensure_scraped(&conn, concert, |conn, source_url| {
             called.set(true);
             assert_eq!(source_url, url);
-            db::update_metadata(
+            db::concerts::update_metadata(
                 conn,
                 id,
                 &MetadataUpdate {
@@ -3411,10 +3415,10 @@ mod tests {
 
     #[test]
     fn ensure_scraped_tolerates_failure_and_returns_listing_only() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let url = "https://example.org/broken";
         let id = seed_listing(&conn, url);
-        let concert = db::get_concert(&conn, id).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
 
         let result = ensure_scraped(&conn, concert, |_conn, _url| {
             Err(anyhow::anyhow!("simulated network failure"))
@@ -3429,7 +3433,7 @@ mod tests {
             "metadata_scraped_at must remain NULL after a failed scrape so the next view retries"
         );
 
-        let reread = db::get_concert(&conn, id).unwrap();
+        let reread = db::concerts::get_concert(&conn, id).unwrap();
         assert!(reread.metadata_scraped_at.is_none());
     }
 
@@ -3437,22 +3441,22 @@ mod tests {
 
     fn archived_concert(conn: &Connection, url: &str) -> Concert {
         let id = seed_listing(conn, url);
-        db::mark_archive_succeeded(conn, id).unwrap();
-        db::get_concert(conn, id).unwrap()
+        db::lifecycle::mark_archive_succeeded(conn, id).unwrap();
+        db::concerts::get_concert(conn, id).unwrap()
     }
 
     #[test]
     fn matches_filter_archived_enabled_returns_true_for_archived_concert() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let c = archived_concert(&conn, "https://example.org/archived-a");
         assert!(matches_filter(&c, "archived", true));
     }
 
     #[test]
     fn matches_filter_archived_enabled_returns_false_for_non_archived_concert() {
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let id = seed_listing(&conn, "https://example.org/not-archived");
-        let c = db::get_concert(&conn, id).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(!matches_filter(&c, "archived", true));
     }
 
@@ -3461,7 +3465,7 @@ mod tests {
         // When the archive feature is gated off (has_archive_location = false),
         // the "archived" slug must fall through to the default arm (!c.ignored),
         // not silently hide archived concerts.
-        let conn = db::open_in_memory().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let c = archived_concert(&conn, "https://example.org/archived-b");
         // Falls through to default: not ignored → true.
         assert!(matches_filter(&c, "archived", false));

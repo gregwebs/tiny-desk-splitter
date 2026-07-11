@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
         cli.proxy_from_env,
     ));
     tracing::debug!("opening database: {:?}", cli.db);
-    let conn = db::open(&cli.db)?;
+    let conn = db::connection::open(&cli.db)?;
     tracing::debug!("database opened");
 
     // Recover from unclean shutdowns: any row still flagged Downloading or
@@ -113,7 +113,7 @@ async fn main() -> Result<()> {
         }
         Err(_) => {
             tracing::warn!("tracks_present backfill timed out (NAS may be unavailable), skipping");
-            db::open(&cli.db)?
+            db::connection::open(&cli.db)?
         }
     };
 
