@@ -179,6 +179,13 @@ function runHurl(glob, appPort, testControlPort) {
     "hurl",
     [
       "--test",
+      // All Hurl files in this suite share one concert-web process, one
+      // scratch DB, and test.reset for isolation between files. --test
+      // parallelizes across files by default, which would let a later file's
+      // test.reset or seed calls race a still-running earlier file against
+      // that shared state. --jobs 1 keeps files sequential.
+      "--jobs",
+      "1",
       "--glob",
       glob,
       "--variable",
