@@ -191,6 +191,18 @@ fn seed_listing(
 /// "Available" state into "NotDownloaded" for the status fragment. Musicians
 /// and description aren't exposed as params: no first-slice Hurl case needs
 /// them yet, and adding unused surface here would be speculative.
+///
+/// Always produces a `NotDownloaded`/`NotSplit`/not-archived concert, even on
+/// a `source_url` reused from a prior seed: `upsert_listing` and
+/// `update_metadata` only touch listing/metadata columns, so without an
+/// explicit reset here a URL that was previously downloaded (e.g. by an
+/// earlier Hurl case, or a retried run) would keep rendering as
+/// Downloaded/Downloading/DownloadError — silently breaking this method's
+/// documented contract instead of producing the state its name promises.
+/// Uses a direct `UPDATE`, not `lifecycle::clear_download_state` /
+/// `clear_split_state` (which are for genuine user-initiated deletes): those
+/// each record a `DownloadDelete`/`SplitDelete` event, which would be a false
+/// audit trail here since nothing was ever actually downloaded or split.
 #[allow(clippy::too_many_arguments)]
 fn seed_scraped_concert(
     state: &AppState,
@@ -216,6 +228,16 @@ fn seed_scraped_concert(
             "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
         )
     })?;
+    conn.execute(
+        "UPDATE concerts SET
+             download_started_at = NULL, downloaded_at = NULL,
+             downloaded_extension = NULL, download_errors_json = '[]',
+             split_started_at = NULL, split_at = NULL, split_errors_json = '[]',
+             tracks_present = NULL,
+             archive_started_at = NULL, archived_at = NULL, archive_errors_json = '[]'
+         WHERE id = ?1",
+        rusqlite::params![concert.id],
+    )?;
     db::concerts::update_metadata(
         &conn,
         concert.id,
@@ -414,6 +436,63 @@ mod tests {
         // metadata_scraped_at is what moves the status fragment from
         // Available to NotDownloaded — see seed_scraped_concert's doc comment.
         assert!(concert.metadata_scraped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_resets_stale_lifecycle_state_on_url_reuse() {
+        // A source_url that was previously downloaded/split/archived (e.g. by
+        // an earlier Hurl case, or a retried run) must still come back as a
+        // clean NotDownloaded/NotSplit fixture — the method's whole contract
+        // is "produce this state", not "produce it only on a brand-new URL".
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/reused-scraped".to_string(),
+            "First Pass".to_string(),
+            None,
+            "Artist".to_string(),
+            "Album".to_string(),
+            vec![],
+        )
+        .unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            let concert =
+                db::concerts::get_concert_by_url(&conn, "https://npr.org/c/reused-scraped")
+                    .unwrap()
+                    .unwrap();
+            conn.execute(
+                "UPDATE concerts SET
+                     downloaded_at = datetime('now'), downloaded_extension = 'mp4',
+                     split_at = datetime('now'), archived_at = datetime('now'),
+                     download_errors_json = '[{\"at\":\"x\",\"message\":\"boom\"}]'
+                 WHERE id = ?1",
+                rusqlite::params![concert.id],
+            )
+            .unwrap();
+        }
+
+        let result = super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/reused-scraped".to_string(),
+            "Second Pass".to_string(),
+            None,
+            "Artist".to_string(),
+            "Album".to_string(),
+            vec![],
+        )
+        .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(
+            concert.download_status(),
+            crate::model::DownloadStatus::NotDownloaded
+        );
+        assert_eq!(concert.split_status(), crate::model::SplitStatus::NotSplit);
+        assert!(concert.archived_at.is_none());
+        assert!(concert.download_errors.is_empty());
     }
 
     #[tokio::test]
