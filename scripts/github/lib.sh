@@ -4,6 +4,8 @@
 # GitHub App installation - see ./gh-app-token.sh in this directory.
 set -euo pipefail
 
+GH_APP_API_VERSION="2022-11-28"
+
 # Best-effort "owner/repo" from the current directory's origin remote.
 gh_app_default_repo() {
   local url
@@ -33,6 +35,7 @@ gh_app_api_post() {
   response=$(curl -s -w '\n%{http_code}' -X POST \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
     "https://api.github.com/${path}" \
     -d "$payload")
   status=$(printf '%s' "$response" | tail -n1)
@@ -55,6 +58,7 @@ gh_app_api_patch() {
   response=$(curl -s -w '\n%{http_code}' -X PATCH \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
     "https://api.github.com/${path}" \
     -d "$payload")
   status=$(printf '%s' "$response" | tail -n1)
@@ -77,6 +81,7 @@ gh_app_api_get() {
   response=$(curl -s -w '\n%{http_code}' -X GET \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
+    -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
     "https://api.github.com/${path}")
   status=$(printf '%s' "$response" | tail -n1)
   body=$(printf '%s' "$response" | sed '$d')

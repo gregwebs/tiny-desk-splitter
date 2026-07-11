@@ -29,6 +29,7 @@ Confirm the target (repo, branch, title) before running if there's any ambiguity
 |---|---|---|
 | Open a PR | `gh-app-pr-create.sh` | `--base BASE --head HEAD --title TITLE` |
 | File an issue | `gh-app-issue-create.sh` | `--title TITLE` |
+| Link sub-issue | `gh-app-issue-sub-add.sh` | `--parent NUMBER --child NUMBER` |
 | Comment on issue/PR | `gh-app-issue-comment.sh` | `--issue NUMBER` (PRs count as issues here) |
 
 Common optional args: `--repo OWNER/REPO`, `--body TEXT`, `--body-file FILE`.
