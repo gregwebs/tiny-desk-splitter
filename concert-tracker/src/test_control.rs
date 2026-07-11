@@ -64,9 +64,12 @@ pub trait TestControlApi {
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
-    /// checked; omit a field to not assert on that dimension. Prefer a public
-    /// HTTP assertion instead of this method whenever the behavior is already
-    /// visible on a public route/fragment — see "Assertion Methods" in
+    /// checked; omit a field to not assert on that dimension. At least one of
+    /// `ignored`/`downloaded`/`split` must be present — a call that provides
+    /// none (all omitted or explicit `null`) errors instead of vacuously
+    /// succeeding without checking anything. Prefer a public HTTP assertion
+    /// instead of this method whenever the behavior is already visible on a
+    /// public route/fragment — see "Assertion Methods" in
     /// docs/change/2026-07-11-hurl-web-integration-tests.md.
     #[method(name = "assert_concert_state", param_kind = map)]
     async fn assert_concert_state(
@@ -312,6 +315,14 @@ fn assert_concert_state(
     downloaded: Option<bool>,
     split: Option<bool>,
 ) -> anyhow::Result<()> {
+    if ignored.is_none() && downloaded.is_none() && split.is_none() {
+        anyhow::bail!(
+            "assert_concert_state called for concert {id} with no expectations \
+             (ignored/downloaded/split all omitted or null) — this would silently \
+             pass without checking anything; assert at least one condition"
+        );
+    }
+
     let conn = state.db.lock().unwrap();
     let concert = db::concerts::get_concert(&conn, id)
         .map_err(|e| anyhow::anyhow!("no concert with id {id}: {e}"))?;
@@ -652,6 +663,26 @@ mod tests {
 
         let err = super::assert_concert_state(&state, 999, Some(true), None, None).unwrap_err();
         assert!(err.to_string().contains("999"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_rejects_a_call_with_no_expectations() {
+        // ignored/downloaded/split all None must error, not vacuously
+        // succeed — a caller that forgets to fill in any expectation would
+        // otherwise get a false "assertion passed" for any existing id.
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-empty".to_string(),
+            "Assert Empty".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = super::assert_concert_state(&state, seeded.id, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
     }
 
     #[tokio::test]
