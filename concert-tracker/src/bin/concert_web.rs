@@ -58,6 +58,16 @@ struct Cli {
     /// and CSS are compiled in via askama, so they still require a recompile.
     #[arg(long, default_value_t = false)]
     dev: bool,
+
+    /// Start the feature-gated Test Control API (JSON-RPC, loopback-only) on
+    /// this port; use 0 for an ephemeral port. Only available when built with
+    /// `--features test-control` — see
+    /// docs/change/2026-07-11-hurl-web-integration-tests.md. This flag alone
+    /// does nothing without that feature, and the feature alone does not
+    /// start the API without this flag.
+    #[cfg(feature = "test-control")]
+    #[arg(long)]
+    test_control_port: Option<u16>,
 }
 
 #[tokio::main]
@@ -134,6 +144,18 @@ async fn main() -> Result<()> {
         registry: Arc::new(JobRegistry::new()),
         jobs: JobConfig::production(workdir, splitter_bin, cli.open_cmd),
         scrape_queue,
+    };
+
+    // Bound to a top-level `main` local (not `_ = ...`) so the handle outlives
+    // this statement: dropping a jsonrpsee `ServerHandle` stops that server.
+    #[cfg(feature = "test-control")]
+    let _test_control_handle = match cli.test_control_port {
+        Some(port) => {
+            let (handle, bound) = concert_tracker::test_control::start(state.clone(), port).await?;
+            println!("Test control listening on http://{}", bound);
+            Some(handle)
+        }
+        None => None,
     };
 
     let app = router_with_opts(state.clone(), RouterOpts { dev: cli.dev });

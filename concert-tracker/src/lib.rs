@@ -14,4 +14,6 @@ pub mod scan;
 pub mod scrape;
 pub mod split_timestamps;
 pub mod sync;
+#[cfg(feature = "test-control")]
+pub mod test_control;
 pub mod web;
