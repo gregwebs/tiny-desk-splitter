@@ -1,7 +1,8 @@
 # Ignore local Claude Code state (settings.local.json, agent-memory, plans,
 # scheduled tasks) but track shared, repo-tracked skills under .claude/skills/.
-.claude/
-!/.claude/skills/
+/.claude/skills/*
+!/.claude/skills/github-app
+/.claude/*
 /concerts/
 /thumbnails/
 /log/
