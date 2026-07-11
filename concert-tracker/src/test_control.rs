@@ -46,6 +46,21 @@ pub trait TestControlApi {
         concert_date: Option<String>,
         teaser: Option<String>,
     ) -> RpcResult<SeedListingResult>;
+
+    /// Seed a listing and then apply scraped metadata through the same
+    /// `db::concerts::update_metadata` path the real scraper uses (setting
+    /// `metadata_scraped_at`), producing a concert in the NotDownloaded
+    /// state. `set_list` defaults to empty when omitted.
+    #[method(name = "seed_scraped_concert", param_kind = map)]
+    async fn seed_scraped_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+    ) -> RpcResult<SeedScrapedConcertResult>;
 }
 
 #[derive(Clone, Serialize)]
@@ -62,6 +77,17 @@ pub struct SeedListingResult {
     pub source_url: String,
     pub title: String,
     pub concert_date: Option<String>,
+}
+
+/// Seed Result for `test.seed_scraped_concert`. Same "public fields only"
+/// rule as [`SeedListingResult`], plus `album` since it is the field the
+/// scraped-status Hurl cases assert on and the public detail page displays.
+#[derive(Clone, Serialize)]
+pub struct SeedScrapedConcertResult {
+    pub id: i64,
+    pub source_url: String,
+    pub title: String,
+    pub album: String,
 }
 
 pub struct TestControlServer {
@@ -90,6 +116,27 @@ impl TestControlApiServer for TestControlServer {
         teaser: Option<String>,
     ) -> RpcResult<SeedListingResult> {
         seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
+    }
+
+    async fn seed_scraped_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+    ) -> RpcResult<SeedScrapedConcertResult> {
+        seed_scraped_concert(
+            &self.state,
+            source_url,
+            title,
+            concert_date,
+            artist,
+            album,
+            set_list.unwrap_or_default(),
+        )
+        .map_err(internal_error)
     }
 }
 
@@ -135,6 +182,57 @@ fn seed_listing(
         source_url: concert.source_url,
         title: concert.title,
         concert_date: concert.concert_date,
+    })
+}
+
+/// Seeds a listing, then applies scraped metadata through the same
+/// `db::concerts::update_metadata` path the real scraper uses — setting
+/// `metadata_scraped_at`, which is what moves a concert out of the
+/// "Available" state into "NotDownloaded" for the status fragment. Musicians
+/// and description aren't exposed as params: no first-slice Hurl case needs
+/// them yet, and adding unused surface here would be speculative.
+#[allow(clippy::too_many_arguments)]
+fn seed_scraped_concert(
+    state: &AppState,
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    artist: String,
+    album: String,
+    set_list: Vec<String>,
+) -> anyhow::Result<SeedScrapedConcertResult> {
+    let conn = state.db.lock().unwrap();
+    db::concerts::upsert_listing(
+        &conn,
+        &db::concerts::NewListing {
+            source_url: source_url.clone(),
+            title,
+            concert_date,
+            teaser: None,
+        },
+    )?;
+    let concert = db::concerts::get_concert_by_url(&conn, &source_url)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
+        )
+    })?;
+    db::concerts::update_metadata(
+        &conn,
+        concert.id,
+        &db::concerts::MetadataUpdate {
+            artist,
+            album,
+            description: None,
+            set_list,
+            musicians: vec![],
+        },
+    )?;
+    let concert = db::concerts::get_concert(&conn, concert.id)?;
+    Ok(SeedScrapedConcertResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        album: concert.album.unwrap_or_default(),
     })
 }
 
@@ -287,6 +385,35 @@ mod tests {
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.title, "Updated Title");
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_sets_metadata_scraped_at_and_returns_album() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let result = super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/scraped-test".to_string(),
+            "Scraped Test Concert".to_string(),
+            Some("2024-01-15".to_string()),
+            "Test Artist".to_string(),
+            "Test Album".to_string(),
+            vec!["Song One".to_string(), "Song Two".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.source_url, "https://npr.org/c/scraped-test");
+        assert_eq!(result.title, "Scraped Test Concert");
+        assert_eq!(result.album, "Test Album");
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(concert.set_list, vec!["Song One", "Song Two"]);
+        // metadata_scraped_at is what moves the status fragment from
+        // Available to NotDownloaded — see seed_scraped_concert's doc comment.
+        assert!(concert.metadata_scraped_at.is_some());
     }
 
     #[tokio::test]

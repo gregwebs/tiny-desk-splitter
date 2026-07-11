@@ -279,48 +279,9 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
     assert!(!html.contains("badge-available"));
 }
 
-#[tokio::test]
-async fn not_downloaded_row_hides_download_badge_and_shows_button() {
-    // Replaces the prior "not-downloaded" grey badge with the Download
-    // action button in the same slot.
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/fresh", "Fresh Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "X".to_string(),
-            album: "Some Album".to_string(),
-            description: None,
-            set_list: vec![],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    let app = router(test_state(conn));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/concerts/1/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("/concerts/1/download\""),
-        "Download button must appear when NotDownloaded"
-    );
-    assert!(
-        !html.contains("badge-not-downloaded"),
-        "no 'not-downloaded' badge in fresh state — the button replaces it"
-    );
-}
+// not_downloaded_row_hides_download_badge_and_shows_button migrated to
+// hurl/listing_status.hurl (test.seed_scraped_concert + GET
+// /concerts/:id/status) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 #[tokio::test]
 async fn list_filter_by_status_narrows_results() {
