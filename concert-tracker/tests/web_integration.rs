@@ -211,39 +211,9 @@ async fn list_page_renders_seeded_concert() {
     assert!(String::from_utf8_lossy(&body).contains("Test Concert"));
 }
 
-#[tokio::test]
-async fn ignore_endpoint_toggles_flag_and_returns_row() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/2", "Another Concert");
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/ignore")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    // After the row redesign, the concert-status slot shows the "ignored"
-    // badge alongside an ✕ button (which posts back to /ignore to clear).
-    assert!(
-        html.contains("badge-ignored"),
-        "ignored badge must render in the slot"
-    );
-    assert!(
-        html.contains("title=\"Clear ignored\""),
-        "✕ to clear ignored must render alongside the badge"
-    );
-}
+// ignore_endpoint_toggles_flag_and_returns_row migrated to
+// hurl/listing_status.hurl (POST /concerts/:id/ignore + badge-ignored / "Clear
+// ignored" assertions) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 #[tokio::test]
 async fn available_concert_row_shows_want_and_ignore_buttons() {
@@ -283,32 +253,9 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
 // hurl/listing_status.hurl (test.seed_scraped_concert + GET
 // /concerts/:id/status) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
-#[tokio::test]
-async fn list_filter_by_status_narrows_results() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/3", "Concert A");
-    seeded_concert(&conn, "https://npr.org/c/4", "Concert B");
-    db::concerts::toggle_ignored(&conn, 1).unwrap();
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/?filter=ignored")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Concert A"));
-    assert!(!html.contains("Concert B"));
-}
+// list_filter_by_status_narrows_results migrated to hurl/listing_status.hurl
+// (GET /?filter=ignored includes the ignored concert, excludes the other) —
+// see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 #[tokio::test]
 async fn notes_endpoint_persists_text() {
