@@ -44,10 +44,21 @@ itself, `connection.rs`, and inline test modules in `handlers.rs` /
   *type* import stayed on the facade. Re-pointed to `db::{self,
   concerts::{MetadataUpdate, NewListing}}`.
 
-No other file in the repo referenced a top-level `db::` operation path —
+No other file under `concert-tracker/src`, `concert-tracker/tests`, or
+`concert-tracker/examples` referenced a top-level `db::` operation path —
 confirmed by a repo-wide grep for all 8 facade-owned types and every
 previously re-exported function name, scoped to exclude the 9 legitimate
-`db::<domain>::...` prefixes.
+`db::<domain>::...` prefixes. That grep is scoped to production/test code
+only. Several `docs/change/*.md` entries dated before this change (e.g.
+`2026-07-10-split-db-expand-module-shell.md`,
+`2026-06-17-backfill-media-duration.md`) still name pre-refactor top-level
+paths such as `db::open` or `db::get_split_timestamps` — left as-is
+intentionally: per `AGENTS.md`, `docs/change` is a snapshot-in-time record of
+what was true when each entry was written, not a canonical reference kept in
+sync with the current API, and rewriting a historical entry's code paths
+would misrepresent what that past change actually did. `docs/data.md` and
+`docs/backend-persistence.md` (the canonical, currently-maintained
+persistence docs) contain no top-level facade references.
 
 ## Documentation
 
@@ -86,4 +97,15 @@ transaction scope, or timestamp format was touched.
 - `just lint` — `cargo fmt --check`, `cargo clippy --workspace --all-targets
   -- -D warnings`, shellcheck, and the frontend TypeScript/oxlint checks all
   pass with no warnings.
-- Codex review of this change against #68's acceptance criteria.
+- Codex review of this change against #68's acceptance criteria found two
+  issues, both fixed before the PR: (1) `docs/backend-persistence.md`
+  incorrectly claimed `execute_batch` runs each migration step as one
+  implicit transaction — verified against `rusqlite::Connection::execute_batch`
+  (prepares and steps statements one at a time, no `BEGIN`/`COMMIT`) and the
+  migration SQL files (no explicit transaction wrapping); corrected to
+  describe per-statement autocommit and why migrations rely on idempotency
+  instead of rollback. (2) This document's original wording implied the
+  "zero references" grep covered docs, when it was scoped to
+  `concert-tracker/src`/`tests`/`examples`; reworded above to state that
+  scope explicitly and to explain why pre-#68 `docs/change` entries
+  intentionally keep their original (now-historical) top-level `db::` paths.

@@ -85,10 +85,15 @@ because they combine a validation read with a write that must be atomic:
   set-equality check (does the submitted id list exactly match the
   playlist's current items?) and the position `UPDATE`s atomic.
 
-`db::connection::run_migrations` wraps each migration step in
-`execute_batch`, which SQLite runs inside an implicit transaction per batch;
-migrations are expected to be idempotent (see `db::connection` tests) rather
-than to roll back cleanly on partial failure.
+`db::connection::run_migrations` runs each migration step through
+`execute_batch`, which prepares and steps each statement in the SQL string
+one at a time — it is **not** a single transaction. Neither the migration
+SQL files nor `run_migrations` open an explicit `BEGIN`/`COMMIT` around a
+step, so each statement commits individually in SQLite's autocommit mode. A
+migration step that fails partway through can leave earlier statements in
+that step already committed. This is why migrations are written to be
+idempotent (see `db::connection` tests) rather than relying on rollback: a
+retried migration must tolerate objects it already created.
 
 ## Key state transitions
 
