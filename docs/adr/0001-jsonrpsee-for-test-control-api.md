@@ -1,0 +1,3 @@
+# Use jsonrpsee for the Test Control API
+
+We will expose the test-only `concert-web` control surface as JSON-RPC using `jsonrpsee`'s trait-first `#[rpc(server)]` macro model. The Test Control API needs typed, low-boilerplate calls for Hurl-driven black-box tests, and `jsonrpsee` lets us declare callable methods on an RPC trait, generate the server module, and pass named map parameters into ordinary seed/helper functions while keeping the production HTTP route table small. The API will have no bearer-token authentication; instead it is defense-in-depth gated by a non-default Cargo feature, an explicit runtime flag, loopback binding, and a compile-time error if included in a release build.
