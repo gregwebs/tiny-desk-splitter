@@ -15,10 +15,20 @@ const path = require("path");
 const REPO = path.resolve(__dirname, "..");
 const BIN = path.join(REPO, "target", "debug", "concert-web");
 const SERVER_START_TIMEOUT_MS = 20_000;
+// How long to wait for a graceful SIGTERM exit before escalating to SIGKILL.
+// concert-web's own graceful-shutdown drain is capped at 2s (SHUTDOWN_GRACE
+// in bin/concert_web.rs); this leaves headroom above that.
+const STOP_GRACE_MS = 5_000;
 
 const APP_LISTEN_RE = /^Listening on http:\/\/127\.0\.0\.1:(\d+)/m;
 const TEST_CONTROL_LISTEN_RE =
   /^Test control listening on http:\/\/127\.0\.0\.1:(\d+)/m;
+
+// Tracks whatever server is currently live so the SIGINT/SIGTERM handlers
+// below can clean it up no matter where main() is suspended when the signal
+// arrives (e.g. mid-`await startServer()`, or blocked inside the synchronous
+// `spawnSync("hurl", ...)` call).
+let activeServer = null;
 
 function parseArgs(argv) {
   let glob = "hurl/*.hurl";
@@ -45,7 +55,11 @@ function buildBinary() {
 
 // Spawn concert-web against a fresh scratch DB/workdir with both the app and
 // Test Control API on ephemeral ports (--port 0 --test-control-port 0), and
-// resolve once both "Listening on ..." lines have been printed.
+// resolve once both "Listening on ..." lines have been printed. On any
+// startup failure (timeout, early exit, spawn error) the caller is
+// responsible for reaching the partially-started server via `activeServer`
+// and cleaning it up — this function only rejects, it never leaves dangling
+// listeners on the child.
 function startServer() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tds-hurl-"));
   const child = spawn(
@@ -67,6 +81,7 @@ function startServer() {
   );
 
   const server = { child, tmp, stdout: "", stderr: "", exited: false };
+  activeServer = server;
   child.stdout.on("data", (data) => (server.stdout += data.toString()));
   child.stderr.on("data", (data) => (server.stderr += data.toString()));
   child.on("exit", () => (server.exited = true));
@@ -118,9 +133,44 @@ function serverDiagnostics(server, summary) {
   );
 }
 
+// Signals the child and resolves only once it has actually exited (SIGTERM,
+// escalating to SIGKILL after STOP_GRACE_MS) — never deletes the scratch
+// directory out from under a still-running process.
 function stopServer(server) {
-  if (server.exited) return;
-  server.child.kill("SIGTERM");
+  return new Promise((resolve) => {
+    if (!server || server.exited) {
+      resolve();
+      return;
+    }
+    const escalate = setTimeout(() => {
+      server.child.kill("SIGKILL");
+    }, STOP_GRACE_MS);
+    server.child.once("exit", () => {
+      clearTimeout(escalate);
+      resolve();
+    });
+    server.child.kill("SIGTERM");
+  });
+}
+
+async function cleanupServer(server) {
+  if (!server) return;
+  await stopServer(server);
+  fs.rmSync(server.tmp, { recursive: true, force: true });
+  if (activeServer === server) activeServer = null;
+}
+
+// Ctrl-C (SIGINT) or an external SIGTERM would otherwise kill this process
+// immediately (Node's default disposition for both), skipping every
+// `finally` cleanup path below and leaking the concert-web child plus its
+// scratch DB/workdir. These handlers make cleanup run on that path too.
+function installSignalHandlers() {
+  const onSignal = (signal, exitCode) => {
+    console.error(`\n[hurl-test] received ${signal}, cleaning up...`);
+    cleanupServer(activeServer).finally(() => process.exit(exitCode));
+  };
+  process.on("SIGINT", () => onSignal("SIGINT", 130));
+  process.on("SIGTERM", () => onSignal("SIGTERM", 143));
 }
 
 function runHurl(glob, appPort, testControlPort) {
@@ -142,6 +192,7 @@ function runHurl(glob, appPort, testControlPort) {
 }
 
 async function main() {
+  installSignalHandlers();
   const { glob } = parseArgs(process.argv.slice(2));
 
   const binResult = spawnSync("which", ["hurl"], { stdio: "ignore" });
@@ -159,6 +210,7 @@ async function main() {
     started = await startServer();
   } catch (error) {
     console.error(`[hurl-test] ${error.message}`);
+    await cleanupServer(activeServer);
     process.exit(1);
     return;
   }
@@ -172,8 +224,7 @@ async function main() {
   try {
     exitCode = runHurl(glob, appPort, testControlPort);
   } finally {
-    stopServer(server);
-    fs.rmSync(server.tmp, { recursive: true, force: true });
+    await cleanupServer(server);
   }
 
   if (exitCode !== 0) {
