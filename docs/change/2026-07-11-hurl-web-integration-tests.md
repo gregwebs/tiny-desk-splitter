@@ -8,7 +8,7 @@ Tracks the stacked PR series implementing this spec (parent issue #84):
 - [x] #79 Seed Listing Through Hurl — `test.seed_listing`, `hurl/listing_status.hurl`, `scripts/hurl-test.js`, `just test-hurl`.
 - [x] #80 Seed Scraped Concert Status Cases — `test.seed_scraped_concert`; removed the equivalent Rust test.
 - [x] #82 Migrate Listing Filter And Ignore Cases — removed the two equivalent Rust tests.
-- [ ] #81 Add Semantic Assertion API When Needed
+- [x] #81 Add Semantic Assertion API When Needed — `test.assert_concert_state`; not yet called from a Hurl case (no first-slice postcondition needs it — see the method's doc comment).
 - [ ] #83 Document And Stabilize The Hurl Workflow
 
 **Known gap for #83 to document**: as of #82, the four removed Rust integration
