@@ -46,6 +46,39 @@ pub trait TestControlApi {
         concert_date: Option<String>,
         teaser: Option<String>,
     ) -> RpcResult<SeedListingResult>;
+
+    /// Seed a listing and then apply scraped metadata through the same
+    /// `db::concerts::update_metadata` path the real scraper uses (setting
+    /// `metadata_scraped_at`), producing a concert in the NotDownloaded
+    /// state. `set_list` defaults to empty when omitted.
+    #[method(name = "seed_scraped_concert", param_kind = map)]
+    async fn seed_scraped_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+    ) -> RpcResult<SeedScrapedConcertResult>;
+
+    /// Assert semantic domain conditions for a seeded concert without Hurl
+    /// having to read raw DB rows. Only the expectations that are present are
+    /// checked; omit a field to not assert on that dimension. At least one of
+    /// `ignored`/`downloaded`/`split` must be present — a call that provides
+    /// none (all omitted or explicit `null`) errors instead of vacuously
+    /// succeeding without checking anything. Prefer a public HTTP assertion
+    /// instead of this method whenever the behavior is already visible on a
+    /// public route/fragment — see "Assertion Methods" in
+    /// docs/change/2026-07-11-hurl-web-integration-tests.md.
+    #[method(name = "assert_concert_state", param_kind = map)]
+    async fn assert_concert_state(
+        &self,
+        id: i64,
+        ignored: Option<bool>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+    ) -> RpcResult<OkResult>;
 }
 
 #[derive(Clone, Serialize)]
@@ -62,6 +95,17 @@ pub struct SeedListingResult {
     pub source_url: String,
     pub title: String,
     pub concert_date: Option<String>,
+}
+
+/// Seed Result for `test.seed_scraped_concert`. Same "public fields only"
+/// rule as [`SeedListingResult`], plus `album` since it is the field the
+/// scraped-status Hurl cases assert on and the public detail page displays.
+#[derive(Clone, Serialize)]
+pub struct SeedScrapedConcertResult {
+    pub id: i64,
+    pub source_url: String,
+    pub title: String,
+    pub album: String,
 }
 
 pub struct TestControlServer {
@@ -91,11 +135,57 @@ impl TestControlApiServer for TestControlServer {
     ) -> RpcResult<SeedListingResult> {
         seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
     }
+
+    async fn seed_scraped_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+    ) -> RpcResult<SeedScrapedConcertResult> {
+        seed_scraped_concert(
+            &self.state,
+            source_url,
+            title,
+            concert_date,
+            artist,
+            album,
+            set_list.unwrap_or_default(),
+        )
+        .map_err(internal_error)
+    }
+
+    async fn assert_concert_state(
+        &self,
+        id: i64,
+        ignored: Option<bool>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+    ) -> RpcResult<OkResult> {
+        assert_concert_state(&self.state, id, ignored, downloaded, split)
+            .map(|()| OkResult { ok: true })
+            .map_err(assertion_error)
+    }
 }
 
 fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         jsonrpsee::types::ErrorCode::InternalError.code(),
+        err.to_string(),
+        None::<()>,
+    )
+}
+
+/// Distinct from [`internal_error`]: this is for an assertion that ran
+/// successfully but found the domain condition doesn't hold (or the
+/// concert doesn't exist) — an expected test-failure outcome, not a server
+/// malfunction. Uses jsonrpsee's `CALL_EXECUTION_FAILED_CODE`, its
+/// general-purpose "the call executed but did not succeed" code.
+fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE,
         err.to_string(),
         None::<()>,
     )
@@ -136,6 +226,134 @@ fn seed_listing(
         title: concert.title,
         concert_date: concert.concert_date,
     })
+}
+
+/// Seeds a listing, then applies scraped metadata through the same
+/// `db::concerts::update_metadata` path the real scraper uses — setting
+/// `metadata_scraped_at`, which is what moves a concert out of the
+/// "Available" state into "NotDownloaded" for the status fragment. Musicians
+/// and description aren't exposed as params: no first-slice Hurl case needs
+/// them yet, and adding unused surface here would be speculative.
+///
+/// Always produces a `NotDownloaded`/`NotSplit`/not-archived concert, even on
+/// a `source_url` reused from a prior seed: `upsert_listing` and
+/// `update_metadata` only touch listing/metadata columns, so without an
+/// explicit reset here a URL that was previously downloaded (e.g. by an
+/// earlier Hurl case, or a retried run) would keep rendering as
+/// Downloaded/Downloading/DownloadError — silently breaking this method's
+/// documented contract instead of producing the state its name promises.
+/// Uses a direct `UPDATE`, not `lifecycle::clear_download_state` /
+/// `clear_split_state` (which are for genuine user-initiated deletes): those
+/// each record a `DownloadDelete`/`SplitDelete` event, which would be a false
+/// audit trail here since nothing was ever actually downloaded or split.
+#[allow(clippy::too_many_arguments)]
+fn seed_scraped_concert(
+    state: &AppState,
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    artist: String,
+    album: String,
+    set_list: Vec<String>,
+) -> anyhow::Result<SeedScrapedConcertResult> {
+    let conn = state.db.lock().unwrap();
+    db::concerts::upsert_listing(
+        &conn,
+        &db::concerts::NewListing {
+            source_url: source_url.clone(),
+            title,
+            concert_date,
+            teaser: None,
+        },
+    )?;
+    let concert = db::concerts::get_concert_by_url(&conn, &source_url)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
+        )
+    })?;
+    conn.execute(
+        "UPDATE concerts SET
+             download_started_at = NULL, downloaded_at = NULL,
+             downloaded_extension = NULL, download_errors_json = '[]',
+             split_started_at = NULL, split_at = NULL, split_errors_json = '[]',
+             tracks_present = NULL,
+             archive_started_at = NULL, archived_at = NULL, archive_errors_json = '[]'
+         WHERE id = ?1",
+        rusqlite::params![concert.id],
+    )?;
+    db::concerts::update_metadata(
+        &conn,
+        concert.id,
+        &db::concerts::MetadataUpdate {
+            artist,
+            album,
+            description: None,
+            set_list,
+            musicians: vec![],
+        },
+    )?;
+    let concert = db::concerts::get_concert(&conn, concert.id)?;
+    Ok(SeedScrapedConcertResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        album: concert.album.unwrap_or_default(),
+    })
+}
+
+/// Checks each present expectation against the concert's actual domain
+/// state, returning every mismatch (not just the first) so a Hurl case gets
+/// the full picture in one round trip. `downloaded`/`split` are checked
+/// against [`crate::model::DownloadStatus`]/[`crate::model::SplitStatus`]
+/// being exactly `Downloaded`/`Split` — a concert `Downloading` or in
+/// `DownloadError` counts as "not downloaded" here, matching what a human
+/// reading "downloaded: true/false" would expect.
+fn assert_concert_state(
+    state: &AppState,
+    id: i64,
+    ignored: Option<bool>,
+    downloaded: Option<bool>,
+    split: Option<bool>,
+) -> anyhow::Result<()> {
+    if ignored.is_none() && downloaded.is_none() && split.is_none() {
+        anyhow::bail!(
+            "assert_concert_state called for concert {id} with no expectations \
+             (ignored/downloaded/split all omitted or null) — this would silently \
+             pass without checking anything; assert at least one condition"
+        );
+    }
+
+    let conn = state.db.lock().unwrap();
+    let concert = db::concerts::get_concert(&conn, id)
+        .map_err(|e| anyhow::anyhow!("no concert with id {id}: {e}"))?;
+
+    let mut mismatches = Vec::new();
+    if let Some(expected) = ignored {
+        if concert.ignored != expected {
+            mismatches.push(format!(
+                "ignored: expected {expected}, got {}",
+                concert.ignored
+            ));
+        }
+    }
+    if let Some(expected) = downloaded {
+        let actual = concert.download_status() == crate::model::DownloadStatus::Downloaded;
+        if actual != expected {
+            mismatches.push(format!("downloaded: expected {expected}, got {actual}"));
+        }
+    }
+    if let Some(expected) = split {
+        let actual = concert.split_status() == crate::model::SplitStatus::Split;
+        if actual != expected {
+            mismatches.push(format!("split: expected {expected}, got {actual}"));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("concert {id} state mismatch: {}", mismatches.join("; "));
+    }
 }
 
 /// Removes generated files under `<workdir>/concerts` and
@@ -287,6 +505,184 @@ mod tests {
 
         assert_eq!(first.id, second.id);
         assert_eq!(second.title, "Updated Title");
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_sets_metadata_scraped_at_and_returns_album() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let result = super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/scraped-test".to_string(),
+            "Scraped Test Concert".to_string(),
+            Some("2024-01-15".to_string()),
+            "Test Artist".to_string(),
+            "Test Album".to_string(),
+            vec!["Song One".to_string(), "Song Two".to_string()],
+        )
+        .unwrap();
+
+        assert_eq!(result.source_url, "https://npr.org/c/scraped-test");
+        assert_eq!(result.title, "Scraped Test Concert");
+        assert_eq!(result.album, "Test Album");
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.artist.as_deref(), Some("Test Artist"));
+        assert_eq!(concert.set_list, vec!["Song One", "Song Two"]);
+        // metadata_scraped_at is what moves the status fragment from
+        // Available to NotDownloaded — see seed_scraped_concert's doc comment.
+        assert!(concert.metadata_scraped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_resets_stale_lifecycle_state_on_url_reuse() {
+        // A source_url that was previously downloaded/split/archived (e.g. by
+        // an earlier Hurl case, or a retried run) must still come back as a
+        // clean NotDownloaded/NotSplit fixture — the method's whole contract
+        // is "produce this state", not "produce it only on a brand-new URL".
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/reused-scraped".to_string(),
+            "First Pass".to_string(),
+            None,
+            "Artist".to_string(),
+            "Album".to_string(),
+            vec![],
+        )
+        .unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            let concert =
+                db::concerts::get_concert_by_url(&conn, "https://npr.org/c/reused-scraped")
+                    .unwrap()
+                    .unwrap();
+            conn.execute(
+                "UPDATE concerts SET
+                     downloaded_at = datetime('now'), downloaded_extension = 'mp4',
+                     split_at = datetime('now'), archived_at = datetime('now'),
+                     download_errors_json = '[{\"at\":\"x\",\"message\":\"boom\"}]'
+                 WHERE id = ?1",
+                rusqlite::params![concert.id],
+            )
+            .unwrap();
+        }
+
+        let result = super::seed_scraped_concert(
+            &state,
+            "https://npr.org/c/reused-scraped".to_string(),
+            "Second Pass".to_string(),
+            None,
+            "Artist".to_string(),
+            "Album".to_string(),
+            vec![],
+        )
+        .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(
+            concert.download_status(),
+            crate::model::DownloadStatus::NotDownloaded
+        );
+        assert_eq!(concert.split_status(), crate::model::SplitStatus::NotSplit);
+        assert!(concert.archived_at.is_none());
+        assert!(concert.download_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_passes_when_expectations_match() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-pass".to_string(),
+            "Assert Pass".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        super::assert_concert_state(&state, seeded.id, Some(false), Some(false), Some(false))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_reports_every_mismatch_in_one_message() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-fail".to_string(),
+            "Assert Fail".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = super::assert_concert_state(&state, seeded.id, Some(true), Some(true), None)
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("ignored: expected true, got false"),
+            "{message}"
+        );
+        assert!(
+            message.contains("downloaded: expected true, got false"),
+            "{message}"
+        );
+        // split wasn't asserted (None), so it must not appear in the message.
+        assert!(!message.contains("split:"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_only_checks_present_expectations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-partial".to_string(),
+            "Assert Partial".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Only asserting `ignored`; downloaded/split are omitted (None) and
+        // must not be checked even though this concert can't be Downloaded.
+        super::assert_concert_state(&state, seeded.id, Some(false), None, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::assert_concert_state(&state, 999, Some(true), None, None).unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_rejects_a_call_with_no_expectations() {
+        // ignored/downloaded/split all None must error, not vacuously
+        // succeed — a caller that forgets to fill in any expectation would
+        // otherwise get a false "assertion passed" for any existing id.
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-empty".to_string(),
+            "Assert Empty".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = super::assert_concert_state(&state, seeded.id, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
     }
 
     #[tokio::test]

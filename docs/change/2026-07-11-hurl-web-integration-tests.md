@@ -6,10 +6,15 @@ Tracks the stacked PR series implementing this spec (parent issue #84):
 
 - [x] #78 Feature-Gated Test Control Server — `test.reset` JSON-RPC method, `--test-control-port` flag, release-build guard.
 - [x] #79 Seed Listing Through Hurl — `test.seed_listing`, `hurl/listing_status.hurl`, `scripts/hurl-test.js`, `just test-hurl`.
-- [ ] #80 Seed Scraped Concert Status Cases
-- [ ] #82 Migrate Listing Filter And Ignore Cases
-- [ ] #81 Add Semantic Assertion API When Needed
-- [ ] #83 Document And Stabilize The Hurl Workflow
+- [x] #80 Seed Scraped Concert Status Cases — `test.seed_scraped_concert`; removed the equivalent Rust test.
+- [x] #82 Migrate Listing Filter And Ignore Cases — removed the two equivalent Rust tests.
+- [x] #81 Add Semantic Assertion API When Needed — `test.assert_concert_state`; not yet called from a Hurl case (no first-slice postcondition needs it — see the method's doc comment).
+- [x] #83 Document And Stabilize The Hurl Workflow — `hurl/README.md`, linked from `CONTRIBUTING.md`; removed one more now-duplicated Rust test (`list_page_renders_seeded_concert`).
+
+This series is now complete. See [`hurl/README.md`](../../hurl/README.md) for
+setup/execution, the public-HTTP/Seed-Result/Assertion-API distinction, why
+the remaining `web_integration.rs` tests are still Rust-only, and known gaps
+(notably: Hurl is not yet wired into CI).
 
 ## Problem
 

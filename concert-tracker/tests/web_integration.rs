@@ -193,57 +193,13 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
     .unwrap();
 }
 
-#[tokio::test]
-async fn list_page_renders_seeded_concert() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/1", "Test Concert");
-    let app = router(test_state(conn));
+// list_page_renders_seeded_concert migrated to hurl/listing_status.hurl
+// (test.seed_listing + GET / contains the seeded title) — see
+// docs/change/2026-07-11-hurl-web-integration-tests.md.
 
-    let response = app
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("Test Concert"));
-}
-
-#[tokio::test]
-async fn ignore_endpoint_toggles_flag_and_returns_row() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/2", "Another Concert");
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/ignore")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    // After the row redesign, the concert-status slot shows the "ignored"
-    // badge alongside an ✕ button (which posts back to /ignore to clear).
-    assert!(
-        html.contains("badge-ignored"),
-        "ignored badge must render in the slot"
-    );
-    assert!(
-        html.contains("title=\"Clear ignored\""),
-        "✕ to clear ignored must render alongside the badge"
-    );
-}
+// ignore_endpoint_toggles_flag_and_returns_row migrated to
+// hurl/listing_status.hurl (POST /concerts/:id/ignore + badge-ignored / "Clear
+// ignored" assertions) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 #[tokio::test]
 async fn available_concert_row_shows_want_and_ignore_buttons() {
@@ -279,75 +235,13 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
     assert!(!html.contains("badge-available"));
 }
 
-#[tokio::test]
-async fn not_downloaded_row_hides_download_badge_and_shows_button() {
-    // Replaces the prior "not-downloaded" grey badge with the Download
-    // action button in the same slot.
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/fresh", "Fresh Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "X".to_string(),
-            album: "Some Album".to_string(),
-            description: None,
-            set_list: vec![],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    let app = router(test_state(conn));
+// not_downloaded_row_hides_download_badge_and_shows_button migrated to
+// hurl/listing_status.hurl (test.seed_scraped_concert + GET
+// /concerts/:id/status) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/concerts/1/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("/concerts/1/download\""),
-        "Download button must appear when NotDownloaded"
-    );
-    assert!(
-        !html.contains("badge-not-downloaded"),
-        "no 'not-downloaded' badge in fresh state — the button replaces it"
-    );
-}
-
-#[tokio::test]
-async fn list_filter_by_status_narrows_results() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/3", "Concert A");
-    seeded_concert(&conn, "https://npr.org/c/4", "Concert B");
-    db::concerts::toggle_ignored(&conn, 1).unwrap();
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/?filter=ignored")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Concert A"));
-    assert!(!html.contains("Concert B"));
-}
+// list_filter_by_status_narrows_results migrated to hurl/listing_status.hurl
+// (GET /?filter=ignored includes the ignored concert, excludes the other) —
+// see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 #[tokio::test]
 async fn notes_endpoint_persists_text() {
