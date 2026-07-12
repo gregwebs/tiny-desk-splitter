@@ -17,15 +17,19 @@
 compile_error!("test-control must not be compiled into release builds");
 
 use std::net::{Ipv4Addr, SocketAddr};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
-use jsonrpsee::server::{ServerBuilder, ServerHandle};
-use jsonrpsee::types::ErrorObjectOwned;
+use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
+use jsonrpsee::types::{ErrorObjectOwned, Params};
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::db;
 use crate::web::AppState;
+
+const DEFAULT_CONCERT_DATE: &str = "2026-01-01";
 
 #[rpc(server, namespace = "test", namespace_separator = ".")]
 pub trait TestControlApi {
@@ -34,53 +38,6 @@ pub trait TestControlApi {
     /// workdir. Leaves the SQLite schema and server configuration intact.
     #[method(name = "reset")]
     async fn reset(&self) -> RpcResult<OkResult>;
-
-    /// Seed a plain (unscraped) listing through the same
-    /// `db::concerts::upsert_listing` path the real scraper uses, and return
-    /// its id plus the public-facing listing fields Hurl needs to capture.
-    #[method(name = "seed_listing", param_kind = map)]
-    async fn seed_listing(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        teaser: Option<String>,
-    ) -> RpcResult<SeedListingResult>;
-
-    /// Seed a listing and then apply scraped metadata through the same
-    /// `db::concerts::update_metadata` path the real scraper uses (setting
-    /// `metadata_scraped_at`), producing a concert in the NotDownloaded
-    /// state. `set_list` defaults to empty when omitted.
-    #[method(name = "seed_scraped_concert", param_kind = map)]
-    async fn seed_scraped_concert(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        artist: String,
-        album: String,
-        set_list: Option<Vec<String>>,
-    ) -> RpcResult<SeedScrapedConcertResult>;
-
-    /// Seed scraped metadata plus lifecycle/timestamp state through normal
-    /// domain setters only. This is state-only: it never writes media files,
-    /// thumbnails, `timestamps.json`, or track-presence flags. Tests that need
-    /// real media on disk must stay in Rust or use a file-writing fixture.
-    #[method(name = "seed_lifecycle_concert", param_kind = map)]
-    async fn seed_lifecycle_concert(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        artist: String,
-        album: String,
-        set_list: Option<Vec<String>>,
-        downloaded: Option<bool>,
-        split: Option<bool>,
-        auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-        user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-        media_duration: Option<f64>,
-    ) -> RpcResult<SeedLifecycleConcertResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
@@ -101,7 +58,7 @@ pub trait TestControlApi {
     ) -> RpcResult<OkResult>;
 }
 
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct OkResult {
     pub ok: bool,
 }
@@ -109,7 +66,7 @@ pub struct OkResult {
 /// Seed Result for `test.seed_listing`. Deliberately only the id plus the
 /// fields already meaningful to the public list/detail HTML — no full DB row
 /// (see "Seed Methods" in docs/change/2026-07-11-hurl-web-integration-tests.md).
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SeedListingResult {
     pub id: i64,
     pub source_url: String,
@@ -120,7 +77,7 @@ pub struct SeedListingResult {
 /// Seed Result for `test.seed_scraped_concert`. Same "public fields only"
 /// rule as [`SeedListingResult`], plus `album` since it is the field the
 /// scraped-status Hurl cases assert on and the public detail page displays.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SeedScrapedConcertResult {
     pub id: i64,
     pub source_url: String,
@@ -131,7 +88,7 @@ pub struct SeedScrapedConcertResult {
 /// Seed Result for `test.seed_lifecycle_concert`. The booleans echo the
 /// requested state so Hurl can capture one fixture call and then assert the
 /// corresponding public endpoint behavior.
-#[derive(Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct SeedLifecycleConcertResult {
     pub id: i64,
     pub source_url: String,
@@ -143,11 +100,116 @@ pub struct SeedLifecycleConcertResult {
 
 pub struct TestControlServer {
     state: AppState,
+    fixtures: TestControlFixtures,
 }
 
 impl TestControlServer {
     pub fn new(state: AppState) -> Self {
-        Self { state }
+        Self {
+            state,
+            fixtures: TestControlFixtures::new(),
+        }
+    }
+
+    fn rpc_module(self) -> RpcModule<Self> {
+        let mut rpc = TestControlApiServer::into_rpc(self);
+        rpc.register_async_method("test.seed_listing", |params, server, _| async move {
+            server.seed_listing_rpc(params).await
+        })
+        .expect("test.seed_listing must register once");
+        rpc.register_async_method(
+            "test.seed_scraped_concert",
+            |params, server, _| async move { server.seed_scraped_concert_rpc(params).await },
+        )
+        .expect("test.seed_scraped_concert must register once");
+        rpc.register_async_method(
+            "test.seed_lifecycle_concert",
+            |params, server, _| async move { server.seed_lifecycle_concert_rpc(params).await },
+        )
+        .expect("test.seed_lifecycle_concert must register once");
+        rpc
+    }
+
+    async fn seed_listing_rpc(&self, params: Params<'static>) -> RpcResult<SeedListingResult> {
+        let fixture = self.fixtures.allocate(FixtureKind::Listing);
+        let mut params = parse_seed_params(params)?;
+        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
+        let title = take_string_default(&mut params, "title", || fixture.title())?;
+        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
+            DEFAULT_CONCERT_DATE.to_string()
+        })?;
+        let teaser = take_nullable_string_default(&mut params, "teaser", || fixture.teaser())?;
+        reject_unknown_seed_params(&params)?;
+
+        seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
+    }
+
+    async fn seed_scraped_concert_rpc(
+        &self,
+        params: Params<'static>,
+    ) -> RpcResult<SeedScrapedConcertResult> {
+        let fixture = self.fixtures.allocate(FixtureKind::Scraped);
+        let mut params = parse_seed_params(params)?;
+        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
+        let title = take_string_default(&mut params, "title", || fixture.title())?;
+        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
+            DEFAULT_CONCERT_DATE.to_string()
+        })?;
+        let artist = take_string_default(&mut params, "artist", || fixture.artist())?;
+        let album = take_string_default(&mut params, "album", || fixture.album())?;
+        let set_list = take_set_list_default(&mut params, "set_list", || fixture.set_list())?;
+        reject_unknown_seed_params(&params)?;
+
+        seed_scraped_concert(
+            &self.state,
+            source_url,
+            title,
+            concert_date,
+            artist,
+            album,
+            set_list,
+        )
+        .map_err(internal_error)
+    }
+
+    async fn seed_lifecycle_concert_rpc(
+        &self,
+        params: Params<'static>,
+    ) -> RpcResult<SeedLifecycleConcertResult> {
+        let fixture = self.fixtures.allocate(FixtureKind::Lifecycle);
+        let mut params = parse_seed_params(params)?;
+        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
+        let title = take_string_default(&mut params, "title", || fixture.title())?;
+        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
+            DEFAULT_CONCERT_DATE.to_string()
+        })?;
+        let artist = take_string_default(&mut params, "artist", || fixture.artist())?;
+        let album = take_string_default(&mut params, "album", || fixture.album())?;
+        let set_list = take_set_list_default(&mut params, "set_list", || fixture.set_list())?;
+        let downloaded = take_bool_default(&mut params, "downloaded", false)?;
+        let split = take_bool_default(&mut params, "split", false)?;
+        let auto_timestamps = take_nullable_value(&mut params, "auto_timestamps")?;
+        let user_timestamps = take_nullable_value(&mut params, "user_timestamps")?;
+        let media_duration = take_nullable_value(&mut params, "media_duration")?;
+        reject_unknown_seed_params(&params)?;
+
+        seed_lifecycle_concert(
+            &self.state,
+            SeedLifecycleConcertParams {
+                source_url,
+                title,
+                concert_date,
+                artist,
+                album,
+                set_list,
+                downloaded,
+                split,
+                auto_timestamps,
+                user_timestamps,
+                media_duration,
+            },
+        )
+        .map_err(internal_error)
     }
 }
 
@@ -157,70 +219,6 @@ impl TestControlApiServer for TestControlServer {
         reset_test_data(&self.state)
             .map(|()| OkResult { ok: true })
             .map_err(internal_error)
-    }
-
-    async fn seed_listing(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        teaser: Option<String>,
-    ) -> RpcResult<SeedListingResult> {
-        seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
-    }
-
-    async fn seed_scraped_concert(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        artist: String,
-        album: String,
-        set_list: Option<Vec<String>>,
-    ) -> RpcResult<SeedScrapedConcertResult> {
-        seed_scraped_concert(
-            &self.state,
-            source_url,
-            title,
-            concert_date,
-            artist,
-            album,
-            set_list.unwrap_or_default(),
-        )
-        .map_err(internal_error)
-    }
-
-    async fn seed_lifecycle_concert(
-        &self,
-        source_url: String,
-        title: String,
-        concert_date: Option<String>,
-        artist: String,
-        album: String,
-        set_list: Option<Vec<String>>,
-        downloaded: Option<bool>,
-        split: Option<bool>,
-        auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-        user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-        media_duration: Option<f64>,
-    ) -> RpcResult<SeedLifecycleConcertResult> {
-        seed_lifecycle_concert(
-            &self.state,
-            SeedLifecycleConcertParams {
-                source_url,
-                title,
-                concert_date,
-                artist,
-                album,
-                set_list: set_list.unwrap_or_default(),
-                downloaded: downloaded.unwrap_or(false),
-                split: split.unwrap_or(false),
-                auto_timestamps,
-                user_timestamps,
-                media_duration,
-            },
-        )
-        .map_err(internal_error)
     }
 
     async fn assert_concert_state(
@@ -255,6 +253,186 @@ fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
         err.to_string(),
         None::<()>,
     )
+}
+
+fn invalid_params_error(message: impl Into<String>) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        jsonrpsee::types::ErrorCode::InvalidParams.code(),
+        message.into(),
+        None::<()>,
+    )
+}
+
+struct TestControlFixtures {
+    next_fixture: AtomicU64,
+}
+
+impl TestControlFixtures {
+    fn new() -> Self {
+        Self {
+            next_fixture: AtomicU64::new(1),
+        }
+    }
+
+    fn allocate(&self, kind: FixtureKind) -> FixtureIdentity {
+        let n = self.next_fixture.fetch_add(1, Ordering::Relaxed);
+        FixtureIdentity { kind, n }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FixtureKind {
+    Listing,
+    Scraped,
+    Lifecycle,
+}
+
+struct FixtureIdentity {
+    kind: FixtureKind,
+    n: u64,
+}
+
+impl FixtureIdentity {
+    fn source_url(&self) -> String {
+        format!("https://example.test/tiny-desk/test-control-{}", self.n)
+    }
+
+    fn title(&self) -> String {
+        match self.kind {
+            FixtureKind::Listing => format!("Test Listing {}", self.n),
+            FixtureKind::Scraped => format!("Test Scraped Concert {}", self.n),
+            FixtureKind::Lifecycle => format!("Test Lifecycle Concert {}", self.n),
+        }
+    }
+
+    fn artist(&self) -> String {
+        match self.kind {
+            FixtureKind::Listing => format!("Test Listing Artist {}", self.n),
+            FixtureKind::Scraped => format!("Test Scraped Artist {}", self.n),
+            FixtureKind::Lifecycle => format!("Test Lifecycle Artist {}", self.n),
+        }
+    }
+
+    fn album(&self) -> String {
+        match self.kind {
+            FixtureKind::Listing => format!("Test Listing Album {}", self.n),
+            FixtureKind::Scraped => format!("Test Scraped Album {}", self.n),
+            FixtureKind::Lifecycle => format!("Test Lifecycle Album {}", self.n),
+        }
+    }
+
+    fn teaser(&self) -> String {
+        format!("Test listing teaser {}", self.n)
+    }
+
+    fn set_list(&self) -> Vec<String> {
+        vec![
+            format!("Test Control Track {}.1", self.n),
+            format!("Test Control Track {}.2", self.n),
+            format!("Test Control Track {}.3", self.n),
+        ]
+    }
+}
+
+fn parse_seed_params(params: Params<'static>) -> RpcResult<Map<String, Value>> {
+    params.parse::<Map<String, Value>>()
+}
+
+fn reject_unknown_seed_params(params: &Map<String, Value>) -> RpcResult<()> {
+    if params.is_empty() {
+        return Ok(());
+    }
+    let mut fields = params.keys().cloned().collect::<Vec<_>>();
+    fields.sort();
+    Err(invalid_params_error(format!(
+        "unknown seed params: {}",
+        fields.join(", ")
+    )))
+}
+
+fn take_string_default(
+    params: &mut Map<String, Value>,
+    field: &str,
+    default: impl FnOnce() -> String,
+) -> RpcResult<String> {
+    match params.remove(field) {
+        None => Ok(default()),
+        Some(Value::String(value)) => Ok(value),
+        Some(Value::Null) => Err(invalid_params_error(format!(
+            "{field} must be omitted or a string; null is not valid"
+        ))),
+        Some(value) => Err(invalid_params_error(format!(
+            "{field} must be a string, got {}",
+            value_type_name(&value)
+        ))),
+    }
+}
+
+fn take_nullable_string_default(
+    params: &mut Map<String, Value>,
+    field: &str,
+    default: impl FnOnce() -> String,
+) -> RpcResult<Option<String>> {
+    match params.remove(field) {
+        None => Ok(Some(default())),
+        Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(value) => Err(invalid_params_error(format!(
+            "{field} must be null or a string, got {}",
+            value_type_name(&value)
+        ))),
+    }
+}
+
+fn take_bool_default(
+    params: &mut Map<String, Value>,
+    field: &str,
+    default: bool,
+) -> RpcResult<bool> {
+    match params.remove(field) {
+        None => Ok(default),
+        Some(Value::Bool(value)) => Ok(value),
+        Some(value) => Err(invalid_params_error(format!(
+            "{field} must be a boolean, got {}",
+            value_type_name(&value)
+        ))),
+    }
+}
+
+fn take_nullable_value<T>(params: &mut Map<String, Value>, field: &str) -> RpcResult<Option<T>>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    match params.remove(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => serde_json::from_value(value)
+            .map(Some)
+            .map_err(|err| invalid_params_error(format!("{field} is invalid: {err}"))),
+    }
+}
+
+fn take_set_list_default(
+    params: &mut Map<String, Value>,
+    field: &str,
+    default: impl FnOnce() -> Vec<String>,
+) -> RpcResult<Vec<String>> {
+    match params.remove(field) {
+        None => Ok(default()),
+        Some(Value::Null) => Ok(Vec::new()),
+        Some(value) => serde_json::from_value(value)
+            .map_err(|err| invalid_params_error(format!("{field} is invalid: {err}"))),
+    }
+}
+
+fn value_type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 #[derive(Deserialize)]
@@ -573,7 +751,7 @@ pub async fn start(state: AppState, port: u16) -> anyhow::Result<(ServerHandle, 
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let server = ServerBuilder::new().build(addr).await?;
     let bound = server.local_addr()?;
-    let handle = server.start(TestControlServer::new(state).into_rpc());
+    let handle = server.start(TestControlServer::new(state).rpc_module());
     Ok((handle, bound))
 }
 
@@ -599,6 +777,206 @@ mod tests {
             ),
             jobs: JobConfig::test(workdir),
         }
+    }
+
+    fn params(json: &'static str) -> Params<'static> {
+        Params::new(Some(json))
+    }
+
+    #[tokio::test]
+    async fn seed_listing_accepts_empty_params_with_generated_defaults() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state);
+
+        let result = server.seed_listing_rpc(params("{}")).await.unwrap();
+
+        assert_eq!(
+            result.source_url,
+            "https://example.test/tiny-desk/test-control-1"
+        );
+        assert_eq!(result.title, "Test Listing 1");
+        assert_eq!(result.concert_date.as_deref(), Some(DEFAULT_CONCERT_DATE));
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_accepts_empty_params_with_three_default_tracks() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let result = server.seed_scraped_concert_rpc(params("{}")).await.unwrap();
+
+        assert_eq!(result.title, "Test Scraped Concert 1");
+        assert_eq!(result.album, "Test Scraped Album 1");
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(
+            concert.set_list,
+            vec![
+                "Test Control Track 1.1",
+                "Test Control Track 1.2",
+                "Test Control Track 1.3"
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_lifecycle_concert_accepts_empty_params_with_inert_lifecycle_defaults() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let result = server
+            .seed_lifecycle_concert_rpc(params("{}"))
+            .await
+            .unwrap();
+
+        assert_eq!(result.title, "Test Lifecycle Concert 1");
+        assert_eq!(result.album, "Test Lifecycle Album 1");
+        assert!(!result.downloaded);
+        assert!(!result.split);
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.set_list.len(), 3);
+        assert!(concert.media_duration.is_none());
+        let timestamps = db::split_timestamps::get_split_timestamps(&conn, result.id).unwrap();
+        assert!(timestamps.auto.is_none());
+        assert!(timestamps.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn seed_defaults_generate_unique_urls_across_methods_and_reset() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state);
+
+        let listing = server.seed_listing_rpc(params("{}")).await.unwrap();
+        reset_test_data(&server.state).unwrap();
+        let scraped = server.seed_scraped_concert_rpc(params("{}")).await.unwrap();
+        let lifecycle = server
+            .seed_lifecycle_concert_rpc(params("{}"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            listing.source_url,
+            "https://example.test/tiny-desk/test-control-1"
+        );
+        assert_eq!(
+            scraped.source_url,
+            "https://example.test/tiny-desk/test-control-2"
+        );
+        assert_eq!(
+            lifecycle.source_url,
+            "https://example.test/tiny-desk/test-control-3"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_flat_map_seed_params_override_generated_defaults() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state);
+
+        let listing = server
+            .seed_listing_rpc(params(
+                r#"{
+                    "source_url": "https://npr.org/c/explicit-listing",
+                    "title": "Explicit Listing",
+                    "concert_date": "2024-01-15",
+                    "teaser": "Visible teaser"
+                }"#,
+            ))
+            .await
+            .unwrap();
+        let scraped = server
+            .seed_scraped_concert_rpc(params(
+                r#"{
+                    "source_url": "https://npr.org/c/explicit-scraped",
+                    "title": "Explicit Scraped",
+                    "concert_date": "2024-02-15",
+                    "artist": "Explicit Artist",
+                    "album": "Explicit Album",
+                    "set_list": ["One"]
+                }"#,
+            ))
+            .await
+            .unwrap();
+        let lifecycle = server
+            .seed_lifecycle_concert_rpc(params(
+                r#"{
+                    "source_url": "https://npr.org/c/explicit-lifecycle",
+                    "title": "Explicit Lifecycle",
+                    "concert_date": "2024-03-15",
+                    "artist": "Explicit Lifecycle Artist",
+                    "album": "Explicit Lifecycle Album",
+                    "set_list": ["One"],
+                    "downloaded": true,
+                    "split": true
+                }"#,
+            ))
+            .await
+            .unwrap();
+
+        assert_eq!(listing.title, "Explicit Listing");
+        assert_eq!(listing.source_url, "https://npr.org/c/explicit-listing");
+        assert_eq!(scraped.album, "Explicit Album");
+        assert_eq!(lifecycle.album, "Explicit Lifecycle Album");
+        assert!(lifecycle.downloaded);
+        assert!(lifecycle.split);
+    }
+
+    #[tokio::test]
+    async fn explicit_null_preserves_nullable_domain_absence() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let listing = server
+            .seed_listing_rpc(params(r#"{"concert_date": null, "teaser": null}"#))
+            .await
+            .unwrap();
+        let lifecycle = server
+            .seed_lifecycle_concert_rpc(params(
+                r#"{
+                    "concert_date": null,
+                    "set_list": null,
+                    "auto_timestamps": null,
+                    "user_timestamps": null,
+                    "media_duration": null
+                }"#,
+            ))
+            .await
+            .unwrap();
+
+        assert!(listing.concert_date.is_none());
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, lifecycle.id).unwrap();
+        assert!(concert.concert_date.is_none());
+        assert!(concert.set_list.is_empty());
+        assert!(concert.media_duration.is_none());
+        let timestamps = db::split_timestamps::get_split_timestamps(&conn, lifecycle.id).unwrap();
+        assert!(timestamps.auto.is_none());
+        assert!(timestamps.user.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_null_for_identity_strings_is_rejected() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state);
+
+        let err = server
+            .seed_lifecycle_concert_rpc(params(r#"{"source_url": null}"#))
+            .await
+            .unwrap_err();
+
+        assert_eq!(
+            err.code(),
+            jsonrpsee::types::ErrorCode::InvalidParams.code()
+        );
+        assert!(err.message().contains("source_url"), "{err:?}");
     }
 
     #[tokio::test]
