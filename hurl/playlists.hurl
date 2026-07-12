@@ -21,11 +21,6 @@ Content-Type: application/json
   "id": 1,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/playlist-crud-hurl",
-    "title": "Playlist CRUD Hurl",
-    "concert_date": "2024-08-01",
-    "artist": "Playlist Artist",
-    "album": "Playlist Crud Album",
     "set_list": ["t0", "t1"],
     "auto_timestamps": [
       {"title": "t0", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
@@ -129,14 +124,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 2,
   "method": "test.seed_lifecycle_concert",
-  "params": {
-    "source_url": "https://npr.org/c/playlist-validation-hurl",
-    "title": "Playlist Validation Hurl",
-    "concert_date": "2024-08-02",
-    "artist": "Playlist Artist",
-    "album": "Playlist Validation Album",
-    "set_list": ["t0"]
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -198,11 +186,6 @@ Content-Type: application/json
   "id": 3,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/playlist-html-hurl",
-    "title": "Playlist HTML Hurl",
-    "concert_date": "2024-08-03",
-    "artist": "Playlist Artist",
-    "album": "Playlist HTML Album",
     "set_list": ["Song Zero", "Song One"],
     "auto_timestamps": [
       {"title": "Song Zero", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},

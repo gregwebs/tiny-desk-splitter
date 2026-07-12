@@ -6,11 +6,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 1,
   "method": "test.seed_listing",
-  "params": {
-    "source_url": "https://npr.org/c/notes-hurl",
-    "title": "Notes Hurl Concert",
-    "concert_date": "2024-05-01"
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -33,11 +29,7 @@ Content-Type: application/json
   "id": 2,
   "method": "test.seed_scraped_concert",
   "params": {
-    "source_url": "https://npr.org/c/detail-set-list-hurl",
-    "title": "Detail Set List Hurl",
-    "concert_date": "2024-05-02",
     "artist": "Detail Artist",
-    "album": "Detail Album",
     "set_list": ["Song One", "Song Two"]
   }
 }
@@ -59,11 +51,6 @@ Content-Type: application/json
   "id": 3,
   "method": "test.seed_scraped_concert",
   "params": {
-    "source_url": "https://npr.org/c/prepare-empty-set-list-hurl",
-    "title": "Prepare Empty Set List Hurl",
-    "concert_date": "2024-05-03",
-    "artist": "Prepare Artist",
-    "album": "Empty Album",
     "set_list": []
   }
 }

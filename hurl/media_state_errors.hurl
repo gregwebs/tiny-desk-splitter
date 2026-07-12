@@ -8,11 +8,6 @@ Content-Type: application/json
   "id": 1,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/delete-download-missing-hurl",
-    "title": "Delete Download Missing Hurl",
-    "concert_date": "2024-06-01",
-    "artist": "Media Artist",
-    "album": "Delete Download Missing Album",
     "downloaded": true
   }
 }
@@ -34,11 +29,6 @@ Content-Type: application/json
   "id": 2,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/watch-missing-hurl",
-    "title": "Watch Missing Hurl",
-    "concert_date": "2024-06-02",
-    "artist": "Media Artist",
-    "album": "Watch Missing Album",
     "downloaded": true
   }
 }
@@ -58,13 +48,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 3,
   "method": "test.seed_scraped_concert",
-  "params": {
-    "source_url": "https://npr.org/c/watch-not-downloaded-hurl",
-    "title": "Watch Not Downloaded Hurl",
-    "concert_date": "2024-06-03",
-    "artist": "Media Artist",
-    "album": "Watch Not Downloaded Album"
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -80,13 +64,6 @@ Content-Type: application/json
   "id": 4,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/concert-playback-empty-hurl",
-    "title": "Concert Playback Empty Hurl",
-    "concert_date": "2024-06-04",
-    "artist": "Media Artist",
-    "album": "Concert Playback Empty Album",
-    "set_list": ["Song A"],
-    "downloaded": true,
     "split": true
   }
 }
