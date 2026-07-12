@@ -193,23 +193,9 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
     .unwrap();
 }
 
-#[tokio::test]
-async fn list_page_renders_seeded_concert() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/1", "Test Concert");
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("Test Concert"));
-}
+// list_page_renders_seeded_concert migrated to hurl/listing_status.hurl
+// (test.seed_listing + GET / contains the seeded title) — see
+// docs/change/2026-07-11-hurl-web-integration-tests.md.
 
 // ignore_endpoint_toggles_flag_and_returns_row migrated to
 // hurl/listing_status.hurl (POST /concerts/:id/ignore + badge-ignored / "Clear
