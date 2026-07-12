@@ -9,7 +9,8 @@ for the full design (architecture, decisions, Test Control API contracts) and
 [`docs/adr/0001-jsonrpsee-for-test-control-api.md`](../docs/adr/0001-jsonrpsee-for-test-control-api.md)
 for why the Test Control API is JSON-RPC.
 
-This is optional local tooling, not yet part of CI (see "Known gaps" below).
+It runs locally via `just test-hurl` and is a blocking step in CI (see "CI"
+below).
 
 ## Setup
 
@@ -96,8 +97,9 @@ cargo build --release --bin concert-web --features test-control
 
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
-After the state-only public HTTP slice, `concert-tracker/tests/web_integration.rs`
-still has 48 tests. This groups them by *why*, matching the migration specs'
+After the state-only public HTTP and playlist slices,
+`concert-tracker/tests/web_integration.rs` still has 44 tests. This groups
+them by *why*, matching the migration specs'
 out-of-scope lists plus a couple of pre-existing areas these slices never
 touched. It's a categorization of the shape of the remaining suite, not an
 exhaustive per-test audit; several examples are named under each bucket, but
@@ -129,11 +131,6 @@ the buckets cover more tests than are named here.
   write source/track/`timestamps.json` files and assert on exact filesystem
   state. Seeding that through Test Control would need file-producing seed
   methods and a separate design.
-- **Playlist API and HTML pages** (not part of the "listing and status
-  basics" first slice). `playlist_api_crud_and_resolution`,
-  `playlist_api_validation_status_codes`, `playlists_html_pages_render`, and
-  related tests cover a distinct feature area with its own JSON API — a
-  reasonable target for a *future* migration slice, not this one.
 - **Router/build-internals checks that aren't user-facing HTTP behavior**.
   `prod_router_serves_embedded_js_without_livereload` distinguishes dev vs.
   prod router wiring (an internal construction detail, not something a
@@ -147,6 +144,17 @@ the buckets cover more tests than are named here.
   downloaded filtering, missing-file media errors, prepare 404/422 responses,
   split-timestamp 404/409/422/read/reset state cases, delete-split timestamp
   preservation, and empty concert playback 404.
+- **Playlist API and HTML pages are migrated.** The third Hurl slice
+  (`hurl/playlists.hurl`) moved `playlist_api_crud_and_resolution`,
+  `playlist_api_validation_status_codes`, `playlists_html_pages_render`, and
+  `playlist_detail_page_unknown_id_is_404` — no new Test Control surface was
+  needed, since `test.seed_lifecycle_concert` already covers the fixture
+  shape those tests seeded by hand. Two markup-internal assertions (the
+  `data-playlist-id` attribute, the nav `href="/playlists"` link) were
+  intentionally dropped from the Hurl port rather than translated
+  byte-for-byte; that coverage now lives in `e2e/playlists.spec.js`'s
+  drag-drop reorder test, which drives the real DOM attribute. See
+  [`docs/change/2026-07-12-playlist-hurl-migration.md`](../docs/change/2026-07-12-playlist-hurl-migration.md).
 - **Still intentionally Rust-only after the state-only slice.**
   `detail_page_auto_scrape_failure_still_renders` exercises an outbound
   scrape failure and proxy disabling. `track_details_returns_200_without_album`
