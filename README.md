@@ -1,20 +1,6 @@
 # Tiny Desk Splitter
 
-Tools for downloading and splitting NPR Tiny Desk Concerts into individual tracks with metadata.
-
-## Workspace crates
-
-| Crate | Description |
-|---|---|
-| `scraper` | Scrape concert metadata from NPR pages; list concerts from the archive |
-| `live-set-song-splitter` | Split a concert MP4 into individual tracks using FFmpeg |
-| `concert-tracker` | SQLite-backed web UI and CLI to track download/split state across concerts |
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, linting, and
-testing.
-
-See [CODING_STANDARDS.md](CODING_STANDARDS.md) for how code should be written and reviewed.
-testing.
+Tools and a GUI for downloading and splitting NPR Tiny Desk Concerts into individual tracks with metadata.
 
 ## Quick start
 
@@ -23,6 +9,28 @@ cargo build
 cargo run --bin concert-web
 # → http://localhost:3000
 ```
+
+## Development 
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, linting, and
+testing.
+
+See [CODING_STANDARDS.md](CODING_STANDARDS.md) for how code should be written and reviewed.
+testing.
+
+See documentation in ./docs
+* adr: architectural decision records 
+* changes: documentation of recent changes
+* *: architectural and other useful documentation
+
+### Workspace crates
+
+| Crate | Description |
+|---|---|
+| `scraper` | Scrape concert metadata from NPR pages; list concerts from the archive |
+| `live-set-song-splitter` | Split a concert MP4 into individual tracks using FFmpeg |
+| `concert-tracker` | SQLite-backed web UI and CLI to track download/split state across concerts |
+
 
 ## Running with containers
 
@@ -182,13 +190,7 @@ persistence layer's Rust modules are organized.
 
 Scrapes concert metadata from NPR pages and lists concerts from the archive.
 
-```sh
-# Scrape a single concert
-cargo run --bin scraper -- <URL>
-
-# List concerts from a month's archive
-cargo run --bin archive_scraper -- 2024 01
-```
+See [./scraper](./scraper/README.md)
 
 ---
 
@@ -196,30 +198,4 @@ cargo run --bin archive_scraper -- 2024 01
 
 Splits a downloaded concert MP4 into individual tracks.
 
-```sh
-cargo run --bin live-set-splitter -- <json_file> [output_dir]
-
-# Optional: choose the OCR backend (default tesseract; paddle needs --features paddle-ocr)
-cargo run --features paddle-ocr --bin live-set-splitter -- <json_file> --ocr-engine paddle
-
-# Optional: frame-accurate video cuts (slower, re-encodes video). Default is `copy`.
-cargo run --bin live-set-splitter -- <json_file> --video-cut-mode reencode
-```
-
-The JSON file uses the same format produced by the `scraper` crate.
-
-### Video cut mode
-
-`--video-cut-mode` controls how each track's video is cut from the source. Both modes
-keep audio and video in sync:
-
-| Mode | Speed | Cut precision | Notes |
-|---|---|---|---|
-| `copy` *(default)* | Fast, lossless | Snaps the start back to the nearest preceding keyframe (up to one GOP — a few seconds — early) | Stream copy; no re-encode |
-| `reencode` | Slow | Frame-accurate at the detected start | Re-encodes video with x264; audio is still copied |
-
-Both modes seek on the **input** side (`-ss` before `-i`). An earlier version placed
-`-ss` *after* `-i` with `-c copy`, which let the video start at the first keyframe
-*after* the cut while the audio started exactly at the cut — desyncing every track not
-cut on a keyframe by up to one GOP. See
-[docs/change/2026-06-06-video-audio-sync-fix.md](docs/change/2026-06-06-video-audio-sync-fix.md).
+See [./live-set-song-splitter](./live-set-song-splitter/README.md)

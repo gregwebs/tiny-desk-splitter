@@ -160,19 +160,27 @@ the buckets (especially the last one) cover more tests than are named here.
   Rust duplicates as each Hurl equivalent lands, not to migrate everything
   reachable in the first pass.
 
+## CI
+
+`.github/workflows/ci.yml`'s `rust` job runs `just test-hurl` as a **blocking**
+step, after `cargo nextest run --tests` and before the working-tree-clean
+check. It installs `hurl` from the official `.deb` release artifact (pinned
+`HURL_VERSION`, bumped deliberately) and `just` via `taiki-e/install-action`,
+then runs the same command a contributor runs locally — `scripts/hurl-test.js`
+builds `concert-web --features test-control` itself. A failing `.hurl` case
+fails the PR.
+
+The same job also runs a **release-safety guard** step:
+`cargo build --release --bin concert-web --features test-control` is expected
+to *fail*, and the step further asserts the failure comes from the
+`compile_error!` in `concert-tracker/src/test_control.rs` (not some unrelated
+build break masking a missing guard). This exists because `just test-hurl`
+only builds in debug mode and would not notice if that guard were ever removed
+or bypassed — the CI step catches that regression independently of the Hurl
+suite passing.
+
 ## Known gaps
 
-- **Not wired into CI.** `.github/workflows/ci.yml`'s `rust` job runs
-  `cargo nextest run --tests` only — `just test-hurl` is not part of any
-  workflow. This matches the spec's explicit "CI enforcement of Hurl tests"
-  being Out Of Scope For First Slice, but it means the behaviors this slice
-  migrated (a listing appearing on `GET /`, the ignore endpoint's badge
-  markup, the ignored filter, the scraped-status fragment) are currently
-  **not covered by anything CI runs** — only by `hurl/listing_status.hurl`,
-  which a human or agent has to remember to run locally. Wiring `just
-  test-hurl` into CI is the natural next step once this workflow has proven
-  itself, but is a deliberate, explicit decision to make separately (it
-  changes what blocks a PR), not something to add silently.
 - **No Assertion API consumer yet.** `test.assert_concert_state` exists (see
   above) but nothing in `hurl/listing_status.hurl` calls it — by design, per
   the "when to use each" section above.
