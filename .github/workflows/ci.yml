@@ -77,12 +77,55 @@ jobs:
 
       - uses: taiki-e/install-action@682e7d9e49c5e653d371fc6adbda67653461378a # v2.82.4
         with:
-          tool: nextest
+          tool: nextest,just
       - name: Test
         run: cargo nextest run --tests
 
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      # Hurl (https://hurl.dev) black-box HTTP integration tests against a
+      # real concert-web process — see hurl/README.md. Installed from the
+      # official .deb release artifact, the method the Hurl docs recommend
+      # for Debian/Ubuntu CI. Pin HURL_VERSION and bump deliberately.
+      - name: Install Hurl
+        run: |
+          HURL_VERSION=8.0.1
+          curl --location --remote-name \
+            "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl_${HURL_VERSION}_amd64.deb"
+          sudo apt-get update
+          sudo apt-get install -y "./hurl_${HURL_VERSION}_amd64.deb"
+          rm "hurl_${HURL_VERSION}_amd64.deb"
+
+      # `just test-hurl` builds concert-web --features test-control itself
+      # (scripts/hurl-test.js) and runs hurl/*.hurl against it. See
+      # hurl/README.md for what this does and does not cover.
+      - name: Hurl web integration tests
+        run: just test-hurl
+
+      # Release-safety guard: the Test Control API (behind the `test-control`
+      # feature) must never reach a release binary — see the compile_error!
+      # in concert-tracker/src/test_control.rs. This step fails the build if
+      # that guard is ever removed or bypassed; `just test-hurl` above only
+      # builds in debug mode and would not catch that regression on its own.
+      - name: Verify test-control cannot build in release mode
+        run: |
+          if output=$(cargo build --release --bin concert-web --features test-control 2>&1); then
+            echo "::error::cargo build --release --features test-control succeeded — the release guard in concert-tracker/src/test_control.rs is missing or broken."
+            echo "$output"
+            exit 1
+          fi
+          if ! grep -q "test-control must not be compiled into release builds" <<<"$output"; then
+            echo "::error::Build failed as expected, but not with the release guard's compile_error! message — a different, unrelated failure may be masking a missing guard:"
+            echo "$output"
+            exit 1
+          fi
+          echo "Release guard confirmed: test-control feature correctly fails to build in release mode."
+
       # Backstop the --locked flags above and catch any other build-time mutation
       # (gitignored artifacts under target/, models/, 3rd_party/ are not reported).
+      # Placed last so it also covers the hurl/release-guard steps above.
       - name: Verify working tree is clean
         run: |
           if [ -n "$(git status --porcelain)" ]; then

@@ -12,9 +12,10 @@ Tracks the stacked PR series implementing this spec (parent issue #84):
 - [x] #83 Document And Stabilize The Hurl Workflow — `hurl/README.md`, linked from `CONTRIBUTING.md`; removed one more now-duplicated Rust test (`list_page_renders_seeded_concert`).
 
 This series is now complete. See [`hurl/README.md`](../../hurl/README.md) for
-setup/execution, the public-HTTP/Seed-Result/Assertion-API distinction, why
-the remaining `web_integration.rs` tests are still Rust-only, and known gaps
-(notably: Hurl is not yet wired into CI).
+setup/execution, the public-HTTP/Seed-Result/Assertion-API distinction, and
+why the remaining `web_integration.rs` tests are still Rust-only. A follow-up
+slice (`docs/change/2026-07-12-hurl-ci-wiring.md` onward) wires `just
+test-hurl` into CI and migrates more of that remaining Rust-only bucket.
 
 ## Problem
 
