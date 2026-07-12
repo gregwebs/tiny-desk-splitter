@@ -44,17 +44,11 @@ test-ts:
 test-rs:
 	cargo nextest run --tests
 
-# Optional: black-box HTTP integration tests via Hurl against a real
+# black-box HTTP integration tests via Hurl against a real
 # concert-web process (docs/change/2026-07-11-hurl-web-integration-tests.md,
 # hurl/README.md). Requires `hurl` on PATH: https://hurl.dev/docs/installation.html
 test-hurl:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    if ! command -v hurl >/dev/null 2>&1; then
-        echo "test-hurl: 'hurl' is not installed or not on PATH. See https://hurl.dev/docs/installation.html" >&2
-        exit 1
-    fi
-    node scripts/hurl-test.js
+    ./scripts/hurl-test.sh
 
 # Run fmt-check + clippy + shellcheck + ts-check + ts-lint (the full standard lint suite).
 lint: fmt-check clippy shellcheck ts-check ts-lint
