@@ -61,6 +61,24 @@ pub trait TestControlApi {
         album: String,
         set_list: Option<Vec<String>>,
     ) -> RpcResult<SeedScrapedConcertResult>;
+
+    /// Assert semantic domain conditions for a seeded concert without Hurl
+    /// having to read raw DB rows. Only the expectations that are present are
+    /// checked; omit a field to not assert on that dimension. At least one of
+    /// `ignored`/`downloaded`/`split` must be present — a call that provides
+    /// none (all omitted or explicit `null`) errors instead of vacuously
+    /// succeeding without checking anything. Prefer a public HTTP assertion
+    /// instead of this method whenever the behavior is already visible on a
+    /// public route/fragment — see "Assertion Methods" in
+    /// docs/change/2026-07-11-hurl-web-integration-tests.md.
+    #[method(name = "assert_concert_state", param_kind = map)]
+    async fn assert_concert_state(
+        &self,
+        id: i64,
+        ignored: Option<bool>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+    ) -> RpcResult<OkResult>;
 }
 
 #[derive(Clone, Serialize)]
@@ -138,11 +156,36 @@ impl TestControlApiServer for TestControlServer {
         )
         .map_err(internal_error)
     }
+
+    async fn assert_concert_state(
+        &self,
+        id: i64,
+        ignored: Option<bool>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+    ) -> RpcResult<OkResult> {
+        assert_concert_state(&self.state, id, ignored, downloaded, split)
+            .map(|()| OkResult { ok: true })
+            .map_err(assertion_error)
+    }
 }
 
 fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         jsonrpsee::types::ErrorCode::InternalError.code(),
+        err.to_string(),
+        None::<()>,
+    )
+}
+
+/// Distinct from [`internal_error`]: this is for an assertion that ran
+/// successfully but found the domain condition doesn't hold (or the
+/// concert doesn't exist) — an expected test-failure outcome, not a server
+/// malfunction. Uses jsonrpsee's `CALL_EXECUTION_FAILED_CODE`, its
+/// general-purpose "the call executed but did not succeed" code.
+fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(
+        jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE,
         err.to_string(),
         None::<()>,
     )
@@ -256,6 +299,61 @@ fn seed_scraped_concert(
         title: concert.title,
         album: concert.album.unwrap_or_default(),
     })
+}
+
+/// Checks each present expectation against the concert's actual domain
+/// state, returning every mismatch (not just the first) so a Hurl case gets
+/// the full picture in one round trip. `downloaded`/`split` are checked
+/// against [`crate::model::DownloadStatus`]/[`crate::model::SplitStatus`]
+/// being exactly `Downloaded`/`Split` — a concert `Downloading` or in
+/// `DownloadError` counts as "not downloaded" here, matching what a human
+/// reading "downloaded: true/false" would expect.
+fn assert_concert_state(
+    state: &AppState,
+    id: i64,
+    ignored: Option<bool>,
+    downloaded: Option<bool>,
+    split: Option<bool>,
+) -> anyhow::Result<()> {
+    if ignored.is_none() && downloaded.is_none() && split.is_none() {
+        anyhow::bail!(
+            "assert_concert_state called for concert {id} with no expectations \
+             (ignored/downloaded/split all omitted or null) — this would silently \
+             pass without checking anything; assert at least one condition"
+        );
+    }
+
+    let conn = state.db.lock().unwrap();
+    let concert = db::concerts::get_concert(&conn, id)
+        .map_err(|e| anyhow::anyhow!("no concert with id {id}: {e}"))?;
+
+    let mut mismatches = Vec::new();
+    if let Some(expected) = ignored {
+        if concert.ignored != expected {
+            mismatches.push(format!(
+                "ignored: expected {expected}, got {}",
+                concert.ignored
+            ));
+        }
+    }
+    if let Some(expected) = downloaded {
+        let actual = concert.download_status() == crate::model::DownloadStatus::Downloaded;
+        if actual != expected {
+            mismatches.push(format!("downloaded: expected {expected}, got {actual}"));
+        }
+    }
+    if let Some(expected) = split {
+        let actual = concert.split_status() == crate::model::SplitStatus::Split;
+        if actual != expected {
+            mismatches.push(format!("split: expected {expected}, got {actual}"));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!("concert {id} state mismatch: {}", mismatches.join("; "));
+    }
 }
 
 /// Removes generated files under `<workdir>/concerts` and
@@ -493,6 +591,98 @@ mod tests {
         assert_eq!(concert.split_status(), crate::model::SplitStatus::NotSplit);
         assert!(concert.archived_at.is_none());
         assert!(concert.download_errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_passes_when_expectations_match() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-pass".to_string(),
+            "Assert Pass".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        super::assert_concert_state(&state, seeded.id, Some(false), Some(false), Some(false))
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_reports_every_mismatch_in_one_message() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-fail".to_string(),
+            "Assert Fail".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = super::assert_concert_state(&state, seeded.id, Some(true), Some(true), None)
+            .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("ignored: expected true, got false"),
+            "{message}"
+        );
+        assert!(
+            message.contains("downloaded: expected true, got false"),
+            "{message}"
+        );
+        // split wasn't asserted (None), so it must not appear in the message.
+        assert!(!message.contains("split:"), "{message}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_only_checks_present_expectations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-partial".to_string(),
+            "Assert Partial".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        // Only asserting `ignored`; downloaded/split are omitted (None) and
+        // must not be checked even though this concert can't be Downloaded.
+        super::assert_concert_state(&state, seeded.id, Some(false), None, None).unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::assert_concert_state(&state, 999, Some(true), None, None).unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_state_rejects_a_call_with_no_expectations() {
+        // ignored/downloaded/split all None must error, not vacuously
+        // succeed — a caller that forgets to fill in any expectation would
+        // otherwise get a false "assertion passed" for any existing id.
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(
+            &state,
+            "https://npr.org/c/assert-empty".to_string(),
+            "Assert Empty".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        let err = super::assert_concert_state(&state, seeded.id, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
     }
 
     #[tokio::test]
