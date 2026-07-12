@@ -201,39 +201,8 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
 // hurl/listing_status.hurl (POST /concerts/:id/ignore + badge-ignored / "Clear
 // ignored" assertions) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
-#[tokio::test]
-async fn available_concert_row_shows_want_and_ignore_buttons() {
-    // In the Available state the concert-status slot exposes the two action
-    // buttons. The redesign moved them from a trailing actions row into the
-    // status slot itself, replacing the prior "available" badge.
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/avail", "Avail Concert");
-    let app = router(test_state(conn));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/concerts/1/status")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("/concerts/1/want\""),
-        "Want action must appear in slot when Available"
-    );
-    assert!(
-        html.contains("/concerts/1/ignore\""),
-        "Ignore action must appear in slot when Available"
-    );
-    // No "available" badge — that was the visual the buttons replace.
-    assert!(!html.contains("badge-available"));
-}
+// available_concert_row_shows_want_and_ignore_buttons migrated to
+// hurl/listing_status.hurl.
 
 // not_downloaded_row_hides_download_badge_and_shows_button migrated to
 // hurl/listing_status.hurl (test.seed_scraped_concert + GET
@@ -243,26 +212,7 @@ async fn available_concert_row_shows_want_and_ignore_buttons() {
 // (GET /?filter=ignored includes the ignored concert, excludes the other) —
 // see docs/change/2026-07-11-hurl-web-integration-tests.md.
 
-#[tokio::test]
-async fn notes_endpoint_persists_text() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/5", "Notes Concert");
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/notes")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .body(Body::from("notes=great+show"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-}
+// notes_endpoint_persists_text migrated to hurl/detail_prepare_notes.hurl.
 
 #[tokio::test]
 async fn download_endpoint_spawns_job_and_returns_row() {
@@ -533,76 +483,7 @@ async fn delete_download_with_prior_split_error_restores_download_button() {
     );
 }
 
-#[tokio::test]
-async fn downloaded_filter_includes_split_concerts() {
-    // With the new two-axis statuses, the "Downloaded" filter pill should
-    // include every concert whose download badge reads "downloaded" — even
-    // if it has also been split. (Previously the filter carried a hidden
-    // `&& !Split` guard, which surprised users when their split concerts
-    // disappeared from the Downloaded filter despite showing the badge.)
-    let conn = db::connection::open_in_memory().unwrap();
-    // First concert: downloaded only. `seed_downloaded` hardcodes id=1.
-    seed_downloaded(&conn, "https://npr.org/d/dl-only", "Album One");
-    // Second concert: downloaded + split. Set up inline because seed_downloaded
-    // only handles a single id=1 concert.
-    db::concerts::upsert_listing(
-        &conn,
-        &NewListing {
-            source_url: "https://npr.org/d/dl-split".to_string(),
-            title: "Split Concert".to_string(),
-            concert_date: Some("2024-01-16".to_string()),
-            teaser: None,
-        },
-    )
-    .unwrap();
-    let id2 = db::concerts::get_concert_by_url(&conn, "https://npr.org/d/dl-split")
-        .unwrap()
-        .unwrap()
-        .id;
-    db::concerts::update_metadata(
-        &conn,
-        id2,
-        &MetadataUpdate {
-            artist: "Y".to_string(),
-            album: "Album Two".to_string(),
-            description: None,
-            set_list: vec![],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    db::lifecycle::try_mark_download_started(&conn, id2).unwrap();
-    db::lifecycle::mark_download_succeeded(&conn, id2, "mp4").unwrap();
-    db::lifecycle::try_mark_split_started(&conn, id2).unwrap();
-    db::lifecycle::mark_split_succeeded(&conn, id2).unwrap();
-
-    let app = router(test_state(conn));
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/?filter=downloaded")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-
-    // Cards are rendered with id="concert-{id}". Both must appear.
-    assert!(
-        html.contains("id=\"concert-1\""),
-        "downloaded-only concert (id 1) must appear under Downloaded filter"
-    );
-    assert!(
-        html.contains(&format!("id=\"concert-{}\"", id2)),
-        "split concert (id {}) must also appear under Downloaded filter — its badge reads 'downloaded'",
-        id2
-    );
-}
+// downloaded_filter_includes_split_concerts migrated to hurl/listing_status.hurl.
 
 #[tokio::test]
 async fn play_button_visible_after_successful_split() {
@@ -702,42 +583,8 @@ async fn play_button_visible_after_successful_split() {
     );
 }
 
-#[tokio::test]
-async fn delete_download_missing_file_returns_confirm_fragment() {
-    let workdir = tempfile::tempdir().unwrap();
-    // Deliberately don't create the mp4 — the file is "missing".
-
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/2", "Some Album");
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/delete-download")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.headers().get("HX-Refresh").is_none(),
-        "missing-file response must NOT trigger a page refresh — it returns a confirm fragment"
-    );
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("delete-confirm"),
-        "body should be the confirm fragment, got: {}",
-        html
-    );
-    assert!(html.contains("Yes, clear record"));
-}
+// delete_download_missing_file_returns_confirm_fragment migrated to
+// hurl/media_state_errors.hurl.
 
 #[tokio::test]
 async fn delete_download_force_clears_state_when_file_missing() {
@@ -838,63 +685,11 @@ async fn delete_split_clears_state() {
     assert!(c.downloaded_at.is_some(), "download must be untouched");
 }
 
-#[tokio::test]
-async fn delete_split_when_not_split_returns_400() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/d/5", "Not Split Concert");
-    let app = router(test_state(conn));
+// delete_split_when_not_split_returns_400 migrated to
+// hurl/split_timestamps_state.hurl.
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/delete-split")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-}
-
-#[tokio::test]
-async fn detail_page_renders_set_list_and_state() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/7", "Detail Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "Detail Artist".to_string(),
-            album: "Detail Album".to_string(),
-            description: Some("Great show".to_string()),
-            set_list: vec!["Song One".to_string(), "Song Two".to_string()],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    let app = router(test_state(conn));
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri("/concerts/1")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(html.contains("Song One"));
-    assert!(html.contains("Song Two"));
-    assert!(html.contains("Detail Artist"));
-}
+// detail_page_renders_set_list_and_state migrated to
+// hurl/detail_prepare_notes.hurl.
 
 #[tokio::test]
 async fn ignore_deletes_preview_image() {
@@ -1298,30 +1093,8 @@ async fn track_details_reports_busy_from_handler_state() {
     assert_eq!(info["tracks"][0]["available"], true);
 }
 
-#[tokio::test]
-async fn watch_returns_500_when_downloaded_but_file_missing() {
-    // Concert is marked downloaded in the DB but the media file is not on
-    // disk (e.g. an old import whose archive never contained the source).
-    // The handler must signal a server-side data-integrity issue, not a 404,
-    // so the UI can surface an error indicator to the user.
-    let workdir = tempfile::tempdir().unwrap();
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/no-file", "Missing File Album");
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/watch")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-}
+// watch_returns_500_when_downloaded_but_file_missing migrated to
+// hurl/media_state_errors.hurl.
 
 /// Build an AppState whose opener runs `program` (e.g. "true"/"false") instead
 /// of the real `open`, so watch tests never launch a media player.
@@ -1404,69 +1177,11 @@ async fn watch_returns_500_when_opener_fails() {
     assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
 }
 
-#[tokio::test]
-async fn media_info_returns_500_when_downloaded_but_file_missing() {
-    let workdir = tempfile::tempdir().unwrap();
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/no-file-mi", "Missing File Album");
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
+// media_info_returns_500_when_downloaded_but_file_missing migrated to
+// hurl/media_state_errors.hurl.
 
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .uri("/concerts/1/media-info")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::INTERNAL_SERVER_ERROR);
-}
-
-#[tokio::test]
-async fn watch_returns_404_when_concert_not_downloaded() {
-    // Regression: only the "downloaded but file missing" case escalates to
-    // 500. A concert that simply hasn't been downloaded yet still 404s.
-    let workdir = tempfile::tempdir().unwrap();
-    let conn = db::connection::open_in_memory().unwrap();
-    db::concerts::upsert_listing(
-        &conn,
-        &NewListing {
-            source_url: "https://npr.org/d/not-dl".to_string(),
-            title: "Not Yet Downloaded".to_string(),
-            concert_date: None,
-            teaser: None,
-        },
-    )
-    .unwrap();
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "X".to_string(),
-            album: "Pending Album".to_string(),
-            description: None,
-            set_list: vec![],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/watch")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
+// watch_returns_404_when_concert_not_downloaded migrated to
+// hurl/media_state_errors.hurl.
 
 #[tokio::test]
 async fn like_track_toggles_state_and_renders_star() {
@@ -1666,37 +1381,8 @@ async fn next_media_info_carries_liked_state() {
     assert_eq!(info["liked"], true);
 }
 
-#[tokio::test]
-async fn like_track_out_of_range_returns_404() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/1", "Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "Artist".to_string(),
-            album: "Album".to_string(),
-            description: None,
-            set_list: vec!["Song A".to_string()],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    let app = router(test_state(conn));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/tracks/5/like")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
+// like_track_out_of_range_returns_404 migrated to
+// hurl/split_timestamps_state.hurl.
 
 // ── prepare endpoints ────────────────────────────────────────────────────────
 
@@ -1847,24 +1533,11 @@ async fn prepare_status_reports_filesystem_track_state() {
     assert_eq!(j["split_queued"], false);
 }
 
-#[tokio::test]
-async fn prepare_returns_422_without_set_list() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_scraped(&conn, "Empty Album", vec![]);
-    let app = router(test_state(conn));
+// prepare_returns_422_without_set_list migrated to
+// hurl/detail_prepare_notes.hurl.
 
-    let (status, _) = post_json(&app, "/concerts/1/prepare").await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-}
-
-#[tokio::test]
-async fn prepare_returns_404_for_unknown_concert() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let app = router(test_state(conn));
-
-    let (status, _) = post_json(&app, "/concerts/99/prepare").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
+// prepare_returns_404_for_unknown_concert migrated to
+// hurl/detail_prepare_notes.hurl.
 
 // ── Download auto-split tests ─────────────────────────────────────────────────
 
@@ -2231,76 +1904,17 @@ async fn create_test_audio(dir: &std::path::Path, name: &str) -> Option<std::pat
 
 // ── GET /concerts/:id/split-timestamps ───────────────────────────────────────
 
-#[tokio::test]
-async fn get_split_timestamps_returns_404_for_unknown_id() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let app = router(test_state(conn));
-    let (status, _) = get_json(&app, "/concerts/999/split-timestamps").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
+// get_split_timestamps_returns_404_for_unknown_id migrated to
+// hurl/split_timestamps_state.hurl.
 
-#[tokio::test]
-async fn get_split_timestamps_returns_null_auto_and_user_initially() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["Song A", "Song B"];
-    let id = seed_ts_concert(&conn, "Null Album", &songs);
-    let app = router(test_state(conn));
+// get_split_timestamps_returns_null_auto_and_user_initially migrated to
+// hurl/split_timestamps_state.hurl.
 
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["auto"], serde_json::Value::Null);
-    assert_eq!(json["user"], serde_json::Value::Null);
-    let set_list = json["set_list"].as_array().unwrap();
-    assert_eq!(set_list.len(), 2);
-    assert_eq!(set_list[0], "Song A");
-}
+// get_split_timestamps_returns_seeded_auto_timestamps migrated to
+// hurl/split_timestamps_state.hurl.
 
-#[tokio::test]
-async fn get_split_timestamps_returns_seeded_auto_timestamps() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["Track One", "Track Two"];
-    let id = seed_ts_concert(&conn, "Auto Album", &songs);
-    let ts = sample_song_timestamps(&songs);
-    set_auto_split_timestamps(&conn, id, &ts).unwrap();
-
-    let app = router(test_state(conn));
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-    assert_eq!(status, StatusCode::OK);
-    let auto_arr = json["auto"].as_array().unwrap();
-    assert_eq!(auto_arr.len(), 2);
-    assert_eq!(auto_arr[0]["title"], "Track One");
-    assert_eq!(json["user"], serde_json::Value::Null);
-}
-
-#[tokio::test]
-async fn get_split_timestamps_returns_both_auto_and_user() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["Alpha", "Beta"];
-    let id = seed_ts_concert(&conn, "Both Album", &songs);
-    let auto_ts = sample_song_timestamps(&songs);
-    set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
-    let user_ts: Vec<concert_types::SongTimestamp> = songs
-        .iter()
-        .enumerate()
-        .map(|(i, title)| concert_types::SongTimestamp {
-            title: title.to_string(),
-            start_time: (i * 60 + 2) as f64,
-            end_time: (i * 60 + 57) as f64,
-            duration: 55.0,
-        })
-        .collect();
-    set_user_split_timestamps(&conn, id, &user_ts).unwrap();
-
-    let app = router(test_state(conn));
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(json["auto"].is_array());
-    assert!(json["user"].is_array());
-    assert_eq!(json["auto"].as_array().unwrap().len(), 2);
-    assert_eq!(json["user"].as_array().unwrap().len(), 2);
-    assert_eq!(json["auto"][0]["start_time"], 0.0);
-    assert_eq!(json["user"][0]["start_time"], 2.0);
-}
+// get_split_timestamps_returns_both_auto_and_user migrated to
+// hurl/split_timestamps_state.hurl.
 
 #[tokio::test]
 async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
@@ -2340,19 +1954,8 @@ async fn get_split_timestamps_lazy_backfill_from_timestamps_json() {
     assert_eq!(auto_arr[0]["title"], "Old Song A");
 }
 
-#[tokio::test]
-async fn get_split_timestamps_uses_stored_media_duration_when_source_missing() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["Song A", "Song B"];
-    let id = seed_ts_concert(&conn, "Stored Duration Album", &songs);
-    db::split_timestamps::set_media_duration(&conn, id, 321.5).unwrap();
-
-    let app = router(test_state(conn));
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["media_duration"], 321.5);
-}
+// get_split_timestamps_uses_stored_media_duration_when_source_missing migrated
+// to hurl/split_timestamps_state.hurl.
 
 // ── POST /concerts/:id/split-timestamps ──────────────────────────────────────
 
@@ -2405,32 +2008,11 @@ async fn post_body_text(
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
-#[tokio::test]
-async fn set_split_timestamps_returns_404_for_unknown_concert() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let app = router(test_state(conn));
-    let body = serde_json::json!({"songs": []});
-    let (status, _) = post_body_json(&app, "/concerts/999/split-timestamps", body).await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
+// set_split_timestamps_returns_404_for_unknown_concert migrated to
+// hurl/split_timestamps_state.hurl.
 
-#[tokio::test]
-async fn set_split_timestamps_returns_409_when_source_missing() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["A", "B"];
-    let id = seed_ts_concert(&conn, "No Source Album", &songs);
-    // No source file on disk — workdir points to /tmp (no files).
-    let app = router(test_state(conn));
-
-    let body = serde_json::json!({"songs": [
-        {"title": "A", "start_time": 0.0, "end_time": 55.0},
-        {"title": "B", "start_time": 60.0, "end_time": 115.0}
-    ]});
-    let (status, text) =
-        post_body_text(&app, &format!("/concerts/{id}/split-timestamps"), body).await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(text, "Source file not found — download the concert first");
-}
+// set_split_timestamps_returns_409_when_source_missing migrated to
+// hurl/split_timestamps_state.hurl.
 
 #[tokio::test]
 async fn set_split_timestamps_returns_422_on_count_mismatch() {
@@ -2537,62 +2119,14 @@ async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
 
 // ── POST /concerts/:id/split-timestamps/reset ────────────────────────────────
 
-#[tokio::test]
-async fn reset_split_timestamps_returns_404_for_unknown_concert() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let app = router(test_state(conn));
-    let (status, _) = post_json(&app, "/concerts/999/split-timestamps/reset").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
+// reset_split_timestamps_returns_404_for_unknown_concert migrated to
+// hurl/split_timestamps_state.hurl.
 
-#[tokio::test]
-async fn reset_split_timestamps_returns_422_when_no_auto_timestamps() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["A", "B"];
-    let id = seed_ts_concert(&conn, "No Auto Album", &songs);
-    let app = router(test_state(conn));
+// reset_split_timestamps_returns_422_when_no_auto_timestamps migrated to
+// hurl/split_timestamps_state.hurl.
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri(format!("/concerts/{id}/split-timestamps/reset"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    let status = response.status();
-    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let text = String::from_utf8_lossy(&bytes);
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-    assert_eq!(
-        text,
-        "No automated split timestamps available — run analysis first"
-    );
-}
-
-#[tokio::test]
-async fn reset_split_timestamps_returns_already_auto_when_user_is_null() {
-    let conn = db::connection::open_in_memory().unwrap();
-    let songs = ["A", "B"];
-    let id = seed_ts_concert(&conn, "Already Auto Album", &songs);
-    let ts = sample_song_timestamps(&songs);
-    // auto is set, user is NULL → already-auto
-    set_auto_split_timestamps(&conn, id, &ts).unwrap();
-
-    let app = router(test_state(conn));
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(json["auto"].is_array());
-    assert_eq!(json["user"], serde_json::Value::Null);
-
-    let (status, json) = post_json(&app, &format!("/concerts/{id}/split-timestamps/reset")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["status"], "already-auto");
-}
+// reset_split_timestamps_returns_already_auto_when_user_is_null migrated to
+// hurl/split_timestamps_state.hurl.
 
 /// Happy path for reset: user column is non-NULL + auto available → 202 and
 /// eventually user column is cleared. Skips if ffmpeg is unavailable (need
@@ -2676,45 +2210,8 @@ async fn reset_split_timestamps_happy_path_returns_202_and_clears_user_column() 
     panic!("user_split_timestamps_json not cleared after reset job completed");
 }
 
-#[tokio::test]
-async fn delete_split_preserves_split_timestamp_columns() {
-    // delete-split (clear_split_state) must NOT wipe the timestamp columns —
-    // the invariant is that they reflect what's on disk, and delete-split does
-    // not delete the track files.
-    let workdir = tempfile::tempdir().unwrap();
-    let album = "Preserve TS Album";
-    let songs = ["Keep A", "Keep B"];
-
-    let conn = db::connection::open_in_memory().unwrap();
-    let id = seed_ts_concert(&conn, album, &songs);
-
-    // Put the concert in split state so delete-split accepts it.
-    db::lifecycle::try_mark_download_started(&conn, id).unwrap();
-    db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
-    db::lifecycle::try_mark_split_started(&conn, id).unwrap();
-    db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
-
-    let auto_ts = sample_song_timestamps(&songs);
-    set_auto_split_timestamps(&conn, id, &auto_ts).unwrap();
-    set_user_split_timestamps(&conn, id, &auto_ts).unwrap();
-
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
-
-    let (status, _) = post_json(&app, &format!("/concerts/{id}/delete-split")).await;
-    assert_eq!(status, StatusCode::OK);
-
-    // Verify both columns survive.
-    let (status, json) = get_json(&app, &format!("/concerts/{id}/split-timestamps")).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        json["auto"].is_array(),
-        "auto timestamps must survive delete-split"
-    );
-    assert!(
-        json["user"].is_array(),
-        "user timestamps must survive delete-split"
-    );
-}
+// delete_split_preserves_split_timestamp_columns migrated to
+// hurl/split_timestamps_state.hurl.
 
 // ── Playlists JSON API ───────────────────────────────────────────────────────
 
@@ -3124,44 +2621,8 @@ async fn concert_playback_reconstruction_includes_interlude() {
     assert_eq!(items[2]["kind"], "song");
 }
 
-#[tokio::test]
-async fn concert_playback_returns_404_when_nothing_playable() {
-    let workdir = tempfile::tempdir().unwrap();
-    let album = "Empty Album";
-    let conn = db::connection::open_in_memory().unwrap();
-    db::concerts::upsert_listing(
-        &conn,
-        &NewListing {
-            source_url: "https://npr.org/d/empty".to_string(),
-            title: "Empty Concert".to_string(),
-            concert_date: None,
-            teaser: None,
-        },
-    )
-    .unwrap();
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "X".to_string(),
-            album: album.to_string(),
-            description: None,
-            set_list: vec!["Song A".to_string()],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    db::lifecycle::try_mark_download_started(&conn, 1).unwrap();
-    db::lifecycle::mark_download_succeeded(&conn, 1, "mp4").unwrap();
-    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
-    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
-    db::split_timestamps::set_tracks_present(&conn, 1, &[false]).unwrap();
-    std::fs::create_dir_all(concert_dir(workdir.path(), album)).unwrap();
-
-    let app = router(state_with_workdir(conn, workdir.path().to_path_buf()));
-    let (status, _) = get_json(&app, "/concerts/1/concert-playback").await;
-    assert_eq!(status, StatusCode::NOT_FOUND);
-}
+// concert_playback_returns_404_when_nothing_playable migrated to
+// hurl/media_state_errors.hurl.
 
 #[tokio::test]
 async fn delete_interlude_removes_file_records_event_returns_fragment() {

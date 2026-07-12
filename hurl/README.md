@@ -96,12 +96,12 @@ cargo build --release --bin concert-web --features test-control
 
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
-As of this first slice, `concert-tracker/tests/web_integration.rs` still has
-~60 tests. This groups them by *why*, matching the spec's "Out Of Scope For
-First Slice" list plus a couple of pre-existing areas this slice never
+After the state-only public HTTP slice, `concert-tracker/tests/web_integration.rs`
+still has 48 tests. This groups them by *why*, matching the migration specs'
+out-of-scope lists plus a couple of pre-existing areas these slices never
 touched. It's a categorization of the shape of the remaining suite, not an
-exhaustive per-test audit — several examples are named under each bucket, but
-the buckets (especially the last one) cover more tests than are named here.
+exhaustive per-test audit; several examples are named under each bucket, but
+the buckets cover more tests than are named here.
 
 - **Job command stubbing for download/split chains** (spec: explicitly out of
   scope). The largest group: everything that injects a fake download/split
@@ -110,10 +110,10 @@ the buckets (especially the last one) cover more tests than are named here.
   e.g. `download_endpoint_spawns_job_and_returns_row`,
   `prepare_endpoint_runs_download_then_split_chain`,
   `download_auto_split_retries_on_split_error`,
-  `download_double_click_does_not_drop_split_edge`, the `delete_download_*`
-  and `delete_split_*` family. The Test Control API has no equivalent for
-  "run a job with an injected outcome" yet — that needs its own design (a
-  later migration slice), not a bolt-on to the first slice's seed methods.
+  `download_double_click_does_not_drop_split_edge`, and the delete cases that
+  require a stubbed job outcome or real file deletion. The Test Control API has
+  no equivalent for "run a job with an injected outcome" yet — that needs its
+  own design (a later migration slice), not a bolt-on to the seed methods.
 - **Scrape queue timing** (spec: explicitly out of scope).
   `pending_card_shows_loading_then_thumbnail` injects a stub scrape item and
   release/done channels to deterministically observe the pending → thumbnail
@@ -123,13 +123,12 @@ the buckets (especially the last one) cover more tests than are named here.
   `watch_uses_injected_opener_and_succeeds`,
   `watch_returns_500_when_opener_fails` inject a success/failure closure for
   the "open in system player" command.
-- **Filesystem/media-fixture-heavy tests** (spec: "broad filesystem assertion
-  helpers beyond what the first suite needs" is out of scope). Track
-  navigation, media-info, watch/like, playback-reconstruction, and
-  split-timestamps tests generate real tiny playable media with `ffmpeg`
-  (`create_test_audio`) and assert on exact filesystem/track state. Seeding
-  that through Test Control would need file-producing seed methods this slice
-  doesn't have a concrete consumer for yet.
+- **Filesystem/media-fixture-heavy tests**. Track navigation, media-info,
+  watch/like, playback-reconstruction, and split-timestamps happy paths
+  generate real tiny playable media with `ffmpeg` (`create_test_audio`) or
+  write source/track/`timestamps.json` files and assert on exact filesystem
+  state. Seeding that through Test Control would need file-producing seed
+  methods and a separate design.
 - **Playlist API and HTML pages** (not part of the "listing and status
   basics" first slice). `playlist_api_crud_and_resolution`,
   `playlist_api_validation_status_codes`, `playlists_html_pages_render`, and
@@ -142,23 +141,20 @@ the buckets (especially the last one) cover more tests than are named here.
   compares two in-process Rust values (the built OpenAPI doc vs. what's
   served) — a pure Rust-internal consistency check with no black-box
   equivalent.
-- **In-scope but not yet migrated — the largest remaining bucket.** Tests that
-  check pure public-HTTP behavior (status codes, response bodies/fragments)
-  with no job stubbing, no real media files, and no worker-timing control —
-  today's Test Control API (`test.seed_listing`, `test.seed_scraped_concert`,
-  `test.assert_concert_state`) could support migrating them, but they weren't
-  in the first slice's five-bullet "Initial Hurl coverage" list from the
-  spec. Representative examples, not an exhaustive list:
-  `available_concert_row_shows_want_and_ignore_buttons`,
-  `notes_endpoint_persists_text`, `downloaded_filter_includes_split_concerts`,
-  `prepare_returns_422_without_set_list`,
-  `prepare_returns_404_for_unknown_concert`,
-  `set_split_timestamps_returns_404_for_unknown_concert`, and other
-  404/409/422-validation-style tests across the split-timestamps and prepare
-  endpoints. These are reasonable candidates for a *next* slice, not defects
-  in this one — the spec's own decision is to migrate in slices and delete
-  Rust duplicates as each Hurl equivalent lands, not to migrate everything
-  reachable in the first pass.
+- **State-only public HTTP tests are migrated.** The second Hurl slice added
+  `test.seed_lifecycle_concert` and moved the remaining pure public-HTTP,
+  no-files/no-stub cases into Hurl: available status actions, notes/detail,
+  downloaded filtering, missing-file media errors, prepare 404/422 responses,
+  split-timestamp 404/409/422/read/reset state cases, delete-split timestamp
+  preservation, and empty concert playback 404.
+- **Still intentionally Rust-only after the state-only slice.**
+  `detail_page_auto_scrape_failure_still_renders` exercises an outbound
+  scrape failure and proxy disabling. `track_details_returns_200_without_album`
+  and the like/unavailable cases rely on raw-SQL or presence states no real
+  lifecycle produces without files. `set_split_timestamps_returns_422_on_count_mismatch`
+  requires a source file to pass the earlier 409 check. The remaining prepare,
+  playback reconstruction, lazy-backfill, source-present playback, and
+  play-button tests depend on real files or injected jobs.
 
 ## CI
 

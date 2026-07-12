@@ -15,9 +15,9 @@ the Swagger tag and operation selectors. This change completes the repair:
   scope for the interactive request, avoiding similarly prefixed operations.
 - The interactive response assertion selects the response table body rather
   than its `Code` header before checking for status `200`.
-- `scripts/check-playwright-job.sh` reports or waits for the current commit's
-  Playwright check, making CI browser acceptance directly observable when the
-  local host cannot launch Chromium.
+- `scripts/check-ci-runs.sh --job playwright` reports or waits for the current
+  commit's Playwright check, making CI browser acceptance directly observable
+  when the local host cannot launch Chromium.
 
 ## State transitions
 
