@@ -8,7 +8,7 @@
 
 ## Github auth
 
-For write access to the repo, use the github skill in .claude/skills/github/SKILL.md
+For write access to the repo, use the github skill in .claude/skills/github-app/SKILL.md
 For read access, the repo is public.
 
 
@@ -17,7 +17,7 @@ For read access, the repo is public.
 ## Agent Review
 
 Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
-Reviews should be adversarial. After an initial adversarial review, follow up reviews should not be adversarial.
+Initial reviews should be adversarial. After an initial adversarial review, follow up reviews should not be adversarial.
 
 ## Bug Fix
 
@@ -25,15 +25,16 @@ Use /plan mode to investigate a bug in read-only mode.
 If a bug is difficult, use /diagnosing-bugs to investigate it.
 
 Generate a root cause analysis of the defect.
-If the root cause is complicated, use /to-spec to 
-When there is a straightforward fix, use /to-spec to generate a specification for the fix.
-If the fix requires user input, generate an explanation.
-If the fix
-Generate a plan on how to fix t
+Save the root cause analysis on the ticket for the defect.
+If there is no ticket, create one using /to-tickets.
+Suggest how to fix the defect and also place that on the ticket.
+A very simple straightforward fix can be implemented immediately.
 
 ## Improve Codebase Architecture
 
 This is provided by the /improve-codebase-architecture skill.
+
+## General workflow
 
 - update the local main to the latest from origin and branch from that.
 - Planning
