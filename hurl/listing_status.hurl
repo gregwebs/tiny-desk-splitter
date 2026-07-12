@@ -113,3 +113,75 @@ HTTP 200
 [Asserts]
 body contains "Listing Filter A"
 body not contains "Listing Filter B"
+
+# Available status fragments expose Want and Ignore actions, and no longer
+# render the old "available" badge.
+POST {{test_control_url}}
+Content-Type: application/json
+{
+  "jsonrpc": "2.0",
+  "id": 5,
+  "method": "test.seed_listing",
+  "params": {
+    "source_url": "https://npr.org/c/available-actions",
+    "title": "Available Actions",
+    "concert_date": "2024-04-01"
+  }
+}
+HTTP 200
+[Captures]
+available_actions_id: jsonpath "$.result.id"
+
+GET {{base_url}}/concerts/{{available_actions_id}}/status
+HTTP 200
+[Asserts]
+body contains "/concerts/{{available_actions_id}}/want\""
+body contains "/concerts/{{available_actions_id}}/ignore\""
+body not contains "badge-available"
+
+# The Downloaded filter includes both downloaded-only and downloaded+split
+# concerts because the download badge still reads downloaded in both states.
+POST {{test_control_url}}
+Content-Type: application/json
+{
+  "jsonrpc": "2.0",
+  "id": 6,
+  "method": "test.seed_lifecycle_concert",
+  "params": {
+    "source_url": "https://npr.org/c/downloaded-filter-only",
+    "title": "Downloaded Filter Only",
+    "concert_date": "2024-04-02",
+    "artist": "Downloaded Filter Artist",
+    "album": "Downloaded Filter Only Album",
+    "downloaded": true
+  }
+}
+HTTP 200
+[Captures]
+downloaded_filter_only_id: jsonpath "$.result.id"
+
+POST {{test_control_url}}
+Content-Type: application/json
+{
+  "jsonrpc": "2.0",
+  "id": 7,
+  "method": "test.seed_lifecycle_concert",
+  "params": {
+    "source_url": "https://npr.org/c/downloaded-filter-split",
+    "title": "Downloaded Filter Split",
+    "concert_date": "2024-04-03",
+    "artist": "Downloaded Filter Artist",
+    "album": "Downloaded Filter Split Album",
+    "downloaded": true,
+    "split": true
+  }
+}
+HTTP 200
+[Captures]
+downloaded_filter_split_id: jsonpath "$.result.id"
+
+GET {{base_url}}/?filter=downloaded
+HTTP 200
+[Asserts]
+body contains "id=\"concert-{{downloaded_filter_only_id}}\""
+body contains "id=\"concert-{{downloaded_filter_split_id}}\""

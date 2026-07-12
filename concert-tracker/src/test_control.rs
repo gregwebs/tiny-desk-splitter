@@ -22,7 +22,7 @@ use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::db;
 use crate::web::AppState;
@@ -61,6 +61,26 @@ pub trait TestControlApi {
         album: String,
         set_list: Option<Vec<String>>,
     ) -> RpcResult<SeedScrapedConcertResult>;
+
+    /// Seed scraped metadata plus lifecycle/timestamp state through normal
+    /// domain setters only. This is state-only: it never writes media files,
+    /// thumbnails, `timestamps.json`, or track-presence flags. Tests that need
+    /// real media on disk must stay in Rust or use a file-writing fixture.
+    #[method(name = "seed_lifecycle_concert", param_kind = map)]
+    async fn seed_lifecycle_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+        auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+        user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+        media_duration: Option<f64>,
+    ) -> RpcResult<SeedLifecycleConcertResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
@@ -106,6 +126,19 @@ pub struct SeedScrapedConcertResult {
     pub source_url: String,
     pub title: String,
     pub album: String,
+}
+
+/// Seed Result for `test.seed_lifecycle_concert`. The booleans echo the
+/// requested state so Hurl can capture one fixture call and then assert the
+/// corresponding public endpoint behavior.
+#[derive(Clone, Serialize)]
+pub struct SeedLifecycleConcertResult {
+    pub id: i64,
+    pub source_url: String,
+    pub title: String,
+    pub album: String,
+    pub downloaded: bool,
+    pub split: bool,
 }
 
 pub struct TestControlServer {
@@ -157,6 +190,39 @@ impl TestControlApiServer for TestControlServer {
         .map_err(internal_error)
     }
 
+    async fn seed_lifecycle_concert(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        artist: String,
+        album: String,
+        set_list: Option<Vec<String>>,
+        downloaded: Option<bool>,
+        split: Option<bool>,
+        auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+        user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+        media_duration: Option<f64>,
+    ) -> RpcResult<SeedLifecycleConcertResult> {
+        seed_lifecycle_concert(
+            &self.state,
+            SeedLifecycleConcertParams {
+                source_url,
+                title,
+                concert_date,
+                artist,
+                album,
+                set_list: set_list.unwrap_or_default(),
+                downloaded: downloaded.unwrap_or(false),
+                split: split.unwrap_or(false),
+                auto_timestamps,
+                user_timestamps,
+                media_duration,
+            },
+        )
+        .map_err(internal_error)
+    }
+
     async fn assert_concert_state(
         &self,
         id: i64,
@@ -189,6 +255,21 @@ fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
         err.to_string(),
         None::<()>,
     )
+}
+
+#[derive(Deserialize)]
+struct SeedLifecycleConcertParams {
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    artist: String,
+    album: String,
+    set_list: Vec<String>,
+    downloaded: bool,
+    split: bool,
+    auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+    user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
+    media_duration: Option<f64>,
 }
 
 /// Inserts (or updates, on a `source_url` collision) a listing through the
@@ -298,6 +379,70 @@ fn seed_scraped_concert(
         source_url: concert.source_url,
         title: concert.title,
         album: concert.album.unwrap_or_default(),
+    })
+}
+
+fn seed_lifecycle_concert(
+    state: &AppState,
+    params: SeedLifecycleConcertParams,
+) -> anyhow::Result<SeedLifecycleConcertResult> {
+    let conn = state.db.lock().unwrap();
+    db::concerts::upsert_listing(
+        &conn,
+        &db::concerts::NewListing {
+            source_url: params.source_url.clone(),
+            title: params.title,
+            concert_date: params.concert_date,
+            teaser: None,
+        },
+    )?;
+    let concert =
+        db::concerts::get_concert_by_url(&conn, &params.source_url)?.ok_or_else(|| {
+            anyhow::anyhow!(
+                "upsert_listing succeeded but the row is not readable back by source_url: {}",
+                params.source_url
+            )
+        })?;
+    db::concerts::update_metadata(
+        &conn,
+        concert.id,
+        &db::concerts::MetadataUpdate {
+            artist: params.artist,
+            album: params.album,
+            description: None,
+            set_list: params.set_list,
+            musicians: vec![],
+        },
+    )?;
+
+    if params.downloaded || params.split {
+        db::lifecycle::try_mark_download_started(&conn, concert.id)?;
+        db::lifecycle::mark_download_succeeded(&conn, concert.id, "mp4")?;
+    }
+    if params.split {
+        db::lifecycle::try_mark_split_started(&conn, concert.id)?;
+        db::lifecycle::mark_split_succeeded(&conn, concert.id)?;
+    }
+    if let Some(timestamps) = params.auto_timestamps {
+        db::split_timestamps::set_auto_split_timestamps(&conn, concert.id, &timestamps)?;
+    }
+    if let Some(timestamps) = params.user_timestamps {
+        db::split_timestamps::set_user_split_timestamps(&conn, concert.id, &timestamps)?;
+    }
+    if let Some(duration) = params.media_duration {
+        db::split_timestamps::set_media_duration(&conn, concert.id, duration)?;
+    }
+
+    let concert = db::concerts::get_concert(&conn, concert.id)?;
+    let downloaded = concert.download_status() == crate::model::DownloadStatus::Downloaded;
+    let split = concert.split_status() == crate::model::SplitStatus::Split;
+    Ok(SeedLifecycleConcertResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        album: concert.album.unwrap_or_default(),
+        downloaded,
+        split,
     })
 }
 
@@ -440,6 +585,7 @@ mod tests {
     use crate::db::settings;
     use crate::jobs::scrape_queue::ScrapeQueue;
     use crate::jobs::{JobConfig, JobRegistry};
+    use concert_types::SongTimestamp;
     use std::sync::{Arc, Mutex};
 
     fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppState {
@@ -591,6 +737,87 @@ mod tests {
         assert_eq!(concert.split_status(), crate::model::SplitStatus::NotSplit);
         assert!(concert.archived_at.is_none());
         assert!(concert.download_errors.is_empty());
+    }
+
+    fn ts(title: &str, start_time: f64, end_time: f64) -> SongTimestamp {
+        SongTimestamp {
+            title: title.to_string(),
+            start_time,
+            end_time,
+            duration: end_time - start_time,
+        }
+    }
+
+    #[tokio::test]
+    async fn seed_lifecycle_concert_marks_downloaded_and_split_without_files() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let state = test_state(conn, workdir.path().to_path_buf());
+
+        let result = super::seed_lifecycle_concert(
+            &state,
+            SeedLifecycleConcertParams {
+                source_url: "https://npr.org/c/lifecycle-split".to_string(),
+                title: "Lifecycle Split".to_string(),
+                concert_date: Some("2024-06-01".to_string()),
+                artist: "Lifecycle Artist".to_string(),
+                album: "Lifecycle Album".to_string(),
+                set_list: vec!["One".to_string()],
+                downloaded: false,
+                split: true,
+                auto_timestamps: None,
+                user_timestamps: None,
+                media_duration: None,
+            },
+        )
+        .unwrap();
+
+        assert!(
+            result.downloaded,
+            "split implies downloaded lifecycle state"
+        );
+        assert!(result.split);
+        assert!(
+            std::fs::read_dir(workdir.path()).unwrap().next().is_none(),
+            "state-only seed must not create files under the workdir"
+        );
+    }
+
+    #[tokio::test]
+    async fn seed_lifecycle_concert_sets_optional_timestamp_columns() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let auto = vec![ts("One", 0.0, 55.0), ts("Two", 60.0, 115.0)];
+        let user = vec![ts("One", 1.0, 54.0), ts("Two", 61.0, 114.0)];
+
+        let result = super::seed_lifecycle_concert(
+            &state,
+            SeedLifecycleConcertParams {
+                source_url: "https://npr.org/c/lifecycle-timestamps".to_string(),
+                title: "Lifecycle Timestamps".to_string(),
+                concert_date: None,
+                artist: "Lifecycle Artist".to_string(),
+                album: "Lifecycle Timestamp Album".to_string(),
+                set_list: vec!["One".to_string(), "Two".to_string()],
+                downloaded: false,
+                split: false,
+                auto_timestamps: Some(auto.clone()),
+                user_timestamps: Some(user.clone()),
+                media_duration: Some(123.5),
+            },
+        )
+        .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&conn, result.id).unwrap();
+        assert_eq!(stored.auto, Some(auto));
+        assert_eq!(stored.user, Some(user));
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.media_duration, Some(123.5));
+        assert_eq!(
+            concert.download_status(),
+            crate::model::DownloadStatus::NotDownloaded
+        );
     }
 
     #[tokio::test]
