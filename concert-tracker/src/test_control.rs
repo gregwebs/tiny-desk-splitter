@@ -24,6 +24,7 @@ use jsonrpsee::server::{ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::Serialize;
 
+use crate::db;
 use crate::web::AppState;
 
 #[rpc(server, namespace = "test", namespace_separator = ".")]
@@ -33,11 +34,34 @@ pub trait TestControlApi {
     /// workdir. Leaves the SQLite schema and server configuration intact.
     #[method(name = "reset")]
     async fn reset(&self) -> RpcResult<OkResult>;
+
+    /// Seed a plain (unscraped) listing through the same
+    /// `db::concerts::upsert_listing` path the real scraper uses, and return
+    /// its id plus the public-facing listing fields Hurl needs to capture.
+    #[method(name = "seed_listing", param_kind = map)]
+    async fn seed_listing(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        teaser: Option<String>,
+    ) -> RpcResult<SeedListingResult>;
 }
 
 #[derive(Clone, Serialize)]
 pub struct OkResult {
     pub ok: bool,
+}
+
+/// Seed Result for `test.seed_listing`. Deliberately only the id plus the
+/// fields already meaningful to the public list/detail HTML — no full DB row
+/// (see "Seed Methods" in docs/change/2026-07-11-hurl-web-integration-tests.md).
+#[derive(Clone, Serialize)]
+pub struct SeedListingResult {
+    pub id: i64,
+    pub source_url: String,
+    pub title: String,
+    pub concert_date: Option<String>,
 }
 
 pub struct TestControlServer {
@@ -57,6 +81,16 @@ impl TestControlApiServer for TestControlServer {
             .map(|()| OkResult { ok: true })
             .map_err(internal_error)
     }
+
+    async fn seed_listing(
+        &self,
+        source_url: String,
+        title: String,
+        concert_date: Option<String>,
+        teaser: Option<String>,
+    ) -> RpcResult<SeedListingResult> {
+        seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
+    }
 }
 
 fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
@@ -65,6 +99,43 @@ fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
         err.to_string(),
         None::<()>,
     )
+}
+
+/// Inserts (or updates, on a `source_url` collision) a listing through the
+/// same `db::concerts::upsert_listing` path the real scraper uses. Looks the
+/// row back up by `source_url` rather than trusting
+/// `Connection::last_insert_rowid` — `upsert_listing` is an `INSERT ... ON
+/// CONFLICT DO UPDATE`, and SQLite only advances `last_insert_rowid` for the
+/// `INSERT` branch, so it would silently return a stale id whenever a Hurl
+/// case reseeds an already-used `source_url`.
+fn seed_listing(
+    state: &AppState,
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    teaser: Option<String>,
+) -> anyhow::Result<SeedListingResult> {
+    let conn = state.db.lock().unwrap();
+    db::concerts::upsert_listing(
+        &conn,
+        &db::concerts::NewListing {
+            source_url: source_url.clone(),
+            title,
+            concert_date,
+            teaser,
+        },
+    )?;
+    let concert = db::concerts::get_concert_by_url(&conn, &source_url)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
+        )
+    })?;
+    Ok(SeedListingResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        concert_date: concert.concert_date,
+    })
 }
 
 /// Removes generated files under `<workdir>/concerts` and
@@ -164,6 +235,58 @@ mod tests {
             ),
             jobs: JobConfig::test(workdir),
         }
+    }
+
+    #[tokio::test]
+    async fn seed_listing_returns_the_created_id_and_public_fields() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let result = super::seed_listing(
+            &state,
+            "https://npr.org/c/seed-test".to_string(),
+            "Seed Test Concert".to_string(),
+            Some("2024-01-15".to_string()),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(result.source_url, "https://npr.org/c/seed-test");
+        assert_eq!(result.title, "Seed Test Concert");
+        assert_eq!(result.concert_date.as_deref(), Some("2024-01-15"));
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.source_url, "https://npr.org/c/seed-test");
+    }
+
+    #[tokio::test]
+    async fn seed_listing_reseeding_the_same_source_url_returns_the_same_id() {
+        // upsert_listing is an INSERT ... ON CONFLICT DO UPDATE, so
+        // Connection::last_insert_rowid would go stale on the second call —
+        // this pins the look-up-by-source_url behavior that avoids that.
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let first = super::seed_listing(
+            &state,
+            "https://npr.org/c/reseed".to_string(),
+            "Original Title".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+        let second = super::seed_listing(
+            &state,
+            "https://npr.org/c/reseed".to_string(),
+            "Updated Title".to_string(),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(first.id, second.id);
+        assert_eq!(second.title, "Updated Title");
     }
 
     #[tokio::test]
