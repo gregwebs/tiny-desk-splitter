@@ -14,19 +14,14 @@
 
 # ── A. CRUD + resolution ────────────────────────────────────────────────────
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["t0", "t1"],
-    "auto_timestamps": [
-      {"title": "t0", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "t1", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["t0", "t1"],
+  "auto_timestamps": [
+    {"title": "t0", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "t1", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]
@@ -118,14 +113,9 @@ HTTP 404
 
 # ── B. Validation status codes ──────────────────────────────────────────────
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "test.seed_lifecycle_concert",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 val_cid: jsonpath "$.result.id"
@@ -179,19 +169,14 @@ HTTP 404
 # e2e/playlists.spec.js instead of duplicated here — see the docs/change note
 # at the top of this file.
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["Song Zero", "Song One"],
-    "auto_timestamps": [
-      {"title": "Song Zero", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "Song One", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["Song Zero", "Song One"],
+  "auto_timestamps": [
+    {"title": "Song Zero", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "Song One", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]

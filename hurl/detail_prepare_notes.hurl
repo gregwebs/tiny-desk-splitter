@@ -1,13 +1,8 @@
 # Detail, notes, and prepare endpoint state-only cases.
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_listing",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 notes_id: jsonpath "$.result.id"
@@ -22,16 +17,11 @@ HTTP 200
 [Asserts]
 body contains "great show"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "test.seed_scraped_concert",
-  "params": {
-    "artist": "Detail Artist",
-    "set_list": ["Song One", "Song Two"]
-  }
+  "artist": "Detail Artist",
+  "set_list": ["Song One", "Song Two"]
 }
 HTTP 200
 [Captures]
@@ -44,15 +34,10 @@ body contains "Song One"
 body contains "Song Two"
 body contains "Detail Artist"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "test.seed_scraped_concert",
-  "params": {
-    "set_list": []
-  }
+  "set_list": []
 }
 HTTP 200
 [Captures]

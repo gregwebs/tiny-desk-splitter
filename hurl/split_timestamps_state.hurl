@@ -11,15 +11,10 @@ HTTP 404
 POST {{base_url}}/concerts/999999/split-timestamps/reset
 HTTP 404
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["Song A", "Song B"]
-  }
+  "set_list": ["Song A", "Song B"]
 }
 HTTP 200
 [Captures]
@@ -33,19 +28,14 @@ jsonpath "$.user" == null
 jsonpath "$.set_list[0]" == "Song A"
 jsonpath "$.set_list[1]" == "Song B"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["Track One", "Track Two"],
-    "auto_timestamps": [
-      {"title": "Track One", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "Track Two", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["Track One", "Track Two"],
+  "auto_timestamps": [
+    {"title": "Track One", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "Track Two", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]
@@ -58,23 +48,18 @@ jsonpath "$.auto[0].title" == "Track One"
 jsonpath "$.auto[1].title" == "Track Two"
 jsonpath "$.user" == null
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["Alpha", "Beta"],
-    "auto_timestamps": [
-      {"title": "Alpha", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "Beta", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ],
-    "user_timestamps": [
-      {"title": "Alpha", "start_time": 2.0, "end_time": 57.0, "duration": 55.0},
-      {"title": "Beta", "start_time": 62.0, "end_time": 117.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["Alpha", "Beta"],
+  "auto_timestamps": [
+    {"title": "Alpha", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "Beta", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ],
+  "user_timestamps": [
+    {"title": "Alpha", "start_time": 2.0, "end_time": 57.0, "duration": 55.0},
+    {"title": "Beta", "start_time": 62.0, "end_time": 117.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]
@@ -88,15 +73,10 @@ jsonpath "$.auto[1].title" == "Beta"
 jsonpath "$.user[0].start_time" == 2.0
 jsonpath "$.user[1].title" == "Beta"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "media_duration": 321.5
-  }
+  "media_duration": 321.5
 }
 HTTP 200
 [Captures]
@@ -107,14 +87,9 @@ HTTP 200
 [Asserts]
 jsonpath "$.media_duration" == 321.5
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "test.seed_lifecycle_concert",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 split_ts_source_missing_id: jsonpath "$.result.id"
@@ -131,14 +106,9 @@ HTTP 409
 [Asserts]
 body contains "Source file not found"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "test.seed_lifecycle_concert",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 split_ts_reset_no_auto_id: jsonpath "$.result.id"
@@ -148,19 +118,14 @@ HTTP 422
 [Asserts]
 body contains "No automated split timestamps available"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["A", "B"],
-    "auto_timestamps": [
-      {"title": "A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["A", "B"],
+  "auto_timestamps": [
+    {"title": "A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]
@@ -171,24 +136,19 @@ HTTP 200
 [Asserts]
 jsonpath "$.status" == "already-auto"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 8,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "set_list": ["Keep A", "Keep B"],
-    "split": true,
-    "auto_timestamps": [
-      {"title": "Keep A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "Keep B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ],
-    "user_timestamps": [
-      {"title": "Keep A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
-      {"title": "Keep B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
-    ]
-  }
+  "set_list": ["Keep A", "Keep B"],
+  "split": true,
+  "auto_timestamps": [
+    {"title": "Keep A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "Keep B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ],
+  "user_timestamps": [
+    {"title": "Keep A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
+    {"title": "Keep B", "start_time": 60.0, "end_time": 115.0, "duration": 55.0}
+  ]
 }
 HTTP 200
 [Captures]
@@ -203,14 +163,9 @@ HTTP 200
 jsonpath "$.auto[0].title" == "Keep A"
 jsonpath "$.user[0].title" == "Keep A"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 9,
-  "method": "test.seed_listing",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 delete_split_not_split_id: jsonpath "$.result.id"
@@ -218,15 +173,10 @@ delete_split_not_split_id: jsonpath "$.result.id"
 POST {{base_url}}/concerts/{{delete_split_not_split_id}}/delete-split
 HTTP 400
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 10,
-  "method": "test.seed_scraped_concert",
-  "params": {
-    "set_list": ["Song A"]
-  }
+  "set_list": ["Song A"]
 }
 HTTP 200
 [Captures]

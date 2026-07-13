@@ -1,15 +1,10 @@
 # State-only media error cases. The lifecycle seed never writes files, so the
 # scratch workdir naturally represents missing source media.
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "downloaded": true
-  }
+  "downloaded": true
 }
 HTTP 200
 [Captures]
@@ -22,15 +17,10 @@ header "HX-Refresh" not exists
 body contains "delete-confirm"
 body contains "/concerts/{{delete_download_missing_id}}/delete-download?force=true"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "downloaded": true
-  }
+  "downloaded": true
 }
 HTTP 200
 [Captures]
@@ -42,14 +32,9 @@ HTTP 500
 GET {{base_url}}/concerts/{{watch_missing_id}}/media-info
 HTTP 500
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "test.seed_scraped_concert",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 watch_not_downloaded_id: jsonpath "$.result.id"
@@ -57,15 +42,10 @@ watch_not_downloaded_id: jsonpath "$.result.id"
 POST {{base_url}}/concerts/{{watch_not_downloaded_id}}/watch
 HTTP 404
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "split": true
-  }
+  "split": true
 }
 HTTP 200
 [Captures]
