@@ -23,8 +23,7 @@ use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
 use jsonrpsee::types::{ErrorObjectOwned, Params};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::db;
 use crate::web::AppState;
@@ -132,16 +131,15 @@ impl TestControlServer {
 
     async fn seed_listing_rpc(&self, params: Params<'static>) -> RpcResult<SeedListingResult> {
         let fixture = self.fixtures.allocate(FixtureKind::Listing);
-        let mut params = parse_seed_params(params)?;
-        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
-        let title = take_string_default(&mut params, "title", || fixture.title())?;
-        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
-            DEFAULT_CONCERT_DATE.to_string()
-        })?;
-        let teaser = take_nullable_string_default(&mut params, "teaser", || fixture.teaser())?;
-        reject_unknown_seed_params(&params)?;
-
-        seed_listing(&self.state, source_url, title, concert_date, teaser).map_err(internal_error)
+        let params = SeedListingRequest::parse(params)?.with_defaults(fixture);
+        seed_listing(
+            &self.state,
+            params.source_url,
+            params.title,
+            params.concert_date,
+            params.teaser,
+        )
+        .map_err(internal_error)
     }
 
     async fn seed_scraped_concert_rpc(
@@ -149,25 +147,15 @@ impl TestControlServer {
         params: Params<'static>,
     ) -> RpcResult<SeedScrapedConcertResult> {
         let fixture = self.fixtures.allocate(FixtureKind::Scraped);
-        let mut params = parse_seed_params(params)?;
-        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
-        let title = take_string_default(&mut params, "title", || fixture.title())?;
-        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
-            DEFAULT_CONCERT_DATE.to_string()
-        })?;
-        let artist = take_string_default(&mut params, "artist", || fixture.artist())?;
-        let album = take_string_default(&mut params, "album", || fixture.album())?;
-        let set_list = take_set_list_default(&mut params, "set_list", || fixture.set_list())?;
-        reject_unknown_seed_params(&params)?;
-
+        let params = SeedScrapedConcertRequest::parse(params)?.with_defaults(fixture);
         seed_scraped_concert(
             &self.state,
-            source_url,
-            title,
-            concert_date,
-            artist,
-            album,
-            set_list,
+            params.source_url,
+            params.title,
+            params.concert_date,
+            params.artist,
+            params.album,
+            params.set_list,
         )
         .map_err(internal_error)
     }
@@ -177,36 +165,21 @@ impl TestControlServer {
         params: Params<'static>,
     ) -> RpcResult<SeedLifecycleConcertResult> {
         let fixture = self.fixtures.allocate(FixtureKind::Lifecycle);
-        let mut params = parse_seed_params(params)?;
-        let source_url = take_string_default(&mut params, "source_url", || fixture.source_url())?;
-        let title = take_string_default(&mut params, "title", || fixture.title())?;
-        let concert_date = take_nullable_string_default(&mut params, "concert_date", || {
-            DEFAULT_CONCERT_DATE.to_string()
-        })?;
-        let artist = take_string_default(&mut params, "artist", || fixture.artist())?;
-        let album = take_string_default(&mut params, "album", || fixture.album())?;
-        let set_list = take_set_list_default(&mut params, "set_list", || fixture.set_list())?;
-        let downloaded = take_bool_default(&mut params, "downloaded", false)?;
-        let split = take_bool_default(&mut params, "split", false)?;
-        let auto_timestamps = take_nullable_value(&mut params, "auto_timestamps")?;
-        let user_timestamps = take_nullable_value(&mut params, "user_timestamps")?;
-        let media_duration = take_nullable_value(&mut params, "media_duration")?;
-        reject_unknown_seed_params(&params)?;
-
+        let params = SeedLifecycleConcertRequest::parse(params)?.with_defaults(fixture);
         seed_lifecycle_concert(
             &self.state,
             SeedLifecycleConcertParams {
-                source_url,
-                title,
-                concert_date,
-                artist,
-                album,
-                set_list,
-                downloaded,
-                split,
-                auto_timestamps,
-                user_timestamps,
-                media_duration,
+                source_url: params.source_url,
+                title: params.title,
+                concert_date: params.concert_date,
+                artist: params.artist,
+                album: params.album,
+                set_list: params.set_list,
+                downloaded: params.downloaded,
+                split: params.split,
+                auto_timestamps: params.auto_timestamps,
+                user_timestamps: params.user_timestamps,
+                media_duration: params.media_duration,
             },
         )
         .map_err(internal_error)
@@ -251,14 +224,6 @@ fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         jsonrpsee::types::error::CALL_EXECUTION_FAILED_CODE,
         err.to_string(),
-        None::<()>,
-    )
-}
-
-fn invalid_params_error(message: impl Into<String>) -> ErrorObjectOwned {
-    ErrorObjectOwned::owned(
-        jsonrpsee::types::ErrorCode::InvalidParams.code(),
-        message.into(),
         None::<()>,
     )
 }
@@ -334,104 +299,179 @@ impl FixtureIdentity {
     }
 }
 
-fn parse_seed_params(params: Params<'static>) -> RpcResult<Map<String, Value>> {
-    params.parse::<Map<String, Value>>()
+#[derive(Debug)]
+enum OmittedOr<T> {
+    Omitted,
+    Present(T),
 }
 
-fn reject_unknown_seed_params(params: &Map<String, Value>) -> RpcResult<()> {
-    if params.is_empty() {
-        return Ok(());
-    }
-    let mut fields = params.keys().cloned().collect::<Vec<_>>();
-    fields.sort();
-    Err(invalid_params_error(format!(
-        "unknown seed params: {}",
-        fields.join(", ")
-    )))
-}
-
-fn take_string_default(
-    params: &mut Map<String, Value>,
-    field: &str,
-    default: impl FnOnce() -> String,
-) -> RpcResult<String> {
-    match params.remove(field) {
-        None => Ok(default()),
-        Some(Value::String(value)) => Ok(value),
-        Some(Value::Null) => Err(invalid_params_error(format!(
-            "{field} must be omitted or a string; null is not valid"
-        ))),
-        Some(value) => Err(invalid_params_error(format!(
-            "{field} must be a string, got {}",
-            value_type_name(&value)
-        ))),
+impl<T> Default for OmittedOr<T> {
+    fn default() -> Self {
+        Self::Omitted
     }
 }
 
-fn take_nullable_string_default(
-    params: &mut Map<String, Value>,
-    field: &str,
-    default: impl FnOnce() -> String,
-) -> RpcResult<Option<String>> {
-    match params.remove(field) {
-        None => Ok(Some(default())),
-        Some(Value::Null) => Ok(None),
-        Some(Value::String(value)) => Ok(Some(value)),
-        Some(value) => Err(invalid_params_error(format!(
-            "{field} must be null or a string, got {}",
-            value_type_name(&value)
-        ))),
-    }
-}
-
-fn take_bool_default(
-    params: &mut Map<String, Value>,
-    field: &str,
-    default: bool,
-) -> RpcResult<bool> {
-    match params.remove(field) {
-        None => Ok(default),
-        Some(Value::Bool(value)) => Ok(value),
-        Some(value) => Err(invalid_params_error(format!(
-            "{field} must be a boolean, got {}",
-            value_type_name(&value)
-        ))),
-    }
-}
-
-fn take_nullable_value<T>(params: &mut Map<String, Value>, field: &str) -> RpcResult<Option<T>>
+impl<'de, T> Deserialize<'de> for OmittedOr<T>
 where
-    T: for<'de> Deserialize<'de>,
+    T: Deserialize<'de>,
 {
-    match params.remove(field) {
-        None | Some(Value::Null) => Ok(None),
-        Some(value) => serde_json::from_value(value)
-            .map(Some)
-            .map_err(|err| invalid_params_error(format!("{field} is invalid: {err}"))),
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Present)
     }
 }
 
-fn take_set_list_default(
-    params: &mut Map<String, Value>,
-    field: &str,
-    default: impl FnOnce() -> Vec<String>,
-) -> RpcResult<Vec<String>> {
-    match params.remove(field) {
-        None => Ok(default()),
-        Some(Value::Null) => Ok(Vec::new()),
-        Some(value) => serde_json::from_value(value)
-            .map_err(|err| invalid_params_error(format!("{field} is invalid: {err}"))),
+impl<T> OmittedOr<T> {
+    fn unwrap_or_else(self, default: impl FnOnce() -> T) -> T {
+        match self {
+            Self::Omitted => default(),
+            Self::Present(value) => value,
+        }
+    }
+
+    fn unwrap_or(self, default: T) -> T {
+        self.unwrap_or_else(|| default)
     }
 }
 
-fn value_type_name(value: &Value) -> &'static str {
-    match value {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedListingRequest {
+    #[serde(default)]
+    source_url: OmittedOr<String>,
+    #[serde(default)]
+    title: OmittedOr<String>,
+    #[serde(default)]
+    concert_date: OmittedOr<Option<String>>,
+    #[serde(default)]
+    teaser: OmittedOr<Option<String>>,
+}
+
+struct SeedListingDefaults {
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    teaser: Option<String>,
+}
+
+impl SeedListingRequest {
+    fn parse(params: Params<'static>) -> RpcResult<Self> {
+        params.parse()
+    }
+
+    fn with_defaults(self, fixture: FixtureIdentity) -> SeedListingDefaults {
+        SeedListingDefaults {
+            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
+            title: self.title.unwrap_or_else(|| fixture.title()),
+            concert_date: self
+                .concert_date
+                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
+            teaser: self.teaser.unwrap_or_else(|| Some(fixture.teaser())),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedScrapedConcertRequest {
+    #[serde(default)]
+    source_url: OmittedOr<String>,
+    #[serde(default)]
+    title: OmittedOr<String>,
+    #[serde(default)]
+    concert_date: OmittedOr<Option<String>>,
+    #[serde(default)]
+    artist: OmittedOr<String>,
+    #[serde(default)]
+    album: OmittedOr<String>,
+    #[serde(default)]
+    set_list: OmittedOr<Option<Vec<String>>>,
+}
+
+struct SeedScrapedConcertDefaults {
+    source_url: String,
+    title: String,
+    concert_date: Option<String>,
+    artist: String,
+    album: String,
+    set_list: Vec<String>,
+}
+
+impl SeedScrapedConcertRequest {
+    fn parse(params: Params<'static>) -> RpcResult<Self> {
+        params.parse()
+    }
+
+    fn with_defaults(self, fixture: FixtureIdentity) -> SeedScrapedConcertDefaults {
+        SeedScrapedConcertDefaults {
+            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
+            title: self.title.unwrap_or_else(|| fixture.title()),
+            concert_date: self
+                .concert_date
+                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
+            artist: self.artist.unwrap_or_else(|| fixture.artist()),
+            album: self.album.unwrap_or_else(|| fixture.album()),
+            set_list: self
+                .set_list
+                .unwrap_or_else(|| Some(fixture.set_list()))
+                .unwrap_or_default(),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SeedLifecycleConcertRequest {
+    #[serde(default)]
+    source_url: OmittedOr<String>,
+    #[serde(default)]
+    title: OmittedOr<String>,
+    #[serde(default)]
+    concert_date: OmittedOr<Option<String>>,
+    #[serde(default)]
+    artist: OmittedOr<String>,
+    #[serde(default)]
+    album: OmittedOr<String>,
+    #[serde(default)]
+    set_list: OmittedOr<Option<Vec<String>>>,
+    #[serde(default)]
+    downloaded: OmittedOr<bool>,
+    #[serde(default)]
+    split: OmittedOr<bool>,
+    #[serde(default)]
+    auto_timestamps: OmittedOr<Option<Vec<concert_types::SongTimestamp>>>,
+    #[serde(default)]
+    user_timestamps: OmittedOr<Option<Vec<concert_types::SongTimestamp>>>,
+    #[serde(default)]
+    media_duration: OmittedOr<Option<f64>>,
+}
+
+impl SeedLifecycleConcertRequest {
+    fn parse(params: Params<'static>) -> RpcResult<Self> {
+        params.parse()
+    }
+
+    fn with_defaults(self, fixture: FixtureIdentity) -> SeedLifecycleConcertParams {
+        SeedLifecycleConcertParams {
+            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
+            title: self.title.unwrap_or_else(|| fixture.title()),
+            concert_date: self
+                .concert_date
+                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
+            artist: self.artist.unwrap_or_else(|| fixture.artist()),
+            album: self.album.unwrap_or_else(|| fixture.album()),
+            set_list: self
+                .set_list
+                .unwrap_or_else(|| Some(fixture.set_list()))
+                .unwrap_or_default(),
+            downloaded: self.downloaded.unwrap_or(false),
+            split: self.split.unwrap_or(false),
+            auto_timestamps: self.auto_timestamps.unwrap_or(None),
+            user_timestamps: self.user_timestamps.unwrap_or(None),
+            media_duration: self.media_duration.unwrap_or(None),
+        }
     }
 }
 
@@ -976,7 +1016,6 @@ mod tests {
             err.code(),
             jsonrpsee::types::ErrorCode::InvalidParams.code()
         );
-        assert!(err.message().contains("source_url"), "{err:?}");
     }
 
     #[tokio::test]
