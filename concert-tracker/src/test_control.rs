@@ -28,6 +28,8 @@ use serde::{Deserialize, Deserializer, Serialize};
 use crate::db;
 use crate::web::AppState;
 
+mod adapter;
+
 const DEFAULT_CONCERT_DATE: &str = "2026-01-01";
 static NEXT_TEST_CONTROL_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
@@ -98,6 +100,11 @@ pub struct SeedLifecycleConcertResult {
     pub split: bool,
 }
 
+/// Clone is cheap (an `AppState` clone) and lets [`start`] clone the built
+/// `RpcModule` — one copy is converted to [`jsonrpsee::server::Methods`] for
+/// the [`adapter`] to dispatch through in-process, the other is handed to
+/// jsonrpsee's own server unchanged.
+#[derive(Clone)]
 pub struct TestControlServer {
     state: AppState,
 }
@@ -750,12 +757,44 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
 /// app server's configured `--host` — the API never becomes reachable off-box.
 /// Returns a handle (keep it alive for the process lifetime; dropping it stops
 /// the server) and the bound address for the startup banner.
+///
+/// Mounts the [`adapter`] as HTTP middleware in front of jsonrpsee's own
+/// server so `POST /test/...` adapter routes and the raw JSON-RPC root
+/// endpoint share one listener and port (see
+/// docs/adr/0004-test-control-http-adapter.md).
 pub async fn start(state: AppState, port: u16) -> anyhow::Result<(ServerHandle, SocketAddr)> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let server = ServerBuilder::new().build(addr).await?;
+    let module = TestControlServer::new(state).rpc_module();
+    let methods: jsonrpsee::server::Methods = module.clone().into();
+    let server = ServerBuilder::new()
+        .set_http_middleware(
+            tower::ServiceBuilder::new().layer(adapter::TestControlAdapterLayer::new(methods)),
+        )
+        .build(addr)
+        .await?;
     let bound = server.local_addr()?;
-    let handle = server.start(TestControlServer::new(state).rpc_module());
+    let handle = server.start(module);
     Ok((handle, bound))
+}
+
+/// Shared by this module's own tests and by [`adapter`]'s tests (a
+/// descendant module can reach a private ancestor item directly).
+#[cfg(test)]
+fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppState {
+    use crate::jobs::scrape_queue::ScrapeQueue;
+    use crate::jobs::{JobConfig, JobRegistry};
+    use std::sync::{Arc, Mutex};
+
+    tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
+    AppState {
+        db: Arc::new(Mutex::new(conn)),
+        registry: Arc::new(JobRegistry::new()),
+        scrape_queue: ScrapeQueue::start(
+            Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
+            workdir.clone(),
+        ),
+        jobs: JobConfig::test(workdir),
+    }
 }
 
 #[cfg(test)]
@@ -764,23 +803,7 @@ mod tests {
     use crate::db;
     use crate::db::concerts::NewListing;
     use crate::db::settings;
-    use crate::jobs::scrape_queue::ScrapeQueue;
-    use crate::jobs::{JobConfig, JobRegistry};
     use concert_types::SongTimestamp;
-    use std::sync::{Arc, Mutex};
-
-    fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppState {
-        tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
-        AppState {
-            db: Arc::new(Mutex::new(conn)),
-            registry: Arc::new(JobRegistry::new()),
-            scrape_queue: ScrapeQueue::start(
-                Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
-                workdir.clone(),
-            ),
-            jobs: JobConfig::test(workdir),
-        }
-    }
 
     fn params(json: &'static str) -> Params<'static> {
         Params::new(Some(json))

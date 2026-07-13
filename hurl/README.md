@@ -11,6 +11,11 @@ for why the Test Control API is JSON-RPC. Seed defaulting is captured in
 [`docs/adr/0003-test-control-seed-defaults.md`](../docs/adr/0003-test-control-seed-defaults.md)
 and
 [`docs/change/2026-07-12-test-control-seed-defaults-spec.md`](../docs/change/2026-07-12-test-control-seed-defaults-spec.md).
+Hurl requests use the Test Control HTTP Adapter's concise routes rather than
+raw JSON-RPC envelopes; see
+[`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md)
+and
+[`docs/change/2026-07-13-test-control-http-adapter-spec.md`](../docs/change/2026-07-13-test-control-http-adapter-spec.md).
 
 It runs locally via `just test-hurl` and is a blocking step in CI (see "CI"
 below).
@@ -57,37 +62,78 @@ Each invocation gets its own fresh scratch DB, so files don't need to call
 scenarios *within* one file, or across files in the same run, do share state
 and should rely on Test Control's generated seed defaults or explicit
 distinguishing `source_url`s rather than relying on `test.reset` between every
-scenario.
+scenario. This also means no `.hurl` file should call the adapter's
+`/test/reset` route mid-run: `just test-hurl` shares one process/DB across
+every file, so a reset from one file would wipe fixtures another file still
+depends on.
 
-## Test Control seed defaults
+## Test Control HTTP Adapter
 
-The seed methods accept an empty flat params object when a scenario does not
-care about fixture identity fields:
+Hurl requests use the **Test Control HTTP Adapter**'s concise routes — plain
+`POST {{test_control_url}}/test/...` calls with just the method's params as
+the JSON body, no JSON-RPC envelope to write by hand:
 
-```json
+```hurl
+POST {{test_control_url}}/test/seed/listing
+Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_lifecycle_concert",
-  "params": {}
+  "title": "Example"
 }
 ```
 
-Keep the JSON-RPC envelope as-is for now: Hurl requests still send `jsonrpc`,
-`id`, `method`, and `params`. The `params` value remains a flat map; do not
-wrap seed fields under a nested `params.params` object.
-
-Explicit flat-map params override generated defaults:
+The adapter translates that into a single in-process JSON-RPC call (id
+`"default"`) and returns the JSON-RPC response envelope unchanged, so
+`[Captures]`/`[Asserts]` still read from `$.result...`:
 
 ```json
 {
   "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "title": "Downloaded Filter Fixture",
-    "downloaded": true
-  }
+  "result": {
+    "id": 1,
+    "source_url": "https://example.test/tiny-desk/test-control-1",
+    "title": "Example",
+    "concert_date": "2026-01-01"
+  },
+  "id": "default"
+}
+```
+
+| Adapter route | JSON-RPC method |
+|---|---|
+| `/test/reset` | `test.reset` |
+| `/test/seed/{name}` | `test.seed_{name}` |
+| `/test/assert/{name}` | `test.assert_{name}` |
+
+Raw JSON-RPC (the full `jsonrpc`/`id`/`method`/`params` envelope, posted to
+`{{test_control_url}}` with no path suffix) still works — it's the
+implementation debug fallback for verifying the underlying JSON-RPC layer
+directly, not something new `.hurl` scenarios should reach for. See
+[`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md)
+and
+[`docs/change/2026-07-13-test-control-http-adapter-spec.md`](../docs/change/2026-07-13-test-control-http-adapter-spec.md)
+for the full route/translation/error contract, and
+[`hurl/test_control_adapter.hurl`](test_control_adapter.hurl) for a worked
+example of both, including the adapter's invalid-JSON HTTP 400 response.
+
+## Test Control seed defaults
+
+The seed methods accept an empty JSON object when a scenario does not care
+about fixture identity fields:
+
+```hurl
+POST {{test_control_url}}/test/seed/lifecycle_concert
+Content-Type: application/json
+{}
+```
+
+Explicit params override generated defaults:
+
+```hurl
+POST {{test_control_url}}/test/seed/lifecycle_concert
+Content-Type: application/json
+{
+  "title": "Downloaded Filter Fixture",
+  "downloaded": true
 }
 ```
 
@@ -116,13 +162,14 @@ The spec's "Decisions" section covers this in depth; the short version:
    a stable handle (an id, or public fields) to use in later steps. Never
    read a raw DB row or assume an id — capture it from the Seed Result with
    `[Captures]`, as every case in `hurl/listing_status.hurl` does.
-3. **Assertion API methods** (`test.assert_concert_state` today) — only when
-   a postcondition is internal-only and no public route exposes it. No case
-   in `hurl/listing_status.hurl` currently needs this — every postcondition
-   the first slice checks (a listing appears, the ignored badge/filter, the
-   scraped-status fragment) is already public. The method exists so a future
-   slice touching download/split/archive state doesn't have to invent new
-   Test Control surface mid-slice; see its doc comment in
+3. **Assertion API methods** (`test.assert_concert_state` today, reached via
+   its adapter route `/test/assert/concert_state`) — only when a
+   postcondition is internal-only and no public route exposes it. No case in
+   `hurl/listing_status.hurl` needs this — every postcondition the first
+   slice checks (a listing appears, the ignored badge/filter, the
+   scraped-status fragment) is already public.
+   [`hurl/test_control_adapter.hurl`](test_control_adapter.hurl) does use it,
+   as adapter-route coverage. See its doc comment in
    `concert-tracker/src/test_control.rs`.
 
 ## Verification commands for future agents
@@ -131,6 +178,7 @@ The spec's "Decisions" section covers this in depth; the short version:
 cargo check -p concert-tracker --features test-control
 cargo check -p concert-tracker
 cargo build --bin concert-web --features test-control
+node scripts/hurl-test.js --glob 'hurl/test_control_adapter.hurl'
 just test-hurl
 cargo nextest run -p concert-tracker --test web_integration
 just lint
@@ -233,6 +281,7 @@ suite passing.
 
 ## Known gaps
 
-- **No Assertion API consumer yet.** `test.assert_concert_state` exists (see
-  above) but nothing in `hurl/listing_status.hurl` calls it — by design, per
-  the "when to use each" section above.
+- **`listing_status.hurl` still has no Assertion API case.** `test.assert_concert_state`
+  is exercised by `hurl/test_control_adapter.hurl`, but no case in
+  `hurl/listing_status.hurl` needs it — by design, per the "when to use each"
+  section above; every postcondition it checks is already public.
