@@ -52,7 +52,9 @@ jsonpath "$.result.ok" == true
 # Raw JSON-RPC remains available at the listener root, unchanged, for
 # debugging adapter issues — spec: "Raw JSON-RPC remains available at the
 # root test-control endpoint for debugging adapter issues and validating the
-# underlying JSON-RPC layer."
+# underlying JSON-RPC layer." Seed methods are generated request-object RPC
+# methods, so raw JSON-RPC wraps the fixture body under params.params; the
+# adapter route above is the Hurl-facing flat shape.
 POST {{test_control_url}}
 Content-Type: application/json
 {
@@ -60,8 +62,10 @@ Content-Type: application/json
   "id": 1,
   "method": "test.seed_listing",
   "params": {
-    "source_url": "https://npr.org/c/test-control-adapter-raw",
-    "title": "Test Control Adapter Raw Compat"
+    "params": {
+      "source_url": "https://npr.org/c/test-control-adapter-raw",
+      "title": "Test Control Adapter Raw Compat"
+    }
   }
 }
 HTTP 200

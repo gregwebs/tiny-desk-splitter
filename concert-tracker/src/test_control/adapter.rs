@@ -87,22 +87,29 @@ fn route_for(method: &http::Method, path: &str) -> Option<AdapterRoute> {
 /// JSON — the caller maps that to the adapter's HTTP 400 parse-error
 /// response.
 ///
-/// - An empty body becomes `params: {}`.
-/// - Any other valid JSON value (including literal `null`) is preserved as
-///   `params` verbatim — spec: "Literal JSON `null` is preserved as `null`;
-///   only an actually empty body becomes `{}`."
+/// - An empty body becomes `{}` before route-specific translation.
+/// - Any other valid JSON value (including literal `null`) is preserved before
+///   route-specific translation — spec: "Literal JSON `null` is preserved as
+///   `null`; only an actually empty body becomes `{}`."
+/// - Seed routes wrap the parsed value under `params` because generated
+///   jsonrpsee request-object methods expect the raw JSON-RPC nested shape
+///   `params: { "params": ... }`.
 /// - `/test/reset` is a no-argument JSON-RPC method; when its body is empty
 ///   or `{}`, `params` is omitted entirely rather than sent as `{}` — spec:
 ///   "translate empty body or `{}` to a no-argument-compatible JSON-RPC
 ///   request using whichever representation is least awkward for jsonrpsee."
 fn translate(route: &AdapterRoute, body: &[u8]) -> Result<String, ()> {
-    let params: Value = if body.is_empty() {
+    let body_params: Value = if body.is_empty() {
         json!({})
     } else {
         serde_json::from_slice(body).map_err(|_| ())?
     };
 
-    let omit_params = matches!(route, AdapterRoute::Reset) && params == json!({});
+    let omit_params = matches!(route, AdapterRoute::Reset) && body_params == json!({});
+    let params = match route {
+        AdapterRoute::Seed(_) => json!({ "params": body_params }),
+        AdapterRoute::Reset | AdapterRoute::Assert(_) => body_params,
+    };
 
     let mut envelope = serde_json::Map::new();
     envelope.insert("jsonrpc".to_string(), json!("2.0"));
@@ -312,19 +319,31 @@ mod tests {
     // --- translate: pure request-body translation (spec's required unit tests) ---
 
     #[test]
-    fn empty_body_becomes_empty_object_params() {
+    fn empty_seed_body_becomes_nested_empty_object_params() {
         let envelope = translate(&AdapterRoute::Seed("listing".to_string()), b"").unwrap();
         let value: Value = serde_json::from_str(&envelope).unwrap();
         assert_eq!(value["method"], "test.seed_listing");
         assert_eq!(value["id"], "default");
-        assert_eq!(value["params"], json!({}));
+        assert_eq!(value["params"], json!({"params": {}}));
     }
 
     #[test]
-    fn literal_null_is_preserved() {
+    fn seed_literal_null_is_preserved_inside_request_object_wrapper() {
         let envelope = translate(&AdapterRoute::Seed("listing".to_string()), b"null").unwrap();
         let value: Value = serde_json::from_str(&envelope).unwrap();
-        assert_eq!(value["params"], Value::Null);
+        assert_eq!(value["params"], json!({"params": Value::Null}));
+    }
+
+    #[test]
+    fn seed_route_wraps_flat_hurl_body_for_generated_rpc_method() {
+        let envelope = translate(
+            &AdapterRoute::Seed("listing".to_string()),
+            br#"{"title":"Example"}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(value["method"], "test.seed_listing");
+        assert_eq!(value["params"], json!({"params": {"title": "Example"}}));
     }
 
     #[test]
