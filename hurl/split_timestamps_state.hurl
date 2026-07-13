@@ -18,11 +18,6 @@ Content-Type: application/json
   "id": 1,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/split-ts-null-hurl",
-    "title": "Split TS Null Hurl",
-    "concert_date": "2024-07-01",
-    "artist": "Timestamp Artist",
-    "album": "Null Album",
     "set_list": ["Song A", "Song B"]
   }
 }
@@ -45,11 +40,6 @@ Content-Type: application/json
   "id": 2,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/split-ts-auto-hurl",
-    "title": "Split TS Auto Hurl",
-    "concert_date": "2024-07-02",
-    "artist": "Timestamp Artist",
-    "album": "Auto Album",
     "set_list": ["Track One", "Track Two"],
     "auto_timestamps": [
       {"title": "Track One", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
@@ -75,11 +65,6 @@ Content-Type: application/json
   "id": 3,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/split-ts-both-hurl",
-    "title": "Split TS Both Hurl",
-    "concert_date": "2024-07-03",
-    "artist": "Timestamp Artist",
-    "album": "Both Album",
     "set_list": ["Alpha", "Beta"],
     "auto_timestamps": [
       {"title": "Alpha", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
@@ -110,12 +95,6 @@ Content-Type: application/json
   "id": 4,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/split-ts-duration-hurl",
-    "title": "Split TS Duration Hurl",
-    "concert_date": "2024-07-04",
-    "artist": "Timestamp Artist",
-    "album": "Stored Duration Album",
-    "set_list": ["Song A", "Song B"],
     "media_duration": 321.5
   }
 }
@@ -134,14 +113,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 5,
   "method": "test.seed_lifecycle_concert",
-  "params": {
-    "source_url": "https://npr.org/c/split-ts-source-missing-hurl",
-    "title": "Split TS Source Missing Hurl",
-    "concert_date": "2024-07-05",
-    "artist": "Timestamp Artist",
-    "album": "No Source Album",
-    "set_list": ["A", "B"]
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -165,14 +137,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 6,
   "method": "test.seed_lifecycle_concert",
-  "params": {
-    "source_url": "https://npr.org/c/split-ts-reset-no-auto-hurl",
-    "title": "Split TS Reset No Auto Hurl",
-    "concert_date": "2024-07-06",
-    "artist": "Timestamp Artist",
-    "album": "No Auto Album",
-    "set_list": ["A", "B"]
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -190,11 +155,6 @@ Content-Type: application/json
   "id": 7,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/split-ts-reset-auto-only-hurl",
-    "title": "Split TS Reset Auto Only Hurl",
-    "concert_date": "2024-07-07",
-    "artist": "Timestamp Artist",
-    "album": "Already Auto Album",
     "set_list": ["A", "B"],
     "auto_timestamps": [
       {"title": "A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
@@ -218,13 +178,7 @@ Content-Type: application/json
   "id": 8,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/delete-split-preserve-ts-hurl",
-    "title": "Delete Split Preserve TS Hurl",
-    "concert_date": "2024-07-08",
-    "artist": "Timestamp Artist",
-    "album": "Preserve TS Album",
     "set_list": ["Keep A", "Keep B"],
-    "downloaded": true,
     "split": true,
     "auto_timestamps": [
       {"title": "Keep A", "start_time": 0.0, "end_time": 55.0, "duration": 55.0},
@@ -255,11 +209,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 9,
   "method": "test.seed_listing",
-  "params": {
-    "source_url": "https://npr.org/c/delete-split-not-split-hurl",
-    "title": "Delete Split Not Split Hurl",
-    "concert_date": "2024-07-09"
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -275,11 +225,6 @@ Content-Type: application/json
   "id": 10,
   "method": "test.seed_scraped_concert",
   "params": {
-    "source_url": "https://npr.org/c/like-out-of-range-hurl",
-    "title": "Like Out Of Range Hurl",
-    "concert_date": "2024-07-10",
-    "artist": "Timestamp Artist",
-    "album": "Like Out Of Range Album",
     "set_list": ["Song A"]
   }
 }

@@ -42,10 +42,6 @@ Content-Type: application/json
   "id": 2,
   "method": "test.seed_scraped_concert",
   "params": {
-    "source_url": "https://npr.org/c/listing-status-scraped",
-    "title": "Listing Status Scraped",
-    "concert_date": "2024-02-01",
-    "artist": "Listing Status Artist",
     "album": "Listing Status Album"
   }
 }
@@ -72,9 +68,7 @@ Content-Type: application/json
   "id": 3,
   "method": "test.seed_listing",
   "params": {
-    "source_url": "https://npr.org/c/listing-filter-a",
-    "title": "Listing Filter A",
-    "concert_date": "2024-03-01"
+    "title": "Listing Filter A"
   }
 }
 HTTP 200
@@ -88,9 +82,7 @@ Content-Type: application/json
   "id": 4,
   "method": "test.seed_listing",
   "params": {
-    "source_url": "https://npr.org/c/listing-filter-b",
-    "title": "Listing Filter B",
-    "concert_date": "2024-03-02"
+    "title": "Listing Filter B"
   }
 }
 HTTP 200
@@ -122,11 +114,7 @@ Content-Type: application/json
   "jsonrpc": "2.0",
   "id": 5,
   "method": "test.seed_listing",
-  "params": {
-    "source_url": "https://npr.org/c/available-actions",
-    "title": "Available Actions",
-    "concert_date": "2024-04-01"
-  }
+  "params": {}
 }
 HTTP 200
 [Captures]
@@ -148,11 +136,6 @@ Content-Type: application/json
   "id": 6,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/downloaded-filter-only",
-    "title": "Downloaded Filter Only",
-    "concert_date": "2024-04-02",
-    "artist": "Downloaded Filter Artist",
-    "album": "Downloaded Filter Only Album",
     "downloaded": true
   }
 }
@@ -167,12 +150,6 @@ Content-Type: application/json
   "id": 7,
   "method": "test.seed_lifecycle_concert",
   "params": {
-    "source_url": "https://npr.org/c/downloaded-filter-split",
-    "title": "Downloaded Filter Split",
-    "concert_date": "2024-04-03",
-    "artist": "Downloaded Filter Artist",
-    "album": "Downloaded Filter Split Album",
-    "downloaded": true,
     "split": true
   }
 }

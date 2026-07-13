@@ -7,7 +7,10 @@ web implementation and calls the axum router in-process via
 [`docs/change/2026-07-11-hurl-web-integration-tests.md`](../docs/change/2026-07-11-hurl-web-integration-tests.md)
 for the full design (architecture, decisions, Test Control API contracts) and
 [`docs/adr/0001-jsonrpsee-for-test-control-api.md`](../docs/adr/0001-jsonrpsee-for-test-control-api.md)
-for why the Test Control API is JSON-RPC.
+for why the Test Control API is JSON-RPC. Seed defaulting is captured in
+[`docs/adr/0003-test-control-seed-defaults.md`](../docs/adr/0003-test-control-seed-defaults.md)
+and
+[`docs/change/2026-07-12-test-control-seed-defaults-spec.md`](../docs/change/2026-07-12-test-control-seed-defaults-spec.md).
 
 It runs locally via `just test-hurl` and is a blocking step in CI (see "CI"
 below).
@@ -52,8 +55,53 @@ To run against a subset of files: `node scripts/hurl-test.js --glob 'hurl/some_f
 Each invocation gets its own fresh scratch DB, so files don't need to call
 `test.reset` for isolation *between separate `just test-hurl` runs* — but
 scenarios *within* one file, or across files in the same run, do share state
-and should pick distinguishing `source_url`s (see `hurl/listing_status.hurl`)
-rather than relying on `test.reset` between every scenario.
+and should rely on Test Control's generated seed defaults or explicit
+distinguishing `source_url`s rather than relying on `test.reset` between every
+scenario.
+
+## Test Control seed defaults
+
+The seed methods accept an empty flat params object when a scenario does not
+care about fixture identity fields:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "test.seed_lifecycle_concert",
+  "params": {}
+}
+```
+
+Keep the JSON-RPC envelope as-is for now: Hurl requests still send `jsonrpc`,
+`id`, `method`, and `params`. The `params` value remains a flat map; do not
+wrap seed fields under a nested `params.params` object.
+
+Explicit flat-map params override generated defaults:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "test.seed_lifecycle_concert",
+  "params": {
+    "title": "Downloaded Filter Fixture",
+    "downloaded": true
+  }
+}
+```
+
+Generated fixture URLs use `https://example.test/`, and generated identities
+come from a server-local monotonic counter. `test.reset` clears database and
+workdir state but does not reset that counter, so defaults remain
+conflict-free within one `just test-hurl` run.
+
+Scraped and lifecycle seeds default to a three-track set list. Lifecycle seeds
+default to inert state: `downloaded = false`, `split = false`, no timestamps,
+and no media duration. Pass explicit `null` only for nullable domain fields
+(`concert_date`, `teaser`, `set_list`, `auto_timestamps`, `user_timestamps`,
+`media_duration`). Identity fields (`source_url`, `title`, `artist`, `album`)
+must be omitted or strings; explicit `null` is rejected.
 
 ## Three ways to check something, and when to use each
 
