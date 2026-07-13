@@ -107,7 +107,9 @@ The adapter translates that into a single in-process JSON-RPC call (id
 Raw JSON-RPC (the full `jsonrpc`/`id`/`method`/`params` envelope, posted to
 `{{test_control_url}}` with no path suffix) still works — it's the
 implementation debug fallback for verifying the underlying JSON-RPC layer
-directly, not something new `.hurl` scenarios should reach for. See
+directly, not something new `.hurl` scenarios should reach for. Raw JSON-RPC
+seed calls use jsonrpsee's generated request-object shape, so the flat adapter
+body appears under `params.params` at the root endpoint. See
 [`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md)
 and
 [`docs/change/2026-07-13-test-control-http-adapter-spec.md`](../docs/change/2026-07-13-test-control-http-adapter-spec.md)

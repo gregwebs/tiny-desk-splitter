@@ -22,7 +22,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
-use jsonrpsee::types::{ErrorObjectOwned, Params};
+use jsonrpsee::types::ErrorObjectOwned;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::db;
@@ -40,6 +40,21 @@ pub trait TestControlApi {
     /// workdir. Leaves the SQLite schema and server configuration intact.
     #[method(name = "reset")]
     async fn reset(&self) -> RpcResult<OkResult>;
+
+    #[method(name = "seed_listing", param_kind = map)]
+    async fn seed_listing(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult>;
+
+    #[method(name = "seed_scraped_concert", param_kind = map)]
+    async fn seed_scraped_concert(
+        &self,
+        params: SeedScrapedConcertRequest,
+    ) -> RpcResult<SeedScrapedConcertResult>;
+
+    #[method(name = "seed_lifecycle_concert", param_kind = map)]
+    async fn seed_lifecycle_concert(
+        &self,
+        params: SeedLifecycleConcertRequest,
+    ) -> RpcResult<SeedLifecycleConcertResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
@@ -115,32 +130,19 @@ impl TestControlServer {
     }
 
     fn rpc_module(self) -> RpcModule<Self> {
-        let mut rpc = TestControlApiServer::into_rpc(self);
-        rpc.register_async_method("test.seed_listing", |params, server, _| async move {
-            let params = SeedListingRequest::parse(params)?;
-            server.seed_listing_rpc(params).await
-        })
-        .expect("test.seed_listing must register once");
-        rpc.register_async_method(
-            "test.seed_scraped_concert",
-            |params, server, _| async move {
-                let params = SeedScrapedConcertRequest::parse(params)?;
-                server.seed_scraped_concert_rpc(params).await
-            },
-        )
-        .expect("test.seed_scraped_concert must register once");
-        rpc.register_async_method(
-            "test.seed_lifecycle_concert",
-            |params, server, _| async move {
-                let params = SeedLifecycleConcertRequest::parse(params)?;
-                server.seed_lifecycle_concert_rpc(params).await
-            },
-        )
-        .expect("test.seed_lifecycle_concert must register once");
-        rpc
+        TestControlApiServer::into_rpc(self)
+    }
+}
+
+#[async_trait]
+impl TestControlApiServer for TestControlServer {
+    async fn reset(&self) -> RpcResult<OkResult> {
+        reset_test_data(&self.state)
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
     }
 
-    async fn seed_listing_rpc(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult> {
+    async fn seed_listing(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult> {
         let params = params.with_defaults();
         seed_listing(
             &self.state,
@@ -152,7 +154,7 @@ impl TestControlServer {
         .map_err(internal_error)
     }
 
-    async fn seed_scraped_concert_rpc(
+    async fn seed_scraped_concert(
         &self,
         params: SeedScrapedConcertRequest,
     ) -> RpcResult<SeedScrapedConcertResult> {
@@ -169,7 +171,7 @@ impl TestControlServer {
         .map_err(internal_error)
     }
 
-    async fn seed_lifecycle_concert_rpc(
+    async fn seed_lifecycle_concert(
         &self,
         params: SeedLifecycleConcertRequest,
     ) -> RpcResult<SeedLifecycleConcertResult> {
@@ -191,15 +193,6 @@ impl TestControlServer {
             },
         )
         .map_err(internal_error)
-    }
-}
-
-#[async_trait]
-impl TestControlApiServer for TestControlServer {
-    async fn reset(&self) -> RpcResult<OkResult> {
-        reset_test_data(&self.state)
-            .map(|()| OkResult { ok: true })
-            .map_err(internal_error)
     }
 
     async fn assert_concert_state(
@@ -291,7 +284,7 @@ impl<T> OmittedOr<T> {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SeedListingRequest {
+pub struct SeedListingRequest {
     #[serde(default)]
     source_url: OmittedOr<String>,
     #[serde(default)]
@@ -310,10 +303,6 @@ struct SeedListingDefaults {
 }
 
 impl SeedListingRequest {
-    fn parse(params: Params<'static>) -> RpcResult<Self> {
-        params.parse()
-    }
-
     fn with_defaults(self) -> SeedListingDefaults {
         let n = allocate_fixture_number();
         SeedListingDefaults {
@@ -331,7 +320,7 @@ impl SeedListingRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SeedScrapedConcertRequest {
+pub struct SeedScrapedConcertRequest {
     #[serde(default)]
     source_url: OmittedOr<String>,
     #[serde(default)]
@@ -356,10 +345,6 @@ struct SeedScrapedConcertDefaults {
 }
 
 impl SeedScrapedConcertRequest {
-    fn parse(params: Params<'static>) -> RpcResult<Self> {
-        params.parse()
-    }
-
     fn with_defaults(self) -> SeedScrapedConcertDefaults {
         let n = allocate_fixture_number();
         SeedScrapedConcertDefaults {
@@ -386,7 +371,7 @@ impl SeedScrapedConcertRequest {
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct SeedLifecycleConcertRequest {
+pub struct SeedLifecycleConcertRequest {
     #[serde(default)]
     source_url: OmittedOr<String>,
     #[serde(default)]
@@ -412,10 +397,6 @@ struct SeedLifecycleConcertRequest {
 }
 
 impl SeedLifecycleConcertRequest {
-    fn parse(params: Params<'static>) -> RpcResult<Self> {
-        params.parse()
-    }
-
     fn with_defaults(self) -> SeedLifecycleConcertParams {
         let n = allocate_fixture_number();
         SeedLifecycleConcertParams {
@@ -804,21 +785,26 @@ mod tests {
     use crate::db::concerts::NewListing;
     use crate::db::settings;
     use concert_types::SongTimestamp;
+    use jsonrpsee::types::Params;
 
     fn params(json: &'static str) -> Params<'static> {
         Params::new(Some(json))
     }
 
+    fn request<T: serde::de::DeserializeOwned>(json: &'static str) -> T {
+        params(json).parse().unwrap()
+    }
+
     fn listing_request(json: &'static str) -> SeedListingRequest {
-        SeedListingRequest::parse(params(json)).unwrap()
+        request(json)
     }
 
     fn scraped_request(json: &'static str) -> SeedScrapedConcertRequest {
-        SeedScrapedConcertRequest::parse(params(json)).unwrap()
+        request(json)
     }
 
     fn lifecycle_request(json: &'static str) -> SeedLifecycleConcertRequest {
-        SeedLifecycleConcertRequest::parse(params(json)).unwrap()
+        request(json)
     }
 
     fn fixture_number_from_source_url(source_url: &str) -> u64 {
@@ -829,16 +815,21 @@ mod tests {
             .expect("generated source_url must end with a fixture number")
     }
 
+    async fn raw_json_call(
+        methods: &jsonrpsee::server::Methods,
+        request: &str,
+    ) -> serde_json::Value {
+        let (response, _subscriptions) = methods.raw_json_request(request, 1).await.unwrap();
+        serde_json::from_str(response.get()).unwrap()
+    }
+
     #[tokio::test]
     async fn seed_listing_accepts_empty_params_with_generated_defaults() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let result = server
-            .seed_listing_rpc(listing_request("{}"))
-            .await
-            .unwrap();
+        let result = server.seed_listing(listing_request("{}")).await.unwrap();
         let n = fixture_number_from_source_url(&result.source_url);
 
         assert_eq!(result.title, format!("Test Listing {n}"));
@@ -852,7 +843,7 @@ mod tests {
         let server = TestControlServer::new(state.clone());
 
         let result = server
-            .seed_scraped_concert_rpc(scraped_request("{}"))
+            .seed_scraped_concert(scraped_request("{}"))
             .await
             .unwrap();
         let n = fixture_number_from_source_url(&result.source_url);
@@ -878,7 +869,7 @@ mod tests {
         let server = TestControlServer::new(state.clone());
 
         let result = server
-            .seed_lifecycle_concert_rpc(lifecycle_request("{}"))
+            .seed_lifecycle_concert(lifecycle_request("{}"))
             .await
             .unwrap();
         let n = fixture_number_from_source_url(&result.source_url);
@@ -902,17 +893,14 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let listing = server
-            .seed_listing_rpc(listing_request("{}"))
-            .await
-            .unwrap();
+        let listing = server.seed_listing(listing_request("{}")).await.unwrap();
         reset_test_data(&server.state).unwrap();
         let scraped = server
-            .seed_scraped_concert_rpc(scraped_request("{}"))
+            .seed_scraped_concert(scraped_request("{}"))
             .await
             .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(lifecycle_request("{}"))
+            .seed_lifecycle_concert(lifecycle_request("{}"))
             .await
             .unwrap();
 
@@ -937,7 +925,7 @@ mod tests {
         let server = TestControlServer::new(state);
 
         let listing = server
-            .seed_listing_rpc(listing_request(
+            .seed_listing(listing_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-listing",
                     "title": "Explicit Listing",
@@ -948,7 +936,7 @@ mod tests {
             .await
             .unwrap();
         let scraped = server
-            .seed_scraped_concert_rpc(scraped_request(
+            .seed_scraped_concert(scraped_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-scraped",
                     "title": "Explicit Scraped",
@@ -961,7 +949,7 @@ mod tests {
             .await
             .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(lifecycle_request(
+            .seed_lifecycle_concert(lifecycle_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-lifecycle",
                     "title": "Explicit Lifecycle",
@@ -985,17 +973,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_jsonrpc_generated_seed_method_accepts_nested_request_object_params() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+
+        let body = raw_json_call(
+            &methods,
+            r#"{
+                "jsonrpc": "2.0",
+                "id": "raw",
+                "method": "test.seed_listing",
+                "params": {
+                    "params": {
+                        "source_url": "https://npr.org/c/raw-nested-seed",
+                        "title": "Raw Nested Seed"
+                    }
+                }
+            }"#,
+        )
+        .await;
+
+        assert_eq!(body["id"], "raw");
+        assert_eq!(body["result"]["title"], "Raw Nested Seed");
+        assert_eq!(
+            body["result"]["source_url"],
+            "https://npr.org/c/raw-nested-seed"
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_jsonrpc_generated_seed_method_rejects_old_flat_params_shape() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+
+        let body = raw_json_call(
+            &methods,
+            r#"{
+                "jsonrpc": "2.0",
+                "id": "raw",
+                "method": "test.seed_listing",
+                "params": {
+                    "title": "Raw Flat Seed"
+                }
+            }"#,
+        )
+        .await;
+
+        assert_eq!(body["id"], "raw");
+        assert_eq!(body["error"]["code"], -32602);
+    }
+
+    #[tokio::test]
     async fn explicit_null_preserves_nullable_domain_absence() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state.clone());
 
         let listing = server
-            .seed_listing_rpc(listing_request(r#"{"concert_date": null, "teaser": null}"#))
+            .seed_listing(listing_request(r#"{"concert_date": null, "teaser": null}"#))
             .await
             .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(lifecycle_request(
+            .seed_lifecycle_concert(lifecycle_request(
                 r#"{
                     "concert_date": null,
                     "set_list": null,
@@ -1020,8 +1061,9 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_null_for_identity_strings_is_rejected() {
-        let err =
-            SeedLifecycleConcertRequest::parse(params(r#"{"source_url": null}"#)).unwrap_err();
+        let err = params(r#"{"source_url": null}"#)
+            .parse::<SeedLifecycleConcertRequest>()
+            .unwrap_err();
 
         assert_eq!(
             err.code(),
