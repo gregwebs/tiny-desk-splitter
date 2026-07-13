@@ -47,12 +47,19 @@ utoipa-swagger-ui = { version = "8", features = ["axum", "vendored"] }
 # Test Control API (see docs/change/2026-07-11-hurl-web-integration-tests.md).
 # Only pulled in behind the `test-control` feature — never a default dependency.
 jsonrpsee = { version = "0.26.0", features = ["server", "macros"], optional = true }
+# HTTP adapter for the Test Control API (docs/adr/0004-test-control-http-adapter.md):
+# a tower middleware layer in front of jsonrpsee's own HTTP service, plus
+# bounded body reading. Versions match what jsonrpsee 0.26 already locks
+# transitively (see Cargo.lock), so this adds no new resolution.
+tower = { version = "0.5", features = ["util"], optional = true }
+http = { version = "1", optional = true }
+http-body-util = { version = "0.1", optional = true }
 
 [dev-dependencies]
-tower = { version = "0.4", features = ["util"] }
+tower = { version = "0.5", features = ["util"] }
 
 [features]
 # Feature-gated Test Control API for Hurl black-box integration tests. Also
 # requires an explicit runtime flag, loopback binding, and a debug-build guard
 # (see src/test_control.rs) — this feature flag alone does not start it.
-test-control = ["dep:jsonrpsee"]
+test-control = ["dep:jsonrpsee", "dep:tower", "dep:http", "dep:http-body-util"]

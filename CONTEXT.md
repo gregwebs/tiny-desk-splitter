@@ -8,6 +8,10 @@ Tiny Desk Splitter tracks the lifecycle of Tiny Desk concerts from discovery thr
 A test-only HTTP control surface mounted inside the `concert-web` process so black-box HTTP tests can arrange fixture state and inspect necessary postconditions without linking to application internals. It is compiled only for non-release test-control builds and started only when explicitly requested.
 _Avoid_: Seed proxy, seed backdoor
 
+**Test Control HTTP Adapter**:
+A test-only HTTP convenience surface that accepts concise Hurl request shapes and translates them into Test Control API JSON-RPC calls without changing the underlying JSON-RPC method contracts.
+_Avoid_: Seed proxy, shim, fake server
+
 **Seed Result**:
 The object returned by a Test Control API seed method that identifies the exact fixture data it created. Seed Results should reuse public API JSON shapes when practical, adding test-only fields only when tests need stable handles that the public API should not expose.
 _Avoid_: Fixture lookup by assumed ID

@@ -7,17 +7,12 @@
 
 # Seed a plain listing through the Test Control API and capture its id from
 # the Seed Result instead of assuming id = 1.
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "test.seed_listing",
-  "params": {
-    "source_url": "https://npr.org/c/listing-status-a",
-    "title": "Listing Status A",
-    "concert_date": "2024-01-15"
-  }
+  "source_url": "https://npr.org/c/listing-status-a",
+  "title": "Listing Status A",
+  "concert_date": "2024-01-15"
 }
 HTTP 200
 [Captures]
@@ -35,15 +30,10 @@ body contains "Listing Status A"
 
 # Seed a concert with scraped metadata (no download yet) and capture its id
 # from the Seed Result.
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 2,
-  "method": "test.seed_scraped_concert",
-  "params": {
-    "album": "Listing Status Album"
-  }
+  "album": "Listing Status Album"
 }
 HTTP 200
 [Captures]
@@ -61,29 +51,19 @@ body contains "/concerts/{{scraped_id}}/download\""
 body not contains "badge-not-downloaded"
 
 # Seed two more listings, capturing both ids from their Seed Results.
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 3,
-  "method": "test.seed_listing",
-  "params": {
-    "title": "Listing Filter A"
-  }
+  "title": "Listing Filter A"
 }
 HTTP 200
 [Captures]
 filter_a_id: jsonpath "$.result.id"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 4,
-  "method": "test.seed_listing",
-  "params": {
-    "title": "Listing Filter B"
-  }
+  "title": "Listing Filter B"
 }
 HTTP 200
 [Captures]
@@ -108,14 +88,9 @@ body not contains "Listing Filter B"
 
 # Available status fragments expose Want and Ignore actions, and no longer
 # render the old "available" badge.
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/listing
 Content-Type: application/json
-{
-  "jsonrpc": "2.0",
-  "id": 5,
-  "method": "test.seed_listing",
-  "params": {}
-}
+{}
 HTTP 200
 [Captures]
 available_actions_id: jsonpath "$.result.id"
@@ -129,29 +104,19 @@ body not contains "badge-available"
 
 # The Downloaded filter includes both downloaded-only and downloaded+split
 # concerts because the download badge still reads downloaded in both states.
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 6,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "downloaded": true
-  }
+  "downloaded": true
 }
 HTTP 200
 [Captures]
 downloaded_filter_only_id: jsonpath "$.result.id"
 
-POST {{test_control_url}}
+POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
-  "jsonrpc": "2.0",
-  "id": 7,
-  "method": "test.seed_lifecycle_concert",
-  "params": {
-    "split": true
-  }
+  "split": true
 }
 HTTP 200
 [Captures]

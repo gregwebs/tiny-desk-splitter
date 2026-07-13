@@ -241,7 +241,7 @@ dependencies = [
  "serde_urlencoded",
  "sync_wrapper 1.0.2",
  "tokio",
- "tower 0.5.3",
+ "tower",
  "tower-layer",
  "tower-service",
  "tracing",
@@ -557,6 +557,8 @@ dependencies = [
  "chrono",
  "clap",
  "concert-types",
+ "http 1.4.0",
+ "http-body-util",
  "image 0.25.10",
  "jsonrpsee",
  "regex",
@@ -566,7 +568,7 @@ dependencies = [
  "tempfile",
  "tiny-desk-scraper",
  "tokio",
- "tower 0.4.13",
+ "tower",
  "tower-http",
  "tower-livereload",
  "tracing",
@@ -1908,7 +1910,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
- "tower 0.5.3",
+ "tower",
  "tracing",
 ]
 
@@ -1948,7 +1950,7 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tokio-util",
- "tower 0.5.3",
+ "tower",
  "tracing",
 ]
 
@@ -3815,21 +3817,6 @@ dependencies = [
 
 [[package]]
 name = "tower"
-version = "0.4.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b8fa9be0de6cf49e536ce1851f987bd21a43b771b09473c3549a6c853db37c1c"
-dependencies = [
- "futures-core",
- "futures-util",
- "pin-project",
- "pin-project-lite",
- "tower-layer",
- "tower-service",
- "tracing",
-]
-
-[[package]]
-name = "tower"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ebe5ef63511595f1344e2d5cfa636d973292adc0eec1f0ad45fae9f0851ab1d4"
@@ -3886,7 +3873,7 @@ dependencies = [
  "http-body 1.0.1",
  "pin-project-lite",
  "tokio",
- "tower 0.5.3",
+ "tower",
 ]
 
 [[package]]
