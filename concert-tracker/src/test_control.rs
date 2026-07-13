@@ -29,6 +29,7 @@ use crate::db;
 use crate::web::AppState;
 
 const DEFAULT_CONCERT_DATE: &str = "2026-01-01";
+static NEXT_TEST_CONTROL_FIXTURE: AtomicU64 = AtomicU64::new(1);
 
 #[rpc(server, namespace = "test", namespace_separator = ".")]
 pub trait TestControlApi {
@@ -99,39 +100,41 @@ pub struct SeedLifecycleConcertResult {
 
 pub struct TestControlServer {
     state: AppState,
-    fixtures: TestControlFixtures,
 }
 
 impl TestControlServer {
     pub fn new(state: AppState) -> Self {
-        Self {
-            state,
-            fixtures: TestControlFixtures::new(),
-        }
+        Self { state }
     }
 
     fn rpc_module(self) -> RpcModule<Self> {
         let mut rpc = TestControlApiServer::into_rpc(self);
         rpc.register_async_method("test.seed_listing", |params, server, _| async move {
+            let params = SeedListingRequest::parse(params)?;
             server.seed_listing_rpc(params).await
         })
         .expect("test.seed_listing must register once");
         rpc.register_async_method(
             "test.seed_scraped_concert",
-            |params, server, _| async move { server.seed_scraped_concert_rpc(params).await },
+            |params, server, _| async move {
+                let params = SeedScrapedConcertRequest::parse(params)?;
+                server.seed_scraped_concert_rpc(params).await
+            },
         )
         .expect("test.seed_scraped_concert must register once");
         rpc.register_async_method(
             "test.seed_lifecycle_concert",
-            |params, server, _| async move { server.seed_lifecycle_concert_rpc(params).await },
+            |params, server, _| async move {
+                let params = SeedLifecycleConcertRequest::parse(params)?;
+                server.seed_lifecycle_concert_rpc(params).await
+            },
         )
         .expect("test.seed_lifecycle_concert must register once");
         rpc
     }
 
-    async fn seed_listing_rpc(&self, params: Params<'static>) -> RpcResult<SeedListingResult> {
-        let fixture = self.fixtures.allocate(FixtureKind::Listing);
-        let params = SeedListingRequest::parse(params)?.with_defaults(fixture);
+    async fn seed_listing_rpc(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult> {
+        let params = params.with_defaults();
         seed_listing(
             &self.state,
             params.source_url,
@@ -144,10 +147,9 @@ impl TestControlServer {
 
     async fn seed_scraped_concert_rpc(
         &self,
-        params: Params<'static>,
+        params: SeedScrapedConcertRequest,
     ) -> RpcResult<SeedScrapedConcertResult> {
-        let fixture = self.fixtures.allocate(FixtureKind::Scraped);
-        let params = SeedScrapedConcertRequest::parse(params)?.with_defaults(fixture);
+        let params = params.with_defaults();
         seed_scraped_concert(
             &self.state,
             params.source_url,
@@ -162,10 +164,9 @@ impl TestControlServer {
 
     async fn seed_lifecycle_concert_rpc(
         &self,
-        params: Params<'static>,
+        params: SeedLifecycleConcertRequest,
     ) -> RpcResult<SeedLifecycleConcertResult> {
-        let fixture = self.fixtures.allocate(FixtureKind::Lifecycle);
-        let params = SeedLifecycleConcertRequest::parse(params)?.with_defaults(fixture);
+        let params = params.with_defaults();
         seed_lifecycle_concert(
             &self.state,
             SeedLifecycleConcertParams {
@@ -228,75 +229,20 @@ fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
     )
 }
 
-struct TestControlFixtures {
-    next_fixture: AtomicU64,
+fn allocate_fixture_number() -> u64 {
+    NEXT_TEST_CONTROL_FIXTURE.fetch_add(1, Ordering::Relaxed)
 }
 
-impl TestControlFixtures {
-    fn new() -> Self {
-        Self {
-            next_fixture: AtomicU64::new(1),
-        }
-    }
-
-    fn allocate(&self, kind: FixtureKind) -> FixtureIdentity {
-        let n = self.next_fixture.fetch_add(1, Ordering::Relaxed);
-        FixtureIdentity { kind, n }
-    }
+fn fixture_source_url(n: u64) -> String {
+    format!("https://example.test/tiny-desk/test-control-{n}")
 }
 
-#[derive(Clone, Copy)]
-enum FixtureKind {
-    Listing,
-    Scraped,
-    Lifecycle,
-}
-
-struct FixtureIdentity {
-    kind: FixtureKind,
-    n: u64,
-}
-
-impl FixtureIdentity {
-    fn source_url(&self) -> String {
-        format!("https://example.test/tiny-desk/test-control-{}", self.n)
-    }
-
-    fn title(&self) -> String {
-        match self.kind {
-            FixtureKind::Listing => format!("Test Listing {}", self.n),
-            FixtureKind::Scraped => format!("Test Scraped Concert {}", self.n),
-            FixtureKind::Lifecycle => format!("Test Lifecycle Concert {}", self.n),
-        }
-    }
-
-    fn artist(&self) -> String {
-        match self.kind {
-            FixtureKind::Listing => format!("Test Listing Artist {}", self.n),
-            FixtureKind::Scraped => format!("Test Scraped Artist {}", self.n),
-            FixtureKind::Lifecycle => format!("Test Lifecycle Artist {}", self.n),
-        }
-    }
-
-    fn album(&self) -> String {
-        match self.kind {
-            FixtureKind::Listing => format!("Test Listing Album {}", self.n),
-            FixtureKind::Scraped => format!("Test Scraped Album {}", self.n),
-            FixtureKind::Lifecycle => format!("Test Lifecycle Album {}", self.n),
-        }
-    }
-
-    fn teaser(&self) -> String {
-        format!("Test listing teaser {}", self.n)
-    }
-
-    fn set_list(&self) -> Vec<String> {
-        vec![
-            format!("Test Control Track {}.1", self.n),
-            format!("Test Control Track {}.2", self.n),
-            format!("Test Control Track {}.3", self.n),
-        ]
-    }
+fn fixture_set_list(n: u64) -> Vec<String> {
+    vec![
+        format!("Test Control Track {n}.1"),
+        format!("Test Control Track {n}.2"),
+        format!("Test Control Track {n}.3"),
+    ]
 }
 
 #[derive(Debug)]
@@ -336,7 +282,7 @@ impl<T> OmittedOr<T> {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedListingRequest {
     #[serde(default)]
@@ -361,19 +307,22 @@ impl SeedListingRequest {
         params.parse()
     }
 
-    fn with_defaults(self, fixture: FixtureIdentity) -> SeedListingDefaults {
+    fn with_defaults(self) -> SeedListingDefaults {
+        let n = allocate_fixture_number();
         SeedListingDefaults {
-            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
-            title: self.title.unwrap_or_else(|| fixture.title()),
+            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
+            title: self.title.unwrap_or_else(|| format!("Test Listing {n}")),
             concert_date: self
                 .concert_date
                 .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            teaser: self.teaser.unwrap_or_else(|| Some(fixture.teaser())),
+            teaser: self
+                .teaser
+                .unwrap_or_else(|| Some(format!("Test listing teaser {n}"))),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedScrapedConcertRequest {
     #[serde(default)]
@@ -404,24 +353,31 @@ impl SeedScrapedConcertRequest {
         params.parse()
     }
 
-    fn with_defaults(self, fixture: FixtureIdentity) -> SeedScrapedConcertDefaults {
+    fn with_defaults(self) -> SeedScrapedConcertDefaults {
+        let n = allocate_fixture_number();
         SeedScrapedConcertDefaults {
-            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
-            title: self.title.unwrap_or_else(|| fixture.title()),
+            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
+            title: self
+                .title
+                .unwrap_or_else(|| format!("Test Scraped Concert {n}")),
             concert_date: self
                 .concert_date
                 .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            artist: self.artist.unwrap_or_else(|| fixture.artist()),
-            album: self.album.unwrap_or_else(|| fixture.album()),
+            artist: self
+                .artist
+                .unwrap_or_else(|| format!("Test Scraped Artist {n}")),
+            album: self
+                .album
+                .unwrap_or_else(|| format!("Test Scraped Album {n}")),
             set_list: self
                 .set_list
-                .unwrap_or_else(|| Some(fixture.set_list()))
+                .unwrap_or_else(|| Some(fixture_set_list(n)))
                 .unwrap_or_default(),
         }
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SeedLifecycleConcertRequest {
     #[serde(default)]
@@ -453,18 +409,25 @@ impl SeedLifecycleConcertRequest {
         params.parse()
     }
 
-    fn with_defaults(self, fixture: FixtureIdentity) -> SeedLifecycleConcertParams {
+    fn with_defaults(self) -> SeedLifecycleConcertParams {
+        let n = allocate_fixture_number();
         SeedLifecycleConcertParams {
-            source_url: self.source_url.unwrap_or_else(|| fixture.source_url()),
-            title: self.title.unwrap_or_else(|| fixture.title()),
+            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
+            title: self
+                .title
+                .unwrap_or_else(|| format!("Test Lifecycle Concert {n}")),
             concert_date: self
                 .concert_date
                 .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            artist: self.artist.unwrap_or_else(|| fixture.artist()),
-            album: self.album.unwrap_or_else(|| fixture.album()),
+            artist: self
+                .artist
+                .unwrap_or_else(|| format!("Test Lifecycle Artist {n}")),
+            album: self
+                .album
+                .unwrap_or_else(|| format!("Test Lifecycle Album {n}")),
             set_list: self
                 .set_list
-                .unwrap_or_else(|| Some(fixture.set_list()))
+                .unwrap_or_else(|| Some(fixture_set_list(n)))
                 .unwrap_or_default(),
             downloaded: self.downloaded.unwrap_or(false),
             split: self.split.unwrap_or(false),
@@ -823,19 +786,39 @@ mod tests {
         Params::new(Some(json))
     }
 
+    fn listing_request(json: &'static str) -> SeedListingRequest {
+        SeedListingRequest::parse(params(json)).unwrap()
+    }
+
+    fn scraped_request(json: &'static str) -> SeedScrapedConcertRequest {
+        SeedScrapedConcertRequest::parse(params(json)).unwrap()
+    }
+
+    fn lifecycle_request(json: &'static str) -> SeedLifecycleConcertRequest {
+        SeedLifecycleConcertRequest::parse(params(json)).unwrap()
+    }
+
+    fn fixture_number_from_source_url(source_url: &str) -> u64 {
+        source_url
+            .strip_prefix("https://example.test/tiny-desk/test-control-")
+            .expect("generated source_url must use the example.test fixture prefix")
+            .parse()
+            .expect("generated source_url must end with a fixture number")
+    }
+
     #[tokio::test]
     async fn seed_listing_accepts_empty_params_with_generated_defaults() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let result = server.seed_listing_rpc(params("{}")).await.unwrap();
+        let result = server
+            .seed_listing_rpc(listing_request("{}"))
+            .await
+            .unwrap();
+        let n = fixture_number_from_source_url(&result.source_url);
 
-        assert_eq!(
-            result.source_url,
-            "https://example.test/tiny-desk/test-control-1"
-        );
-        assert_eq!(result.title, "Test Listing 1");
+        assert_eq!(result.title, format!("Test Listing {n}"));
         assert_eq!(result.concert_date.as_deref(), Some(DEFAULT_CONCERT_DATE));
     }
 
@@ -845,18 +828,22 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state.clone());
 
-        let result = server.seed_scraped_concert_rpc(params("{}")).await.unwrap();
+        let result = server
+            .seed_scraped_concert_rpc(scraped_request("{}"))
+            .await
+            .unwrap();
+        let n = fixture_number_from_source_url(&result.source_url);
 
-        assert_eq!(result.title, "Test Scraped Concert 1");
-        assert_eq!(result.album, "Test Scraped Album 1");
+        assert_eq!(result.title, format!("Test Scraped Concert {n}"));
+        assert_eq!(result.album, format!("Test Scraped Album {n}"));
         let conn = state.db.lock().unwrap();
         let concert = db::concerts::get_concert(&conn, result.id).unwrap();
         assert_eq!(
             concert.set_list,
             vec![
-                "Test Control Track 1.1",
-                "Test Control Track 1.2",
-                "Test Control Track 1.3"
+                format!("Test Control Track {n}.1"),
+                format!("Test Control Track {n}.2"),
+                format!("Test Control Track {n}.3")
             ]
         );
     }
@@ -868,12 +855,13 @@ mod tests {
         let server = TestControlServer::new(state.clone());
 
         let result = server
-            .seed_lifecycle_concert_rpc(params("{}"))
+            .seed_lifecycle_concert_rpc(lifecycle_request("{}"))
             .await
             .unwrap();
+        let n = fixture_number_from_source_url(&result.source_url);
 
-        assert_eq!(result.title, "Test Lifecycle Concert 1");
-        assert_eq!(result.album, "Test Lifecycle Album 1");
+        assert_eq!(result.title, format!("Test Lifecycle Concert {n}"));
+        assert_eq!(result.album, format!("Test Lifecycle Album {n}"));
         assert!(!result.downloaded);
         assert!(!result.split);
         let conn = state.db.lock().unwrap();
@@ -891,26 +879,32 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let listing = server.seed_listing_rpc(params("{}")).await.unwrap();
+        let listing = server
+            .seed_listing_rpc(listing_request("{}"))
+            .await
+            .unwrap();
         reset_test_data(&server.state).unwrap();
-        let scraped = server.seed_scraped_concert_rpc(params("{}")).await.unwrap();
+        let scraped = server
+            .seed_scraped_concert_rpc(scraped_request("{}"))
+            .await
+            .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(params("{}"))
+            .seed_lifecycle_concert_rpc(lifecycle_request("{}"))
             .await
             .unwrap();
 
+        let urls = [
+            &listing.source_url,
+            &scraped.source_url,
+            &lifecycle.source_url,
+        ];
         assert_eq!(
-            listing.source_url,
-            "https://example.test/tiny-desk/test-control-1"
+            urls.iter().collect::<std::collections::HashSet<_>>().len(),
+            3
         );
-        assert_eq!(
-            scraped.source_url,
-            "https://example.test/tiny-desk/test-control-2"
-        );
-        assert_eq!(
-            lifecycle.source_url,
-            "https://example.test/tiny-desk/test-control-3"
-        );
+        for url in urls {
+            fixture_number_from_source_url(url);
+        }
     }
 
     #[tokio::test]
@@ -920,7 +914,7 @@ mod tests {
         let server = TestControlServer::new(state);
 
         let listing = server
-            .seed_listing_rpc(params(
+            .seed_listing_rpc(listing_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-listing",
                     "title": "Explicit Listing",
@@ -931,7 +925,7 @@ mod tests {
             .await
             .unwrap();
         let scraped = server
-            .seed_scraped_concert_rpc(params(
+            .seed_scraped_concert_rpc(scraped_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-scraped",
                     "title": "Explicit Scraped",
@@ -944,7 +938,7 @@ mod tests {
             .await
             .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(params(
+            .seed_lifecycle_concert_rpc(lifecycle_request(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-lifecycle",
                     "title": "Explicit Lifecycle",
@@ -974,11 +968,11 @@ mod tests {
         let server = TestControlServer::new(state.clone());
 
         let listing = server
-            .seed_listing_rpc(params(r#"{"concert_date": null, "teaser": null}"#))
+            .seed_listing_rpc(listing_request(r#"{"concert_date": null, "teaser": null}"#))
             .await
             .unwrap();
         let lifecycle = server
-            .seed_lifecycle_concert_rpc(params(
+            .seed_lifecycle_concert_rpc(lifecycle_request(
                 r#"{
                     "concert_date": null,
                     "set_list": null,
@@ -1003,14 +997,8 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_null_for_identity_strings_is_rejected() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
-
-        let err = server
-            .seed_lifecycle_concert_rpc(params(r#"{"source_url": null}"#))
-            .await
-            .unwrap_err();
+        let err =
+            SeedLifecycleConcertRequest::parse(params(r#"{"source_url": null}"#)).unwrap_err();
 
         assert_eq!(
             err.code(),
