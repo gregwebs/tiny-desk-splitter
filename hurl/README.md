@@ -147,18 +147,27 @@ conflict-free within one `just test-hurl` run.
 
 Scraped and lifecycle seeds default to a three-track set list. Lifecycle seeds
 default to inert state: `downloaded = false`, `split = false`, no timestamps,
-and no media duration.
+no media duration, and no `tracks_present`.
 
 Fixture defaulting follows one rule: a field's Rust `Default` applies when the
 field is **omitted**. For every field typed as optional (all of the seed
 fields except `downloaded`/`split`), explicit JSON `null` always deserializes
 to `None`. For most of those fields (`source_url`, `title`, `artist`,
-`album`, `set_list`, `auto_timestamps`, `user_timestamps`, `media_duration`)
-the `Default` is already `None`, so omitting the field and sending `null`
-behave identically — both generate a fixture value (identity fields,
-`set_list`) or leave the field absent (timestamps, media duration). Pass
-`"set_list": []` for an explicitly *empty* set list; `null`/omitted both mean
-"generate the three-track default".
+`album`, `set_list`, `auto_timestamps`, `user_timestamps`, `media_duration`,
+`tracks_present`) the `Default` is already `None`, so omitting the field and
+sending `null` behave identically — both generate a fixture value (identity
+fields, `set_list`) or leave the field absent (timestamps, media duration,
+tracks-present). Pass `"set_list": []` for an explicitly *empty* set list;
+`null`/omitted both mean "generate the three-track default".
+
+`tracks_present` (lifecycle seeds only) writes a raw `Vec<bool>` verbatim via
+`db::split_timestamps::set_tracks_present` with no length check against
+`set_list` — the `/like` handler and media-info routes already tolerate a
+short array (`.get(idx).unwrap_or(false)`), so seeding a mismatched length is
+valid and exercises that same defensive path. This is the only Test Control
+knob for "this track is available" that doesn't require writing an actual
+file to the scratch workdir; see
+[`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
 
 Two fields are the exception, because their `Default` is `Some(...)` rather
 than `None`: `concert_date` (default `"2026-01-01"`) and `teaser` (default
@@ -217,8 +226,8 @@ cargo build --release --bin concert-web --features test-control
 
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
-After the state-only public HTTP and playlist slices,
-`concert-tracker/tests/web_integration.rs` still has 44 tests. This groups
+After the state-only public HTTP, playlist, and state-only-stragglers slices,
+`concert-tracker/tests/web_integration.rs` still has 40 tests. This groups
 them by *why*, matching the migration specs'
 out-of-scope lists plus a couple of pre-existing areas these slices never
 touched. It's a categorization of the shape of the remaining suite, not an
@@ -251,6 +260,13 @@ the buckets cover more tests than are named here.
   write source/track/`timestamps.json` files and assert on exact filesystem
   state. Seeding that through Test Control would need file-producing seed
   methods and a separate design.
+  `delete_interlude_removes_file_records_event_returns_fragment` is in this
+  bucket for its file fixture, but its internal-events postcondition (an
+  `interlude_delete` event recorded, no `track_delete`) has no public HTTP
+  surface either — when this bucket's design lands, add a
+  `test.assert_concert_events` Assertion API method (decided during the
+  state-only-stragglers slice review, not implemented there since no
+  migrating test at the time consumed it) rather than dropping that coverage.
 - **Router/build-internals checks that aren't user-facing HTTP behavior**.
   `prod_router_serves_embedded_js_without_livereload` distinguishes dev vs.
   prod router wiring (an internal construction detail, not something a
@@ -275,11 +291,21 @@ the buckets cover more tests than are named here.
   byte-for-byte; that coverage now lives in `e2e/playlists.spec.js`'s
   drag-drop reorder test, which drives the real DOM attribute. See
   [`docs/change/2026-07-12-playlist-hurl-migration.md`](../docs/change/2026-07-12-playlist-hurl-migration.md).
-- **Still intentionally Rust-only after the state-only slice.**
+- **State-only stragglers are migrated.** The fourth Hurl slice added a
+  `tracks_present` param to `test.seed_lifecycle_concert` (see "Test Control
+  seed defaults" above) and moved
+  `delete_download_force_clears_state_when_file_missing`,
+  `delete_split_clears_state`, `like_track_toggles_state_and_renders_star`,
+  and `like_track_unavailable_returns_404` — the last four remaining tests
+  that needed neither files nor job stubs, blocked only by the seed API's
+  inability to set the `tracks_present` DB column the `/like` handler reads.
+  See
+  [`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
+- **Still intentionally Rust-only after the state-only-stragglers slice.**
   `detail_page_auto_scrape_failure_still_renders` exercises an outbound
   scrape failure and proxy disabling. `track_details_returns_200_without_album`
-  and the like/unavailable cases rely on raw-SQL or presence states no real
-  lifecycle produces without files. `set_split_timestamps_returns_422_on_count_mismatch`
+  relies on a raw-SQL `NULL` album no real lifecycle (or the seed API's null
+  semantics) produces. `set_split_timestamps_returns_422_on_count_mismatch`
   requires a source file to pass the earlier 409 check. The remaining prepare,
   playback reconstruction, lazy-backfill, source-present playback, and
   play-button tests depend on real files or injected jobs.

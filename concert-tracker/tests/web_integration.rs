@@ -586,104 +586,10 @@ async fn play_button_visible_after_successful_split() {
 // delete_download_missing_file_returns_confirm_fragment migrated to
 // hurl/media_state_errors.hurl.
 
-#[tokio::test]
-async fn delete_download_force_clears_state_when_file_missing() {
-    let workdir = tempfile::tempdir().unwrap();
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/3", "Some Album");
-    let db_arc = Arc::new(Mutex::new(conn));
-    let state = AppState {
-        db: db_arc.clone(),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig::test(workdir.path().to_path_buf()),
-    };
-    let app = router(state);
+// delete_download_force_clears_state_when_file_missing migrated to
+// hurl/media_state_errors.hurl.
 
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/delete-download?force=true")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.headers().get("HX-Refresh").is_none(),
-        "delete must NOT trigger a full page reload"
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("HX-Retarget")
-            .and_then(|v| v.to_str().ok()),
-        Some("#concert-1")
-    );
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    assert!(String::from_utf8_lossy(&body).contains("id=\"concert-1\""));
-    let c = {
-        let conn = db_arc.lock().unwrap();
-        db::concerts::get_concert(&conn, 1).unwrap()
-    };
-    assert!(c.downloaded_at.is_none());
-}
-
-#[tokio::test]
-async fn delete_split_clears_state() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seed_downloaded(&conn, "https://npr.org/d/4", "Some Album");
-    db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
-    db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
-    let db_arc = Arc::new(Mutex::new(conn));
-    let state = AppState {
-        db: db_arc.clone(),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig::test(PathBuf::from("/tmp")),
-    };
-    let app = router(state);
-
-    let response = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/delete-split")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-
-    assert_eq!(response.status(), StatusCode::OK);
-    assert!(
-        response.headers().get("HX-Refresh").is_none(),
-        "delete-split must NOT trigger a full page reload"
-    );
-    let body = axum::body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("id=\"concert-1\""),
-        "body is the re-rendered card"
-    );
-    assert!(
-        !html.contains("/concerts/1/split\""),
-        "no Split button: splitting is automated via track play"
-    );
-    let c = {
-        let conn = db_arc.lock().unwrap();
-        db::concerts::get_concert(&conn, 1).unwrap()
-    };
-    assert!(c.split_at.is_none());
-    assert!(c.downloaded_at.is_some(), "download must be untouched");
-}
+// delete_split_clears_state migrated to hurl/split_timestamps_state.hurl.
 
 // delete_split_when_not_split_returns_400 migrated to
 // hurl/split_timestamps_state.hurl.
@@ -1183,82 +1089,11 @@ async fn watch_returns_500_when_opener_fails() {
 // watch_returns_404_when_concert_not_downloaded migrated to
 // hurl/media_state_errors.hurl.
 
-#[tokio::test]
-async fn like_track_toggles_state_and_renders_star() {
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/1", "Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "Artist".to_string(),
-            album: "Album".to_string(),
-            description: None,
-            set_list: vec!["Song A".to_string(), "Song B".to_string()],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    // Mark both tracks present; starring is only allowed on available tracks.
-    db::split_timestamps::set_tracks_present(&conn, 1, &[true, true]).unwrap();
-    let app = router(test_state(conn));
+// like_track_toggles_state_and_renders_star migrated to
+// hurl/split_timestamps_state.hurl.
 
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/tracks/0/like")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let html = String::from_utf8_lossy(&body);
-    assert!(
-        html.contains("btn-like liked"),
-        "filled star class expected"
-    );
-    assert!(html.contains("★"), "filled star glyph expected");
-}
-
-#[tokio::test]
-async fn like_track_unavailable_returns_404() {
-    // Starring a deleted / unavailable track must be rejected.
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/2", "Concert");
-    db::concerts::update_metadata(
-        &conn,
-        1,
-        &MetadataUpdate {
-            artist: "Artist".to_string(),
-            album: "Album".to_string(),
-            description: None,
-            set_list: vec!["Song A".to_string(), "Song B".to_string()],
-            musicians: vec![],
-        },
-    )
-    .unwrap();
-    // Track 0 present, track 1 absent (simulates deletion).
-    db::split_timestamps::set_tracks_present(&conn, 1, &[true, false]).unwrap();
-    let app = router(test_state(conn));
-
-    let resp = app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/concerts/1/tracks/1/like")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
-}
+// like_track_unavailable_returns_404 migrated to
+// hurl/split_timestamps_state.hurl.
 
 #[tokio::test]
 async fn track_media_info_reports_liked_state() {

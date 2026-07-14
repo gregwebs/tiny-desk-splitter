@@ -173,6 +173,36 @@ delete_split_not_split_id: jsonpath "$.result.id"
 POST {{base_url}}/concerts/{{delete_split_not_split_id}}/delete-split
 HTTP 400
 
+# Plain delete-split: clears split state but leaves download state untouched,
+# and the re-rendered card drops the (now-redundant) Split button — splitting
+# is automated via track play, so there's never a manual Split button anyway.
+POST {{test_control_url}}/test/seed/lifecycle_concert
+Content-Type: application/json
+{
+  "split": true
+}
+HTTP 200
+[Captures]
+delete_split_clears_id: jsonpath "$.result.id"
+
+POST {{base_url}}/concerts/{{delete_split_clears_id}}/delete-split
+HTTP 200
+[Asserts]
+header "HX-Refresh" not exists
+body contains "id=\"concert-{{delete_split_clears_id}}\""
+body not contains "/concerts/{{delete_split_clears_id}}/split\""
+
+POST {{test_control_url}}/test/assert/concert_state
+Content-Type: application/json
+{
+  "id": {{delete_split_clears_id}},
+  "downloaded": true,
+  "split": false
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
 POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {
@@ -183,4 +213,35 @@ HTTP 200
 like_out_of_range_id: jsonpath "$.result.id"
 
 POST {{base_url}}/concerts/{{like_out_of_range_id}}/tracks/5/like
+HTTP 404
+
+# Availability for /like comes from the DB tracks_present column, not the
+# filesystem — the lifecycle seed can set it directly with no files needed.
+POST {{test_control_url}}/test/seed/lifecycle_concert
+Content-Type: application/json
+{
+  "set_list": ["Song A", "Song B"],
+  "tracks_present": [true, true]
+}
+HTTP 200
+[Captures]
+like_available_id: jsonpath "$.result.id"
+
+POST {{base_url}}/concerts/{{like_available_id}}/tracks/0/like
+HTTP 200
+[Asserts]
+body contains "btn-like liked"
+body contains "★"
+
+POST {{test_control_url}}/test/seed/lifecycle_concert
+Content-Type: application/json
+{
+  "set_list": ["Song A", "Song B"],
+  "tracks_present": [true, false]
+}
+HTTP 200
+[Captures]
+like_unavailable_id: jsonpath "$.result.id"
+
+POST {{base_url}}/concerts/{{like_unavailable_id}}/tracks/1/like
 HTTP 404
