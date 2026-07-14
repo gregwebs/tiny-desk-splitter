@@ -502,6 +502,26 @@ mod tests {
         assert!(split.split);
     }
 
+    /// `tracks_present` is deliberately not echoed on `SeedLifecycleConcertResult`
+    /// (no Hurl case reads it yet, and echoing the request rather than the
+    /// persisted row would let a broken seed write pass unnoticed) — so this
+    /// asserts the DB write directly, the same way `db/seeds.rs`'s unit tests do.
+    #[tokio::test]
+    async fn seed_lifecycle_concert_tracks_present_persists_through_the_rpc_dispatch_path() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let result = server
+            .seed_lifecycle_concert(lifecycle(r#"{"tracks_present": [true, false]}"#))
+            .await
+            .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.tracks_present, vec![true, false]);
+    }
+
     #[tokio::test]
     async fn seed_defaults_generate_unique_urls_across_methods_and_reset() {
         // Pins that FIXTURE_IDS is one process-lifetime allocator (ADR 0003):

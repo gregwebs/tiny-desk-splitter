@@ -212,6 +212,9 @@ impl<'a> SeedContext<'a> {
         if let Some(duration) = seed.media_duration {
             split_timestamps::set_media_duration(self.conn, concert.id, duration)?;
         }
+        if let Some(tracks_present) = &seed.tracks_present {
+            split_timestamps::set_tracks_present(self.conn, concert.id, tracks_present)?;
+        }
 
         concerts::get_concert(self.conn, concert.id)
     }
@@ -349,6 +352,13 @@ impl Default for SeedScrapedConcert {
 /// `test.seed_lifecycle_concert`. `downloaded`/`split` default to `false`
 /// (an inert fixture); `split: true` implies `downloaded: true` regardless of
 /// the `downloaded` field, matching the real download-then-split lifecycle.
+///
+/// `tracks_present` defaults to `None` (column stays `NULL`, matching a
+/// concert that has never been split). When set, it is written verbatim via
+/// `db::split_timestamps::set_tracks_present` with no validation against
+/// `set_list`'s length — the web handlers already tolerate a short
+/// `tracks_present` array (`.get(idx).unwrap_or(false)`), so permissive
+/// seeding lets tests exercise those defensive paths too.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SeedLifecycleConcert {
@@ -363,6 +373,7 @@ pub struct SeedLifecycleConcert {
     pub auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
     pub user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
     pub media_duration: Option<f64>,
+    pub tracks_present: Option<Vec<bool>>,
 }
 
 impl Default for SeedLifecycleConcert {
@@ -379,6 +390,7 @@ impl Default for SeedLifecycleConcert {
             auto_timestamps: None,
             user_timestamps: None,
             media_duration: None,
+            tracks_present: None,
         }
     }
 }
@@ -612,6 +624,73 @@ mod tests {
         let stored = split_timestamps::get_split_timestamps(&conn, reseeded.id).unwrap();
         assert_eq!(stored.auto, None);
         assert_eq!(stored.user, None);
+    }
+
+    #[test]
+    fn seed_lifecycle_concert_tracks_present_persists_exact_value() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                tracks_present: Some(vec![true, false]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(concert.tracks_present, vec![true, false]);
+    }
+
+    #[test]
+    fn seed_lifecycle_concert_tracks_present_reseed_without_field_clears_it() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let url = "https://npr.org/c/tracks-present-reseed".to_string();
+        seeds
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                source_url: Some(url.clone()),
+                tracks_present: Some(vec![true, false]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        // Reseed the same source_url with tracks_present genuinely omitted
+        // from the JSON (deserialized default is None, per the struct's
+        // Default) — must reset to inert, not keep the prior seed's array.
+        let omitted: SeedLifecycleConcert = serde_json::from_value(serde_json::json!({
+            "source_url": url,
+        }))
+        .unwrap();
+        assert_eq!(omitted.tracks_present, None);
+        let reseeded = seeds.seed_lifecycle_concert(omitted).unwrap();
+        assert!(
+            reseeded.tracks_present.is_empty(),
+            "omitting tracks_present on reseed must clear a prior seed's array, \
+             not preserve it"
+        );
+    }
+
+    #[test]
+    fn seed_lifecycle_concert_tracks_present_reseed_with_explicit_null_clears_it() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let url = "https://npr.org/c/tracks-present-null-reseed".to_string();
+        seeds
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                source_url: Some(url.clone()),
+                tracks_present: Some(vec![true, true, false]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        let cleared: SeedLifecycleConcert = serde_json::from_value(serde_json::json!({
+            "source_url": url,
+            "tracks_present": null,
+        }))
+        .unwrap();
+        let reseeded = seeds.seed_lifecycle_concert(cleared).unwrap();
+        assert!(
+            reseeded.tracks_present.is_empty(),
+            "explicit null on reseed must clear a prior seed's tracks_present array"
+        );
     }
 
     #[test]

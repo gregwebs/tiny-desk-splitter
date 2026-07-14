@@ -17,6 +17,25 @@ header "HX-Refresh" not exists
 body contains "delete-confirm"
 body contains "/concerts/{{delete_download_missing_id}}/delete-download?force=true"
 
+# force=true skips the confirm step and clears download state even though the
+# file was already missing on disk.
+POST {{base_url}}/concerts/{{delete_download_missing_id}}/delete-download?force=true
+HTTP 200
+[Asserts]
+header "HX-Refresh" not exists
+header "HX-Retarget" == "#concert-{{delete_download_missing_id}}"
+body contains "id=\"concert-{{delete_download_missing_id}}\""
+
+POST {{test_control_url}}/test/assert/concert_state
+Content-Type: application/json
+{
+  "id": {{delete_download_missing_id}},
+  "downloaded": false
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
 POST {{test_control_url}}/test/seed/lifecycle_concert
 Content-Type: application/json
 {
