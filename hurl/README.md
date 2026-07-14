@@ -140,16 +140,38 @@ Content-Type: application/json
 ```
 
 Generated fixture URLs use `https://example.test/`, and generated identities
-come from a server-local monotonic counter. `test.reset` clears database and
+come from a server-local monotonic counter (`db::seeds::FixtureIds`, held for
+the lifetime of the `concert-web` process). `test.reset` clears database and
 workdir state but does not reset that counter, so defaults remain
 conflict-free within one `just test-hurl` run.
 
 Scraped and lifecycle seeds default to a three-track set list. Lifecycle seeds
 default to inert state: `downloaded = false`, `split = false`, no timestamps,
-and no media duration. Pass explicit `null` only for nullable domain fields
-(`concert_date`, `teaser`, `set_list`, `auto_timestamps`, `user_timestamps`,
-`media_duration`). Identity fields (`source_url`, `title`, `artist`, `album`)
-must be omitted or strings; explicit `null` is rejected.
+and no media duration.
+
+Fixture defaulting follows one rule: a field's Rust `Default` applies when the
+field is **omitted**. For every field typed as optional (all of the seed
+fields except `downloaded`/`split`), explicit JSON `null` always deserializes
+to `None`. For most of those fields (`source_url`, `title`, `artist`,
+`album`, `set_list`, `auto_timestamps`, `user_timestamps`, `media_duration`)
+the `Default` is already `None`, so omitting the field and sending `null`
+behave identically — both generate a fixture value (identity fields,
+`set_list`) or leave the field absent (timestamps, media duration). Pass
+`"set_list": []` for an explicitly *empty* set list; `null`/omitted both mean
+"generate the three-track default".
+
+Two fields are the exception, because their `Default` is `Some(...)` rather
+than `None`: `concert_date` (default `"2026-01-01"`) and `teaser` (default
+`"Test listing teaser"`, listing seeds only). For these, omitting the field
+takes the default text, while explicit `null` stores a real SQL `NULL` — the
+only way to seed a concert with no date or no teaser. Sending
+`"source_url": null` (or `null` for `title`/`artist`/`album`) is valid and
+behaves exactly like omitting the field — Test Control no longer rejects
+explicit `null` for identity fields.
+
+`downloaded`/`split` are plain booleans, not optional: omitting them takes the
+`false` default, but `"downloaded": null` is invalid params, the same as
+sending any other non-boolean value for them would be.
 
 ## Three ways to check something, and when to use each
 

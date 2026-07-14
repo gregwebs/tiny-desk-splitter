@@ -17,21 +17,26 @@
 compile_error!("test-control must not be compiled into release builds");
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
 use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::Serialize;
 
 use crate::db;
+use crate::db::seeds::{
+    FixtureIds, SeedContext, SeedLifecycleConcert, SeedListing, SeedScrapedConcert,
+};
 use crate::web::AppState;
 
 mod adapter;
 
-const DEFAULT_CONCERT_DATE: &str = "2026-01-01";
-static NEXT_TEST_CONTROL_FIXTURE: AtomicU64 = AtomicU64::new(1);
+/// One fixture-number allocator for the process lifetime — per ADR 0003, not
+/// reset by `test.reset`, and shared across every [`TestControlServer`] clone
+/// (all of which wrap the same `AppState` and therefore the same database).
+static FIXTURE_IDS: LazyLock<FixtureIds> = LazyLock::new(FixtureIds::default);
 
 #[rpc(server, namespace = "test", namespace_separator = ".")]
 pub trait TestControlApi {
@@ -42,18 +47,18 @@ pub trait TestControlApi {
     async fn reset(&self) -> RpcResult<OkResult>;
 
     #[method(name = "seed_listing", param_kind = map)]
-    async fn seed_listing(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult>;
+    async fn seed_listing(&self, params: SeedListing) -> RpcResult<SeedListingResult>;
 
     #[method(name = "seed_scraped_concert", param_kind = map)]
     async fn seed_scraped_concert(
         &self,
-        params: SeedScrapedConcertRequest,
+        params: SeedScrapedConcert,
     ) -> RpcResult<SeedScrapedConcertResult>;
 
     #[method(name = "seed_lifecycle_concert", param_kind = map)]
     async fn seed_lifecycle_concert(
         &self,
-        params: SeedLifecycleConcertRequest,
+        params: SeedLifecycleConcert,
     ) -> RpcResult<SeedLifecycleConcertResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
@@ -142,57 +147,22 @@ impl TestControlApiServer for TestControlServer {
             .map_err(internal_error)
     }
 
-    async fn seed_listing(&self, params: SeedListingRequest) -> RpcResult<SeedListingResult> {
-        let params = params.with_defaults();
-        seed_listing(
-            &self.state,
-            params.source_url,
-            params.title,
-            params.concert_date,
-            params.teaser,
-        )
-        .map_err(internal_error)
+    async fn seed_listing(&self, params: SeedListing) -> RpcResult<SeedListingResult> {
+        seed_listing(&self.state, params).map_err(internal_error)
     }
 
     async fn seed_scraped_concert(
         &self,
-        params: SeedScrapedConcertRequest,
+        params: SeedScrapedConcert,
     ) -> RpcResult<SeedScrapedConcertResult> {
-        let params = params.with_defaults();
-        seed_scraped_concert(
-            &self.state,
-            params.source_url,
-            params.title,
-            params.concert_date,
-            params.artist,
-            params.album,
-            params.set_list,
-        )
-        .map_err(internal_error)
+        seed_scraped_concert(&self.state, params).map_err(internal_error)
     }
 
     async fn seed_lifecycle_concert(
         &self,
-        params: SeedLifecycleConcertRequest,
+        params: SeedLifecycleConcert,
     ) -> RpcResult<SeedLifecycleConcertResult> {
-        let params = params.with_defaults();
-        seed_lifecycle_concert(
-            &self.state,
-            SeedLifecycleConcertParams {
-                source_url: params.source_url,
-                title: params.title,
-                concert_date: params.concert_date,
-                artist: params.artist,
-                album: params.album,
-                set_list: params.set_list,
-                downloaded: params.downloaded,
-                split: params.split,
-                auto_timestamps: params.auto_timestamps,
-                user_timestamps: params.user_timestamps,
-                media_duration: params.media_duration,
-            },
-        )
-        .map_err(internal_error)
+        seed_lifecycle_concert(&self.state, params).map_err(internal_error)
     }
 
     async fn assert_concert_state(
@@ -229,247 +199,14 @@ fn assertion_error(err: anyhow::Error) -> ErrorObjectOwned {
     )
 }
 
-fn allocate_fixture_number() -> u64 {
-    NEXT_TEST_CONTROL_FIXTURE.fetch_add(1, Ordering::Relaxed)
-}
-
-fn fixture_source_url(n: u64) -> String {
-    format!("https://example.test/tiny-desk/test-control-{n}")
-}
-
-fn fixture_set_list(n: u64) -> Vec<String> {
-    vec![
-        format!("Test Control Track {n}.1"),
-        format!("Test Control Track {n}.2"),
-        format!("Test Control Track {n}.3"),
-    ]
-}
-
-#[derive(Debug)]
-enum OmittedOr<T> {
-    Omitted,
-    Present(T),
-}
-
-impl<T> Default for OmittedOr<T> {
-    fn default() -> Self {
-        Self::Omitted
-    }
-}
-
-impl<'de, T> Deserialize<'de> for OmittedOr<T>
-where
-    T: Deserialize<'de>,
-{
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        T::deserialize(deserializer).map(Self::Present)
-    }
-}
-
-impl<T> OmittedOr<T> {
-    fn unwrap_or_else(self, default: impl FnOnce() -> T) -> T {
-        match self {
-            Self::Omitted => default(),
-            Self::Present(value) => value,
-        }
-    }
-
-    fn unwrap_or(self, default: T) -> T {
-        self.unwrap_or_else(|| default)
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SeedListingRequest {
-    #[serde(default)]
-    source_url: OmittedOr<String>,
-    #[serde(default)]
-    title: OmittedOr<String>,
-    #[serde(default)]
-    concert_date: OmittedOr<Option<String>>,
-    #[serde(default)]
-    teaser: OmittedOr<Option<String>>,
-}
-
-struct SeedListingDefaults {
-    source_url: String,
-    title: String,
-    concert_date: Option<String>,
-    teaser: Option<String>,
-}
-
-impl SeedListingRequest {
-    fn with_defaults(self) -> SeedListingDefaults {
-        let n = allocate_fixture_number();
-        SeedListingDefaults {
-            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
-            title: self.title.unwrap_or_else(|| format!("Test Listing {n}")),
-            concert_date: self
-                .concert_date
-                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            teaser: self
-                .teaser
-                .unwrap_or_else(|| Some(format!("Test listing teaser {n}"))),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SeedScrapedConcertRequest {
-    #[serde(default)]
-    source_url: OmittedOr<String>,
-    #[serde(default)]
-    title: OmittedOr<String>,
-    #[serde(default)]
-    concert_date: OmittedOr<Option<String>>,
-    #[serde(default)]
-    artist: OmittedOr<String>,
-    #[serde(default)]
-    album: OmittedOr<String>,
-    #[serde(default)]
-    set_list: OmittedOr<Option<Vec<String>>>,
-}
-
-struct SeedScrapedConcertDefaults {
-    source_url: String,
-    title: String,
-    concert_date: Option<String>,
-    artist: String,
-    album: String,
-    set_list: Vec<String>,
-}
-
-impl SeedScrapedConcertRequest {
-    fn with_defaults(self) -> SeedScrapedConcertDefaults {
-        let n = allocate_fixture_number();
-        SeedScrapedConcertDefaults {
-            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
-            title: self
-                .title
-                .unwrap_or_else(|| format!("Test Scraped Concert {n}")),
-            concert_date: self
-                .concert_date
-                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            artist: self
-                .artist
-                .unwrap_or_else(|| format!("Test Scraped Artist {n}")),
-            album: self
-                .album
-                .unwrap_or_else(|| format!("Test Scraped Album {n}")),
-            set_list: self
-                .set_list
-                .unwrap_or_else(|| Some(fixture_set_list(n)))
-                .unwrap_or_default(),
-        }
-    }
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SeedLifecycleConcertRequest {
-    #[serde(default)]
-    source_url: OmittedOr<String>,
-    #[serde(default)]
-    title: OmittedOr<String>,
-    #[serde(default)]
-    concert_date: OmittedOr<Option<String>>,
-    #[serde(default)]
-    artist: OmittedOr<String>,
-    #[serde(default)]
-    album: OmittedOr<String>,
-    #[serde(default)]
-    set_list: OmittedOr<Option<Vec<String>>>,
-    #[serde(default)]
-    downloaded: OmittedOr<bool>,
-    #[serde(default)]
-    split: OmittedOr<bool>,
-    #[serde(default)]
-    auto_timestamps: OmittedOr<Option<Vec<concert_types::SongTimestamp>>>,
-    #[serde(default)]
-    user_timestamps: OmittedOr<Option<Vec<concert_types::SongTimestamp>>>,
-    #[serde(default)]
-    media_duration: OmittedOr<Option<f64>>,
-}
-
-impl SeedLifecycleConcertRequest {
-    fn with_defaults(self) -> SeedLifecycleConcertParams {
-        let n = allocate_fixture_number();
-        SeedLifecycleConcertParams {
-            source_url: self.source_url.unwrap_or_else(|| fixture_source_url(n)),
-            title: self
-                .title
-                .unwrap_or_else(|| format!("Test Lifecycle Concert {n}")),
-            concert_date: self
-                .concert_date
-                .unwrap_or_else(|| Some(DEFAULT_CONCERT_DATE.to_string())),
-            artist: self
-                .artist
-                .unwrap_or_else(|| format!("Test Lifecycle Artist {n}")),
-            album: self
-                .album
-                .unwrap_or_else(|| format!("Test Lifecycle Album {n}")),
-            set_list: self
-                .set_list
-                .unwrap_or_else(|| Some(fixture_set_list(n)))
-                .unwrap_or_default(),
-            downloaded: self.downloaded.unwrap_or(false),
-            split: self.split.unwrap_or(false),
-            auto_timestamps: self.auto_timestamps.unwrap_or(None),
-            user_timestamps: self.user_timestamps.unwrap_or(None),
-            media_duration: self.media_duration.unwrap_or(None),
-        }
-    }
-}
-
-#[derive(Deserialize)]
-struct SeedLifecycleConcertParams {
-    source_url: String,
-    title: String,
-    concert_date: Option<String>,
-    artist: String,
-    album: String,
-    set_list: Vec<String>,
-    downloaded: bool,
-    split: bool,
-    auto_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-    user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
-    media_duration: Option<f64>,
-}
-
-/// Inserts (or updates, on a `source_url` collision) a listing through the
-/// same `db::concerts::upsert_listing` path the real scraper uses. Looks the
-/// row back up by `source_url` rather than trusting
-/// `Connection::last_insert_rowid` — `upsert_listing` is an `INSERT ... ON
-/// CONFLICT DO UPDATE`, and SQLite only advances `last_insert_rowid` for the
-/// `INSERT` branch, so it would silently return a stale id whenever a Hurl
-/// case reseeds an already-used `source_url`.
-fn seed_listing(
-    state: &AppState,
-    source_url: String,
-    title: String,
-    concert_date: Option<String>,
-    teaser: Option<String>,
-) -> anyhow::Result<SeedListingResult> {
+/// Locks the app's connection, seeds a listing via the Database Seed API
+/// (`db::seeds`), and adapts the resulting [`crate::model::Concert`] into
+/// this method's Seed Result JSON shape. All fixture defaulting, `source_url`
+/// upsert semantics, and null-vs-omitted handling live in `db::seeds` —
+/// see its module docs.
+fn seed_listing(state: &AppState, seed: SeedListing) -> anyhow::Result<SeedListingResult> {
     let conn = state.db.lock().unwrap();
-    db::concerts::upsert_listing(
-        &conn,
-        &db::concerts::NewListing {
-            source_url: source_url.clone(),
-            title,
-            concert_date,
-            teaser,
-        },
-    )?;
-    let concert = db::concerts::get_concert_by_url(&conn, &source_url)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
-        )
-    })?;
+    let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_listing(seed)?;
     Ok(SeedListingResult {
         id: concert.id,
         source_url: concert.source_url,
@@ -478,71 +215,14 @@ fn seed_listing(
     })
 }
 
-/// Seeds a listing, then applies scraped metadata through the same
-/// `db::concerts::update_metadata` path the real scraper uses — setting
-/// `metadata_scraped_at`, which is what moves a concert out of the
-/// "Available" state into "NotDownloaded" for the status fragment. Musicians
-/// and description aren't exposed as params: no first-slice Hurl case needs
-/// them yet, and adding unused surface here would be speculative.
-///
-/// Always produces a `NotDownloaded`/`NotSplit`/not-archived concert, even on
-/// a `source_url` reused from a prior seed: `upsert_listing` and
-/// `update_metadata` only touch listing/metadata columns, so without an
-/// explicit reset here a URL that was previously downloaded (e.g. by an
-/// earlier Hurl case, or a retried run) would keep rendering as
-/// Downloaded/Downloading/DownloadError — silently breaking this method's
-/// documented contract instead of producing the state its name promises.
-/// Uses a direct `UPDATE`, not `lifecycle::clear_download_state` /
-/// `clear_split_state` (which are for genuine user-initiated deletes): those
-/// each record a `DownloadDelete`/`SplitDelete` event, which would be a false
-/// audit trail here since nothing was ever actually downloaded or split.
-#[allow(clippy::too_many_arguments)]
+/// See [`seed_listing`] — same shape, delegating to
+/// `db::seeds::SeedContext::seed_scraped_concert`.
 fn seed_scraped_concert(
     state: &AppState,
-    source_url: String,
-    title: String,
-    concert_date: Option<String>,
-    artist: String,
-    album: String,
-    set_list: Vec<String>,
+    seed: SeedScrapedConcert,
 ) -> anyhow::Result<SeedScrapedConcertResult> {
     let conn = state.db.lock().unwrap();
-    db::concerts::upsert_listing(
-        &conn,
-        &db::concerts::NewListing {
-            source_url: source_url.clone(),
-            title,
-            concert_date,
-            teaser: None,
-        },
-    )?;
-    let concert = db::concerts::get_concert_by_url(&conn, &source_url)?.ok_or_else(|| {
-        anyhow::anyhow!(
-            "upsert_listing succeeded but the row is not readable back by source_url: {source_url}"
-        )
-    })?;
-    conn.execute(
-        "UPDATE concerts SET
-             download_started_at = NULL, downloaded_at = NULL,
-             downloaded_extension = NULL, download_errors_json = '[]',
-             split_started_at = NULL, split_at = NULL, split_errors_json = '[]',
-             tracks_present = NULL,
-             archive_started_at = NULL, archived_at = NULL, archive_errors_json = '[]'
-         WHERE id = ?1",
-        rusqlite::params![concert.id],
-    )?;
-    db::concerts::update_metadata(
-        &conn,
-        concert.id,
-        &db::concerts::MetadataUpdate {
-            artist,
-            album,
-            description: None,
-            set_list,
-            musicians: vec![],
-        },
-    )?;
-    let concert = db::concerts::get_concert(&conn, concert.id)?;
+    let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_scraped_concert(seed)?;
     Ok(SeedScrapedConcertResult {
         id: concert.id,
         source_url: concert.source_url,
@@ -551,58 +231,16 @@ fn seed_scraped_concert(
     })
 }
 
+/// See [`seed_listing`] — same shape, delegating to
+/// `db::seeds::SeedContext::seed_lifecycle_concert`. `downloaded`/`split` in
+/// the result are re-derived from the persisted domain state (not echoed from
+/// the request) so the Seed Result reflects what was actually written.
 fn seed_lifecycle_concert(
     state: &AppState,
-    params: SeedLifecycleConcertParams,
+    seed: SeedLifecycleConcert,
 ) -> anyhow::Result<SeedLifecycleConcertResult> {
     let conn = state.db.lock().unwrap();
-    db::concerts::upsert_listing(
-        &conn,
-        &db::concerts::NewListing {
-            source_url: params.source_url.clone(),
-            title: params.title,
-            concert_date: params.concert_date,
-            teaser: None,
-        },
-    )?;
-    let concert =
-        db::concerts::get_concert_by_url(&conn, &params.source_url)?.ok_or_else(|| {
-            anyhow::anyhow!(
-                "upsert_listing succeeded but the row is not readable back by source_url: {}",
-                params.source_url
-            )
-        })?;
-    db::concerts::update_metadata(
-        &conn,
-        concert.id,
-        &db::concerts::MetadataUpdate {
-            artist: params.artist,
-            album: params.album,
-            description: None,
-            set_list: params.set_list,
-            musicians: vec![],
-        },
-    )?;
-
-    if params.downloaded || params.split {
-        db::lifecycle::try_mark_download_started(&conn, concert.id)?;
-        db::lifecycle::mark_download_succeeded(&conn, concert.id, "mp4")?;
-    }
-    if params.split {
-        db::lifecycle::try_mark_split_started(&conn, concert.id)?;
-        db::lifecycle::mark_split_succeeded(&conn, concert.id)?;
-    }
-    if let Some(timestamps) = params.auto_timestamps {
-        db::split_timestamps::set_auto_split_timestamps(&conn, concert.id, &timestamps)?;
-    }
-    if let Some(timestamps) = params.user_timestamps {
-        db::split_timestamps::set_user_split_timestamps(&conn, concert.id, &timestamps)?;
-    }
-    if let Some(duration) = params.media_duration {
-        db::split_timestamps::set_media_duration(&conn, concert.id, duration)?;
-    }
-
-    let concert = db::concerts::get_concert(&conn, concert.id)?;
+    let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_lifecycle_concert(seed)?;
     let downloaded = concert.download_status() == crate::model::DownloadStatus::Downloaded;
     let split = concert.split_status() == crate::model::SplitStatus::Split;
     Ok(SeedLifecycleConcertResult {
@@ -784,7 +422,6 @@ mod tests {
     use crate::db;
     use crate::db::concerts::NewListing;
     use crate::db::settings;
-    use concert_types::SongTimestamp;
     use jsonrpsee::types::Params;
 
     fn params(json: &'static str) -> Params<'static> {
@@ -795,15 +432,15 @@ mod tests {
         params(json).parse().unwrap()
     }
 
-    fn listing_request(json: &'static str) -> SeedListingRequest {
+    fn listing(json: &'static str) -> SeedListing {
         request(json)
     }
 
-    fn scraped_request(json: &'static str) -> SeedScrapedConcertRequest {
+    fn scraped(json: &'static str) -> SeedScrapedConcert {
         request(json)
     }
 
-    fn lifecycle_request(json: &'static str) -> SeedLifecycleConcertRequest {
+    fn lifecycle(json: &'static str) -> SeedLifecycleConcert {
         request(json)
     }
 
@@ -823,91 +460,69 @@ mod tests {
         serde_json::from_str(response.get()).unwrap()
     }
 
+    // The tests below cover the Test Control-specific surface: RPC envelope
+    // parsing (`param_kind = map`, the adapter's nested-params contract), the
+    // shared FIXTURE_IDS allocator, and Concert -> Seed Result JSON mapping.
+    // Fixture defaulting/null semantics and DB write behavior are unit-tested
+    // directly against `db::seeds::SeedContext` in `db/seeds.rs`.
+
     #[tokio::test]
-    async fn seed_listing_accepts_empty_params_with_generated_defaults() {
+    async fn seed_methods_persist_through_the_rpc_dispatch_path() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let result = server.seed_listing(listing("{}")).await.unwrap();
+        assert!(result.id > 0);
+        let conn = state.db.lock().unwrap();
+        assert!(db::concerts::get_concert(&conn, result.id).is_ok());
+    }
+
+    #[tokio::test]
+    async fn seed_lifecycle_concert_via_rpc_maps_persisted_state_into_result_booleans() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let result = server.seed_listing(listing_request("{}")).await.unwrap();
-        let n = fixture_number_from_source_url(&result.source_url);
-
-        assert_eq!(result.title, format!("Test Listing {n}"));
-        assert_eq!(result.concert_date.as_deref(), Some(DEFAULT_CONCERT_DATE));
-    }
-
-    #[tokio::test]
-    async fn seed_scraped_concert_accepts_empty_params_with_three_default_tracks() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
-
-        let result = server
-            .seed_scraped_concert(scraped_request("{}"))
+        let inert = server
+            .seed_lifecycle_concert(lifecycle("{}"))
             .await
             .unwrap();
-        let n = fixture_number_from_source_url(&result.source_url);
+        assert!(!inert.downloaded);
+        assert!(!inert.split);
 
-        assert_eq!(result.title, format!("Test Scraped Concert {n}"));
-        assert_eq!(result.album, format!("Test Scraped Album {n}"));
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(
-            concert.set_list,
-            vec![
-                format!("Test Control Track {n}.1"),
-                format!("Test Control Track {n}.2"),
-                format!("Test Control Track {n}.3")
-            ]
+        let split = server
+            .seed_lifecycle_concert(lifecycle(r#"{"split": true}"#))
+            .await
+            .unwrap();
+        assert!(
+            split.downloaded,
+            "split implies downloaded in the mapped result"
         );
-    }
-
-    #[tokio::test]
-    async fn seed_lifecycle_concert_accepts_empty_params_with_inert_lifecycle_defaults() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
-
-        let result = server
-            .seed_lifecycle_concert(lifecycle_request("{}"))
-            .await
-            .unwrap();
-        let n = fixture_number_from_source_url(&result.source_url);
-
-        assert_eq!(result.title, format!("Test Lifecycle Concert {n}"));
-        assert_eq!(result.album, format!("Test Lifecycle Album {n}"));
-        assert!(!result.downloaded);
-        assert!(!result.split);
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(concert.set_list.len(), 3);
-        assert!(concert.media_duration.is_none());
-        let timestamps = db::split_timestamps::get_split_timestamps(&conn, result.id).unwrap();
-        assert!(timestamps.auto.is_none());
-        assert!(timestamps.user.is_none());
+        assert!(split.split);
     }
 
     #[tokio::test]
     async fn seed_defaults_generate_unique_urls_across_methods_and_reset() {
+        // Pins that FIXTURE_IDS is one process-lifetime allocator (ADR 0003):
+        // shared across every seed method and every TestControlServer clone,
+        // and not reset by `test.reset`.
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let listing = server.seed_listing(listing_request("{}")).await.unwrap();
+        let listing_result = server.seed_listing(listing("{}")).await.unwrap();
         reset_test_data(&server.state).unwrap();
-        let scraped = server
-            .seed_scraped_concert(scraped_request("{}"))
-            .await
-            .unwrap();
-        let lifecycle = server
-            .seed_lifecycle_concert(lifecycle_request("{}"))
+        let scraped_result = server.seed_scraped_concert(scraped("{}")).await.unwrap();
+        let lifecycle_result = server
+            .seed_lifecycle_concert(lifecycle("{}"))
             .await
             .unwrap();
 
         let urls = [
-            &listing.source_url,
-            &scraped.source_url,
-            &lifecycle.source_url,
+            &listing_result.source_url,
+            &scraped_result.source_url,
+            &lifecycle_result.source_url,
         ];
         assert_eq!(
             urls.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -924,8 +539,8 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state);
 
-        let listing = server
-            .seed_listing(listing_request(
+        let listing_result = server
+            .seed_listing(listing(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-listing",
                     "title": "Explicit Listing",
@@ -935,8 +550,8 @@ mod tests {
             ))
             .await
             .unwrap();
-        let scraped = server
-            .seed_scraped_concert(scraped_request(
+        let scraped_result = server
+            .seed_scraped_concert(scraped(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-scraped",
                     "title": "Explicit Scraped",
@@ -948,8 +563,8 @@ mod tests {
             ))
             .await
             .unwrap();
-        let lifecycle = server
-            .seed_lifecycle_concert(lifecycle_request(
+        let lifecycle_result = server
+            .seed_lifecycle_concert(lifecycle(
                 r#"{
                     "source_url": "https://npr.org/c/explicit-lifecycle",
                     "title": "Explicit Lifecycle",
@@ -964,12 +579,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(listing.title, "Explicit Listing");
-        assert_eq!(listing.source_url, "https://npr.org/c/explicit-listing");
-        assert_eq!(scraped.album, "Explicit Album");
-        assert_eq!(lifecycle.album, "Explicit Lifecycle Album");
-        assert!(lifecycle.downloaded);
-        assert!(lifecycle.split);
+        assert_eq!(listing_result.title, "Explicit Listing");
+        assert_eq!(
+            listing_result.source_url,
+            "https://npr.org/c/explicit-listing"
+        );
+        assert_eq!(scraped_result.album, "Explicit Album");
+        assert_eq!(lifecycle_result.album, "Explicit Lifecycle Album");
+        assert!(lifecycle_result.downloaded);
+        assert!(lifecycle_result.split);
     }
 
     #[tokio::test]
@@ -1026,17 +644,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_null_preserves_nullable_domain_absence() {
+    async fn explicit_null_preserves_nullable_domain_absence_through_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let server = TestControlServer::new(state.clone());
 
-        let listing = server
-            .seed_listing(listing_request(r#"{"concert_date": null, "teaser": null}"#))
+        let listing_result = server
+            .seed_listing(listing(r#"{"concert_date": null, "teaser": null}"#))
             .await
             .unwrap();
-        let lifecycle = server
-            .seed_lifecycle_concert(lifecycle_request(
+        let lifecycle_result = server
+            .seed_lifecycle_concert(lifecycle(
                 r#"{
                     "concert_date": null,
                     "set_list": null,
@@ -1048,174 +666,28 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(listing.concert_date.is_none());
+        assert!(listing_result.concert_date.is_none());
         let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, lifecycle.id).unwrap();
+        let concert = db::concerts::get_concert(&conn, lifecycle_result.id).unwrap();
         assert!(concert.concert_date.is_none());
-        assert!(concert.set_list.is_empty());
         assert!(concert.media_duration.is_none());
-        let timestamps = db::split_timestamps::get_split_timestamps(&conn, lifecycle.id).unwrap();
-        assert!(timestamps.auto.is_none());
-        assert!(timestamps.user.is_none());
     }
 
+    /// Pins the ADR 0003 behavior change: explicit `null` for identity fields
+    /// (`source_url`/`title`/`artist`/`album`) used to be rejected by the
+    /// removed `OmittedOr` wrapper; now it deserializes fine and means "use
+    /// the generated default", the same as omitting the field.
     #[tokio::test]
-    async fn explicit_null_for_identity_strings_is_rejected() {
-        let err = params(r#"{"source_url": null}"#)
-            .parse::<SeedLifecycleConcertRequest>()
-            .unwrap_err();
-
-        assert_eq!(
-            err.code(),
-            jsonrpsee::types::ErrorCode::InvalidParams.code()
-        );
-    }
-
-    #[tokio::test]
-    async fn seed_listing_returns_the_created_id_and_public_fields() {
+    async fn explicit_null_for_identity_fields_is_accepted_via_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state);
 
-        let result = super::seed_listing(
-            &state,
-            "https://npr.org/c/seed-test".to_string(),
-            "Seed Test Concert".to_string(),
-            Some("2024-01-15".to_string()),
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(result.source_url, "https://npr.org/c/seed-test");
-        assert_eq!(result.title, "Seed Test Concert");
-        assert_eq!(result.concert_date.as_deref(), Some("2024-01-15"));
-
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(concert.source_url, "https://npr.org/c/seed-test");
-    }
-
-    #[tokio::test]
-    async fn seed_listing_reseeding_the_same_source_url_returns_the_same_id() {
-        // upsert_listing is an INSERT ... ON CONFLICT DO UPDATE, so
-        // Connection::last_insert_rowid would go stale on the second call —
-        // this pins the look-up-by-source_url behavior that avoids that.
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-
-        let first = super::seed_listing(
-            &state,
-            "https://npr.org/c/reseed".to_string(),
-            "Original Title".to_string(),
-            None,
-            None,
-        )
-        .unwrap();
-        let second = super::seed_listing(
-            &state,
-            "https://npr.org/c/reseed".to_string(),
-            "Updated Title".to_string(),
-            None,
-            None,
-        )
-        .unwrap();
-
-        assert_eq!(first.id, second.id);
-        assert_eq!(second.title, "Updated Title");
-    }
-
-    #[tokio::test]
-    async fn seed_scraped_concert_sets_metadata_scraped_at_and_returns_album() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-
-        let result = super::seed_scraped_concert(
-            &state,
-            "https://npr.org/c/scraped-test".to_string(),
-            "Scraped Test Concert".to_string(),
-            Some("2024-01-15".to_string()),
-            "Test Artist".to_string(),
-            "Test Album".to_string(),
-            vec!["Song One".to_string(), "Song Two".to_string()],
-        )
-        .unwrap();
-
-        assert_eq!(result.source_url, "https://npr.org/c/scraped-test");
-        assert_eq!(result.title, "Scraped Test Concert");
-        assert_eq!(result.album, "Test Album");
-
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(concert.artist.as_deref(), Some("Test Artist"));
-        assert_eq!(concert.set_list, vec!["Song One", "Song Two"]);
-        // metadata_scraped_at is what moves the status fragment from
-        // Available to NotDownloaded — see seed_scraped_concert's doc comment.
-        assert!(concert.metadata_scraped_at.is_some());
-    }
-
-    #[tokio::test]
-    async fn seed_scraped_concert_resets_stale_lifecycle_state_on_url_reuse() {
-        // A source_url that was previously downloaded/split/archived (e.g. by
-        // an earlier Hurl case, or a retried run) must still come back as a
-        // clean NotDownloaded/NotSplit fixture — the method's whole contract
-        // is "produce this state", not "produce it only on a brand-new URL".
-        let conn = db::connection::open_in_memory().unwrap();
-        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        super::seed_scraped_concert(
-            &state,
-            "https://npr.org/c/reused-scraped".to_string(),
-            "First Pass".to_string(),
-            None,
-            "Artist".to_string(),
-            "Album".to_string(),
-            vec![],
-        )
-        .unwrap();
-        {
-            let conn = state.db.lock().unwrap();
-            let concert =
-                db::concerts::get_concert_by_url(&conn, "https://npr.org/c/reused-scraped")
-                    .unwrap()
-                    .unwrap();
-            conn.execute(
-                "UPDATE concerts SET
-                     downloaded_at = datetime('now'), downloaded_extension = 'mp4',
-                     split_at = datetime('now'), archived_at = datetime('now'),
-                     download_errors_json = '[{\"at\":\"x\",\"message\":\"boom\"}]'
-                 WHERE id = ?1",
-                rusqlite::params![concert.id],
-            )
-            .unwrap();
-        }
-
-        let result = super::seed_scraped_concert(
-            &state,
-            "https://npr.org/c/reused-scraped".to_string(),
-            "Second Pass".to_string(),
-            None,
-            "Artist".to_string(),
-            "Album".to_string(),
-            vec![],
-        )
-        .unwrap();
-
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(
-            concert.download_status(),
-            crate::model::DownloadStatus::NotDownloaded
-        );
-        assert_eq!(concert.split_status(), crate::model::SplitStatus::NotSplit);
-        assert!(concert.archived_at.is_none());
-        assert!(concert.download_errors.is_empty());
-    }
-
-    fn ts(title: &str, start_time: f64, end_time: f64) -> SongTimestamp {
-        SongTimestamp {
-            title: title.to_string(),
-            start_time,
-            end_time,
-            duration: end_time - start_time,
-        }
+        let parsed = params(r#"{"source_url": null, "artist": null}"#)
+            .parse::<SeedLifecycleConcert>()
+            .expect("explicit null for identity fields must deserialize, not error");
+        let result = server.seed_lifecycle_concert(parsed).await.unwrap();
+        assert!(result.id > 0);
     }
 
     #[tokio::test]
@@ -1226,18 +698,10 @@ mod tests {
 
         let result = super::seed_lifecycle_concert(
             &state,
-            SeedLifecycleConcertParams {
-                source_url: "https://npr.org/c/lifecycle-split".to_string(),
-                title: "Lifecycle Split".to_string(),
-                concert_date: Some("2024-06-01".to_string()),
-                artist: "Lifecycle Artist".to_string(),
-                album: "Lifecycle Album".to_string(),
-                set_list: vec!["One".to_string()],
-                downloaded: false,
+            SeedLifecycleConcert {
+                source_url: Some("https://npr.org/c/lifecycle-split".to_string()),
                 split: true,
-                auto_timestamps: None,
-                user_timestamps: None,
-                media_duration: None,
+                ..Default::default()
             },
         )
         .unwrap();
@@ -1254,40 +718,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn seed_lifecycle_concert_sets_optional_timestamp_columns() {
+    async fn seed_listing_result_maps_concert_fields() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let auto = vec![ts("One", 0.0, 55.0), ts("Two", 60.0, 115.0)];
-        let user = vec![ts("One", 1.0, 54.0), ts("Two", 61.0, 114.0)];
 
-        let result = super::seed_lifecycle_concert(
+        let result = super::seed_listing(
             &state,
-            SeedLifecycleConcertParams {
-                source_url: "https://npr.org/c/lifecycle-timestamps".to_string(),
-                title: "Lifecycle Timestamps".to_string(),
-                concert_date: None,
-                artist: "Lifecycle Artist".to_string(),
-                album: "Lifecycle Timestamp Album".to_string(),
-                set_list: vec!["One".to_string(), "Two".to_string()],
-                downloaded: false,
-                split: false,
-                auto_timestamps: Some(auto.clone()),
-                user_timestamps: Some(user.clone()),
-                media_duration: Some(123.5),
+            SeedListing {
+                source_url: Some("https://npr.org/c/seed-test".to_string()),
+                title: Some("Seed Test Concert".to_string()),
+                concert_date: Some("2024-01-15".to_string()),
+                ..Default::default()
             },
         )
         .unwrap();
 
-        let conn = state.db.lock().unwrap();
-        let stored = db::split_timestamps::get_split_timestamps(&conn, result.id).unwrap();
-        assert_eq!(stored.auto, Some(auto));
-        assert_eq!(stored.user, Some(user));
-        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
-        assert_eq!(concert.media_duration, Some(123.5));
-        assert_eq!(
-            concert.download_status(),
-            crate::model::DownloadStatus::NotDownloaded
-        );
+        assert_eq!(result.source_url, "https://npr.org/c/seed-test");
+        assert_eq!(result.title, "Seed Test Concert");
+        assert_eq!(result.concert_date.as_deref(), Some("2024-01-15"));
+    }
+
+    #[tokio::test]
+    async fn seed_scraped_concert_result_maps_album_from_concert() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let result = super::seed_scraped_concert(
+            &state,
+            SeedScrapedConcert {
+                source_url: Some("https://npr.org/c/scraped-test".to_string()),
+                title: Some("Scraped Test Concert".to_string()),
+                album: Some("Test Album".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.source_url, "https://npr.org/c/scraped-test");
+        assert_eq!(result.title, "Scraped Test Concert");
+        assert_eq!(result.album, "Test Album");
     }
 
     #[tokio::test]
@@ -1296,10 +765,11 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let seeded = super::seed_listing(
             &state,
-            "https://npr.org/c/assert-pass".to_string(),
-            "Assert Pass".to_string(),
-            None,
-            None,
+            SeedListing {
+                source_url: Some("https://npr.org/c/assert-pass".to_string()),
+                title: Some("Assert Pass".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1313,10 +783,11 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let seeded = super::seed_listing(
             &state,
-            "https://npr.org/c/assert-fail".to_string(),
-            "Assert Fail".to_string(),
-            None,
-            None,
+            SeedListing {
+                source_url: Some("https://npr.org/c/assert-fail".to_string()),
+                title: Some("Assert Fail".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1341,10 +812,11 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let seeded = super::seed_listing(
             &state,
-            "https://npr.org/c/assert-partial".to_string(),
-            "Assert Partial".to_string(),
-            None,
-            None,
+            SeedListing {
+                source_url: Some("https://npr.org/c/assert-partial".to_string()),
+                title: Some("Assert Partial".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
 
@@ -1371,10 +843,11 @@ mod tests {
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
         let seeded = super::seed_listing(
             &state,
-            "https://npr.org/c/assert-empty".to_string(),
-            "Assert Empty".to_string(),
-            None,
-            None,
+            SeedListing {
+                source_url: Some("https://npr.org/c/assert-empty".to_string()),
+                title: Some("Assert Empty".to_string()),
+                ..Default::default()
+            },
         )
         .unwrap();
 

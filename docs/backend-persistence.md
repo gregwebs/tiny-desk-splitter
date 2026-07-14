@@ -25,6 +25,7 @@ dependency rules, and the invariants that hold across all of them.
 | `db::settings` | Singleton settings row (archive location, theme) | `Theme`, `Settings` |
 | `db::failed_jobs` | Job-failure audit log | `FailedJob` |
 | `db::time` | `now_string()` — the one place Rust code formats a `concerts`-table timestamp | — |
+| `db::seeds` (test-only: `cfg(any(test, feature = "test-control"))`) | Database Seed API — reusable fixture creation for Rust tests and the Test Control API (`crate::test_control`) | `SeedContext`, `FixtureIds`, `SeedListing`, `SeedScrapedConcert`, `SeedLifecycleConcert` |
 
 `Concert` itself (the read model returned by most `db::concerts` and
 `db::lifecycle` queries) lives in `crate::model`, not in `db` — it's a
@@ -55,6 +56,16 @@ for the same two functions (used by `toggle_track_liked` and the
 queries). `db::sync` depends on `db::time` for `now_string`. No other
 cross-domain-module dependencies exist among `concerts`, `lifecycle`,
 `split_timestamps`, `sync`, `playlists`, `settings`, and `failed_jobs`.
+
+`db::seeds` depends on `db::concerts`, `db::lifecycle`, and
+`db::split_timestamps` (it composes their domain functions to build
+fixtures); nothing outside `db::seeds` and `crate::test_control` depends on
+it — it is test-only and sits outside the production dependency graph above.
+Direct SQL inside `db::seeds` is limited to fixture *normalization* (resolving
+`upsert_listing`'s `COALESCE`-on-conflict semantics and clearing stale
+lifecycle/timestamp state on a reused `source_url`) where the equivalent
+domain functions would record misleading events for state nothing real ever
+produced — see the module's doc comment for details.
 
 ## Event emission invariants
 
