@@ -15,6 +15,7 @@ use crate::concert_media::{find_downloaded_file, find_track_file, ConcertMediaIn
 use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::split::start_split;
+use crate::jobs::OpenMediaOutcome;
 use crate::jobs::{JobKey, JobKind, SplitMode};
 use crate::lifecycle::{
     CancelJobOutcome, DeleteDownloadOutcome, DeleteRedundantSourceOutcome, DeleteSplitOutcome,
@@ -1618,15 +1619,10 @@ pub async fn watch(
         let conn = state.db.lock().unwrap();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, None);
     }
-    let mut cmd = (state.jobs.open_cmd)(&path);
-    match cmd.status().await {
-        Ok(s) if s.success() => Ok(StatusCode::OK),
-        Ok(s) => {
-            tracing::warn!("watch: `open` exited {:?} for concert {}", s.code(), id);
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-        Err(e) => {
-            tracing::warn!("watch: spawn `open` failed for concert {}: {}", id, e);
+    match state.jobs.open_media(&path).await {
+        OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
+        OpenMediaOutcome::Failed { message } => {
+            tracing::warn!("watch: opener failed for concert {}: {}", id, message);
             Ok(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1658,19 +1654,10 @@ pub async fn watch_track(
         let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, Some(&json));
     }
-    let mut cmd = (state.jobs.open_cmd)(&path);
-    match cmd.status().await {
-        Ok(s) if s.success() => Ok(StatusCode::OK),
-        Ok(s) => {
-            tracing::warn!(
-                "watch_track: `open` exited {:?} for concert {}",
-                s.code(),
-                id
-            );
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-        Err(e) => {
-            tracing::warn!("watch_track: spawn `open` failed for concert {}: {}", id, e);
+    match state.jobs.open_media(&path).await {
+        OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
+        OpenMediaOutcome::Failed { message } => {
+            tracing::warn!("watch_track: opener failed for concert {}: {}", id, message);
             Ok(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
