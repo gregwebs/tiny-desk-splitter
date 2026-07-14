@@ -40,8 +40,16 @@ unless acting on a different repo.
 
 ## Body text: always use `--body-file`, never `--body`
 
-Write the body to a temp file with the **Write tool**, then pass `--body-file`.
-Do this even for one-liners. Reasons:
+Write the body to a temp file, then pass `--body-file`. Do this even for
+one-liners.
+
+In Codex, create these temp body files with `exec_command` and a direct write
+under `/private/tmp` (for example, `printf '%s\n' 'body text' >
+/private/tmp/pr-body.md`). Do **not** use `apply_patch` for `/private/tmp`
+body files; `apply_patch` is for repository edits and can trigger an
+unnecessary approval prompt for absolute paths outside the workspace.
+
+Reasons:
 
 - This sandbox mangles `!` into `\!` in Bash-tool arguments and heredocs, so an
   inline `--body "...!..."` corrupts the body. The Write tool is unaffected.
@@ -49,11 +57,10 @@ Do this even for one-liners. Reasons:
   quote safely on a command line.
 
 ```
-# 1. Write the body
-Write  $TMPDIR/pr-body.md   (Markdown PR/issue/comment body)
+# 1. Write the body to /private/tmp/pr-body.md
 # 2. Pass it
 ./scripts/github/gh-app-pr-create.sh --base main --head my-branch \
-  --title "..." --body-file "$TMPDIR/pr-body.md"
+  --title "..." --body-file /private/tmp/pr-body.md
 ```
 
 ## Opening a PR
