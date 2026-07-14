@@ -16,6 +16,14 @@ _Avoid_: Seed proxy, shim, fake server
 The object returned by a Test Control API seed method that identifies the exact fixture data it created. Seed Results should reuse public API JSON shapes when practical, adding test-only fields only when tests need stable handles that the public API should not expose.
 _Avoid_: Fixture lookup by assumed ID
 
+**Database Seed API**:
+A test-only persistence-layer API that creates reusable fixture database state for tests without going through HTTP. Database Seed API input types distinguish required scenario fields from defaultable fixture fields.
+_Avoid_: Hurl seed helper, production seed
+
+**Database Seed Context**:
+A test-only object passed to Database Seed API calls that provides the database connection and allocates fixture IDs for defaulted fixture values.
+_Avoid_: Global seed counter, implicit fixture state
+
 **Assertion API**:
 A Test Control API method that verifies or returns test-only facts that should not be exposed through the real product API. Assertion APIs keep Hurl tests focused on public behavior without forcing internal details into production response shapes.
 _Avoid_: Test-only production fields

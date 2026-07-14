@@ -19,6 +19,8 @@ pub mod connection;
 pub mod failed_jobs;
 pub mod lifecycle;
 pub mod playlists;
+#[cfg(any(test, feature = "test-control"))]
+pub mod seeds;
 pub mod settings;
 pub mod split_timestamps;
 pub mod sync;
@@ -26,8 +28,9 @@ pub mod time;
 
 #[cfg(test)]
 pub mod tests {
-    use super::concerts::{get_concert_by_url, update_metadata, upsert_listing};
+    use super::concerts::update_metadata;
     use super::concerts::{MetadataUpdate, NewListing};
+    use super::seeds::{SeedContext, SeedListing};
     use crate::model::Musician;
     use rusqlite::{params, Connection};
 
@@ -57,13 +60,21 @@ pub mod tests {
 
     /// `pub(crate)`: shared with every domain test module (`db::concerts`,
     /// `db::lifecycle`, `db::split_timestamps`, `db::sync`, `db::failed_jobs`,
-    /// `db::connection`) that needs a seeded concert row.
+    /// `db::connection`) that needs a seeded concert row. A thin wrapper over
+    /// `db::seeds::SeedContext::seed_listing` — see
+    /// `docs/change/2026-07-13-db-seed-api-design.md`. Builds the `SeedListing`
+    /// from [`listing`] so the fixture values live in one place.
     pub(crate) fn seed(conn: &Connection) -> i64 {
-        upsert_listing(conn, &listing("https://npr.org/c/1", "Test Concert")).unwrap();
-        let c = get_concert_by_url(conn, "https://npr.org/c/1")
+        let new_listing = listing("https://npr.org/c/1", "Test Concert");
+        SeedContext::new(conn)
+            .seed_listing(SeedListing {
+                source_url: Some(new_listing.source_url),
+                title: Some(new_listing.title),
+                concert_date: new_listing.concert_date,
+                teaser: new_listing.teaser,
+            })
             .unwrap()
-            .unwrap();
-        c.id
+            .id
     }
 
     /// `pub(crate)`: shared with `db::concerts`, `db::split_timestamps`, and
