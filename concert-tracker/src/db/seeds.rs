@@ -24,6 +24,7 @@
 //! misleading delete events for state that was never really downloaded or
 //! split.
 
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
@@ -215,8 +216,103 @@ impl<'a> SeedContext<'a> {
         if let Some(tracks_present) = &seed.tracks_present {
             split_timestamps::set_tracks_present(self.conn, concert.id, tracks_present)?;
         }
+        if let Some(tracks_liked) = &seed.tracks_liked {
+            split_timestamps::set_tracks_liked(self.conn, concert.id, tracks_liked)?;
+        }
 
         concerts::get_concert(self.conn, concert.id)
+    }
+
+    pub fn seed_media_concert(&self, workdir: &Path, seed: SeedMediaConcert) -> Result<Concert> {
+        validate_seed_media_request(&seed)?;
+        let track_files = seed.track_files.clone();
+        let track_file_extension = seed.track_file_extension.clone();
+        let source_file = seed.source_file;
+        let source_file_extension = seed.source_file_extension.clone();
+        let concert = self.seed_lifecycle_concert(seed.lifecycle)?;
+        write_seed_media_files(
+            workdir,
+            &concert,
+            track_files.as_deref(),
+            &track_file_extension,
+            source_file,
+            &source_file_extension,
+        )?;
+        concerts::get_concert(self.conn, concert.id)
+    }
+}
+
+fn validate_seed_media_request(seed: &SeedMediaConcert) -> Result<()> {
+    resolved_media_extension(&seed.track_file_extension)?;
+    if seed.source_file {
+        resolved_media_extension(&seed.source_file_extension)?;
+    }
+    let set_list_len = seed
+        .lifecycle
+        .set_list
+        .as_ref()
+        .map_or_else(|| fixture_set_list(0).len(), Vec::len);
+    if let Some(indices) = &seed.track_files {
+        for &index in indices {
+            if index >= set_list_len {
+                anyhow::bail!(
+                    "track_files index {index} is out of range for set_list length {set_list_len}"
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn write_seed_media_files(
+    workdir: &Path,
+    concert: &Concert,
+    track_files: Option<&[usize]>,
+    track_file_extension: &Option<String>,
+    source_file: bool,
+    source_file_extension: &Option<String>,
+) -> Result<()> {
+    let album = concert
+        .album
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("seed_media_concert requires an album"))?;
+    let dir = crate::model::concert_dir(workdir, album);
+    std::fs::create_dir_all(&dir)?;
+
+    if source_file {
+        let ext = resolved_media_extension(source_file_extension)?;
+        let stem = crate::model::sanitize_album(album);
+        std::fs::write(
+            dir.join(format!("{stem}.{ext}")),
+            b"test-control dummy media\n",
+        )?;
+    }
+
+    let Some(indices) = track_files else {
+        return Ok(());
+    };
+    let ext = resolved_media_extension(track_file_extension)?;
+    for &index in indices {
+        let title = concert.set_list.get(index).ok_or_else(|| {
+            anyhow::anyhow!(
+                "track_files index {index} is out of range for set_list length {}",
+                concert.set_list.len()
+            )
+        })?;
+        let stem = crate::model::sanitize_filename(title);
+        std::fs::write(
+            dir.join(format!("{stem}.{ext}")),
+            b"test-control dummy media\n",
+        )?;
+    }
+    Ok(())
+}
+
+fn resolved_media_extension(extension: &Option<String>) -> Result<&str> {
+    let ext = extension.as_deref().unwrap_or("mp3");
+    match ext {
+        "mp4" | "m4a" | "webm" | "mkv" | "mp3" | "ogg" | "opus" | "wav" | "flac" => Ok(ext),
+        _ => anyhow::bail!("unsupported seed media extension: {ext}"),
     }
 }
 
@@ -359,6 +455,10 @@ impl Default for SeedScrapedConcert {
 /// `set_list`'s length — the web handlers already tolerate a short
 /// `tracks_present` array (`.get(idx).unwrap_or(false)`), so permissive
 /// seeding lets tests exercise those defensive paths too.
+///
+/// `tracks_liked` has the same optional/null semantics and is written
+/// verbatim when set. It exists for black-box media-info cases that need to
+/// observe liked metadata without first driving the `/like` endpoint.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SeedLifecycleConcert {
@@ -374,6 +474,7 @@ pub struct SeedLifecycleConcert {
     pub user_timestamps: Option<Vec<concert_types::SongTimestamp>>,
     pub media_duration: Option<f64>,
     pub tracks_present: Option<Vec<bool>>,
+    pub tracks_liked: Option<Vec<bool>>,
 }
 
 impl Default for SeedLifecycleConcert {
@@ -391,8 +492,25 @@ impl Default for SeedLifecycleConcert {
             user_timestamps: None,
             media_duration: None,
             tracks_present: None,
+            tracks_liked: None,
         }
     }
+}
+
+/// Seed input for `SeedContext::seed_media_concert` /
+/// `test.seed_media_concert`. It starts from the lifecycle fixture shape and
+/// can write dummy media files under the configured workdir. These files are
+/// only suitable for handlers that check path existence and extension; they
+/// are not valid audio/video and must not be used for ffprobe-backed paths.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SeedMediaConcert {
+    #[serde(flatten)]
+    pub lifecycle: SeedLifecycleConcert,
+    pub source_file: bool,
+    pub source_file_extension: Option<String>,
+    pub track_files: Option<Vec<usize>>,
+    pub track_file_extension: Option<String>,
 }
 
 #[cfg(test)]
@@ -640,6 +758,19 @@ mod tests {
     }
 
     #[test]
+    fn seed_lifecycle_concert_tracks_liked_persists_exact_value() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                tracks_liked: Some(vec![false, true]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(concert.tracks_liked, vec![false, true]);
+    }
+
+    #[test]
     fn seed_lifecycle_concert_tracks_present_reseed_without_field_clears_it() {
         let conn = open_in_memory().unwrap();
         let seeds = ctx(&conn);
@@ -715,6 +846,88 @@ mod tests {
         let stored = split_timestamps::get_split_timestamps(&conn, concert.id).unwrap();
         assert_eq!(stored.auto.map(|v| v.len()), Some(1));
         assert_eq!(stored.user.map(|v| v.len()), Some(1));
+    }
+
+    #[test]
+    fn seed_media_concert_writes_selected_dummy_track_files() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Media Fixture Album".to_string()),
+                        set_list: Some(vec![
+                            "Song A".to_string(),
+                            "Song B".to_string(),
+                            "Song C".to_string(),
+                        ]),
+                        ..Default::default()
+                    },
+                    track_files: Some(vec![0, 2]),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        assert!(dir.join("Song A.mp3").exists());
+        assert!(!dir.join("Song B.mp3").exists());
+        assert!(dir.join("Song C.mp3").exists());
+    }
+
+    #[test]
+    fn seed_media_concert_can_write_source_file() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Source Fixture: Album".to_string()),
+                        ..Default::default()
+                    },
+                    source_file: true,
+                    source_file_extension: Some("mp4".to_string()),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        assert!(dir.join("Source Fixture Album.mp4").exists());
+    }
+
+    #[test]
+    fn seed_media_concert_rejects_out_of_range_track_file_index() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        set_list: Some(vec!["Only Song".to_string()]),
+                        ..Default::default()
+                    },
+                    track_files: Some(vec![1]),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("out of range"),
+            "unexpected error: {err}"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM concerts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "invalid media seed must not write a DB row");
     }
 
     #[test]

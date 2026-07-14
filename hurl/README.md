@@ -145,22 +145,24 @@ the lifetime of the `concert-web` process). `test.reset` clears database and
 workdir state but does not reset that counter, so defaults remain
 conflict-free within one `just test-hurl` run.
 
-Scraped and lifecycle seeds default to a three-track set list. Lifecycle seeds
-default to inert state: `downloaded = false`, `split = false`, no timestamps,
-no media duration, and no `tracks_present`.
+Scraped, lifecycle, and media seeds default to a three-track set list.
+Lifecycle seeds default to inert state: `downloaded = false`, `split = false`,
+no timestamps, no media duration, no `tracks_present`, and no `tracks_liked`.
 
 Fixture defaulting follows one rule: a field's Rust `Default` applies when the
 field is **omitted**. For every field typed as optional (all of the seed
-fields except `downloaded`/`split`), explicit JSON `null` always deserializes
-to `None`. For most of those fields (`source_url`, `title`, `artist`,
-`album`, `set_list`, `auto_timestamps`, `user_timestamps`, `media_duration`,
-`tracks_present`) the `Default` is already `None`, so omitting the field and
-sending `null` behave identically — both generate a fixture value (identity
-fields, `set_list`) or leave the field absent (timestamps, media duration,
-tracks-present). Pass `"set_list": []` for an explicitly *empty* set list;
+fields except `downloaded`/`split`/`source_file`), explicit JSON `null` always
+deserializes to `None`. For most of those fields (`source_url`, `title`,
+`artist`, `album`, `set_list`, `auto_timestamps`, `user_timestamps`,
+`media_duration`, `tracks_present`, `tracks_liked`, media seed file-extension
+fields) the `Default` is already `None`, so omitting the field and sending
+`null` behave identically — both generate a fixture value (identity fields,
+`set_list`) or leave the field absent (timestamps, media duration,
+tracks-present/liked, media-file extension overrides). Pass `"set_list": []`
+for an explicitly *empty* set list;
 `null`/omitted both mean "generate the three-track default".
 
-`tracks_present` (lifecycle seeds only) writes a raw `Vec<bool>` verbatim via
+`tracks_present` (lifecycle/media seeds only) writes a raw `Vec<bool>` verbatim via
 `db::split_timestamps::set_tracks_present` with no length check against
 `set_list` — the `/like` handler and media-info routes already tolerate a
 short array (`.get(idx).unwrap_or(false)`), so seeding a mismatched length is
@@ -168,6 +170,22 @@ valid and exercises that same defensive path. This is the only Test Control
 knob for "this track is available" that doesn't require writing an actual
 file to the scratch workdir; see
 [`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
+
+`tracks_liked` (lifecycle/media seeds only) writes a raw `Vec<bool>` verbatim
+via `db::split_timestamps::set_tracks_liked`, with the same permissive length
+semantics. Use it when a black-box route needs to observe liked metadata
+without first driving the `/like` endpoint.
+
+`test.seed_media_concert` accepts the same lifecycle fields plus optional
+dummy media-file controls. `"track_files": [0, 2]` writes dummy `.mp3` files
+for the selected set-list indices under the scratch workdir; override the one
+extension for all track files with `"track_file_extension": "mp4"` when a case
+needs video-file extension behavior. `"source_file": true` writes a dummy
+album source file, defaulting to `.mp3` and overrideable with
+`"source_file_extension"`. These files are intentionally tiny sentinel bytes,
+not valid audio/video; use them only for routes that check existence or
+extension. Anything that runs ffprobe still needs real media and remains a
+separate migration slice.
 
 Two fields are the exception, because their `Default` is `Some(...)` rather
 than `None`: `concert_date` (default `"2026-01-01"`) and `teaser` (default
@@ -226,8 +244,9 @@ cargo build --release --bin concert-web --features test-control
 
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
-After the state-only public HTTP, playlist, and state-only-stragglers slices,
-`concert-tracker/tests/web_integration.rs` still has 40 tests. This groups
+After the state-only public HTTP, playlist, state-only-stragglers, and
+media-info navigation slices, `concert-tracker/tests/web_integration.rs` still
+has 30 tests. This groups
 them by *why*, matching the migration specs'
 out-of-scope lists plus a couple of pre-existing areas these slices never
 touched. It's a categorization of the shape of the remaining suite, not an
@@ -254,12 +273,13 @@ the buckets cover more tests than are named here.
   `watch_uses_injected_opener_and_succeeds`,
   `watch_returns_500_when_opener_fails` inject a success/failure closure for
   the "open in system player" command.
-- **Filesystem/media-fixture-heavy tests**. Track navigation, media-info,
-  watch/like, playback-reconstruction, and split-timestamps happy paths
-  generate real tiny playable media with `ffmpeg` (`create_test_audio`) or
-  write source/track/`timestamps.json` files and assert on exact filesystem
-  state. Seeding that through Test Control would need file-producing seed
-  methods and a separate design.
+- **Filesystem/media-fixture-heavy tests**. Watch/like with real source files,
+  playback-reconstruction, and split-timestamps happy paths generate real tiny
+  playable media with `ffmpeg` (`create_test_audio`) or write
+  source/track/`timestamps.json` files and assert on exact filesystem state.
+  The media-info navigation subset is migrated via dummy file fixtures, but
+  these remaining cases still need real media, JSON fixture content, deletion
+  assertions, job command control, or event assertions.
   `delete_interlude_removes_file_records_event_returns_fragment` is in this
   bucket for its file fixture, but its internal-events postcondition (an
   `interlude_delete` event recorded, no `track_delete`) has no public HTTP
@@ -301,7 +321,13 @@ the buckets cover more tests than are named here.
   inability to set the `tracks_present` DB column the `/like` handler reads.
   See
   [`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
-- **Still intentionally Rust-only after the state-only-stragglers slice.**
+- **Media-info navigation is migrated.** The fifth Hurl slice added
+  `test.seed_media_concert` for dummy track/source files plus `tracks_liked`
+  on lifecycle/media seeds, then moved next/previous track media-info,
+  track-media `has_prev`, and liked-state metadata cases into
+  `hurl/media_info_navigation.hurl`. See
+  [`docs/change/2026-07-14-media-info-navigation-hurl-migration.md`](../docs/change/2026-07-14-media-info-navigation-hurl-migration.md).
+- **Still intentionally Rust-only after the media-info navigation slice.**
   `detail_page_auto_scrape_failure_still_renders` exercises an outbound
   scrape failure and proxy disabling. `track_details_returns_200_without_album`
   relies on a raw-SQL `NULL` album no real lifecycle (or the seed API's null
