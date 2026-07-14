@@ -49,6 +49,12 @@ under `/private/tmp` (for example, `printf '%s\n' 'body text' >
 body files; `apply_patch` is for repository edits and can trigger an
 unnecessary approval prompt for absolute paths outside the workspace.
 
+Do **not** ask the user for permission before creating these temp body files
+under `/private/tmp`. They are required workflow scratch files, they are outside
+the repo, and `/private/tmp` is an allowed writable temp location in Codex.
+Only ask for approval if the GitHub action itself is ambiguous or if a command
+requires escalated permissions.
+
 Reasons:
 
 - This sandbox mangles `!` into `\!` in Bash-tool arguments and heredocs, so an
