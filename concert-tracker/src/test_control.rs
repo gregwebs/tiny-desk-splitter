@@ -27,7 +27,8 @@ use serde::Serialize;
 
 use crate::db;
 use crate::db::seeds::{
-    FixtureIds, SeedContext, SeedLifecycleConcert, SeedListing, SeedScrapedConcert,
+    FixtureIds, SeedContext, SeedLifecycleConcert, SeedListing, SeedMediaConcert,
+    SeedScrapedConcert,
 };
 use crate::web::AppState;
 
@@ -59,6 +60,12 @@ pub trait TestControlApi {
     async fn seed_lifecycle_concert(
         &self,
         params: SeedLifecycleConcert,
+    ) -> RpcResult<SeedLifecycleConcertResult>;
+
+    #[method(name = "seed_media_concert", param_kind = map)]
+    async fn seed_media_concert(
+        &self,
+        params: SeedMediaConcert,
     ) -> RpcResult<SeedLifecycleConcertResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
@@ -165,6 +172,13 @@ impl TestControlApiServer for TestControlServer {
         seed_lifecycle_concert(&self.state, params).map_err(internal_error)
     }
 
+    async fn seed_media_concert(
+        &self,
+        params: SeedMediaConcert,
+    ) -> RpcResult<SeedLifecycleConcertResult> {
+        seed_media_concert(&self.state, params).map_err(internal_error)
+    }
+
     async fn assert_concert_state(
         &self,
         id: i64,
@@ -241,16 +255,33 @@ fn seed_lifecycle_concert(
 ) -> anyhow::Result<SeedLifecycleConcertResult> {
     let conn = state.db.lock().unwrap();
     let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_lifecycle_concert(seed)?;
+    Ok(seed_lifecycle_concert_result(concert))
+}
+
+/// See [`seed_lifecycle_concert`] — same Seed Result shape, plus dummy media
+/// files written under the app's scratch workdir for filesystem-backed routes
+/// that only check existence/extension.
+fn seed_media_concert(
+    state: &AppState,
+    seed: SeedMediaConcert,
+) -> anyhow::Result<SeedLifecycleConcertResult> {
+    let conn = state.db.lock().unwrap();
+    let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone())
+        .seed_media_concert(&state.jobs.working_dir, seed)?;
+    Ok(seed_lifecycle_concert_result(concert))
+}
+
+fn seed_lifecycle_concert_result(concert: crate::model::Concert) -> SeedLifecycleConcertResult {
     let downloaded = concert.download_status() == crate::model::DownloadStatus::Downloaded;
     let split = concert.split_status() == crate::model::SplitStatus::Split;
-    Ok(SeedLifecycleConcertResult {
+    SeedLifecycleConcertResult {
         id: concert.id,
         source_url: concert.source_url,
         title: concert.title,
         album: concert.album.unwrap_or_default(),
         downloaded,
         split,
-    })
+    }
 }
 
 /// Checks each present expectation against the concert's actual domain
@@ -444,6 +475,10 @@ mod tests {
         request(json)
     }
 
+    fn media(json: &'static str) -> SeedMediaConcert {
+        request(json)
+    }
+
     fn fixture_number_from_source_url(source_url: &str) -> u64 {
         source_url
             .strip_prefix("https://example.test/tiny-desk/test-control-")
@@ -520,6 +555,33 @@ mod tests {
         let conn = state.db.lock().unwrap();
         let concert = db::concerts::get_concert(&conn, result.id).unwrap();
         assert_eq!(concert.tracks_present, vec![true, false]);
+    }
+
+    #[tokio::test]
+    async fn seed_media_concert_writes_files_and_liked_state_through_rpc_dispatch_path() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let state = test_state(conn, workdir.path().to_path_buf());
+        let server = TestControlServer::new(state.clone());
+
+        let result = server
+            .seed_media_concert(media(
+                r#"{
+                    "album": "RPC Media Fixture",
+                    "set_list": ["Song A", "Song B"],
+                    "track_files": [1],
+                    "tracks_liked": [false, true]
+                }"#,
+            ))
+            .await
+            .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.tracks_liked, vec![false, true]);
+        let dir = crate::model::concert_dir(workdir.path(), "RPC Media Fixture");
+        assert!(!dir.join("Song A.mp3").exists());
+        assert!(dir.join("Song B.mp3").exists());
     }
 
     #[tokio::test]
