@@ -197,20 +197,20 @@ mod tests {
             cd.display(),
             source.display()
         );
-        JobConfig {
+        JobConfig::from_commands(
             working_dir,
-            download_cmd: Arc::new(move |_: &DownloadJob| {
+            Arc::new(move |_: &DownloadJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(fetch_source.clone());
                 cmd
             }),
-            split_cmd: Arc::new(move |_: &SplitJob| {
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch_songs.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     async fn wait_for(db: &Arc<Mutex<Connection>>, check: impl Fn(&crate::model::Concert) -> bool) {
@@ -418,20 +418,20 @@ mod tests {
             source.display()
         );
         let touch = format!("touch '{}'", cd.join("Alpha.m4a").display());
-        let config = JobConfig {
-            working_dir: tmp.path().to_path_buf(),
-            download_cmd: Arc::new(move |_: &DownloadJob| {
+        let config = JobConfig::from_commands(
+            tmp.path().to_path_buf(),
+            Arc::new(move |_: &DownloadJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(fetch.clone());
                 cmd
             }),
-            split_cmd: Arc::new(move |_: &SplitJob| {
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        };
+            Arc::new(|_| Command::new("true")),
+        );
 
         let o1 = prepare(db.clone(), registry.clone(), config.clone(), 1)
             .await

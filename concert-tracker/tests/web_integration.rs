@@ -14,7 +14,7 @@ use concert_tracker::{
     },
     jobs::{
         scrape_queue::{ScrapeItemFn, ScrapeQueue},
-        JobConfig, JobRegistry,
+        DownloadJob, JobConfig, JobRegistry, SplitJob,
     },
     model::{concert_dir, sanitize_filename},
     web::{router, AppState},
@@ -770,12 +770,16 @@ fn state_with_opener(
     workdir: PathBuf,
     program: &'static str,
 ) -> AppState {
-    let mut jobs = JobConfig::test(workdir);
-    jobs.open_cmd = Arc::new(move |path| {
-        let mut c = Command::new(program);
-        c.arg(path);
-        c
-    });
+    let jobs = JobConfig::from_commands(
+        workdir,
+        Arc::new(|_: &DownloadJob| Command::new("true")),
+        Arc::new(|_: &SplitJob| Command::new("true")),
+        Arc::new(move |path| {
+            let mut c = Command::new(program);
+            c.arg(path);
+            c
+        }),
+    );
     AppState {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
@@ -944,20 +948,20 @@ async fn prepare_endpoint_runs_download_then_split_chain() {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
         scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(move |_| {
+        jobs: JobConfig::from_commands(
+            workdir.path().to_path_buf(),
+            Arc::new(move |_: &DownloadJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(fetch.clone());
                 cmd
             }),
-            split_cmd: Arc::new(move |_| {
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        },
+            Arc::new(|_| Command::new("true")),
+        ),
     };
     let app = router(state);
 
@@ -1043,20 +1047,20 @@ fn state_with_chain(
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
         scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig {
-            working_dir: wd,
-            download_cmd: Arc::new(move |_| {
+        jobs: JobConfig::from_commands(
+            wd,
+            Arc::new(move |_: &DownloadJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(fetch.clone());
                 cmd
             }),
-            split_cmd: Arc::new(move |_| {
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch_songs.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        },
+            Arc::new(|_| Command::new("true")),
+        ),
     }
 }
 
@@ -1238,20 +1242,20 @@ async fn download_double_click_does_not_drop_split_edge() {
         db: Arc::new(Mutex::new(conn)),
         registry: Arc::new(JobRegistry::new()),
         scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(move |_| {
+        jobs: JobConfig::from_commands(
+            workdir.path().to_path_buf(),
+            Arc::new(move |_: &DownloadJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(fetch.clone());
                 cmd
             }),
-            split_cmd: Arc::new(move |_| {
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        },
+            Arc::new(|_| Command::new("true")),
+        ),
     };
     let app = router(state);
 
@@ -1556,16 +1560,16 @@ async fn set_split_timestamps_happy_path_returns_202_and_stores_user_column() {
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
         scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(move |_| {
+        jobs: JobConfig::from_commands(
+            workdir.path().to_path_buf(),
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch_songs.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        },
+            Arc::new(|_| Command::new("true")),
+        ),
     };
     let app = router(state);
 
@@ -1656,16 +1660,16 @@ async fn reset_split_timestamps_happy_path_returns_202_and_clears_user_column() 
         db: db_arc.clone(),
         registry: Arc::new(JobRegistry::new()),
         scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig {
-            working_dir: workdir.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(move |_| {
+        jobs: JobConfig::from_commands(
+            workdir.path().to_path_buf(),
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(touch_songs.clone());
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        },
+            Arc::new(|_| Command::new("true")),
+        ),
     };
     let app = router(state);
 

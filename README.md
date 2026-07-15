@@ -21,6 +21,7 @@ testing.
 See documentation in ./docs
 * adr: architectural decision records 
 * changes: documentation of recent changes
+* [jobs](docs/jobs.md): backend job execution and runner architecture
 * *: architectural and other useful documentation
 
 ### Workspace crates

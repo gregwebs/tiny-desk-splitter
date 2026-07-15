@@ -5,8 +5,8 @@ use tempfile::NamedTempFile;
 
 use crate::db;
 use crate::jobs::{
-    download_job_from_concert, persist_job_log, run_with_logging, DownloadJob, JobConfig, JobKey,
-    JobKind, JobRegistry,
+    download_job_from_concert, persist_job_log, DownloadJob, JobConfig, JobKey, JobKind,
+    JobRegistry, JobStepOutcome,
 };
 
 pub enum StartOutcome {
@@ -63,8 +63,6 @@ async fn run_download(
         concert_id,
         kind: JobKind::Download,
     };
-    let cmd = (config.download_cmd)(&job);
-
     let log_dir = config.log_dir();
     let temp_file =
         match std::fs::create_dir_all(&log_dir).and_then(|_| NamedTempFile::new_in(&log_dir)) {
@@ -76,8 +74,8 @@ async fn run_download(
         };
     let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
 
-    match run_with_logging(cmd, "download", concert_id, temp_path.as_deref()).await {
-        Ok((status, _)) if status.success() => {
+    match config.run_download(&job, temp_path.as_deref()).await {
+        JobStepOutcome::Succeeded => {
             tracing::info!("download completed for concert {}", concert_id);
             drop(temp_file);
             let ext = crate::concert_media::find_downloaded_file(&config.working_dir, &job.album)
@@ -93,26 +91,12 @@ async fn run_download(
             }
             crate::jobs::spawn_dependents(db, registry, config, &key);
         }
-        Ok((status, stderr_tail)) => {
-            let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());
-            tracing::warn!("download failed for concert {}: {}", concert_id, error);
+        JobStepOutcome::Failed { message } => {
+            tracing::warn!("download failed for concert {}: {}", concert_id, message);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &error);
-            persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
-        }
-        Err(e) => {
-            let hint = if e.kind() == std::io::ErrorKind::NotFound {
-                ". Is yt-dlp installed? See: https://github.com/yt-dlp/yt-dlp#installation"
-            } else {
-                ""
-            };
-            let error = format!("spawn error: {}{}", e, hint);
-            tracing::warn!("download failed for concert {}: {}", concert_id, error);
-            registry.drop_dependency_edges(&key);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &error);
-            persist_job_log(&conn, concert_id, "download", &error, temp_file, &log_dir);
+            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &message);
+            persist_job_log(&conn, concert_id, "download", &message, temp_file, &log_dir);
         }
     }
 }
@@ -127,25 +111,25 @@ mod tests {
     use tokio::process::Command;
 
     fn config_success() -> JobConfig {
-        JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_job: &DownloadJob| Command::new("true")),
-            split_cmd: Arc::new(|_| unreachable!()),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+        JobConfig::from_commands(
+            PathBuf::from("/tmp"),
+            Arc::new(|_job: &DownloadJob| Command::new("true")),
+            Arc::new(|_| unreachable!()),
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     fn config_failure() -> JobConfig {
-        JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_| {
+        JobConfig::from_commands(
+            PathBuf::from("/tmp"),
+            Arc::new(|_| {
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", "echo boom >&2; exit 7"]);
                 cmd
             }),
-            split_cmd: Arc::new(|_| unreachable!()),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| unreachable!()),
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     fn seeded_db_with_set_list(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
@@ -232,12 +216,12 @@ mod tests {
         std::fs::create_dir_all(&cd).unwrap();
         std::fs::write(cd.join("Test Album.mp4"), b"video").unwrap();
 
-        let config = JobConfig {
-            working_dir: tmp.path().to_path_buf(),
-            download_cmd: Arc::new(|_| Command::new("true")),
+        let config = JobConfig::from_commands(
+            tmp.path().to_path_buf(),
+            Arc::new(|_| Command::new("true")),
             // Real command (no mock): the "splitter" creates the per-song
             // files the rescan expects.
-            split_cmd: Arc::new(|job: &crate::jobs::SplitJob| {
+            Arc::new(|job: &crate::jobs::SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(format!(
                     "touch '{0}/Song A.m4a' '{0}/Song B.m4a'",
@@ -245,8 +229,8 @@ mod tests {
                 ));
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        };
+            Arc::new(|_| Command::new("true")),
+        );
 
         let registry = Arc::new(JobRegistry::new());
         let download_key = JobKey {
@@ -306,16 +290,16 @@ mod tests {
     async fn duplicate_start_returns_already_running() {
         let db = seeded_db();
         let registry = Arc::new(JobRegistry::new());
-        let config = JobConfig {
-            working_dir: PathBuf::from("/tmp"),
-            download_cmd: Arc::new(|_| {
+        let config = JobConfig::from_commands(
+            PathBuf::from("/tmp"),
+            Arc::new(|_| {
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", "sleep 10"]);
                 cmd
             }),
-            split_cmd: Arc::new(|_| unreachable!()),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        };
+            Arc::new(|_| unreachable!()),
+            Arc::new(|_| Command::new("true")),
+        );
         let r1 = start_download(db.clone(), registry.clone(), config.clone(), 1)
             .await
             .unwrap();
