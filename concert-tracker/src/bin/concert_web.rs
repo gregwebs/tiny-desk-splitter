@@ -6,6 +6,8 @@ use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
 use concert_tracker::jobs::{check_dependencies, default_splitter_bin, JobConfig, JobRegistry};
+#[cfg(feature = "test-control")]
+use concert_tracker::test_control::job_driver::{JobDriver, TestControlJobRunner};
 use concert_tracker::web::{router_with_opts, AppState, RouterOpts};
 
 #[derive(Parser)]
@@ -139,19 +141,47 @@ async fn main() -> Result<()> {
     let workdir = cli.workdir;
     let scrape_queue =
         concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone());
+
+    // The Job Driver only replaces the production runner when the Test
+    // Control API is actually going to be started (feature compiled in AND
+    // --test-control-port passed) — a test-control build run without that
+    // flag behaves exactly like a production build. See
+    // docs/change/2026-07-15-job-driver-plan.md.
+    #[cfg(feature = "test-control")]
+    let (jobs, job_driver): (JobConfig, Option<Arc<JobDriver>>) = match cli.test_control_port {
+        Some(_) => {
+            let driver = Arc::new(JobDriver::new());
+            let jobs = JobConfig::with_runner(
+                workdir.clone(),
+                Arc::new(TestControlJobRunner::new(driver.clone())),
+            );
+            (jobs, Some(driver))
+        }
+        None => (
+            JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone()),
+            None,
+        ),
+    };
+    #[cfg(not(feature = "test-control"))]
+    let jobs = JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone());
+
     let state = AppState {
         db,
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::production(workdir, splitter_bin, cli.open_cmd),
+        jobs,
         scrape_queue,
     };
 
     // Bound to a top-level `main` local (not `_ = ...`) so the handle outlives
     // this statement: dropping a jsonrpsee `ServerHandle` stops that server.
     #[cfg(feature = "test-control")]
-    let _test_control_handle = match cli.test_control_port {
-        Some(port) => {
-            let (handle, bound) = concert_tracker::test_control::start(state.clone(), port).await?;
+    let _test_control_handle = match job_driver {
+        Some(driver) => {
+            let port = cli
+                .test_control_port
+                .expect("job_driver is only built when test_control_port is Some");
+            let (handle, bound) =
+                concert_tracker::test_control::start(state.clone(), driver, port).await?;
             println!("Test control listening on http://{}", bound);
             Some(handle)
         }

@@ -1619,7 +1619,7 @@ pub async fn watch(
         let conn = state.db.lock().unwrap();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, None);
     }
-    match state.jobs.open_media(&path).await {
+    match state.jobs.open_media(id, &path).await {
         OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
         OpenMediaOutcome::Failed { message } => {
             tracing::warn!("watch: opener failed for concert {}: {}", id, message);
@@ -1654,7 +1654,7 @@ pub async fn watch_track(
         let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
         crate::events::record_now(&conn, id, crate::events::Event::Watch, Some(&json));
     }
-    match state.jobs.open_media(&path).await {
+    match state.jobs.open_media(id, &path).await {
         OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
         OpenMediaOutcome::Failed { message } => {
             tracing::warn!("watch_track: opener failed for concert {}: {}", id, message);

@@ -41,6 +41,13 @@ enum AdapterRoute {
     Reset,
     Seed(String),
     Assert(String),
+    /// Job Driver control actions (`job_set_plan`, `job_release`) — an
+    /// imperative action a Hurl scenario issues at a specific point in its
+    /// timeline, distinct from `Seed` (arranging fixture data up front) and
+    /// `Assert` (a pass/fail check). Uses the same flat-passthrough param
+    /// translation as `Assert`, not `Seed`'s request-object wrapping — see
+    /// docs/change/2026-07-15-job-driver-plan.md.
+    Job(String),
 }
 
 impl AdapterRoute {
@@ -49,6 +56,7 @@ impl AdapterRoute {
             AdapterRoute::Reset => "test.reset".to_string(),
             AdapterRoute::Seed(name) => format!("test.seed_{name}"),
             AdapterRoute::Assert(name) => format!("test.assert_{name}"),
+            AdapterRoute::Job(name) => format!("test.job_{name}"),
         }
     }
 }
@@ -77,6 +85,9 @@ fn route_for(method: &http::Method, path: &str) -> Option<AdapterRoute> {
         }
         (Some("test"), Some("assert"), Some(name), None) if !name.is_empty() => {
             Some(AdapterRoute::Assert(name.to_string()))
+        }
+        (Some("test"), Some("job"), Some(name), None) if !name.is_empty() => {
+            Some(AdapterRoute::Job(name.to_string()))
         }
         _ => None,
     }
@@ -108,7 +119,7 @@ fn translate(route: &AdapterRoute, body: &[u8]) -> Result<String, ()> {
     let omit_params = matches!(route, AdapterRoute::Reset) && body_params == json!({});
     let params = match route {
         AdapterRoute::Seed(_) => json!({ "params": body_params }),
-        AdapterRoute::Reset | AdapterRoute::Assert(_) => body_params,
+        AdapterRoute::Reset | AdapterRoute::Assert(_) | AdapterRoute::Job(_) => body_params,
     };
 
     let mut envelope = serde_json::Map::new();
@@ -245,6 +256,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_control::job_driver::JobDriver;
     use crate::test_control::{test_state, TestControlServer};
     use http::{Method, StatusCode};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -253,7 +265,9 @@ mod tests {
     fn test_methods() -> Methods {
         let conn = db_in_memory();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        TestControlServer::new(state).rpc_module().into()
+        TestControlServer::new(state, Arc::new(JobDriver::new()))
+            .rpc_module()
+            .into()
     }
 
     fn db_in_memory() -> rusqlite::Connection {
@@ -288,6 +302,14 @@ mod tests {
         assert_eq!(
             route_for(&Method::POST, "/test/assert/concert_state"),
             Some(AdapterRoute::Assert("concert_state".to_string()))
+        );
+    }
+
+    #[test]
+    fn job_route_maps_to_test_job_name() {
+        assert_eq!(
+            route_for(&Method::POST, "/test/job/set_plan"),
+            Some(AdapterRoute::Job("set_plan".to_string()))
         );
     }
 
@@ -382,6 +404,21 @@ mod tests {
         let value: Value = serde_json::from_str(&envelope).unwrap();
         assert_eq!(value["method"], "test.assert_concert_state");
         assert_eq!(value["params"], json!({"id": 1, "downloaded": true}));
+    }
+
+    #[test]
+    fn job_route_preserves_params_flat_like_assert() {
+        let envelope = translate(
+            &AdapterRoute::Job("set_plan".to_string()),
+            br#"{"concert_id":42,"download":"block"}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(value["method"], "test.job_set_plan");
+        assert_eq!(
+            value["params"],
+            json!({"concert_id": 42, "download": "block"})
+        );
     }
 
     // --- dispatch: reaches the real Test Control methods in-process ---

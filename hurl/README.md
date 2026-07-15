@@ -200,6 +200,61 @@ explicit `null` for identity fields.
 `false` default, but `"downloaded": null` is invalid params, the same as
 sending any other non-boolean value for them would be.
 
+## Job Driver
+
+`hurl/job_chain.hurl` drives download/split/opener behavior deterministically
+through the **Job Driver** instead of injecting fake shell commands. See
+[`docs/change/2026-07-15-job-driver-plan.md`](../docs/change/2026-07-15-job-driver-plan.md)
+for the full design. A test-control build only uses the Job Driver when
+`--test-control-port` is actually passed — running `concert-web --features
+test-control` without that flag behaves exactly like a production build.
+
+Three adapter routes, all under `/test/job/{name}` → `test.job_{name}` (flat
+params, same passthrough as `/test/assert/{name}`, not `/test/seed/{name}`'s
+request-object wrapping):
+
+- **`/test/job/set_plan`** — `{"concert_id": <id or omitted>, "download":
+  "succeed"|"fail"|"block", "split": ..., "open": ...}`. Omitting
+  `concert_id` sets the process-wide default plan (starts as all-`succeed`);
+  passing it sets a per-concert override, materialized from the current
+  default the first time it's set for that concert and updated independently
+  of later default changes. Only present fields change. **Prefer per-concert
+  overrides over touching the default** — every `.hurl` file in this
+  directory shares one `concert-web` process for the whole `just test-hurl`
+  run (see "Running" above), so a case that changes the default plan and
+  doesn't restore it before the file ends can affect later files/cases.
+  `open` never accepts `"block"` — see below.
+- **`/test/job/release`** — `{"concert_id": <id>, "kind":
+  "download"|"split"|"open", "outcome": "succeed"|"fail"}`. Releases a step
+  currently blocked at `(concert_id, kind)`. **Errors if the step hasn't
+  registered as blocked yet** — poll `test.assert_job_observation` for
+  `blocked=1` first (Hurl's `[Options] retry: N retry-interval: Xms` on the
+  assert request), the same poll-then-act idiom used throughout this
+  directory for async completion. Racing a release against an unregistered
+  block is a caller bug, not a race the Job Driver smooths over.
+- **`/test/assert/job_observation`** — `{"concert_id": <id>, "kind": ...,
+  "started": <n>, "completed": <n>, "failed": <n>, "blocked": <n>,
+  "released": <n>}`. Same shape as `test.assert_concert_state`: only present
+  fields are checked, every mismatch is reported together, and a call with
+  every count field omitted is rejected. Use it for concurrency/dependency-edge
+  facts with no public HTTP surface (e.g. "exactly one split ran," "no split
+  ran at all").
+
+**`open` cannot be blocked.** `watch`/`watch_track` await the opener
+synchronously inline in the HTTP handler (unlike download/split, which run in
+a detached spawned task and return `200` immediately) — a blocked `open`
+would hang the response itself, and Hurl executes requests strictly
+sequentially within a file, so nothing could ever call `job_release` while an
+earlier request is still awaiting its response. `job_set_plan`/`job_release`
+reject `open = "block"` outright.
+
+A `Succeed` outcome writes the same sentinel files (source video, `.m4a`
+track files via `sanitize_filename`, `timestamps.json`, interlude files when
+timestamp gaps require them) the real download/split subprocess would have
+created, since the existing job lifecycle code reads the filesystem
+immediately after a step succeeds. Sentinels are tiny non-media bytes — same
+convention as `test.seed_media_concert`'s dummy files.
+
 ## Three ways to check something, and when to use each
 
 The spec's "Decisions" section covers this in depth; the short version:
@@ -213,15 +268,19 @@ The spec's "Decisions" section covers this in depth; the short version:
    a stable handle (an id, or public fields) to use in later steps. Never
    read a raw DB row or assume an id — capture it from the Seed Result with
    `[Captures]`, as every case in `hurl/listing_status.hurl` does.
-3. **Assertion API methods** (`test.assert_concert_state` today, reached via
-   its adapter route `/test/assert/concert_state`) — only when a
-   postcondition is internal-only and no public route exposes it. No case in
-   `hurl/listing_status.hurl` needs this — every postcondition the first
-   slice checks (a listing appears, the ignored badge/filter, the
-   scraped-status fragment) is already public.
+3. **Assertion API methods** (`test.assert_concert_state`,
+   `test.assert_job_observation`, reached via their `/test/assert/{name}`
+   adapter route) — only when a postcondition is internal-only and no public
+   route exposes it. No case in `hurl/listing_status.hurl` needs this — every
+   postcondition the first slice checks (a listing appears, the ignored
+   badge/filter, the scraped-status fragment) is already public.
    [`hurl/test_control_adapter.hurl`](test_control_adapter.hurl) does use it,
    as adapter-route coverage. See its doc comment in
    `concert-tracker/src/test_control.rs`.
+4. **Job Driver control actions** (`test.job_set_plan`, `test.job_release`,
+   reached via `/test/job/{name}`) — imperative, not a check: configuring
+   deterministic download/split/opener behavior and releasing a blocked step.
+   See "Job Driver" above.
 
 ## Verification commands for future agents
 
@@ -229,7 +288,7 @@ The spec's "Decisions" section covers this in depth; the short version:
 cargo check -p concert-tracker --features test-control
 cargo check -p concert-tracker
 cargo build --bin concert-web --features test-control
-node scripts/hurl-test.js --glob 'hurl/test_control_adapter.hurl'
+node scripts/hurl-test.js --glob 'hurl/job_chain.hurl'
 just test-hurl
 cargo nextest run -p concert-tracker --test web_integration
 just lint
@@ -244,35 +303,34 @@ cargo build --release --bin concert-web --features test-control
 
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
-After the state-only public HTTP, playlist, state-only-stragglers, and
-media-info navigation slices, `concert-tracker/tests/web_integration.rs` still
-has 30 tests. This groups
+After the state-only public HTTP, playlist, state-only-stragglers,
+media-info navigation, and Job Driver slices,
+`concert-tracker/tests/web_integration.rs` still has 19 tests. This groups
 them by *why*, matching the migration specs'
 out-of-scope lists plus a couple of pre-existing areas these slices never
 touched. It's a categorization of the shape of the remaining suite, not an
 exhaustive per-test audit; several examples are named under each bucket, but
 the buckets cover more tests than are named here.
 
-- **Job command stubbing for download/split chains** (spec: explicitly out of
-  scope). The largest group: everything that injects a fake download/split
-  command via `state_with_chain`/`JobConfig` to control success, failure, or
-  retry behavior deterministically and instantly, without a real subprocess —
-  e.g. `download_endpoint_spawns_job_and_returns_row`,
+- **Job-chain and opener tests are migrated.** The Job Driver slice added
+  `test.job_set_plan`, `test.job_release`, and `test.assert_job_observation`
+  (see "Job Driver" above) and moved the download/prepare/split chain and
+  watch-opener cases that injected fake shell commands via
+  `state_with_chain`/`state_with_opener` into `hurl/job_chain.hurl` — e.g.
+  `download_endpoint_spawns_job_and_returns_row`,
   `prepare_endpoint_runs_download_then_split_chain`,
   `download_auto_split_retries_on_split_error`,
-  `download_double_click_does_not_drop_split_edge`, and the delete cases that
-  require a stubbed job outcome or real file deletion. The Test Control API has
-  no equivalent for "run a job with an injected outcome" yet — that needs its
-  own design (a later migration slice), not a bolt-on to the seed methods.
+  `download_double_click_does_not_drop_split_edge`,
+  `watch_uses_injected_opener_and_succeeds`. See
+  [`docs/change/2026-07-15-job-driver-plan.md`](../docs/change/2026-07-15-job-driver-plan.md).
+  The delete cases and other file-heavy tests that also happen to need a job
+  outcome remain Rust-only for now — see "Filesystem/media-fixture-heavy
+  tests" below; they need Scenario Seeds (#109), not just the Job Driver.
 - **Scrape queue timing** (spec: explicitly out of scope).
   `pending_card_shows_loading_then_thumbnail` injects a stub scrape item and
   release/done channels to deterministically observe the pending → thumbnail
   transition mid-flight. No Test Control equivalent exists for controlling
   worker timing.
-- **Opener command injection** (spec: explicitly out of scope).
-  `watch_uses_injected_opener_and_succeeds`,
-  `watch_returns_500_when_opener_fails` inject a success/failure closure for
-  the "open in system player" command.
 - **Filesystem/media-fixture-heavy tests**. Watch/like with real source files,
   playback-reconstruction, and split-timestamps happy paths generate real tiny
   playable media with `ffmpeg` (`create_test_audio`) or write

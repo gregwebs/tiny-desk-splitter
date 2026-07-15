@@ -278,7 +278,11 @@ pub trait JobRunner: Send + Sync {
         log_file: Option<&'a Path>,
     ) -> JobRunFuture<'a, JobStepOutcome>;
 
-    fn open_media<'a>(&'a self, path: &'a Path) -> JobRunFuture<'a, OpenMediaOutcome>;
+    fn open_media<'a>(
+        &'a self,
+        concert_id: i64,
+        path: &'a Path,
+    ) -> JobRunFuture<'a, OpenMediaOutcome>;
 }
 
 pub type DownloadCommandFn = Arc<dyn Fn(&DownloadJob) -> Command + Send + Sync>;
@@ -342,7 +346,11 @@ impl JobRunner for CommandJobRunner {
         })
     }
 
-    fn open_media<'a>(&'a self, path: &'a Path) -> JobRunFuture<'a, OpenMediaOutcome> {
+    fn open_media<'a>(
+        &'a self,
+        _concert_id: i64,
+        path: &'a Path,
+    ) -> JobRunFuture<'a, OpenMediaOutcome> {
         Box::pin(async move {
             let mut cmd = (self.open_cmd)(path);
             match cmd.status().await {
@@ -476,8 +484,8 @@ impl JobConfig {
         self.runner.run_split(job, log_file).await
     }
 
-    pub async fn open_media(&self, path: &Path) -> OpenMediaOutcome {
-        self.runner.open_media(path).await
+    pub async fn open_media(&self, concert_id: i64, path: &Path) -> OpenMediaOutcome {
+        self.runner.open_media(concert_id, path).await
     }
 
     /// Test config: every external command is a no-op (`true`), so handlers can

@@ -13,11 +13,22 @@
 //! [`start`], which ignores the configured host), and the compile-time guard
 //! below. No single one of these is sufficient on its own.
 
+// `assert_job_observation`'s 8 arguments (self + concert_id + kind + 5
+// optional counts) are required by the `#[rpc(param_kind = map)]` flat-args
+// convention this module's other assert/job methods use (see
+// docs/change/2026-07-15-job-driver-plan.md's adapter-parameter-shape
+// correction) — grouping the counts into a struct would revert to the
+// seed-style single-struct-param wrapping the adapter doesn't apply to this
+// route. The `jsonrpsee::rpc` macro's generated code doesn't pick up a
+// per-item `#[allow(...)]` here, so this is a module-level exception rather
+// than a narrower one.
+#![allow(clippy::too_many_arguments)]
+
 #[cfg(all(feature = "test-control", not(debug_assertions)))]
 compile_error!("test-control must not be compiled into release builds");
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
@@ -33,6 +44,9 @@ use crate::db::seeds::{
 use crate::web::AppState;
 
 mod adapter;
+pub mod job_driver;
+
+use job_driver::{JobDriver, JobStepKind, StepOutcome};
 
 /// One fixture-number allocator for the process lifetime — per ADR 0003, not
 /// reset by `test.reset`, and shared across every [`TestControlServer`] clone
@@ -85,6 +99,52 @@ pub trait TestControlApi {
         downloaded: Option<bool>,
         split: Option<bool>,
     ) -> RpcResult<OkResult>;
+
+    /// Configure the Job Driver's default plan (when `concert_id` is
+    /// omitted/`null`) or a per-concert override plan (when present) for
+    /// download/split/open outcomes. Only present fields are changed; a
+    /// per-concert override materializes from the current default plan the
+    /// first time it's set for that concert, then updates independently of
+    /// later default changes. Reached via the adapter's `/test/job/set_plan`
+    /// route. `open = "block"` is rejected — see `job_driver::JobDriver`'s
+    /// docs for why.
+    #[method(name = "job_set_plan", param_kind = map)]
+    async fn job_set_plan(
+        &self,
+        concert_id: Option<i64>,
+        download: Option<StepOutcome>,
+        split: Option<StepOutcome>,
+        open: Option<StepOutcome>,
+    ) -> RpcResult<OkResult>;
+
+    /// Release a step currently blocked at `(concert_id, kind)` with the
+    /// given outcome (`"succeed"` or `"fail"` — `"block"` is invalid here).
+    /// Errors if no step is blocked there; poll `test.assert_job_observation`
+    /// for `blocked=1` first. Reached via the adapter's `/test/job/release`
+    /// route.
+    #[method(name = "job_release", param_kind = map)]
+    async fn job_release(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        outcome: StepOutcome,
+    ) -> RpcResult<OkResult>;
+
+    /// Assert Job Driver observation counts for `(concert_id, kind)`. Only
+    /// present fields are checked, mismatches are collected and reported
+    /// together, and a call with every count field omitted is rejected —
+    /// same shape as [`TestControlApi::assert_concert_state`].
+    #[method(name = "assert_job_observation", param_kind = map)]
+    async fn assert_job_observation(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        started: Option<u32>,
+        completed: Option<u32>,
+        failed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult>;
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -134,11 +194,12 @@ pub struct SeedLifecycleConcertResult {
 #[derive(Clone)]
 pub struct TestControlServer {
     state: AppState,
+    job_driver: Arc<JobDriver>,
 }
 
 impl TestControlServer {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(state: AppState, job_driver: Arc<JobDriver>) -> Self {
+        Self { state, job_driver }
     }
 
     fn rpc_module(self) -> RpcModule<Self> {
@@ -150,7 +211,10 @@ impl TestControlServer {
 impl TestControlApiServer for TestControlServer {
     async fn reset(&self) -> RpcResult<OkResult> {
         reset_test_data(&self.state)
-            .map(|()| OkResult { ok: true })
+            .map(|()| {
+                self.job_driver.reset();
+                OkResult { ok: true }
+            })
             .map_err(internal_error)
     }
 
@@ -189,6 +253,139 @@ impl TestControlApiServer for TestControlServer {
         assert_concert_state(&self.state, id, ignored, downloaded, split)
             .map(|()| OkResult { ok: true })
             .map_err(assertion_error)
+    }
+
+    async fn job_set_plan(
+        &self,
+        concert_id: Option<i64>,
+        download: Option<StepOutcome>,
+        split: Option<StepOutcome>,
+        open: Option<StepOutcome>,
+    ) -> RpcResult<OkResult> {
+        let result = match concert_id {
+            Some(id) => self.job_driver.set_concert_plan(id, download, split, open),
+            None => self.job_driver.set_default_plan(download, split, open),
+        };
+        result
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn job_release(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        outcome: StepOutcome,
+    ) -> RpcResult<OkResult> {
+        self.job_driver
+            .release(concert_id, kind, outcome)
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn assert_job_observation(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        started: Option<u32>,
+        completed: Option<u32>,
+        failed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult> {
+        assert_job_observation(
+            &self.job_driver,
+            concert_id,
+            kind,
+            started,
+            completed,
+            failed,
+            blocked,
+            released,
+        )
+        .map(|()| OkResult { ok: true })
+        .map_err(assertion_error)
+    }
+}
+
+/// Checks each present expectation against the Job Driver's observed counts
+/// for `(concert_id, kind)`, returning every mismatch in one message — same
+/// "check only present fields, report everything, reject a vacuous call"
+/// shape as [`assert_concert_state`].
+#[allow(clippy::too_many_arguments)]
+fn assert_job_observation(
+    job_driver: &JobDriver,
+    concert_id: i64,
+    kind: JobStepKind,
+    started: Option<u32>,
+    completed: Option<u32>,
+    failed: Option<u32>,
+    blocked: Option<u32>,
+    released: Option<u32>,
+) -> anyhow::Result<()> {
+    if started.is_none()
+        && completed.is_none()
+        && failed.is_none()
+        && blocked.is_none()
+        && released.is_none()
+    {
+        anyhow::bail!(
+            "assert_job_observation called for concert {concert_id} {kind:?} with no \
+             expectations (started/completed/failed/blocked/released all omitted or null) \
+             — this would silently pass without checking anything; assert at least one count"
+        );
+    }
+
+    let actual = job_driver.observation(concert_id, kind);
+    let mut mismatches = Vec::new();
+    if let Some(expected) = started {
+        if actual.started != expected {
+            mismatches.push(format!(
+                "started: expected {expected}, got {}",
+                actual.started
+            ));
+        }
+    }
+    if let Some(expected) = completed {
+        if actual.completed != expected {
+            mismatches.push(format!(
+                "completed: expected {expected}, got {}",
+                actual.completed
+            ));
+        }
+    }
+    if let Some(expected) = failed {
+        if actual.failed != expected {
+            mismatches.push(format!(
+                "failed: expected {expected}, got {}",
+                actual.failed
+            ));
+        }
+    }
+    if let Some(expected) = blocked {
+        if actual.blocked != expected {
+            mismatches.push(format!(
+                "blocked: expected {expected}, got {}",
+                actual.blocked
+            ));
+        }
+    }
+    if let Some(expected) = released {
+        if actual.released != expected {
+            mismatches.push(format!(
+                "released: expected {expected}, got {}",
+                actual.released
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} {kind:?} observation mismatch: {}",
+            mismatches.join("; ")
+        );
     }
 }
 
@@ -412,9 +609,13 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
 /// server so `POST /test/...` adapter routes and the raw JSON-RPC root
 /// endpoint share one listener and port (see
 /// docs/adr/0004-test-control-http-adapter.md).
-pub async fn start(state: AppState, port: u16) -> anyhow::Result<(ServerHandle, SocketAddr)> {
+pub async fn start(
+    state: AppState,
+    job_driver: Arc<JobDriver>,
+    port: u16,
+) -> anyhow::Result<(ServerHandle, SocketAddr)> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let module = TestControlServer::new(state).rpc_module();
+    let module = TestControlServer::new(state, job_driver).rpc_module();
     let methods: jsonrpsee::server::Methods = module.clone().into();
     let server = ServerBuilder::new()
         .set_http_middleware(
@@ -445,6 +646,14 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
         ),
         jobs: JobConfig::test(workdir),
     }
+}
+
+/// Shared by this module's own tests and by [`adapter`]'s tests, same
+/// visibility rationale as [`test_state`]. A fresh, never-configured driver —
+/// tests that need specific plans/observations set them up explicitly.
+#[cfg(test)]
+fn test_job_driver() -> Arc<JobDriver> {
+    Arc::new(JobDriver::new())
 }
 
 #[cfg(test)]
@@ -505,7 +714,7 @@ mod tests {
     async fn seed_methods_persist_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver());
 
         let result = server.seed_listing(listing("{}")).await.unwrap();
         assert!(result.id > 0);
@@ -517,7 +726,7 @@ mod tests {
     async fn seed_lifecycle_concert_via_rpc_maps_persisted_state_into_result_booleans() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver());
 
         let inert = server
             .seed_lifecycle_concert(lifecycle("{}"))
@@ -545,7 +754,7 @@ mod tests {
     async fn seed_lifecycle_concert_tracks_present_persists_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver());
 
         let result = server
             .seed_lifecycle_concert(lifecycle(r#"{"tracks_present": [true, false]}"#))
@@ -562,7 +771,7 @@ mod tests {
         let conn = db::connection::open_in_memory().unwrap();
         let workdir = tempfile::tempdir().unwrap();
         let state = test_state(conn, workdir.path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver());
 
         let result = server
             .seed_media_concert(media(
@@ -591,7 +800,7 @@ mod tests {
         // and not reset by `test.reset`.
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver());
 
         let listing_result = server.seed_listing(listing("{}")).await.unwrap();
         reset_test_data(&server.state).unwrap();
@@ -619,7 +828,7 @@ mod tests {
     async fn explicit_flat_map_seed_params_override_generated_defaults() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver());
 
         let listing_result = server
             .seed_listing(listing(
@@ -676,7 +885,9 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_accepts_nested_request_object_params() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+        let methods: jsonrpsee::server::Methods = TestControlServer::new(state, test_job_driver())
+            .rpc_module()
+            .into();
 
         let body = raw_json_call(
             &methods,
@@ -706,7 +917,9 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_rejects_old_flat_params_shape() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+        let methods: jsonrpsee::server::Methods = TestControlServer::new(state, test_job_driver())
+            .rpc_module()
+            .into();
 
         let body = raw_json_call(
             &methods,
@@ -729,7 +942,7 @@ mod tests {
     async fn explicit_null_preserves_nullable_domain_absence_through_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver());
 
         let listing_result = server
             .seed_listing(listing(r#"{"concert_date": null, "teaser": null}"#))
@@ -763,7 +976,7 @@ mod tests {
     async fn explicit_null_for_identity_fields_is_accepted_via_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver());
 
         let parsed = params(r#"{"source_url": null, "artist": null}"#)
             .parse::<SeedLifecycleConcert>()

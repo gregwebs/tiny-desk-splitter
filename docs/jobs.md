@@ -27,8 +27,20 @@ The production runner still builds the existing subprocess commands:
 
 The command runner converts subprocess success, non-zero exit, and spawn
 failure into typed outcomes before the lifecycle code handles success or
-failure. This keeps production behavior unchanged while allowing test-control
-runs to provide a deterministic runner in a later migration slice.
+failure. This keeps production behavior unchanged.
+
+## Test-control runner
+
+`concert-tracker/src/test_control/job_driver.rs`'s `TestControlJobRunner`
+implements the same `JobRunner` trait with configurable per-step outcomes
+(`succeed`/`fail`/`block`) instead of real subprocesses. `concert-web`
+switches to it only when built with `--features test-control` *and* started
+with `--test-control-port` — otherwise (including a test-control build run
+without that flag) it uses `JobConfig::production` unchanged. See
+[`hurl/README.md`](../hurl/README.md)'s "Job Driver" section for the Test
+Control API this runner is configured through, and
+[`docs/change/2026-07-15-job-driver-plan.md`](change/2026-07-15-job-driver-plan.md)
+for the design.
 
 See
 [`docs/adr/0005-typed-job-runner-for-test-control.md`](adr/0005-typed-job-runner-for-test-control.md)
