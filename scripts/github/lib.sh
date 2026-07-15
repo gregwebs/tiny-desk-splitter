@@ -92,3 +92,23 @@ gh_app_api_get() {
   fi
   printf '%s' "$body"
 }
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    --help|-h)
+      cat <<EOF
+usage: $0
+
+Shared helper library for gh-app scripts. Source this file from another script.
+EOF
+      exit 0
+      ;;
+    "")
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+fi
