@@ -12,6 +12,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/gh-app-token.sh"
 
 op="${1:-}"
+if [ "$op" = "--help" ] || [ "$op" = "-h" ]; then
+  cat <<EOF
+usage: $0 get
+
+Git credential helper that returns a fresh GitHub App installation token.
+Configure it as a git credential helper; git calls it with get, store, or erase.
+EOF
+  exit 0
+fi
+
 # git also calls `store` and `erase`; tokens are minted fresh each time, so
 # there's nothing to persist or clean up.
 if [ "$op" != "get" ]; then

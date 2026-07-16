@@ -16,9 +16,14 @@ source "$SCRIPT_DIR/lib.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/gh-app-token.sh"
 
+usage() {
+  echo "usage: $0 --parent NUMBER --child NUMBER [--repo OWNER/REPO]"
+}
+
 repo="" parent="" child=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help|-h) usage; exit 0 ;;
     --repo) repo="$2"; shift 2 ;;
     --parent) parent="$2"; shift 2 ;;
     --child) child="$2"; shift 2 ;;
@@ -28,7 +33,7 @@ done
 
 [ -n "$repo" ] || repo=$(gh_app_default_repo) || { echo "--repo required (not in a github.com git repo)" >&2; exit 1; }
 if [ -z "$parent" ] || [ -z "$child" ]; then
-  echo "usage: $0 --parent NUMBER --child NUMBER [--repo OWNER/REPO]" >&2
+  usage >&2
   exit 1
 fi
 
