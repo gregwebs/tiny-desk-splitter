@@ -1,6 +1,6 @@
 # Detail, notes, and prepare endpoint state-only cases.
 
-POST {{test_control_url}}/test/seed/listing
+POST {{test_control_url}}/test/seed/scraped_concert
 Content-Type: application/json
 {}
 HTTP 200
