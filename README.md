@@ -16,13 +16,14 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, linting, and
 testing.
 
 See [CODING_STANDARDS.md](CODING_STANDARDS.md) for how code should be written and reviewed.
-testing.
 
-See documentation in ./docs
-* adr: architectural decision records 
-* changes: documentation of recent changes
-* [jobs](docs/jobs.md): backend job execution and runner architecture
-* *: architectural and other useful documentation
+Repository documentation:
+
+- [Architecture decisions](docs/adr/)
+- [Change Records](docs/change/)
+- [Job execution](docs/jobs.md): backend job execution and runner architecture
+- [Hurl tests](hurl/README.md): black-box HTTP tests and Test Control API
+- [Data model](docs/data.md)
 
 ### Workspace crates
 
