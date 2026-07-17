@@ -2,8 +2,8 @@
 
 ## Spawning Subagents
 
-When possible, spawn subagents using /codex:rescue rather than a normal claude subagent spawn.
-This includes for the Agent Review documented below.
+For any read only tasks, spawn subagents using /codex:rescue rather than a normal claude subagent spawn.
+The Agent Review is documented below, but agents analyzing the codebase should also use this.
 
 ## Addendum: Agent Review
 
