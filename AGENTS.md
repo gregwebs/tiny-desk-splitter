@@ -1,6 +1,8 @@
 * README.md for an overview of the project
-* CONTRIBUTING.md for development
+* CONTRIBUTING.md for development instructions
 * CODING_STANDARDS.md for how to write code
+
+# Tool Usage
 
 ## Curl
 
@@ -11,7 +13,7 @@
 For write access to the repo, use the github-app skill in .claude/skills/github-app/SKILL.md
 For read access, the repo is public, but there are also github-app convenience scripts.
 
-## General workflow
+# General workflow
 
 - update the local main to the latest from origin and branch from that.
 - Create an **Implementation Plan**
@@ -29,6 +31,7 @@ For read access, the repo is public, but there are also github-app convenience s
 
 Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
 Initial reviews should be adversarial. After an initial adversarial review, follow up reviews should not be adversarial.
+Follow CODING_STANDARDS.md for how code should be written.
 
 ## Documentation
 
@@ -68,6 +71,7 @@ Perform an Agent Review before Verification and a followup review if any changes
 Verify manually that the changes work as expected in a live application.
 Test edge cases and failure modes in addition to the happy path.
 Look at the **Implementation Plan** for verification tests to peform.
+Follow CONTRIBUTING.md for instructions on how to run the program for verification.
 
 Start up a server on a separate port with a separate test database `--db` and a separate `--workdir` directory for saving concert information
 When there are backend changes, first test the API.
@@ -111,6 +115,7 @@ When deviating from the plan, ask for approval.
 Use /tdd to write tests first.
 test, compile/check, and lint the code frequently.
 Follow CODING_STANDARDS.md for how to write the code.
+Follow CONTRIBUTING.md for instructions on how to build and test.
 
 # Workflow entry points
 
