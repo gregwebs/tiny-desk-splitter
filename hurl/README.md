@@ -103,6 +103,8 @@ The adapter translates that into a single in-process JSON-RPC call (id
 | `/test/reset` | `test.reset` |
 | `/test/seed/{name}` | `test.seed_{name}` |
 | `/test/assert/{name}` | `test.assert_{name}` |
+| `/test/job/{name}` | `test.job_{name}` |
+| `/test/scrape/{name}` | `test.scrape_{name}` |
 
 Raw JSON-RPC (the full `jsonrpc`/`id`/`method`/`params` envelope, posted to
 `{{test_control_url}}` with no path suffix) still works — it's the
@@ -288,6 +290,60 @@ created, since the existing job lifecycle code reads the filesystem
 immediately after a step succeeds. Sentinels are tiny non-media bytes — same
 convention as `test.seed_media_concert`'s dummy files.
 
+## Scrape Driver
+
+`hurl/scrape_pending.hurl` drives the background metadata-scrape queue's
+timing deterministically through the **Scrape Driver**, instead of injecting
+a stub scrape item in Rust. See
+[`docs/change/2026-07-17-scrape-driver-hurl-migration.md`](../docs/change/2026-07-17-scrape-driver-hurl-migration.md)
+for the full design. The scrape queue is **not** a download/split/open job —
+it has its own in-memory `pending` set and injectable per-item function
+(`jobs::scrape_queue::ScrapeItemFn`), not a `JobRunner` — so the Scrape
+Driver is a separate control surface from the Job Driver above, not another
+`JobStepKind`. Same activation rule as the Job Driver: a test-control build
+only uses it when `--test-control-port` is actually passed.
+
+Three adapter routes under `/test/scrape/{name}` → `test.scrape_{name}` (flat
+params, same passthrough as `/test/job/{name}`), plus one assertion route:
+
+- **`/test/scrape/set_plan`** — `{"concert_id": <id>, "scrape":
+  "succeed"|"block"}`. **Per-concert only — there is no process-wide default
+  plan.** A concert with no plan set always scrape-succeeds deterministically,
+  so (unlike the Job Driver's default plan) there is no "restore it before the
+  file ends" discipline to follow here.
+- **`/test/scrape/enqueue`** — `{"concert_id": <id>}` → `{"ok": true,
+  "enqueued": <bool>}`. Looks up the concert's `source_url` and queues it on
+  the app's real `ScrapeQueue` (the same queue `/sync/:year/:month` uses).
+  `enqueued: false` means the concert was already queued/in-flight — a normal
+  dedupe no-op, not an error.
+- **`/test/scrape/release`** — `{"concert_id": <id>}`. Releases a scrape
+  currently blocked for `concert_id`. **Errors if it hasn't registered as
+  blocked yet** — poll `test.assert_scrape_observation` for `blocked=1` first,
+  the same poll-then-act idiom the Job Driver uses. Unlike
+  `/test/job/release`, there's no `outcome` to pass: a release always resolves
+  to the deterministic success fixture below.
+- **`/test/assert/scrape_observation`** — `{"concert_id": <id>, "started":
+  <n>, "completed": <n>, "blocked": <n>, "released": <n>}`. Same shape as
+  `test.assert_job_observation`: only present fields are checked, every
+  mismatch is reported together, and a call with every count field omitted is
+  rejected.
+
+A released (or unblocked-default) scrape writes deterministic fixtures, not a
+network fetch: `update_metadata` with artist `"Scrape Driver Artist {id}"` and
+album `"Scrape Driver Album {id}"` (which sets `metadata_scraped_at`, flipping
+the card from loading to a thumbnail), plus a **real, tiny decodable JPEG**
+(not a text sentinel) written to the listing thumbnail path. The card's
+`<img onerror="this.style.display='none'">` would silently hide a
+non-image file, so `hurl/scrape_pending.hurl` asserts the JPEG magic bytes on
+`GET /thumbnails/...`, not just a `200`.
+
+`test.reset` drops any blocked scrape's release channel, waking it to return
+without writing fixtures — but, like the Job Driver, this is best-effort, not
+a queue quiescence boundary (a request already queued but not yet picked up
+still runs after `reset` returns). No `.hurl` file calls `/test/reset`
+mid-run regardless (see "Running" above), so this has not needed a stronger
+guarantee in practice.
+
 ## Three ways to check something, and when to use each
 
 The spec's "Decisions" section covers this in depth; the short version:
@@ -327,6 +383,10 @@ The spec's "Decisions" section covers this in depth; the short version:
    reached via `/test/job/{name}`) — imperative, not a check: configuring
    deterministic download/split/opener behavior and releasing a blocked step.
    See "Job Driver" above.
+5. **Scrape Driver control actions** (`test.scrape_set_plan`,
+   `test.scrape_enqueue`, `test.scrape_release`, reached via
+   `/test/scrape/{name}`) — same imperative shape as the Job Driver, for the
+   background metadata-scrape queue specifically. See "Scrape Driver" above.
 
 ## Verification commands for future agents
 
@@ -338,6 +398,7 @@ node scripts/hurl-test.js --glob 'hurl/job_chain.hurl'
 node scripts/hurl-test.js --glob 'hurl/media_files_lifecycle.hurl'
 node scripts/hurl-test.js --glob 'hurl/split_timestamps_flow.hurl'
 node scripts/hurl-test.js --glob 'hurl/concert_playback.hurl'
+node scripts/hurl-test.js --glob 'hurl/scrape_pending.hurl'
 just test-hurl
 cargo nextest run -p concert-tracker --test web_integration
 just lint
@@ -353,16 +414,10 @@ cargo build --release --bin concert-web --features test-control
 ## Why the remaining `web_integration.rs` tests are still Rust-only
 
 After the state-only public HTTP, playlist, state-only-stragglers,
-media-info navigation, Job Driver, and Scenario Seeds slices,
-`concert-tracker/tests/web_integration.rs` has 4 tests left, and all 4 are
+media-info navigation, Job Driver, Scenario Seeds, and Scrape Driver slices,
+`concert-tracker/tests/web_integration.rs` has 3 tests left, and all 3 are
 intentionally staying Rust-only:
 
-- **`pending_card_shows_loading_then_thumbnail`** — scrape queue timing (spec:
-  explicitly out of scope). It injects a stub scrape item and release/done
-  channels to deterministically observe the pending → thumbnail transition
-  mid-flight. No Test Control equivalent exists for controlling worker
-  timing; this is the last remaining item on the parent spec's slice list
-  (#110).
 - **`detail_page_auto_scrape_failure_still_renders`** — exercises a real
   outbound scrape failure (a connection-refused request) and proxy
   disabling; deliberately kept as the one real failing-scrape regression
@@ -434,6 +489,12 @@ first:
   into `hurl/media_files_lifecycle.hurl`, `hurl/split_timestamps_flow.hurl`,
   and `hurl/concert_playback.hurl`. See
   [`docs/change/2026-07-16-scenario-seeds-hurl-migration.md`](../docs/change/2026-07-16-scenario-seeds-hurl-migration.md).
+- **Scrape queue timing is migrated.** The Scrape Driver slice added
+  `test.scrape_set_plan`, `test.scrape_enqueue`, `test.scrape_release`, and
+  `test.assert_scrape_observation` (see "Scrape Driver" above) and moved
+  `pending_card_shows_loading_then_thumbnail` — the last item on the parent
+  spec's slice list (#110) — into `hurl/scrape_pending.hurl`. See
+  [`docs/change/2026-07-17-scrape-driver-hurl-migration.md`](../docs/change/2026-07-17-scrape-driver-hurl-migration.md).
 
 ## CI
 
