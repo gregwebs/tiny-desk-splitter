@@ -23,6 +23,7 @@ import {
   SeekAudio,
   ShowVideoPanel,
   SyncLikeButtonsExternal,
+  ToggleAudio,
   ToggleLikeRequest,
 } from "../command";
 import { defaultPlayOpts, type Model } from "../model";
@@ -62,7 +63,7 @@ export const handleHostCommand =
           [FetchTrackInfo({ concertId, trackIdx, opts: defaultPlayOpts })],
         ],
 
-        TogglePause: () => (model.isPlaying ? [model, [PauseAudio()]] : [model, [ResumeAudio()]]),
+        TogglePause: () => [model, [ToggleAudio()]],
         Seek: ({ seconds }) => [model, [SeekAudio({ seconds })]],
 
         SkipToNext: () => {
