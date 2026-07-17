@@ -11,7 +11,7 @@
 # artifacts (cargo build stays Node-free via include_str!) — just not ones a
 # human is expected to read. See docs/change/2026-06-19-foldkit-eval.md.
 #
-# Called by both CI (.github/workflows/ci.yml) and `just ts-verify`.
+# Called by CI (.github/workflows/ci.yml) and the root `just lint` recipe.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

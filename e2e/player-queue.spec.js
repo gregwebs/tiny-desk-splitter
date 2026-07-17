@@ -664,6 +664,46 @@ test.describe("Player keyboard shortcuts", () => {
   });
 });
 
+test.describe("Player host pause command", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.goto("/");
+  });
+
+  test("two rapid host toggles pause then resume from live media state", async ({
+    page,
+  }) => {
+    await playTrack(page, AUDIO, 0);
+
+    await page.evaluate(() => {
+      const audio = document.getElementById("player-audio");
+      audio.loop = true;
+      const pause = audio.pause.bind(audio);
+      const play = audio.play.bind(audio);
+      window.__toggleTransitions = [];
+      audio.pause = () => {
+        window.__toggleTransitions.push("pause");
+        pause();
+      };
+      audio.play = () => {
+        window.__toggleTransitions.push("play");
+        return play();
+      };
+
+      window.Player.togglePause();
+      window.Player.togglePause();
+    });
+
+    await expect
+      .poll(() => page.evaluate(() => window.__toggleTransitions))
+      .toEqual(["pause", "play"]);
+    await expect
+      .poll(() =>
+        page.evaluate(() => document.getElementById("player-audio").paused)
+      )
+      .toBe(false);
+  });
+});
+
 test.describe("Inline video", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
