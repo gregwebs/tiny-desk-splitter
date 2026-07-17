@@ -8,6 +8,13 @@
 
 /usr/bin/curl may have TLS issues. Use /opt/homebrew/opt/curl/bin/curl
 
+## Temporary file handling for Codex
+
+- `/private/tmp` is an approved writable location.
+- Create throwaway test harnesses and diagnostic artifacts there without asking permission.
+  Do not request escalation merely to read or write `/private/tmp`.
+- Prefer `mktemp -d /private/tmp/tiny-desk-splitter.XXXXXX` for isolated temporary work.
+
 ## Github auth
 
 For write access to the repo, use the github-app skill in .claude/skills/github-app/SKILL.md
