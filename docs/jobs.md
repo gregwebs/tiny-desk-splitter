@@ -38,12 +38,26 @@ switches to it only when built with `--features test-control` *and* started
 with `--test-control-port` — otherwise (including a test-control build run
 without that flag) it uses `JobConfig::production` unchanged. See
 [`hurl/README.md`](../hurl/README.md)'s "Job Driver" section for the Test
-Control API this runner is configured through, and
-[`docs/change/2026-07-15-job-driver-plan.md`](change/2026-07-15-job-driver-plan.md)
-for the design.
+Control API this runner is configured through.
 
 See
 [`docs/adr/0005-typed-job-runner-for-test-control.md`](adr/0005-typed-job-runner-for-test-control.md)
 for the architectural decision and
 [`docs/change/2026-07-14-remaining-web-integration-hurl-migration-spec.md`](change/2026-07-14-remaining-web-integration-hurl-migration-spec.md)
 for the wider Hurl migration plan.
+
+## Scrape runner boundary
+
+The background metadata-scrape queue is separate from `JobRunner`. It owns a
+pending set and calls an injected `jobs::scrape_queue::ScrapeItemFn` for each
+queued concert; download, split, and opener steps instead use typed
+`JobRunner` methods and `JobRegistry` lifecycle coordination. Keeping the
+boundaries separate prevents scrape-specific queue semantics from becoming a
+fake download/split step.
+
+Production uses the normal network-backed scrape item. When Test Control is
+both compiled and enabled with `--test-control-port`, `concert-web` injects
+`test_control::scrape_driver::ScrapeDriver`, which supports deterministic
+per-concert success/block plans and observations while exercising the same
+queue and pending-card behavior. The Scrape Driver's API and reset semantics
+are canonical in [`hurl/README.md`](../hurl/README.md#scrape-driver).

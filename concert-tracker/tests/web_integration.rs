@@ -12,6 +12,8 @@ use concert_tracker::{
     web::{router, AppState},
 };
 
+// Black-box product HTTP coverage lives in hurl/*.hurl; see hurl/README.md.
+
 fn disable_system_proxy_for_tests() {
     tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
 }
@@ -25,12 +27,6 @@ fn idle_scrape_queue() -> ScrapeQueue {
         PathBuf::from("/tmp"),
     )
 }
-
-// pending_card_shows_loading_then_thumbnail migrated to
-// hurl/scrape_pending.hurl (Scrape Driver: test.scrape_set_plan block +
-// test.scrape_enqueue + public GET /concerts/:id/status before/after
-// test.scrape_release) — see
-// docs/change/2026-07-17-scrape-driver-hurl-migration.md.
 
 fn test_state(conn: rusqlite::Connection) -> AppState {
     disable_system_proxy_for_tests();
@@ -55,30 +51,6 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
     .unwrap();
 }
 
-// list_page_renders_seeded_concert migrated to hurl/listing_status.hurl
-// (test.seed_listing + GET / contains the seeded title) — see
-// docs/change/2026-07-11-hurl-web-integration-tests.md.
-
-// ignore_endpoint_toggles_flag_and_returns_row migrated to
-// hurl/listing_status.hurl (POST /concerts/:id/ignore + badge-ignored / "Clear
-// ignored" assertions) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
-
-// available_concert_row_shows_want_and_ignore_buttons migrated to
-// hurl/listing_status.hurl.
-
-// not_downloaded_row_hides_download_badge_and_shows_button migrated to
-// hurl/listing_status.hurl (test.seed_scraped_concert + GET
-// /concerts/:id/status) — see docs/change/2026-07-11-hurl-web-integration-tests.md.
-
-// list_filter_by_status_narrows_results migrated to hurl/listing_status.hurl
-// (GET /?filter=ignored includes the ignored concert, excludes the other) —
-// see docs/change/2026-07-11-hurl-web-integration-tests.md.
-
-// notes_endpoint_persists_text migrated to hurl/detail_prepare_notes.hurl.
-
-// download_endpoint_spawns_job_and_returns_row migrated to
-// hurl/job_chain.hurl — see docs/change/2026-07-15-job-driver-plan.md.
-
 /// When a concert is opened for the first time and the scrape fails (e.g.
 /// network down or NPR unreachable), the detail page must still render with
 /// the listing-only data and `metadata_scraped_at` must stay NULL so the
@@ -86,8 +58,7 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
 /// `ensure_scraped` in src/web/handlers.rs — those use a stub closure and
 /// avoid hitting the network, while this test exercises the real call path.
 ///
-/// Intentionally Rust-only, unlike `pending_card_shows_loading_then_thumbnail`
-/// above: this exercises the detail view's inline auto-scrape
+/// Intentionally Rust-only: this exercises the detail view's inline auto-scrape
 /// (`ensure_scraped`), a real outbound connection-refused failure on a
 /// synchronous call path that does not go through the background
 /// `ScrapeQueue` at all — there is no Scrape Driver seam here to stand in
@@ -139,60 +110,6 @@ async fn detail_page_auto_scrape_failure_still_renders() {
     assert!(reread.metadata_scraped_at.is_none());
     assert!(reread.artist.is_none());
 }
-
-// delete_download_removes_file_and_clears_state migrated to
-// hurl/media_files_lifecycle.hurl (test.seed_media_concert +
-// GET .../concert-playback file-gone proof) — see
-// docs/change/2026-07-16-scenario-seeds-hurl-migration.md.
-
-// delete_download_with_prior_split_error_restores_download_button migrated
-// to hurl/media_files_lifecycle.hurl (Job Driver split=fail + delete-download
-// + GET .../status).
-
-// play_button_visible_after_successful_split migrated to
-// hurl/media_files_lifecycle.hurl (test.seed_media_concert + GET
-// .../status).
-
-// ignore_deletes_preview_image migrated to hurl/media_files_lifecycle.hurl
-// (test.seed_media_concert preview_image + GET .../concert-files/.../
-// preview.jpg).
-
-// track_details_returns_200_without_album migrated to
-// hurl/media_files_lifecycle.hurl (test.seed_album_null_concert).
-
-// track_details_reports_busy_from_handler_state migrated to
-// hurl/media_files_lifecycle.hurl (Job Driver split=block + POST /prepare +
-// GET .../track-details).
-
-// prepare_status_reports_filesystem_track_state migrated to
-// hurl/media_files_lifecycle.hurl (test.seed_media_concert track_files +
-// GET .../prepare-status).
-
-// get_split_timestamps_lazy_backfill_from_timestamps_json migrated to
-// hurl/split_timestamps_flow.hurl (test.seed_media_concert
-// legacy_timestamps_json).
-
-// set_split_timestamps_returns_422_on_count_mismatch migrated to
-// hurl/split_timestamps_flow.hurl.
-
-// set_split_timestamps_happy_path_returns_202_and_stores_user_column
-// migrated to hurl/split_timestamps_flow.hurl (test.seed_media_concert
-// source_file_kind: real_audio — the one Hurl case needing real ffprobe-
-// backed media).
-
-// reset_split_timestamps_happy_path_returns_202_and_clears_user_column
-// migrated to hurl/split_timestamps_flow.hurl.
-
-// concert_playback_source_mode_when_file_present,
-// concert_playback_reconstruction_mode_when_source_gone, and
-// concert_playback_reconstruction_includes_interlude migrated to
-// hurl/concert_playback.hurl (test.seed_media_concert interlude_files).
-// concert_playback_returns_404_when_nothing_playable already lives in
-// hurl/media_state_errors.hurl.
-
-// delete_interlude_removes_file_records_event_returns_fragment migrated to
-// hurl/concert_playback.hurl (test.assert_concert_events — the first
-// consumer of that new Test Control API).
 
 /// `router(state)` (the production path, used by every other test in this file
 /// and by `concert_web.rs` without `--dev`) must keep serving JS from the

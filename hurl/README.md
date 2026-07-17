@@ -3,19 +3,14 @@
 Black-box HTTP tests against a real `concert-web` process, as opposed to
 `concert-tracker/tests/web_integration.rs`, which links directly into the Rust
 web implementation and calls the axum router in-process via
-`tower::ServiceExt::oneshot`. See
-[`docs/change/2026-07-11-hurl-web-integration-tests.md`](../docs/change/2026-07-11-hurl-web-integration-tests.md)
-for the full design (architecture, decisions, Test Control API contracts) and
+`tower::ServiceExt::oneshot`. This guide is the canonical Test Control API
+contract. See
 [`docs/adr/0001-jsonrpsee-for-test-control-api.md`](../docs/adr/0001-jsonrpsee-for-test-control-api.md)
 for why the Test Control API is JSON-RPC. Seed defaulting is captured in
-[`docs/adr/0003-test-control-seed-defaults.md`](../docs/adr/0003-test-control-seed-defaults.md)
-and
-[`docs/change/2026-07-12-test-control-seed-defaults-spec.md`](../docs/change/2026-07-12-test-control-seed-defaults-spec.md).
+[`docs/adr/0003-test-control-seed-defaults.md`](../docs/adr/0003-test-control-seed-defaults.md).
 Hurl requests use the Test Control HTTP Adapter's concise routes rather than
 raw JSON-RPC envelopes; see
-[`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md)
-and
-[`docs/change/2026-07-13-test-control-http-adapter-spec.md`](../docs/change/2026-07-13-test-control-http-adapter-spec.md).
+[`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md).
 
 It runs locally via `just test-hurl` and is a blocking step in CI (see "CI"
 below).
@@ -113,9 +108,7 @@ directly, not something new `.hurl` scenarios should reach for. Raw JSON-RPC
 seed calls use jsonrpsee's generated request-object shape, so the flat adapter
 body appears under `params.params` at the root endpoint. See
 [`docs/adr/0004-test-control-http-adapter.md`](../docs/adr/0004-test-control-http-adapter.md)
-and
-[`docs/change/2026-07-13-test-control-http-adapter-spec.md`](../docs/change/2026-07-13-test-control-http-adapter-spec.md)
-for the full route/translation/error contract, and
+for the adapter decision, and
 [`hurl/test_control_adapter.hurl`](test_control_adapter.hurl) for a worked
 example of both, including the adapter's invalid-JSON HTTP 400 response.
 
@@ -170,8 +163,8 @@ for an explicitly *empty* set list;
 short array (`.get(idx).unwrap_or(false)`), so seeding a mismatched length is
 valid and exercises that same defensive path. This is the only Test Control
 knob for "this track is available" that doesn't require writing an actual
-file to the scratch workdir; see
-[`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
+file to the scratch workdir; see `hurl/media_info_navigation.hurl` for a
+representative consumer.
 
 `tracks_liked` (lifecycle/media seeds only) writes a raw `Vec<bool>` verbatim
 via `db::split_timestamps::set_tracks_liked`, with the same permissive length
@@ -239,8 +232,9 @@ sending any other non-boolean value for them would be.
 
 `hurl/job_chain.hurl` drives download/split/opener behavior deterministically
 through the **Job Driver** instead of injecting fake shell commands. See
-[`docs/change/2026-07-15-job-driver-plan.md`](../docs/change/2026-07-15-job-driver-plan.md)
-for the full design. A test-control build only uses the Job Driver when
+[`docs/jobs.md`](../docs/jobs.md) and
+[`docs/adr/0005-typed-job-runner-for-test-control.md`](../docs/adr/0005-typed-job-runner-for-test-control.md)
+for the lasting design. A test-control build only uses the Job Driver when
 `--test-control-port` is actually passed — running `concert-web --features
 test-control` without that flag behaves exactly like a production build.
 
@@ -294,9 +288,9 @@ convention as `test.seed_media_concert`'s dummy files.
 
 `hurl/scrape_pending.hurl` drives the background metadata-scrape queue's
 timing deterministically through the **Scrape Driver**, instead of injecting
-a stub scrape item in Rust. See
-[`docs/change/2026-07-17-scrape-driver-hurl-migration.md`](../docs/change/2026-07-17-scrape-driver-hurl-migration.md)
-for the full design. The scrape queue is **not** a download/split/open job —
+a stub scrape item in Rust. See [`docs/jobs.md`](../docs/jobs.md) for the
+lasting runner-boundary design. The scrape queue is **not** a
+download/split/open job —
 it has its own in-memory `pending` set and injectable per-item function
 (`jobs::scrape_queue::ScrapeItemFn`), not a `JobRunner` — so the Scrape
 Driver is a separate control surface from the Job Driver above, not another
@@ -429,72 +423,23 @@ intentionally staying Rust-only:
   Rust values (the built OpenAPI doc vs. what's served) — a pure
   Rust-internal consistency check with no black-box equivalent.
 
-The rest of this section is a history of how earlier slices got here, oldest
-first:
+Current black-box coverage is organized by product boundary:
 
-- **State-only public HTTP tests are migrated.** The second Hurl slice added
-  `test.seed_lifecycle_concert` and moved the remaining pure public-HTTP,
-  no-files/no-stub cases into Hurl: available status actions, notes/detail,
-  downloaded filtering, missing-file media errors, prepare 404/422 responses,
-  split-timestamp 404/409/422/read/reset state cases, delete-split timestamp
-  preservation, and empty concert playback 404.
-- **Playlist API and HTML pages are migrated.** The third Hurl slice
-  (`hurl/playlists.hurl`) moved `playlist_api_crud_and_resolution`,
-  `playlist_api_validation_status_codes`, `playlists_html_pages_render`, and
-  `playlist_detail_page_unknown_id_is_404` — no new Test Control surface was
-  needed, since `test.seed_lifecycle_concert` already covers the fixture
-  shape those tests seeded by hand. Two markup-internal assertions (the
-  `data-playlist-id` attribute, the nav `href="/playlists"` link) were
-  intentionally dropped from the Hurl port rather than translated
-  byte-for-byte; that coverage now lives in `e2e/playlists.spec.js`'s
-  drag-drop reorder test, which drives the real DOM attribute. See
-  [`docs/change/2026-07-12-playlist-hurl-migration.md`](../docs/change/2026-07-12-playlist-hurl-migration.md).
-- **State-only stragglers are migrated.** The fourth Hurl slice added a
-  `tracks_present` param to `test.seed_lifecycle_concert` (see "Test Control
-  seed defaults" above) and moved
-  `delete_download_force_clears_state_when_file_missing`,
-  `delete_split_clears_state`, `like_track_toggles_state_and_renders_star`,
-  and `like_track_unavailable_returns_404` — the last four remaining tests
-  that needed neither files nor job stubs, blocked only by the seed API's
-  inability to set the `tracks_present` DB column the `/like` handler reads.
-  See
-  [`docs/change/2026-07-14-state-only-stragglers-hurl-migration.md`](../docs/change/2026-07-14-state-only-stragglers-hurl-migration.md).
-- **Media-info navigation is migrated.** The fifth Hurl slice added
-  `test.seed_media_concert` for dummy track/source files plus `tracks_liked`
-  on lifecycle/media seeds, then moved next/previous track media-info,
-  track-media `has_prev`, and liked-state metadata cases into
-  `hurl/media_info_navigation.hurl`. See
-  [`docs/change/2026-07-14-media-info-navigation-hurl-migration.md`](../docs/change/2026-07-14-media-info-navigation-hurl-migration.md).
-- **Job-chain and opener tests are migrated.** The Job Driver slice added
-  `test.job_set_plan`, `test.job_release`, and `test.assert_job_observation`
-  (see "Job Driver" above) and moved the download/prepare/split chain and
-  watch-opener cases that injected fake shell commands via
-  `state_with_chain`/`state_with_opener` into `hurl/job_chain.hurl` — e.g.
-  `download_endpoint_spawns_job_and_returns_row`,
-  `prepare_endpoint_runs_download_then_split_chain`,
-  `download_auto_split_retries_on_split_error`,
-  `download_double_click_does_not_drop_split_edge`,
-  `watch_uses_injected_opener_and_succeeds`. See
-  [`docs/change/2026-07-15-job-driver-plan.md`](../docs/change/2026-07-15-job-driver-plan.md).
-- **File-heavy tests are migrated.** The Scenario Seeds slice extended
-  `test.seed_media_concert` with `preview_image`, `interlude_files`,
-  `legacy_timestamps_json`, and `source_file_kind: real_audio` (see "Test
-  Control seed defaults" above), added the separate `test.seed_album_null_concert`
-  seed, and added `test.assert_concert_events` (see "Three ways to check
-  something" above). These moved delete-download file/fragment behavior, the
-  prior-split-error delete case, the play-concert button, ignore-deletes-preview,
-  prepare-status filesystem track state, track-details album-null/busy
-  behavior, the split-timestamps lazy-backfill/count-mismatch/real-media-happy-
-  path/reset cases, all three concert-playback modes, and interlude deletion
-  into `hurl/media_files_lifecycle.hurl`, `hurl/split_timestamps_flow.hurl`,
-  and `hurl/concert_playback.hurl`. See
-  [`docs/change/2026-07-16-scenario-seeds-hurl-migration.md`](../docs/change/2026-07-16-scenario-seeds-hurl-migration.md).
-- **Scrape queue timing is migrated.** The Scrape Driver slice added
-  `test.scrape_set_plan`, `test.scrape_enqueue`, `test.scrape_release`, and
-  `test.assert_scrape_observation` (see "Scrape Driver" above) and moved
-  `pending_card_shows_loading_then_thumbnail` — the last item on the parent
-  spec's slice list (#110) — into `hurl/scrape_pending.hurl`. See
-  [`docs/change/2026-07-17-scrape-driver-hurl-migration.md`](../docs/change/2026-07-17-scrape-driver-hurl-migration.md).
+- listing, filtering, detail, notes, and state errors:
+  `listing_status.hurl`, `detail_prepare_notes.hurl`, and
+  `media_state_errors.hurl`;
+- playlists and media navigation: `playlists.hurl` and
+  `media_info_navigation.hurl`;
+- download/split/opener orchestration: `job_chain.hurl`;
+- filesystem lifecycle and timestamp workflows:
+  `media_files_lifecycle.hurl`, `split_timestamps_state.hurl`, and
+  `split_timestamps_flow.hurl`;
+- playback reconstruction and interlude deletion: `concert_playback.hurl`;
+- background scrape timing: `scrape_pending.hurl`;
+- Test Control transport and adapter contracts: `test_control_adapter.hurl`.
+
+The completed migration history is recorded in
+[`docs/change/2026-07-17-hurl-migration-sweep.md`](../docs/change/2026-07-17-hurl-migration-sweep.md).
 
 ## CI
 
@@ -514,10 +459,3 @@ build break masking a missing guard). This exists because `just test-hurl`
 only builds in debug mode and would not notice if that guard were ever removed
 or bypassed — the CI step catches that regression independently of the Hurl
 suite passing.
-
-## Known gaps
-
-- **`listing_status.hurl` still has no Assertion API case.** `test.assert_concert_state`
-  is exercised by `hurl/test_control_adapter.hurl`, but no case in
-  `hurl/listing_status.hurl` needs it — by design, per the "when to use each"
-  section above; every postcondition it checks is already public.
