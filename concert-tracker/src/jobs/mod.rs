@@ -5,8 +5,10 @@ pub mod scrape_queue;
 pub mod split;
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -248,15 +250,151 @@ pub struct SplitJob {
     pub timestamps_path: Option<PathBuf>,
 }
 
+pub type JobRunFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub enum JobStepOutcome {
+    Succeeded,
+    Failed { message: String },
+}
+
+pub enum OpenMediaOutcome {
+    Succeeded,
+    Failed { message: String },
+}
+
+/// Executes domain job steps. Production uses subprocess commands behind this
+/// interface; test-control can replace the runner with deterministic job
+/// completion without changing the lifecycle orchestration.
+pub trait JobRunner: Send + Sync {
+    fn run_download<'a>(
+        &'a self,
+        job: &'a DownloadJob,
+        log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome>;
+
+    fn run_split<'a>(
+        &'a self,
+        job: &'a SplitJob,
+        log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome>;
+
+    fn open_media<'a>(
+        &'a self,
+        concert_id: i64,
+        path: &'a Path,
+    ) -> JobRunFuture<'a, OpenMediaOutcome>;
+}
+
+pub type DownloadCommandFn = Arc<dyn Fn(&DownloadJob) -> Command + Send + Sync>;
+pub type SplitCommandFn = Arc<dyn Fn(&SplitJob) -> Command + Send + Sync>;
+pub type OpenCommandFn = Arc<dyn Fn(&Path) -> Command + Send + Sync>;
+
+pub struct CommandJobRunner {
+    download_cmd: DownloadCommandFn,
+    split_cmd: SplitCommandFn,
+    open_cmd: OpenCommandFn,
+}
+
+impl CommandJobRunner {
+    pub fn new(
+        download_cmd: DownloadCommandFn,
+        split_cmd: SplitCommandFn,
+        open_cmd: OpenCommandFn,
+    ) -> Self {
+        Self {
+            download_cmd,
+            split_cmd,
+            open_cmd,
+        }
+    }
+}
+
+impl JobRunner for CommandJobRunner {
+    fn run_download<'a>(
+        &'a self,
+        job: &'a DownloadJob,
+        log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome> {
+        Box::pin(async move {
+            let cmd = (self.download_cmd)(job);
+            command_job_outcome(
+                cmd,
+                "download",
+                job.concert_id,
+                log_file,
+                ". Is yt-dlp installed? See: https://github.com/yt-dlp/yt-dlp#installation",
+            )
+            .await
+        })
+    }
+
+    fn run_split<'a>(
+        &'a self,
+        job: &'a SplitJob,
+        log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome> {
+        Box::pin(async move {
+            let cmd = (self.split_cmd)(job);
+            command_job_outcome(
+                cmd,
+                "split",
+                job.concert_id,
+                log_file,
+                ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter",
+            )
+            .await
+        })
+    }
+
+    fn open_media<'a>(
+        &'a self,
+        _concert_id: i64,
+        path: &'a Path,
+    ) -> JobRunFuture<'a, OpenMediaOutcome> {
+        Box::pin(async move {
+            let mut cmd = (self.open_cmd)(path);
+            match cmd.status().await {
+                Ok(status) if status.success() => OpenMediaOutcome::Succeeded,
+                Ok(status) => OpenMediaOutcome::Failed {
+                    message: format!("`open` exited {:?}", status.code()),
+                },
+                Err(err) => OpenMediaOutcome::Failed {
+                    message: format!("spawn `open` failed: {err}"),
+                },
+            }
+        })
+    }
+}
+
+async fn command_job_outcome(
+    cmd: Command,
+    kind: &'static str,
+    concert_id: i64,
+    log_file: Option<&Path>,
+    not_found_hint: &'static str,
+) -> JobStepOutcome {
+    match run_with_logging(cmd, kind, concert_id, log_file).await {
+        Ok((status, _)) if status.success() => JobStepOutcome::Succeeded,
+        Ok((status, stderr_tail)) => JobStepOutcome::Failed {
+            message: format!("exit {:?}: {}", status.code(), stderr_tail.trim()),
+        },
+        Err(err) => {
+            let hint = if err.kind() == std::io::ErrorKind::NotFound {
+                not_found_hint
+            } else {
+                ""
+            };
+            JobStepOutcome::Failed {
+                message: format!("spawn error: {err}{hint}"),
+            }
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct JobConfig {
     pub working_dir: PathBuf,
-    pub download_cmd: Arc<dyn Fn(&DownloadJob) -> Command + Send + Sync>,
-    pub split_cmd: Arc<dyn Fn(&SplitJob) -> Command + Send + Sync>,
-    /// Builds the command used to open a media file in the system player (the
-    /// "Open" / watch buttons). Injectable so tests can substitute a no-op and
-    /// never launch a real player.
-    pub open_cmd: Arc<dyn Fn(&Path) -> Command + Send + Sync>,
+    runner: Arc<dyn JobRunner>,
 }
 
 /// Default location of the splitter binary. Looks for `live-set-splitter`
@@ -319,27 +457,53 @@ impl JobConfig {
         self.working_dir.join("log").join("job")
     }
 
+    pub fn with_runner(working_dir: PathBuf, runner: Arc<dyn JobRunner>) -> Self {
+        Self {
+            working_dir,
+            runner,
+        }
+    }
+
+    pub fn from_commands(
+        working_dir: PathBuf,
+        download_cmd: DownloadCommandFn,
+        split_cmd: SplitCommandFn,
+        open_cmd: OpenCommandFn,
+    ) -> Self {
+        Self::with_runner(
+            working_dir,
+            Arc::new(CommandJobRunner::new(download_cmd, split_cmd, open_cmd)),
+        )
+    }
+
+    pub async fn run_download(&self, job: &DownloadJob, log_file: Option<&Path>) -> JobStepOutcome {
+        self.runner.run_download(job, log_file).await
+    }
+
+    pub async fn run_split(&self, job: &SplitJob, log_file: Option<&Path>) -> JobStepOutcome {
+        self.runner.run_split(job, log_file).await
+    }
+
+    pub async fn open_media(&self, concert_id: i64, path: &Path) -> OpenMediaOutcome {
+        self.runner.open_media(concert_id, path).await
+    }
+
     /// Test config: every external command is a no-op (`true`), so handlers can
     /// be driven without yt-dlp, the splitter, or a media player on the host.
     pub fn test(working_dir: PathBuf) -> Self {
-        JobConfig {
+        Self::from_commands(
             working_dir,
-            download_cmd: Arc::new(|_| Command::new("true")),
-            split_cmd: Arc::new(|_| Command::new("true")),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+            Arc::new(|_| Command::new("true")),
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     pub fn production(working_dir: PathBuf, splitter_bin: PathBuf, open_program: String) -> Self {
         let wd = working_dir.clone();
-        JobConfig {
-            working_dir: working_dir.clone(),
-            open_cmd: Arc::new(move |path: &Path| {
-                let mut cmd = Command::new(&open_program);
-                cmd.arg(path);
-                cmd
-            }),
-            download_cmd: Arc::new(move |job: &DownloadJob| {
+        Self::from_commands(
+            working_dir,
+            Arc::new(move |job: &DownloadJob| {
                 let cd = concert_dir(&wd, &job.album);
                 let _ = std::fs::create_dir_all(&cd);
                 let out = cd
@@ -350,7 +514,7 @@ impl JobConfig {
                 cmd.arg("-o").arg(out).arg(&job.source_url);
                 cmd
             }),
-            split_cmd: Arc::new(move |job: &SplitJob| {
+            Arc::new(move |job: &SplitJob| {
                 let mut cmd = Command::new(&splitter_bin);
                 cmd.arg(&job.json_path)
                     .arg("--input-file")
@@ -376,7 +540,12 @@ impl JobConfig {
                 }
                 cmd
             }),
-        }
+            Arc::new(move |path: &Path| {
+                let mut cmd = Command::new(&open_program);
+                cmd.arg(path);
+                cmd
+            }),
+        )
     }
 }
 

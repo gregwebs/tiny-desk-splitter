@@ -39,6 +39,46 @@ pub enum Event {
 }
 
 impl Event {
+    /// Every variant, for validating an event name supplied by a caller
+    /// (Test Control's `assert_concert_events`) against the real vocabulary
+    /// instead of accepting an arbitrary typo'd string that would then
+    /// vacuously never match.
+    pub const ALL: [Event; 27] = [
+        Event::Listen,
+        Event::Import,
+        Event::Scraped,
+        Event::DownloadStarted,
+        Event::DownloadError,
+        Event::Downloaded,
+        Event::DownloadDelete,
+        Event::SplitStarted,
+        Event::Split,
+        Event::SplitError,
+        Event::SplitDelete,
+        Event::TrackDelete,
+        Event::TrackLiked,
+        Event::TrackLikedDelete,
+        Event::Wanted,
+        Event::WantedDelete,
+        Event::Ignored,
+        Event::IgnoredDelete,
+        Event::ArchiveStarted,
+        Event::Archived,
+        Event::ArchiveError,
+        Event::ArchiveDelete,
+        Event::Watch,
+        Event::SplitTimestampsUser,
+        Event::SplitTimestampsReset,
+        Event::SourceRedundantDelete,
+        Event::InterludeDelete,
+    ];
+
+    /// Parse an event name (the same string `as_str` produces) back into an
+    /// `Event`, or `None` if it doesn't match any known variant.
+    pub fn parse(name: &str) -> Option<Event> {
+        Self::ALL.into_iter().find(|e| e.as_str() == name)
+    }
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Event::Listen => "listen",
@@ -79,25 +119,48 @@ pub struct EventRow {
     pub json: Option<String>,
 }
 
+const LIST_FOR_CONCERT_SQL: &str =
+    "SELECT event, at, json FROM events WHERE concert_id = ?1 ORDER BY at ASC, id ASC";
+
+fn event_row_from_sql(row: &rusqlite::Row) -> rusqlite::Result<EventRow> {
+    Ok(EventRow {
+        event: row.get(0)?,
+        at: row.get(1)?,
+        json: row.get(2)?,
+    })
+}
+
+/// Fallible variant of [`list_for_concert`], for callers that must treat a
+/// query failure as a genuine error rather than an empty result — e.g.
+/// `test_control::assert_concert_events`, where silently reading "no
+/// events" on a failed query would let an `absent` expectation vacuously
+/// pass. Propagates a prepare/query failure *or any single row's decode
+/// failure* as `Err` — deliberately stricter than [`list_for_concert`],
+/// which keeps whatever rows it could decode.
+pub fn try_list_for_concert(conn: &Connection, concert_id: i64) -> rusqlite::Result<Vec<EventRow>> {
+    let mut stmt = conn.prepare(LIST_FOR_CONCERT_SQL)?;
+    let rows = stmt.query_map(params![concert_id], event_row_from_sql)?;
+    rows.collect()
+}
+
+/// Best-effort variant for production rendering paths, where an event-log
+/// hiccup should degrade gracefully rather than break the page: a
+/// prepare/query failure returns an empty list (logged), and a single row
+/// that fails to decode is dropped rather than discarding every other row
+/// that decoded fine. Callers that need a query failure to surface as a
+/// real error (not be indistinguishable from "no events") should call
+/// [`try_list_for_concert`] instead.
 pub fn list_for_concert(conn: &Connection, concert_id: i64) -> Vec<EventRow> {
-    let mut stmt = match conn
-        .prepare("SELECT event, at, json FROM events WHERE concert_id = ?1 ORDER BY at ASC, id ASC")
-    {
+    let mut stmt = match conn.prepare(LIST_FOR_CONCERT_SQL) {
         Ok(s) => s,
         Err(e) => {
             tracing::warn!("failed to list events for concert {}: {}", concert_id, e);
             return Vec::new();
         }
     };
-    stmt.query_map(params![concert_id], |row| {
-        Ok(EventRow {
-            event: row.get(0)?,
-            at: row.get(1)?,
-            json: row.get(2)?,
-        })
-    })
-    .map(|rows| rows.filter_map(|r| r.ok()).collect())
-    .unwrap_or_default()
+    stmt.query_map(params![concert_id], event_row_from_sql)
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
 }
 
 pub fn record(conn: &Connection, concert_id: i64, event: Event, at: &str, json: Option<&str>) {
@@ -341,6 +404,89 @@ mod tests {
             |row| row.get(0),
         )
         .ok()
+    }
+
+    #[test]
+    fn all_events_round_trip_through_as_str_and_parse() {
+        for event in Event::ALL {
+            let name = event.as_str();
+            assert_eq!(
+                Event::parse(name),
+                Some(event),
+                "Event::ALL is missing (or has a stale entry for) {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unknown_name() {
+        assert_eq!(Event::parse("not_a_real_event"), None);
+    }
+
+    #[test]
+    fn try_list_for_concert_returns_recorded_events() {
+        let conn = setup();
+        let id = seed(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        record_now(&conn, id, Event::Downloaded, None);
+
+        let events = try_list_for_concert(&conn, id).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event, "downloaded");
+    }
+
+    #[test]
+    fn try_list_for_concert_propagates_a_query_failure_instead_of_swallowing_it() {
+        let conn = Connection::open_in_memory().unwrap();
+        // no migrations run — no events table, so the query itself fails.
+        let err = try_list_for_concert(&conn, 1).unwrap_err();
+        assert!(err.to_string().to_lowercase().contains("no such table"));
+    }
+
+    #[test]
+    fn list_for_concert_swallows_a_query_failure_into_an_empty_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        assert_eq!(list_for_concert(&conn, 1).len(), 0);
+    }
+
+    /// A BLOB stored in `json` fails to decode as `Option<String>` (rusqlite's
+    /// `FromSql` for `String` only accepts a Text value) — a stand-in for a
+    /// single malformed row among otherwise well-formed ones.
+    fn insert_row_with_undecodable_json(conn: &Connection, concert_id: i64) {
+        conn.execute(
+            "INSERT INTO events (concert_id, event, at, json) VALUES (?1, 'listen', '2024-01-01T00:00:00Z', ?2)",
+            params![concert_id, vec![0xFFu8, 0xFE, 0x00]],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_for_concert_keeps_well_formed_rows_when_one_row_is_malformed() {
+        let conn = setup();
+        let id = seed(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        record_now(&conn, id, Event::Downloaded, None);
+        insert_row_with_undecodable_json(&conn, id);
+
+        let events = list_for_concert(&conn, id);
+        assert_eq!(
+            events.len(),
+            1,
+            "the one malformed row must be dropped, not the whole list"
+        );
+        assert_eq!(events[0].event, "downloaded");
+    }
+
+    #[test]
+    fn try_list_for_concert_fails_the_whole_call_when_one_row_is_malformed() {
+        let conn = setup();
+        let id = seed(&conn);
+        conn.execute("DELETE FROM events", []).unwrap();
+        record_now(&conn, id, Event::Downloaded, None);
+        insert_row_with_undecodable_json(&conn, id);
+
+        try_list_for_concert(&conn, id)
+            .expect_err("a single malformed row must fail the whole call, not just be dropped");
     }
 
     #[test]

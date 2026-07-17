@@ -13,11 +13,22 @@
 //! [`start`], which ignores the configured host), and the compile-time guard
 //! below. No single one of these is sufficient on its own.
 
+// `assert_job_observation`'s 8 arguments (self + concert_id + kind + 5
+// optional counts) are required by the `#[rpc(param_kind = map)]` flat-args
+// convention this module's other assert/job methods use (see
+// docs/change/2026-07-15-job-driver-plan.md's adapter-parameter-shape
+// correction) — grouping the counts into a struct would revert to the
+// seed-style single-struct-param wrapping the adapter doesn't apply to this
+// route. The `jsonrpsee::rpc` macro's generated code doesn't pick up a
+// per-item `#[allow(...)]` here, so this is a module-level exception rather
+// than a narrower one.
+#![allow(clippy::too_many_arguments)]
+
 #[cfg(all(feature = "test-control", not(debug_assertions)))]
 compile_error!("test-control must not be compiled into release builds");
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::sync::LazyLock;
+use std::sync::{Arc, LazyLock};
 
 use jsonrpsee::core::{async_trait, RpcResult};
 use jsonrpsee::proc_macros::rpc;
@@ -27,12 +38,18 @@ use serde::Serialize;
 
 use crate::db;
 use crate::db::seeds::{
-    FixtureIds, SeedContext, SeedLifecycleConcert, SeedListing, SeedMediaConcert,
-    SeedScrapedConcert,
+    FixtureIds, SeedAlbumNullConcert, SeedContext, SeedLifecycleConcert, SeedListing,
+    SeedMediaConcert, SeedScrapedConcert,
 };
+use crate::events::Event;
 use crate::web::AppState;
 
 mod adapter;
+pub mod job_driver;
+pub mod scrape_driver;
+
+use job_driver::{JobDriver, JobStepKind, StepOutcome};
+use scrape_driver::{ScrapeDriver, ScrapeOutcome};
 
 /// One fixture-number allocator for the process lifetime — per ADR 0003, not
 /// reset by `test.reset`, and shared across every [`TestControlServer`] clone
@@ -68,6 +85,16 @@ pub trait TestControlApi {
         params: SeedMediaConcert,
     ) -> RpcResult<SeedLifecycleConcertResult>;
 
+    /// Seed a concert with a NULL `album` column — a historical/defensive
+    /// shape no current product write path produces, kept for the
+    /// `track-details` handler test that exercises it. See
+    /// `db::seeds::SeedAlbumNullConcert`.
+    #[method(name = "seed_album_null_concert", param_kind = map)]
+    async fn seed_album_null_concert(
+        &self,
+        params: SeedAlbumNullConcert,
+    ) -> RpcResult<SeedListingResult>;
+
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
     /// checked; omit a field to not assert on that dimension. At least one of
@@ -84,6 +111,105 @@ pub trait TestControlApi {
         ignored: Option<bool>,
         downloaded: Option<bool>,
         split: Option<bool>,
+    ) -> RpcResult<OkResult>;
+
+    /// Configure the Job Driver's default plan (when `concert_id` is
+    /// omitted/`null`) or a per-concert override plan (when present) for
+    /// download/split/open outcomes. Only present fields are changed; a
+    /// per-concert override materializes from the current default plan the
+    /// first time it's set for that concert, then updates independently of
+    /// later default changes. Reached via the adapter's `/test/job/set_plan`
+    /// route. `open = "block"` is rejected — see `job_driver::JobDriver`'s
+    /// docs for why.
+    #[method(name = "job_set_plan", param_kind = map)]
+    async fn job_set_plan(
+        &self,
+        concert_id: Option<i64>,
+        download: Option<StepOutcome>,
+        split: Option<StepOutcome>,
+        open: Option<StepOutcome>,
+    ) -> RpcResult<OkResult>;
+
+    /// Release a step currently blocked at `(concert_id, kind)` with the
+    /// given outcome (`"succeed"` or `"fail"` — `"block"` is invalid here).
+    /// Errors if no step is blocked there; poll `test.assert_job_observation`
+    /// for `blocked=1` first. Reached via the adapter's `/test/job/release`
+    /// route.
+    #[method(name = "job_release", param_kind = map)]
+    async fn job_release(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        outcome: StepOutcome,
+    ) -> RpcResult<OkResult>;
+
+    /// Assert Job Driver observation counts for `(concert_id, kind)`. Only
+    /// present fields are checked, mismatches are collected and reported
+    /// together, and a call with every count field omitted is rejected —
+    /// same shape as [`TestControlApi::assert_concert_state`].
+    #[method(name = "assert_job_observation", param_kind = map)]
+    async fn assert_job_observation(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        started: Option<u32>,
+        completed: Option<u32>,
+        failed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult>;
+
+    /// Assert internal event-log facts with no public HTTP surface: `present`
+    /// lists event names that must have at least one recorded row for the
+    /// concert, `absent` lists names that must have none. At least one of
+    /// `present`/`absent` must be non-empty — same "reject a vacuous call"
+    /// shape as [`TestControlApi::assert_concert_state`]. Every listed name
+    /// must be a real event (see `crate::events::Event::parse`) — an unknown
+    /// name errors rather than vacuously passing in `absent`. First consumer:
+    /// interlude deletion (`present: ["interlude_delete"], absent:
+    /// ["track_delete"]`).
+    #[method(name = "assert_concert_events", param_kind = map)]
+    async fn assert_concert_events(
+        &self,
+        concert_id: i64,
+        present: Option<Vec<String>>,
+        absent: Option<Vec<String>>,
+    ) -> RpcResult<OkResult>;
+
+    /// Configure the Scrape Driver's plan for `concert_id` (`"succeed"` or
+    /// `"block"`). Unlike the Job Driver there is no default plan — an
+    /// unconfigured concert always scrape-succeeds deterministically.
+    /// Reached via the adapter's `/test/scrape/set_plan` route.
+    #[method(name = "scrape_set_plan", param_kind = map)]
+    async fn scrape_set_plan(&self, concert_id: i64, scrape: ScrapeOutcome) -> RpcResult<OkResult>;
+
+    /// Enqueue `concert_id` for a background scrape through the app's real
+    /// [`crate::jobs::scrape_queue::ScrapeQueue`] (the same queue
+    /// `/sync/:year/:month` uses), looking up its `source_url` from the
+    /// database. Returns `enqueued: false` if the concert was already
+    /// queued/in-flight (normal dedupe, not an error). Reached via the
+    /// adapter's `/test/scrape/enqueue` route.
+    #[method(name = "scrape_enqueue", param_kind = map)]
+    async fn scrape_enqueue(&self, concert_id: i64) -> RpcResult<ScrapeEnqueueResult>;
+
+    /// Release a scrape currently blocked for `concert_id`. Errors if none is
+    /// blocked there; poll `test.assert_scrape_observation` for `blocked=1`
+    /// first. Reached via the adapter's `/test/scrape/release` route.
+    #[method(name = "scrape_release", param_kind = map)]
+    async fn scrape_release(&self, concert_id: i64) -> RpcResult<OkResult>;
+
+    /// Assert Scrape Driver observation counts for `concert_id`. Only present
+    /// fields are checked, mismatches are collected and reported together,
+    /// and a call with every count field omitted is rejected — same shape as
+    /// [`TestControlApi::assert_job_observation`].
+    #[method(name = "assert_scrape_observation", param_kind = map)]
+    async fn assert_scrape_observation(
+        &self,
+        concert_id: i64,
+        started: Option<u32>,
+        completed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
     ) -> RpcResult<OkResult>;
 }
 
@@ -127,6 +253,15 @@ pub struct SeedLifecycleConcertResult {
     pub split: bool,
 }
 
+/// Result for `test.scrape_enqueue`. `enqueued` distinguishes "this call
+/// queued a new scrape" from "already queued/in-flight" (a normal dedupe
+/// no-op) so Hurl cases can assert either shape.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrapeEnqueueResult {
+    pub ok: bool,
+    pub enqueued: bool,
+}
+
 /// Clone is cheap (an `AppState` clone) and lets [`start`] clone the built
 /// `RpcModule` — one copy is converted to [`jsonrpsee::server::Methods`] for
 /// the [`adapter`] to dispatch through in-process, the other is handed to
@@ -134,11 +269,21 @@ pub struct SeedLifecycleConcertResult {
 #[derive(Clone)]
 pub struct TestControlServer {
     state: AppState,
+    job_driver: Arc<JobDriver>,
+    scrape_driver: Arc<ScrapeDriver>,
 }
 
 impl TestControlServer {
-    pub fn new(state: AppState) -> Self {
-        Self { state }
+    pub fn new(
+        state: AppState,
+        job_driver: Arc<JobDriver>,
+        scrape_driver: Arc<ScrapeDriver>,
+    ) -> Self {
+        Self {
+            state,
+            job_driver,
+            scrape_driver,
+        }
     }
 
     fn rpc_module(self) -> RpcModule<Self> {
@@ -150,7 +295,11 @@ impl TestControlServer {
 impl TestControlApiServer for TestControlServer {
     async fn reset(&self) -> RpcResult<OkResult> {
         reset_test_data(&self.state)
-            .map(|()| OkResult { ok: true })
+            .map(|()| {
+                self.job_driver.reset();
+                self.scrape_driver.reset();
+                OkResult { ok: true }
+            })
             .map_err(internal_error)
     }
 
@@ -179,6 +328,13 @@ impl TestControlApiServer for TestControlServer {
         seed_media_concert(&self.state, params).map_err(internal_error)
     }
 
+    async fn seed_album_null_concert(
+        &self,
+        params: SeedAlbumNullConcert,
+    ) -> RpcResult<SeedListingResult> {
+        seed_album_null_concert(&self.state, params).map_err(internal_error)
+    }
+
     async fn assert_concert_state(
         &self,
         id: i64,
@@ -189,6 +345,333 @@ impl TestControlApiServer for TestControlServer {
         assert_concert_state(&self.state, id, ignored, downloaded, split)
             .map(|()| OkResult { ok: true })
             .map_err(assertion_error)
+    }
+
+    async fn job_set_plan(
+        &self,
+        concert_id: Option<i64>,
+        download: Option<StepOutcome>,
+        split: Option<StepOutcome>,
+        open: Option<StepOutcome>,
+    ) -> RpcResult<OkResult> {
+        let result = match concert_id {
+            Some(id) => self.job_driver.set_concert_plan(id, download, split, open),
+            None => self.job_driver.set_default_plan(download, split, open),
+        };
+        result
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn job_release(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        outcome: StepOutcome,
+    ) -> RpcResult<OkResult> {
+        self.job_driver
+            .release(concert_id, kind, outcome)
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn assert_job_observation(
+        &self,
+        concert_id: i64,
+        kind: JobStepKind,
+        started: Option<u32>,
+        completed: Option<u32>,
+        failed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult> {
+        assert_job_observation(
+            &self.job_driver,
+            concert_id,
+            kind,
+            started,
+            completed,
+            failed,
+            blocked,
+            released,
+        )
+        .map(|()| OkResult { ok: true })
+        .map_err(assertion_error)
+    }
+
+    async fn assert_concert_events(
+        &self,
+        concert_id: i64,
+        present: Option<Vec<String>>,
+        absent: Option<Vec<String>>,
+    ) -> RpcResult<OkResult> {
+        assert_concert_events(&self.state, concert_id, present, absent)
+            .map(|()| OkResult { ok: true })
+            .map_err(assertion_error)
+    }
+
+    async fn scrape_set_plan(&self, concert_id: i64, scrape: ScrapeOutcome) -> RpcResult<OkResult> {
+        self.scrape_driver.set_plan(concert_id, scrape);
+        Ok(OkResult { ok: true })
+    }
+
+    async fn scrape_enqueue(&self, concert_id: i64) -> RpcResult<ScrapeEnqueueResult> {
+        scrape_enqueue(&self.state, concert_id)
+            .map(|enqueued| ScrapeEnqueueResult { ok: true, enqueued })
+            .map_err(internal_error)
+    }
+
+    async fn scrape_release(&self, concert_id: i64) -> RpcResult<OkResult> {
+        self.scrape_driver
+            .release(concert_id)
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn assert_scrape_observation(
+        &self,
+        concert_id: i64,
+        started: Option<u32>,
+        completed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult> {
+        assert_scrape_observation(
+            &self.scrape_driver,
+            concert_id,
+            started,
+            completed,
+            blocked,
+            released,
+        )
+        .map(|()| OkResult { ok: true })
+        .map_err(assertion_error)
+    }
+}
+
+/// Checks each present expectation against the Job Driver's observed counts
+/// for `(concert_id, kind)`, returning every mismatch in one message — same
+/// "check only present fields, report everything, reject a vacuous call"
+/// shape as [`assert_concert_state`].
+#[allow(clippy::too_many_arguments)]
+fn assert_job_observation(
+    job_driver: &JobDriver,
+    concert_id: i64,
+    kind: JobStepKind,
+    started: Option<u32>,
+    completed: Option<u32>,
+    failed: Option<u32>,
+    blocked: Option<u32>,
+    released: Option<u32>,
+) -> anyhow::Result<()> {
+    if started.is_none()
+        && completed.is_none()
+        && failed.is_none()
+        && blocked.is_none()
+        && released.is_none()
+    {
+        anyhow::bail!(
+            "assert_job_observation called for concert {concert_id} {kind:?} with no \
+             expectations (started/completed/failed/blocked/released all omitted or null) \
+             — this would silently pass without checking anything; assert at least one count"
+        );
+    }
+
+    let actual = job_driver.observation(concert_id, kind);
+    let mut mismatches = Vec::new();
+    if let Some(expected) = started {
+        if actual.started != expected {
+            mismatches.push(format!(
+                "started: expected {expected}, got {}",
+                actual.started
+            ));
+        }
+    }
+    if let Some(expected) = completed {
+        if actual.completed != expected {
+            mismatches.push(format!(
+                "completed: expected {expected}, got {}",
+                actual.completed
+            ));
+        }
+    }
+    if let Some(expected) = failed {
+        if actual.failed != expected {
+            mismatches.push(format!(
+                "failed: expected {expected}, got {}",
+                actual.failed
+            ));
+        }
+    }
+    if let Some(expected) = blocked {
+        if actual.blocked != expected {
+            mismatches.push(format!(
+                "blocked: expected {expected}, got {}",
+                actual.blocked
+            ));
+        }
+    }
+    if let Some(expected) = released {
+        if actual.released != expected {
+            mismatches.push(format!(
+                "released: expected {expected}, got {}",
+                actual.released
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} {kind:?} observation mismatch: {}",
+            mismatches.join("; ")
+        );
+    }
+}
+
+/// Checks each expected event name against the concert's recorded event log,
+/// returning every mismatch in one message — same "check only present
+/// fields, report everything, reject a vacuous call" shape as
+/// [`assert_concert_state`]/[`assert_job_observation`]. Every name in
+/// `present`/`absent` must be a real event name (`Event::parse`); an unknown
+/// name errors immediately rather than silently never matching in `absent`.
+fn assert_concert_events(
+    state: &AppState,
+    concert_id: i64,
+    present: Option<Vec<String>>,
+    absent: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let present = present.unwrap_or_default();
+    let absent = absent.unwrap_or_default();
+    if present.is_empty() && absent.is_empty() {
+        anyhow::bail!(
+            "assert_concert_events called for concert {concert_id} with no expectations \
+             (present/absent both omitted, null, or empty) — this would silently pass \
+             without checking anything; assert at least one event name"
+        );
+    }
+    for name in present.iter().chain(absent.iter()) {
+        if Event::parse(name).is_none() {
+            anyhow::bail!(
+                "assert_concert_events: unknown event name {name:?} — see \
+                 crate::events::Event for the known names"
+            );
+        }
+    }
+
+    let conn = state.db.lock().unwrap();
+    db::concerts::get_concert(&conn, concert_id)
+        .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?;
+    // The fallible `try_list_for_concert`, not `list_for_concert` — a query
+    // failure here must surface as an error, not be misread as "no events"
+    // and let an `absent` assertion silently pass without truly checking
+    // the event log.
+    let events = crate::events::try_list_for_concert(&conn, concert_id)
+        .map_err(|e| anyhow::anyhow!("failed to list events for concert {concert_id}: {e}"))?;
+
+    let mut mismatches = Vec::new();
+    for name in &present {
+        if !events.iter().any(|e| &e.event == name) {
+            mismatches.push(format!("expected event {name:?} to be present, found none"));
+        }
+    }
+    for name in &absent {
+        let count = events.iter().filter(|e| &e.event == name).count();
+        if count > 0 {
+            mismatches.push(format!(
+                "expected event {name:?} to be absent, found {count}"
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} event mismatch: {}",
+            mismatches.join("; ")
+        );
+    }
+}
+
+/// Looks up `concert_id`'s `source_url` and enqueues it on the app's real
+/// scrape queue, matching what `/sync/:year/:month` does for a newly-listed
+/// concert. Drops the DB lock before calling `enqueue` — `ScrapeQueue` takes
+/// no DB lock itself, but keeping the critical section to the lookup only
+/// stays deadlock-proof by construction.
+fn scrape_enqueue(state: &AppState, concert_id: i64) -> anyhow::Result<bool> {
+    let source_url = {
+        let conn = state.db.lock().unwrap();
+        db::concerts::get_concert(&conn, concert_id)
+            .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?
+            .source_url
+    };
+    Ok(state.scrape_queue.enqueue(concert_id, source_url))
+}
+
+/// Checks each present expectation against the Scrape Driver's observed
+/// counts for `concert_id`, returning every mismatch in one message — same
+/// "check only present fields, report everything, reject a vacuous call"
+/// shape as [`assert_job_observation`].
+fn assert_scrape_observation(
+    scrape_driver: &ScrapeDriver,
+    concert_id: i64,
+    started: Option<u32>,
+    completed: Option<u32>,
+    blocked: Option<u32>,
+    released: Option<u32>,
+) -> anyhow::Result<()> {
+    if started.is_none() && completed.is_none() && blocked.is_none() && released.is_none() {
+        anyhow::bail!(
+            "assert_scrape_observation called for concert {concert_id} with no expectations \
+             (started/completed/blocked/released all omitted or null) — this would silently \
+             pass without checking anything; assert at least one count"
+        );
+    }
+
+    let actual = scrape_driver.observation(concert_id);
+    let mut mismatches = Vec::new();
+    if let Some(expected) = started {
+        if actual.started != expected {
+            mismatches.push(format!(
+                "started: expected {expected}, got {}",
+                actual.started
+            ));
+        }
+    }
+    if let Some(expected) = completed {
+        if actual.completed != expected {
+            mismatches.push(format!(
+                "completed: expected {expected}, got {}",
+                actual.completed
+            ));
+        }
+    }
+    if let Some(expected) = blocked {
+        if actual.blocked != expected {
+            mismatches.push(format!(
+                "blocked: expected {expected}, got {}",
+                actual.blocked
+            ));
+        }
+    }
+    if let Some(expected) = released {
+        if actual.released != expected {
+            mismatches.push(format!(
+                "released: expected {expected}, got {}",
+                actual.released
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} scrape observation mismatch: {}",
+            mismatches.join("; ")
+        );
     }
 }
 
@@ -269,6 +752,23 @@ fn seed_media_concert(
     let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone())
         .seed_media_concert(&state.jobs.working_dir, seed)?;
     Ok(seed_lifecycle_concert_result(concert))
+}
+
+/// See [`seed_listing`] — same shape, delegating to
+/// `db::seeds::SeedContext::seed_album_null_concert`.
+fn seed_album_null_concert(
+    state: &AppState,
+    seed: SeedAlbumNullConcert,
+) -> anyhow::Result<SeedListingResult> {
+    let conn = state.db.lock().unwrap();
+    let concert =
+        SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_album_null_concert(seed)?;
+    Ok(SeedListingResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        concert_date: concert.concert_date,
+    })
 }
 
 fn seed_lifecycle_concert_result(concert: crate::model::Concert) -> SeedLifecycleConcertResult {
@@ -368,13 +868,17 @@ fn assert_concert_state(
 /// would leave every later request against that singleton 404ing on a
 /// "Query returned no rows" error for the lifetime of the process.
 ///
-/// Deliberately out of scope for this first slice (see "Out Of Scope For
-/// First Slice" in docs/change/2026-07-11-hurl-web-integration-tests.md):
-/// this does not quiesce in-flight download/split jobs or the background
-/// scrape worker. A reset run concurrently with one of those can still race
-/// with writes it makes after reset returns. Job-command stubbing and scrape
-/// queue controls are explicitly deferred to a later migration slice, and
-/// the first slice's Hurl cases never trigger those paths.
+/// Deliberately out of scope even after the Job Driver (slice 2) and Scrape
+/// Driver (slice 4) migrations (see "Out Of Scope For First Slice" in
+/// docs/change/2026-07-11-hurl-web-integration-tests.md): this is not a
+/// quiescence boundary for either driver. `reset()` (the caller, below) does
+/// drop both drivers' blocked senders so a *currently blocked* download/
+/// split/scrape step is woken and resolves without writing further fixtures
+/// — but a step already queued and not yet started, or one that already
+/// released and is mid-write, is unaffected and can still write after this
+/// function returns. Hurl's `--jobs 1` shared-process convention (see
+/// hurl/README.md) means no file actually calls `/test/reset` mid-run, so
+/// this caveat has not needed a stronger guarantee in practice.
 fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
     for dir_name in ["concerts", "thumbnails"] {
         let dir = state.jobs.working_dir.join(dir_name);
@@ -412,9 +916,14 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
 /// server so `POST /test/...` adapter routes and the raw JSON-RPC root
 /// endpoint share one listener and port (see
 /// docs/adr/0004-test-control-http-adapter.md).
-pub async fn start(state: AppState, port: u16) -> anyhow::Result<(ServerHandle, SocketAddr)> {
+pub async fn start(
+    state: AppState,
+    job_driver: Arc<JobDriver>,
+    scrape_driver: Arc<ScrapeDriver>,
+    port: u16,
+) -> anyhow::Result<(ServerHandle, SocketAddr)> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let module = TestControlServer::new(state).rpc_module();
+    let module = TestControlServer::new(state, job_driver, scrape_driver).rpc_module();
     let methods: jsonrpsee::server::Methods = module.clone().into();
     let server = ServerBuilder::new()
         .set_http_middleware(
@@ -445,6 +954,23 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
         ),
         jobs: JobConfig::test(workdir),
     }
+}
+
+/// Shared by this module's own tests and by [`adapter`]'s tests, same
+/// visibility rationale as [`test_state`]. A fresh, never-configured driver —
+/// tests that need specific plans/observations set them up explicitly.
+#[cfg(test)]
+fn test_job_driver() -> Arc<JobDriver> {
+    Arc::new(JobDriver::new())
+}
+
+/// Shared by this module's own tests and by [`adapter`]'s tests, same
+/// visibility rationale as [`test_job_driver`]. A fresh, never-configured
+/// driver — tests that need specific plans/observations set them up
+/// explicitly.
+#[cfg(test)]
+fn test_scrape_driver() -> Arc<ScrapeDriver> {
+    Arc::new(ScrapeDriver::new())
 }
 
 #[cfg(test)]
@@ -479,6 +1005,10 @@ mod tests {
         request(json)
     }
 
+    fn album_null(json: &'static str) -> SeedAlbumNullConcert {
+        request(json)
+    }
+
     fn fixture_number_from_source_url(source_url: &str) -> u64 {
         source_url
             .strip_prefix("https://example.test/tiny-desk/test-control-")
@@ -505,7 +1035,7 @@ mod tests {
     async fn seed_methods_persist_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server.seed_listing(listing("{}")).await.unwrap();
         assert!(result.id > 0);
@@ -517,7 +1047,7 @@ mod tests {
     async fn seed_lifecycle_concert_via_rpc_maps_persisted_state_into_result_booleans() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let inert = server
             .seed_lifecycle_concert(lifecycle("{}"))
@@ -545,7 +1075,7 @@ mod tests {
     async fn seed_lifecycle_concert_tracks_present_persists_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server
             .seed_lifecycle_concert(lifecycle(r#"{"tracks_present": [true, false]}"#))
@@ -562,7 +1092,7 @@ mod tests {
         let conn = db::connection::open_in_memory().unwrap();
         let workdir = tempfile::tempdir().unwrap();
         let state = test_state(conn, workdir.path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server
             .seed_media_concert(media(
@@ -585,13 +1115,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn seed_album_null_concert_persists_null_album_through_rpc_dispatch_path() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
+
+        let result = server
+            .seed_album_null_concert(album_null(
+                r#"{"set_list": ["Song A"], "tracks_present": [true]}"#,
+            ))
+            .await
+            .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.album, None);
+        assert_eq!(concert.set_list, vec!["Song A".to_string()]);
+        assert_eq!(concert.tracks_present, vec![true]);
+    }
+
+    #[tokio::test]
     async fn seed_defaults_generate_unique_urls_across_methods_and_reset() {
         // Pins that FIXTURE_IDS is one process-lifetime allocator (ADR 0003):
         // shared across every seed method and every TestControlServer clone,
         // and not reset by `test.reset`.
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let listing_result = server.seed_listing(listing("{}")).await.unwrap();
         reset_test_data(&server.state).unwrap();
@@ -619,7 +1169,7 @@ mod tests {
     async fn explicit_flat_map_seed_params_override_generated_defaults() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let listing_result = server
             .seed_listing(listing(
@@ -676,7 +1226,10 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_accepts_nested_request_object_params() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+        let methods: jsonrpsee::server::Methods =
+            TestControlServer::new(state, test_job_driver(), test_scrape_driver())
+                .rpc_module()
+                .into();
 
         let body = raw_json_call(
             &methods,
@@ -706,7 +1259,10 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_rejects_old_flat_params_shape() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state).rpc_module().into();
+        let methods: jsonrpsee::server::Methods =
+            TestControlServer::new(state, test_job_driver(), test_scrape_driver())
+                .rpc_module()
+                .into();
 
         let body = raw_json_call(
             &methods,
@@ -729,7 +1285,7 @@ mod tests {
     async fn explicit_null_preserves_nullable_domain_absence_through_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let listing_result = server
             .seed_listing(listing(r#"{"concert_date": null, "teaser": null}"#))
@@ -763,7 +1319,7 @@ mod tests {
     async fn explicit_null_for_identity_fields_is_accepted_via_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state);
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let parsed = params(r#"{"source_url": null, "artist": null}"#)
             .parse::<SeedLifecycleConcert>()
@@ -937,6 +1493,132 @@ mod tests {
         assert!(err.to_string().contains("no expectations"), "{err}");
     }
 
+    // ---------- assert_concert_events ----------
+
+    #[tokio::test]
+    async fn assert_concert_events_passes_when_present_and_absent_both_hold() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            crate::events::record_now(
+                &conn,
+                seeded.id,
+                crate::events::Event::InterludeDelete,
+                None,
+            );
+        }
+
+        super::assert_concert_events(
+            &state,
+            seeded.id,
+            Some(vec!["interlude_delete".to_string()]),
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_reports_every_mismatch_in_one_message() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            crate::events::record_now(&conn, seeded.id, crate::events::Event::TrackDelete, None);
+        }
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            Some(vec!["interlude_delete".to_string()]),
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("expected event \"interlude_delete\" to be present, found none"),
+            "{message}"
+        );
+        assert!(
+            message.contains("expected event \"track_delete\" to be absent, found 1"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_rejects_a_call_with_no_expectations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let err = super::assert_concert_events(&state, seeded.id, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+
+        let err = super::assert_concert_events(&state, seeded.id, Some(vec![]), Some(vec![]))
+            .unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_rejects_an_unknown_event_name() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            None,
+            Some(vec!["not_a_real_event".to_string()]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown event name"), "{err}");
+    }
+
+    /// A query failure while listing events must surface as an error, not be
+    /// misread as "no events" and let an `absent` assertion vacuously pass —
+    /// the exact gap `list_for_concert`'s error-swallowing would otherwise
+    /// create here (see `crate::events::try_list_for_concert`'s doc comment).
+    #[tokio::test]
+    async fn assert_concert_events_propagates_a_query_failure_instead_of_passing_absent() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("DROP TABLE events", []).unwrap();
+        }
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            None,
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("no such table"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::assert_concert_events(
+            &state,
+            999,
+            Some(vec!["interlude_delete".to_string()]),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+    }
+
     #[tokio::test]
     async fn reset_clears_concerts_and_settings_but_leaves_the_settings_row() {
         let conn = db::connection::open_in_memory().unwrap();
@@ -1042,5 +1724,81 @@ mod tests {
         // a workdir that has never produced any generated files yet.
         let state = test_state(conn, workdir.path().to_path_buf());
         reset_test_data(&state).unwrap();
+    }
+
+    // ---------- Scrape Driver: scrape_enqueue / assert_scrape_observation / reset ----------
+
+    #[tokio::test]
+    async fn scrape_enqueue_marks_pending_and_dedupes_a_second_call() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let first = super::scrape_enqueue(&state, seeded.id).unwrap();
+        assert!(first, "first enqueue call must queue the scrape");
+        assert!(state.scrape_queue.is_pending(seeded.id));
+
+        let second = super::scrape_enqueue(&state, seeded.id).unwrap();
+        assert!(
+            !second,
+            "a concert already queued/in-flight is a normal dedupe no-op, not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn scrape_enqueue_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::scrape_enqueue(&state, 999).unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+    }
+
+    #[test]
+    fn assert_scrape_observation_rejects_a_call_with_no_expectations() {
+        let driver = ScrapeDriver::new();
+        let err = super::assert_scrape_observation(&driver, 1, None, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+    }
+
+    #[test]
+    fn assert_scrape_observation_reports_every_mismatch_in_one_message() {
+        let driver = ScrapeDriver::new();
+        driver.set_plan(1, ScrapeOutcome::Block);
+        // Never released — `started`/`blocked` will be 0 since nothing ran
+        // `run_item` yet, so every non-zero expectation mismatches.
+        let err = super::assert_scrape_observation(&driver, 1, Some(1), Some(1), Some(1), Some(1))
+            .unwrap_err();
+        for field in ["started", "completed", "blocked", "released"] {
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_clears_scrape_driver_plans_and_observations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let state = test_state(conn, workdir.path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
+
+        // Bump an observation through the public `ScrapeItemFn` seam (default
+        // plan succeeds immediately, no blocking/threading needed) so there
+        // is state for `reset` to actually clear.
+        let item = scrape_driver::scrape_item_fn(server.scrape_driver.clone());
+        let req = crate::jobs::scrape_queue::ScrapeRequest {
+            concert_id: seeded.id,
+            source_url: seeded.source_url.clone(),
+        };
+        item(&state.db, workdir.path(), &req);
+        assert_eq!(server.scrape_driver.observation(seeded.id).completed, 1);
+
+        TestControlApiServer::reset(&server).await.unwrap();
+
+        assert_eq!(
+            server.scrape_driver.observation(seeded.id),
+            scrape_driver::ScrapeObservation::default(),
+            "reset must clear scrape observations"
+        );
     }
 }

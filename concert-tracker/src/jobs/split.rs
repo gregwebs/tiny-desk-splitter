@@ -10,7 +10,7 @@ use tempfile::NamedTempFile;
 use crate::concert_media::{find_downloaded_file, tracks_present_on_disk};
 use crate::db;
 use crate::jobs::{
-    persist_job_log, run_with_logging, JobConfig, JobKey, JobKind, JobRegistry, SplitJob, SplitMode,
+    persist_job_log, JobConfig, JobKey, JobKind, JobRegistry, JobStepOutcome, SplitJob, SplitMode,
 };
 use crate::model::{concert_dir, Concert, Musician};
 use crate::split_timestamps::ValidatedTimestamps;
@@ -359,8 +359,6 @@ async fn run_split(
         remove_stale_interlude_files(&job.output_dir);
     }
 
-    let cmd = (config.split_cmd)(&job);
-
     let log_dir = config.log_dir();
     let temp_file =
         match std::fs::create_dir_all(&log_dir).and_then(|_| NamedTempFile::new_in(&log_dir)) {
@@ -372,8 +370,8 @@ async fn run_split(
         };
     let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
 
-    match run_with_logging(cmd, "split", concert_id, temp_path.as_deref()).await {
-        Ok((status, _)) if status.success() => {
+    match config.run_split(&job, temp_path.as_deref()).await {
+        JobStepOutcome::Succeeded => {
             tracing::info!(
                 "split completed for concert {} mode={}",
                 concert_id,
@@ -468,26 +466,12 @@ async fn run_split(
             }
             crate::jobs::spawn_dependents(db, registry, config, &key);
         }
-        Ok((status, stderr_tail)) => {
-            let error = format!("exit {:?}: {}", status.code(), stderr_tail.trim());
-            tracing::warn!("split failed for concert {}: {}", concert_id, error);
+        JobStepOutcome::Failed { message } => {
+            tracing::warn!("split failed for concert {}: {}", concert_id, message);
             registry.drop_dependency_edges(&key);
             let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &error);
-            persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
-        }
-        Err(e) => {
-            let hint = if e.kind() == std::io::ErrorKind::NotFound {
-                ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter"
-            } else {
-                ""
-            };
-            let error = format!("spawn error: {}{}", e, hint);
-            tracing::warn!("split failed for concert {}: {}", concert_id, error);
-            registry.drop_dependency_edges(&key);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &error);
-            persist_job_log(&conn, concert_id, "split", &error, temp_file, &log_dir);
+            let _ = db::lifecycle::mark_split_failed(&conn, concert_id, &message);
+            persist_job_log(&conn, concert_id, "split", &message, temp_file, &log_dir);
         }
     }
 }
@@ -501,19 +485,19 @@ mod tests {
     use tokio::process::Command;
 
     fn config_for(working_dir: PathBuf) -> JobConfig {
-        JobConfig {
+        JobConfig::from_commands(
             working_dir,
-            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(|_: &DownloadJob| Command::new("true")),
             // Long sleep so a real spawn would be visibly running. Tests that
             // exercise the auto-recover path expect the splitter to never run;
             // tests that exercise the spawn path check the registry, not exit.
-            split_cmd: Arc::new(|_| {
+            Arc::new(|_| {
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", "sleep 10"]);
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     fn seeded_db(album: &str, set_list: Vec<String>) -> Arc<Mutex<Connection>> {
@@ -704,17 +688,17 @@ mod tests {
             "mkdir -p \"$2\" && printf '{}' > \"$2/timestamps.json\"",
             ts_json.replace('\'', "'\\''")
         );
-        JobConfig {
+        JobConfig::from_commands(
             working_dir,
-            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
-            split_cmd: Arc::new(move |job: &SplitJob| {
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(move |job: &SplitJob| {
                 let output_dir = job.output_dir.to_str().unwrap().to_string();
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", &script, "--", "", &output_dir]);
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     /// Config whose splitter records the --timestamps-file content and creates track stubs.
@@ -725,10 +709,10 @@ mod tests {
             .collect();
         let touch = touch_cmds.join("; ");
         let script = format!("mkdir -p \"$2\" && {}", touch);
-        JobConfig {
+        JobConfig::from_commands(
             working_dir,
-            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
-            split_cmd: Arc::new(move |job: &SplitJob| {
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(move |job: &SplitJob| {
                 let output_dir = job.output_dir.to_str().unwrap().to_string();
                 // Verify --timestamps-file is present in the command args
                 let ts_flag = job.timestamps_path.is_some();
@@ -737,8 +721,8 @@ mod tests {
                 cmd.args(["-c", &script, "--", "", &output_dir]);
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     #[tokio::test]
@@ -883,16 +867,16 @@ mod tests {
 
     /// Config whose splitter always exits non-zero, recording a split failure.
     fn config_with_failing_split(working_dir: PathBuf) -> JobConfig {
-        JobConfig {
+        JobConfig::from_commands(
             working_dir,
-            download_cmd: Arc::new(|_: &DownloadJob| Command::new("true")),
-            split_cmd: Arc::new(|_| {
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            Arc::new(|_| {
                 let mut cmd = Command::new("sh");
                 cmd.args(["-c", "exit 1"]);
                 cmd
             }),
-            open_cmd: Arc::new(|_| Command::new("true")),
-        }
+            Arc::new(|_| Command::new("true")),
+        )
     }
 
     /// Simulate a concert that was already split (split_at IS NOT NULL) and re-split

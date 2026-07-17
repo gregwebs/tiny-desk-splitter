@@ -6,6 +6,10 @@ use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
 use concert_tracker::jobs::{check_dependencies, default_splitter_bin, JobConfig, JobRegistry};
+#[cfg(feature = "test-control")]
+use concert_tracker::test_control::job_driver::{JobDriver, TestControlJobRunner};
+#[cfg(feature = "test-control")]
+use concert_tracker::test_control::scrape_driver::{scrape_item_fn, ScrapeDriver};
 use concert_tracker::web::{router_with_opts, AppState, RouterOpts};
 
 #[derive(Parser)]
@@ -137,21 +141,70 @@ async fn main() -> Result<()> {
 
     let db = Arc::new(Mutex::new(conn));
     let workdir = cli.workdir;
-    let scrape_queue =
-        concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone());
+
+    // The Job Driver and Scrape Driver only replace their production
+    // counterparts when the Test Control API is actually going to be started
+    // (feature compiled in AND --test-control-port passed) — a test-control
+    // build run without that flag behaves exactly like a production build,
+    // for both jobs and the scrape queue. See
+    // docs/change/2026-07-15-job-driver-plan.md and
+    // docs/change/2026-07-17-scrape-driver-hurl-migration.md.
+    #[cfg(feature = "test-control")]
+    type TestControlDrivers = Option<(Arc<JobDriver>, Arc<ScrapeDriver>)>;
+    #[cfg(feature = "test-control")]
+    let (scrape_queue, jobs, drivers): (
+        concert_tracker::jobs::scrape_queue::ScrapeQueue,
+        JobConfig,
+        TestControlDrivers,
+    ) = match cli.test_control_port {
+        Some(_) => {
+            let job_driver = Arc::new(JobDriver::new());
+            let scrape_driver = Arc::new(ScrapeDriver::new());
+            let scrape_queue = concert_tracker::jobs::scrape_queue::ScrapeQueue::start_with(
+                db.clone(),
+                workdir.clone(),
+                scrape_item_fn(scrape_driver.clone()),
+            );
+            let jobs = JobConfig::with_runner(
+                workdir.clone(),
+                Arc::new(TestControlJobRunner::new(job_driver.clone())),
+            );
+            (scrape_queue, jobs, Some((job_driver, scrape_driver)))
+        }
+        None => (
+            concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone()),
+            JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone()),
+            None,
+        ),
+    };
+    #[cfg(not(feature = "test-control"))]
+    let (scrape_queue, jobs) = (
+        concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone()),
+        JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone()),
+    );
+
     let state = AppState {
         db,
         registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::production(workdir, splitter_bin, cli.open_cmd),
+        jobs,
         scrape_queue,
     };
 
     // Bound to a top-level `main` local (not `_ = ...`) so the handle outlives
     // this statement: dropping a jsonrpsee `ServerHandle` stops that server.
     #[cfg(feature = "test-control")]
-    let _test_control_handle = match cli.test_control_port {
-        Some(port) => {
-            let (handle, bound) = concert_tracker::test_control::start(state.clone(), port).await?;
+    let _test_control_handle = match drivers {
+        Some((job_driver, scrape_driver)) => {
+            let port = cli
+                .test_control_port
+                .expect("drivers are only built when test_control_port is Some");
+            let (handle, bound) = concert_tracker::test_control::start(
+                state.clone(),
+                job_driver,
+                scrape_driver,
+                port,
+            )
+            .await?;
             println!("Test control listening on http://{}", bound);
             Some(handle)
         }
