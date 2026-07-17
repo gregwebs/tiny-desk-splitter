@@ -38,9 +38,10 @@ use serde::Serialize;
 
 use crate::db;
 use crate::db::seeds::{
-    FixtureIds, SeedContext, SeedLifecycleConcert, SeedListing, SeedMediaConcert,
-    SeedScrapedConcert,
+    FixtureIds, SeedAlbumNullConcert, SeedContext, SeedLifecycleConcert, SeedListing,
+    SeedMediaConcert, SeedScrapedConcert,
 };
+use crate::events::Event;
 use crate::web::AppState;
 
 mod adapter;
@@ -81,6 +82,16 @@ pub trait TestControlApi {
         &self,
         params: SeedMediaConcert,
     ) -> RpcResult<SeedLifecycleConcertResult>;
+
+    /// Seed a concert with a NULL `album` column — a historical/defensive
+    /// shape no current product write path produces, kept for the
+    /// `track-details` handler test that exercises it. See
+    /// `db::seeds::SeedAlbumNullConcert`.
+    #[method(name = "seed_album_null_concert", param_kind = map)]
+    async fn seed_album_null_concert(
+        &self,
+        params: SeedAlbumNullConcert,
+    ) -> RpcResult<SeedListingResult>;
 
     /// Assert semantic domain conditions for a seeded concert without Hurl
     /// having to read raw DB rows. Only the expectations that are present are
@@ -144,6 +155,23 @@ pub trait TestControlApi {
         failed: Option<u32>,
         blocked: Option<u32>,
         released: Option<u32>,
+    ) -> RpcResult<OkResult>;
+
+    /// Assert internal event-log facts with no public HTTP surface: `present`
+    /// lists event names that must have at least one recorded row for the
+    /// concert, `absent` lists names that must have none. At least one of
+    /// `present`/`absent` must be non-empty — same "reject a vacuous call"
+    /// shape as [`TestControlApi::assert_concert_state`]. Every listed name
+    /// must be a real event (see `crate::events::Event::parse`) — an unknown
+    /// name errors rather than vacuously passing in `absent`. First consumer:
+    /// interlude deletion (`present: ["interlude_delete"], absent:
+    /// ["track_delete"]`).
+    #[method(name = "assert_concert_events", param_kind = map)]
+    async fn assert_concert_events(
+        &self,
+        concert_id: i64,
+        present: Option<Vec<String>>,
+        absent: Option<Vec<String>>,
     ) -> RpcResult<OkResult>;
 }
 
@@ -243,6 +271,13 @@ impl TestControlApiServer for TestControlServer {
         seed_media_concert(&self.state, params).map_err(internal_error)
     }
 
+    async fn seed_album_null_concert(
+        &self,
+        params: SeedAlbumNullConcert,
+    ) -> RpcResult<SeedListingResult> {
+        seed_album_null_concert(&self.state, params).map_err(internal_error)
+    }
+
     async fn assert_concert_state(
         &self,
         id: i64,
@@ -305,6 +340,17 @@ impl TestControlApiServer for TestControlServer {
         )
         .map(|()| OkResult { ok: true })
         .map_err(assertion_error)
+    }
+
+    async fn assert_concert_events(
+        &self,
+        concert_id: i64,
+        present: Option<Vec<String>>,
+        absent: Option<Vec<String>>,
+    ) -> RpcResult<OkResult> {
+        assert_concert_events(&self.state, concert_id, present, absent)
+            .map(|()| OkResult { ok: true })
+            .map_err(assertion_error)
     }
 }
 
@@ -389,6 +435,71 @@ fn assert_job_observation(
     }
 }
 
+/// Checks each expected event name against the concert's recorded event log,
+/// returning every mismatch in one message — same "check only present
+/// fields, report everything, reject a vacuous call" shape as
+/// [`assert_concert_state`]/[`assert_job_observation`]. Every name in
+/// `present`/`absent` must be a real event name (`Event::parse`); an unknown
+/// name errors immediately rather than silently never matching in `absent`.
+fn assert_concert_events(
+    state: &AppState,
+    concert_id: i64,
+    present: Option<Vec<String>>,
+    absent: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let present = present.unwrap_or_default();
+    let absent = absent.unwrap_or_default();
+    if present.is_empty() && absent.is_empty() {
+        anyhow::bail!(
+            "assert_concert_events called for concert {concert_id} with no expectations \
+             (present/absent both omitted, null, or empty) — this would silently pass \
+             without checking anything; assert at least one event name"
+        );
+    }
+    for name in present.iter().chain(absent.iter()) {
+        if Event::parse(name).is_none() {
+            anyhow::bail!(
+                "assert_concert_events: unknown event name {name:?} — see \
+                 crate::events::Event for the known names"
+            );
+        }
+    }
+
+    let conn = state.db.lock().unwrap();
+    db::concerts::get_concert(&conn, concert_id)
+        .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?;
+    // The fallible `try_list_for_concert`, not `list_for_concert` — a query
+    // failure here must surface as an error, not be misread as "no events"
+    // and let an `absent` assertion silently pass without truly checking
+    // the event log.
+    let events = crate::events::try_list_for_concert(&conn, concert_id)
+        .map_err(|e| anyhow::anyhow!("failed to list events for concert {concert_id}: {e}"))?;
+
+    let mut mismatches = Vec::new();
+    for name in &present {
+        if !events.iter().any(|e| &e.event == name) {
+            mismatches.push(format!("expected event {name:?} to be present, found none"));
+        }
+    }
+    for name in &absent {
+        let count = events.iter().filter(|e| &e.event == name).count();
+        if count > 0 {
+            mismatches.push(format!(
+                "expected event {name:?} to be absent, found {count}"
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} event mismatch: {}",
+            mismatches.join("; ")
+        );
+    }
+}
+
 fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         jsonrpsee::types::ErrorCode::InternalError.code(),
@@ -466,6 +577,23 @@ fn seed_media_concert(
     let concert = SeedContext::with_ids(&conn, FIXTURE_IDS.clone())
         .seed_media_concert(&state.jobs.working_dir, seed)?;
     Ok(seed_lifecycle_concert_result(concert))
+}
+
+/// See [`seed_listing`] — same shape, delegating to
+/// `db::seeds::SeedContext::seed_album_null_concert`.
+fn seed_album_null_concert(
+    state: &AppState,
+    seed: SeedAlbumNullConcert,
+) -> anyhow::Result<SeedListingResult> {
+    let conn = state.db.lock().unwrap();
+    let concert =
+        SeedContext::with_ids(&conn, FIXTURE_IDS.clone()).seed_album_null_concert(seed)?;
+    Ok(SeedListingResult {
+        id: concert.id,
+        source_url: concert.source_url,
+        title: concert.title,
+        concert_date: concert.concert_date,
+    })
 }
 
 fn seed_lifecycle_concert_result(concert: crate::model::Concert) -> SeedLifecycleConcertResult {
@@ -688,6 +816,10 @@ mod tests {
         request(json)
     }
 
+    fn album_null(json: &'static str) -> SeedAlbumNullConcert {
+        request(json)
+    }
+
     fn fixture_number_from_source_url(source_url: &str) -> u64 {
         source_url
             .strip_prefix("https://example.test/tiny-desk/test-control-")
@@ -791,6 +923,26 @@ mod tests {
         let dir = crate::model::concert_dir(workdir.path(), "RPC Media Fixture");
         assert!(!dir.join("Song A.mp3").exists());
         assert!(dir.join("Song B.mp3").exists());
+    }
+
+    #[tokio::test]
+    async fn seed_album_null_concert_persists_null_album_through_rpc_dispatch_path() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let server = TestControlServer::new(state.clone(), test_job_driver());
+
+        let result = server
+            .seed_album_null_concert(album_null(
+                r#"{"set_list": ["Song A"], "tracks_present": [true]}"#,
+            ))
+            .await
+            .unwrap();
+
+        let conn = state.db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, result.id).unwrap();
+        assert_eq!(concert.album, None);
+        assert_eq!(concert.set_list, vec!["Song A".to_string()]);
+        assert_eq!(concert.tracks_present, vec![true]);
     }
 
     #[tokio::test]
@@ -1148,6 +1300,132 @@ mod tests {
 
         let err = super::assert_concert_state(&state, seeded.id, None, None, None).unwrap_err();
         assert!(err.to_string().contains("no expectations"), "{err}");
+    }
+
+    // ---------- assert_concert_events ----------
+
+    #[tokio::test]
+    async fn assert_concert_events_passes_when_present_and_absent_both_hold() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            crate::events::record_now(
+                &conn,
+                seeded.id,
+                crate::events::Event::InterludeDelete,
+                None,
+            );
+        }
+
+        super::assert_concert_events(
+            &state,
+            seeded.id,
+            Some(vec!["interlude_delete".to_string()]),
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_reports_every_mismatch_in_one_message() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            crate::events::record_now(&conn, seeded.id, crate::events::Event::TrackDelete, None);
+        }
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            Some(vec!["interlude_delete".to_string()]),
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("expected event \"interlude_delete\" to be present, found none"),
+            "{message}"
+        );
+        assert!(
+            message.contains("expected event \"track_delete\" to be absent, found 1"),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_rejects_a_call_with_no_expectations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let err = super::assert_concert_events(&state, seeded.id, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+
+        let err = super::assert_concert_events(&state, seeded.id, Some(vec![]), Some(vec![]))
+            .unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_rejects_an_unknown_event_name() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            None,
+            Some(vec!["not_a_real_event".to_string()]),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("unknown event name"), "{err}");
+    }
+
+    /// A query failure while listing events must surface as an error, not be
+    /// misread as "no events" and let an `absent` assertion vacuously pass —
+    /// the exact gap `list_for_concert`'s error-swallowing would otherwise
+    /// create here (see `crate::events::try_list_for_concert`'s doc comment).
+    #[tokio::test]
+    async fn assert_concert_events_propagates_a_query_failure_instead_of_passing_absent() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        {
+            let conn = state.db.lock().unwrap();
+            conn.execute("DROP TABLE events", []).unwrap();
+        }
+
+        let err = super::assert_concert_events(
+            &state,
+            seeded.id,
+            None,
+            Some(vec!["track_delete".to_string()]),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().to_lowercase().contains("no such table"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn assert_concert_events_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::assert_concert_events(
+            &state,
+            999,
+            Some(vec!["interlude_delete".to_string()]),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
     }
 
     #[tokio::test]

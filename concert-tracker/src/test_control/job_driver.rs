@@ -9,13 +9,16 @@ use std::future::Future;
 use std::path::Path;
 use std::sync::Mutex;
 
-use concert_types::{derive_interludes, interlude_filename_stem, ConcertInfo, Song, SongTimestamp};
 use serde::Deserialize;
 
+use crate::db::seeds::{
+    fake_analysis_timestamps, write_interlude_sentinels, write_legacy_timestamps_json,
+    write_track_sentinels, SENTINEL_BYTES,
+};
 use crate::jobs::{
     DownloadJob, JobRunFuture, JobRunner, JobStepOutcome, OpenMediaOutcome, SplitJob, SplitMode,
 };
-use crate::model::{concert_dir, sanitize_album, sanitize_filename};
+use crate::model::{concert_dir, sanitize_album};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -363,8 +366,6 @@ impl JobRunner for TestControlJobRunner {
     }
 }
 
-const SENTINEL_BYTES: &[u8] = b"test-control dummy media\n";
-
 fn write_download_sentinel(working_dir: &Path, album: &str) -> anyhow::Result<()> {
     let cd = concert_dir(working_dir, album);
     std::fs::create_dir_all(&cd)?;
@@ -394,76 +395,6 @@ fn read_set_list_titles(json_path: &Path) -> anyhow::Result<Vec<String>> {
     Ok(parsed.set_list.into_iter().map(|s| s.title).collect())
 }
 
-/// Deterministic fake per-song timestamps for `SplitMode::Analyze` (there is
-/// no real analysis to report): 90s spans with a 10s gap between songs, so
-/// `derive_interludes` has real gaps to find for callers that check
-/// interlude behavior. Mirrors `jobs::split`'s own
-/// `config_with_fake_analyze` test helper.
-fn fake_analysis_timestamps(titles: &[String]) -> Vec<SongTimestamp> {
-    let mut cursor = 0.0;
-    titles
-        .iter()
-        .map(|title| {
-            let start = cursor;
-            let end = start + 90.0;
-            cursor = end + 10.0;
-            SongTimestamp {
-                title: title.clone(),
-                start_time: start,
-                end_time: end,
-                duration: end - start,
-            }
-        })
-        .collect()
-}
-
-fn write_track_sentinels<'a>(
-    output_dir: &Path,
-    titles: impl Iterator<Item = &'a str>,
-) -> anyhow::Result<()> {
-    for title in titles {
-        let stem = sanitize_filename(title);
-        std::fs::write(output_dir.join(format!("{stem}.m4a")), SENTINEL_BYTES)?;
-    }
-    Ok(())
-}
-
-fn write_timestamps_json(output_dir: &Path, songs: &[SongTimestamp]) -> anyhow::Result<()> {
-    let info = ConcertInfo {
-        artist: String::new(),
-        source: String::new(),
-        show: String::new(),
-        date: None,
-        album: String::new(),
-        description: None,
-        set_list: songs
-            .iter()
-            .map(|s| Song {
-                title: s.title.clone(),
-            })
-            .collect(),
-        musicians: vec![],
-        preview_image_url: None,
-        teaser: None,
-        timestamps: Some(songs.to_vec()),
-    };
-    let json = serde_json::to_string(&info)?;
-    std::fs::write(output_dir.join("timestamps.json"), json)?;
-    Ok(())
-}
-
-fn write_interlude_sentinels(
-    output_dir: &Path,
-    songs: &[SongTimestamp],
-    media_duration: f64,
-) -> anyhow::Result<()> {
-    for interlude in derive_interludes(songs, media_duration) {
-        let stem = interlude_filename_stem(interlude.index);
-        std::fs::write(output_dir.join(format!("{stem}.m4a")), SENTINEL_BYTES)?;
-    }
-    Ok(())
-}
-
 /// Write the domain-level output files a successful split would have
 /// created, branching on [`SplitMode`] exactly like the real splitter's
 /// `--timestamps-file`/`--emit-interludes` flags do (see
@@ -474,15 +405,27 @@ fn write_split_output(job: &SplitJob) -> anyhow::Result<()> {
         SplitMode::Analyze => {
             let titles = read_set_list_titles(&job.json_path)?;
             let songs = fake_analysis_timestamps(&titles);
-            write_track_sentinels(&job.output_dir, songs.iter().map(|s| s.title.as_str()))?;
-            write_timestamps_json(&job.output_dir, &songs)?;
+            write_track_sentinels(
+                &job.output_dir,
+                songs.iter().map(|s| s.title.as_str()),
+                "m4a",
+            )?;
+            write_legacy_timestamps_json(&job.output_dir, &songs)?;
         }
         SplitMode::UserTimestamps { ts, media_duration } => {
-            write_track_sentinels(&job.output_dir, ts.songs().iter().map(|s| s.title.as_str()))?;
+            write_track_sentinels(
+                &job.output_dir,
+                ts.songs().iter().map(|s| s.title.as_str()),
+                "m4a",
+            )?;
             write_interlude_sentinels(&job.output_dir, ts.songs(), *media_duration)?;
         }
         SplitMode::ResetToAuto(ts) => {
-            write_track_sentinels(&job.output_dir, ts.songs().iter().map(|s| s.title.as_str()))?;
+            write_track_sentinels(
+                &job.output_dir,
+                ts.songs().iter().map(|s| s.title.as_str()),
+                "m4a",
+            )?;
         }
     }
     Ok(())
