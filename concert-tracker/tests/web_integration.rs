@@ -7,24 +7,10 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
 use concert_tracker::{
-    db::{
-        self,
-        concerts::{MetadataUpdate, NewListing},
-    },
-    jobs::{
-        scrape_queue::{ScrapeItemFn, ScrapeQueue},
-        JobConfig, JobRegistry,
-    },
+    db::{self, concerts::NewListing},
+    jobs::{scrape_queue::ScrapeQueue, JobConfig, JobRegistry},
     web::{router, AppState},
 };
-
-/// Cadence for the async poll helpers below.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(10);
-/// Budget for a cheap in-memory predicate poll: ~2s.
-const COND_MAX_POLLS: usize = 200;
-/// Budget for awaiting the worker's result after it has run an item (waits on
-/// real worker progress, not just a flag flip): ~5s.
-const RECV_MAX_POLLS: usize = 500;
 
 fn disable_system_proxy_for_tests() {
     tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
@@ -40,133 +26,11 @@ fn idle_scrape_queue() -> ScrapeQueue {
     )
 }
 
-/// Await a value from the scrape worker's sync result channel without parking a
-/// runtime worker thread.
-///
-/// Mirrors the helper in `jobs::scrape_queue`'s tests: `Receiver::recv_timeout`
-/// is a synchronous blocking call that, from an async test, parks one of the
-/// runtime's worker threads for the whole wait and can starve the scrape worker
-/// under load — a flaky timeout. Polling `try_recv` between async `sleep`s frees
-/// the worker thread each tick so the scheduler keeps the worker running.
-async fn recv_soon<T>(rx: &std::sync::mpsc::Receiver<T>) -> T {
-    use std::sync::mpsc::TryRecvError;
-    for _ in 0..RECV_MAX_POLLS {
-        match rx.try_recv() {
-            Ok(v) => return v,
-            Err(TryRecvError::Empty) => tokio::time::sleep(POLL_INTERVAL).await,
-            Err(TryRecvError::Disconnected) => {
-                panic!("worker dropped the result sender before sending a value")
-            }
-        }
-    }
-    panic!("no value received from the scrape worker in time");
-}
-
-/// Fetch the `/concerts/:id/status` fragment HTML (clones the router so it can be
-/// called more than once).
-async fn get_status_html(app: &axum::Router, id: i64) -> String {
-    let resp = app
-        .clone()
-        .oneshot(
-            Request::builder()
-                .uri(format!("/concerts/{id}/status"))
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    String::from_utf8_lossy(&bytes).into_owned()
-}
-
-/// A queued (not-yet-scraped) concert's card shows the "loading…" placeholder and
-/// polls; once the background worker finishes it shows the thumbnail and stops
-/// polling. Uses an injected stub item (no network), gated on a signal (no sleep).
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn pending_card_shows_loading_then_thumbnail() {
-    use std::sync::mpsc as std_mpsc;
-
-    let conn = db::connection::open_in_memory().unwrap();
-    seeded_concert(&conn, "https://npr.org/c/pending", "Pending Concert");
-    let db = Arc::new(Mutex::new(conn));
-
-    // Stub item: block until released, then set metadata (marks
-    // metadata_scraped_at + album) so the card flips loading → thumbnail.
-    let (release_tx, release_rx) = std_mpsc::channel::<()>();
-    let release_rx = Arc::new(Mutex::new(release_rx));
-    let (done_tx, done_rx) = std_mpsc::channel::<()>();
-    let db_for_item = db.clone();
-    let item: ScrapeItemFn = Arc::new(move |_db, _wd, req| {
-        let _ = release_rx.lock().unwrap().recv();
-        {
-            let conn = db_for_item.lock().unwrap();
-            db::concerts::update_metadata(
-                &conn,
-                req.concert_id,
-                &MetadataUpdate {
-                    artist: "Stub Artist".to_string(),
-                    album: "Stub Album".to_string(),
-                    description: None,
-                    set_list: vec![],
-                    musicians: vec![],
-                },
-            )
-            .unwrap();
-        }
-        let _ = done_tx.send(());
-    });
-
-    let scrape_queue = ScrapeQueue::start_with(db.clone(), PathBuf::from("/tmp"), item);
-    let state = AppState {
-        db: db.clone(),
-        registry: Arc::new(JobRegistry::new()),
-        jobs: JobConfig::test(PathBuf::from("/tmp")),
-        scrape_queue: scrape_queue.clone(),
-    };
-
-    assert!(scrape_queue.enqueue(1, "https://npr.org/c/pending".to_string()));
-    let app = router(state);
-
-    // While pending: polls + loading placeholder, no thumbnail yet.
-    let body = get_status_html(&app, 1).await;
-    assert!(
-        body.contains("hx-trigger=\"every 3s\""),
-        "pending card must poll: {body}"
-    );
-    assert!(
-        body.contains("card-thumb-loading"),
-        "pending card must show loading placeholder: {body}"
-    );
-    assert!(!body.contains("/thumbnails/"), "no thumbnail yet: {body}");
-
-    // Release the stub; wait for completion + the worker to clear pending.
-    release_tx.send(()).unwrap();
-    recv_soon(&done_rx).await;
-    for _ in 0..COND_MAX_POLLS {
-        if !scrape_queue.is_pending(1) {
-            break;
-        }
-        tokio::time::sleep(POLL_INTERVAL).await;
-    }
-    assert!(
-        !scrape_queue.is_pending(1),
-        "pending must clear after scrape"
-    );
-
-    // Now scraped: thumbnail shown, polling stopped.
-    let body = get_status_html(&app, 1).await;
-    assert!(
-        body.contains("/thumbnails/"),
-        "scraped card must show thumbnail: {body}"
-    );
-    assert!(
-        !body.contains("hx-trigger=\"every 3s\""),
-        "scraped card must stop polling: {body}"
-    );
-}
+// pending_card_shows_loading_then_thumbnail migrated to
+// hurl/scrape_pending.hurl (Scrape Driver: test.scrape_set_plan block +
+// test.scrape_enqueue + public GET /concerts/:id/status before/after
+// test.scrape_release) — see
+// docs/change/2026-07-17-scrape-driver-hurl-migration.md.
 
 fn test_state(conn: rusqlite::Connection) -> AppState {
     disable_system_proxy_for_tests();
@@ -221,6 +85,13 @@ fn seeded_concert(conn: &rusqlite::Connection, url: &str, title: &str) {
 /// next view can retry. The success path is covered by the unit tests for
 /// `ensure_scraped` in src/web/handlers.rs — those use a stub closure and
 /// avoid hitting the network, while this test exercises the real call path.
+///
+/// Intentionally Rust-only, unlike `pending_card_shows_loading_then_thumbnail`
+/// above: this exercises the detail view's inline auto-scrape
+/// (`ensure_scraped`), a real outbound connection-refused failure on a
+/// synchronous call path that does not go through the background
+/// `ScrapeQueue` at all — there is no Scrape Driver seam here to stand in
+/// for it deterministically, by design.
 #[tokio::test]
 async fn detail_page_auto_scrape_failure_still_renders() {
     disable_system_proxy_for_tests();

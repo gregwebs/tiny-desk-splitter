@@ -48,6 +48,12 @@ enum AdapterRoute {
     /// translation as `Assert`, not `Seed`'s request-object wrapping — see
     /// docs/change/2026-07-15-job-driver-plan.md.
     Job(String),
+    /// Scrape Driver control actions (`scrape_set_plan`, `scrape_enqueue`,
+    /// `scrape_release`) — same imperative-action shape and flat-passthrough
+    /// param translation as `Job`, kept as its own route class because the
+    /// scrape queue is not a download/split/open job; see
+    /// docs/change/2026-07-17-scrape-driver-hurl-migration.md.
+    Scrape(String),
 }
 
 impl AdapterRoute {
@@ -57,6 +63,7 @@ impl AdapterRoute {
             AdapterRoute::Seed(name) => format!("test.seed_{name}"),
             AdapterRoute::Assert(name) => format!("test.assert_{name}"),
             AdapterRoute::Job(name) => format!("test.job_{name}"),
+            AdapterRoute::Scrape(name) => format!("test.scrape_{name}"),
         }
     }
 }
@@ -89,6 +96,9 @@ fn route_for(method: &http::Method, path: &str) -> Option<AdapterRoute> {
         (Some("test"), Some("job"), Some(name), None) if !name.is_empty() => {
             Some(AdapterRoute::Job(name.to_string()))
         }
+        (Some("test"), Some("scrape"), Some(name), None) if !name.is_empty() => {
+            Some(AdapterRoute::Scrape(name.to_string()))
+        }
         _ => None,
     }
 }
@@ -119,7 +129,10 @@ fn translate(route: &AdapterRoute, body: &[u8]) -> Result<String, ()> {
     let omit_params = matches!(route, AdapterRoute::Reset) && body_params == json!({});
     let params = match route {
         AdapterRoute::Seed(_) => json!({ "params": body_params }),
-        AdapterRoute::Reset | AdapterRoute::Assert(_) | AdapterRoute::Job(_) => body_params,
+        AdapterRoute::Reset
+        | AdapterRoute::Assert(_)
+        | AdapterRoute::Job(_)
+        | AdapterRoute::Scrape(_) => body_params,
     };
 
     let mut envelope = serde_json::Map::new();
@@ -257,6 +270,7 @@ where
 mod tests {
     use super::*;
     use crate::test_control::job_driver::JobDriver;
+    use crate::test_control::scrape_driver::ScrapeDriver;
     use crate::test_control::{test_state, TestControlServer};
     use http::{Method, StatusCode};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -265,9 +279,13 @@ mod tests {
     fn test_methods() -> Methods {
         let conn = db_in_memory();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        TestControlServer::new(state, Arc::new(JobDriver::new()))
-            .rpc_module()
-            .into()
+        TestControlServer::new(
+            state,
+            Arc::new(JobDriver::new()),
+            Arc::new(ScrapeDriver::new()),
+        )
+        .rpc_module()
+        .into()
     }
 
     fn db_in_memory() -> rusqlite::Connection {
@@ -311,6 +329,26 @@ mod tests {
             route_for(&Method::POST, "/test/job/set_plan"),
             Some(AdapterRoute::Job("set_plan".to_string()))
         );
+    }
+
+    #[test]
+    fn scrape_route_maps_to_test_scrape_name() {
+        assert_eq!(
+            route_for(&Method::POST, "/test/scrape/enqueue"),
+            Some(AdapterRoute::Scrape("enqueue".to_string()))
+        );
+    }
+
+    #[test]
+    fn scrape_route_preserves_params_flat_like_assert() {
+        let envelope = translate(
+            &AdapterRoute::Scrape("enqueue".to_string()),
+            br#"{"concert_id":1}"#,
+        )
+        .unwrap();
+        let value: Value = serde_json::from_str(&envelope).unwrap();
+        assert_eq!(value["method"], "test.scrape_enqueue");
+        assert_eq!(value["params"], json!({"concert_id": 1}));
     }
 
     #[test]

@@ -46,8 +46,10 @@ use crate::web::AppState;
 
 mod adapter;
 pub mod job_driver;
+pub mod scrape_driver;
 
 use job_driver::{JobDriver, JobStepKind, StepOutcome};
+use scrape_driver::{ScrapeDriver, ScrapeOutcome};
 
 /// One fixture-number allocator for the process lifetime — per ADR 0003, not
 /// reset by `test.reset`, and shared across every [`TestControlServer`] clone
@@ -173,6 +175,42 @@ pub trait TestControlApi {
         present: Option<Vec<String>>,
         absent: Option<Vec<String>>,
     ) -> RpcResult<OkResult>;
+
+    /// Configure the Scrape Driver's plan for `concert_id` (`"succeed"` or
+    /// `"block"`). Unlike the Job Driver there is no default plan — an
+    /// unconfigured concert always scrape-succeeds deterministically.
+    /// Reached via the adapter's `/test/scrape/set_plan` route.
+    #[method(name = "scrape_set_plan", param_kind = map)]
+    async fn scrape_set_plan(&self, concert_id: i64, scrape: ScrapeOutcome) -> RpcResult<OkResult>;
+
+    /// Enqueue `concert_id` for a background scrape through the app's real
+    /// [`crate::jobs::scrape_queue::ScrapeQueue`] (the same queue
+    /// `/sync/:year/:month` uses), looking up its `source_url` from the
+    /// database. Returns `enqueued: false` if the concert was already
+    /// queued/in-flight (normal dedupe, not an error). Reached via the
+    /// adapter's `/test/scrape/enqueue` route.
+    #[method(name = "scrape_enqueue", param_kind = map)]
+    async fn scrape_enqueue(&self, concert_id: i64) -> RpcResult<ScrapeEnqueueResult>;
+
+    /// Release a scrape currently blocked for `concert_id`. Errors if none is
+    /// blocked there; poll `test.assert_scrape_observation` for `blocked=1`
+    /// first. Reached via the adapter's `/test/scrape/release` route.
+    #[method(name = "scrape_release", param_kind = map)]
+    async fn scrape_release(&self, concert_id: i64) -> RpcResult<OkResult>;
+
+    /// Assert Scrape Driver observation counts for `concert_id`. Only present
+    /// fields are checked, mismatches are collected and reported together,
+    /// and a call with every count field omitted is rejected — same shape as
+    /// [`TestControlApi::assert_job_observation`].
+    #[method(name = "assert_scrape_observation", param_kind = map)]
+    async fn assert_scrape_observation(
+        &self,
+        concert_id: i64,
+        started: Option<u32>,
+        completed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult>;
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -215,6 +253,15 @@ pub struct SeedLifecycleConcertResult {
     pub split: bool,
 }
 
+/// Result for `test.scrape_enqueue`. `enqueued` distinguishes "this call
+/// queued a new scrape" from "already queued/in-flight" (a normal dedupe
+/// no-op) so Hurl cases can assert either shape.
+#[derive(Clone, Debug, Serialize)]
+pub struct ScrapeEnqueueResult {
+    pub ok: bool,
+    pub enqueued: bool,
+}
+
 /// Clone is cheap (an `AppState` clone) and lets [`start`] clone the built
 /// `RpcModule` — one copy is converted to [`jsonrpsee::server::Methods`] for
 /// the [`adapter`] to dispatch through in-process, the other is handed to
@@ -223,11 +270,20 @@ pub struct SeedLifecycleConcertResult {
 pub struct TestControlServer {
     state: AppState,
     job_driver: Arc<JobDriver>,
+    scrape_driver: Arc<ScrapeDriver>,
 }
 
 impl TestControlServer {
-    pub fn new(state: AppState, job_driver: Arc<JobDriver>) -> Self {
-        Self { state, job_driver }
+    pub fn new(
+        state: AppState,
+        job_driver: Arc<JobDriver>,
+        scrape_driver: Arc<ScrapeDriver>,
+    ) -> Self {
+        Self {
+            state,
+            job_driver,
+            scrape_driver,
+        }
     }
 
     fn rpc_module(self) -> RpcModule<Self> {
@@ -241,6 +297,7 @@ impl TestControlApiServer for TestControlServer {
         reset_test_data(&self.state)
             .map(|()| {
                 self.job_driver.reset();
+                self.scrape_driver.reset();
                 OkResult { ok: true }
             })
             .map_err(internal_error)
@@ -351,6 +408,44 @@ impl TestControlApiServer for TestControlServer {
         assert_concert_events(&self.state, concert_id, present, absent)
             .map(|()| OkResult { ok: true })
             .map_err(assertion_error)
+    }
+
+    async fn scrape_set_plan(&self, concert_id: i64, scrape: ScrapeOutcome) -> RpcResult<OkResult> {
+        self.scrape_driver.set_plan(concert_id, scrape);
+        Ok(OkResult { ok: true })
+    }
+
+    async fn scrape_enqueue(&self, concert_id: i64) -> RpcResult<ScrapeEnqueueResult> {
+        scrape_enqueue(&self.state, concert_id)
+            .map(|enqueued| ScrapeEnqueueResult { ok: true, enqueued })
+            .map_err(internal_error)
+    }
+
+    async fn scrape_release(&self, concert_id: i64) -> RpcResult<OkResult> {
+        self.scrape_driver
+            .release(concert_id)
+            .map(|()| OkResult { ok: true })
+            .map_err(internal_error)
+    }
+
+    async fn assert_scrape_observation(
+        &self,
+        concert_id: i64,
+        started: Option<u32>,
+        completed: Option<u32>,
+        blocked: Option<u32>,
+        released: Option<u32>,
+    ) -> RpcResult<OkResult> {
+        assert_scrape_observation(
+            &self.scrape_driver,
+            concert_id,
+            started,
+            completed,
+            blocked,
+            released,
+        )
+        .map(|()| OkResult { ok: true })
+        .map_err(assertion_error)
     }
 }
 
@@ -495,6 +590,86 @@ fn assert_concert_events(
     } else {
         anyhow::bail!(
             "concert {concert_id} event mismatch: {}",
+            mismatches.join("; ")
+        );
+    }
+}
+
+/// Looks up `concert_id`'s `source_url` and enqueues it on the app's real
+/// scrape queue, matching what `/sync/:year/:month` does for a newly-listed
+/// concert. Drops the DB lock before calling `enqueue` — `ScrapeQueue` takes
+/// no DB lock itself, but keeping the critical section to the lookup only
+/// stays deadlock-proof by construction.
+fn scrape_enqueue(state: &AppState, concert_id: i64) -> anyhow::Result<bool> {
+    let source_url = {
+        let conn = state.db.lock().unwrap();
+        db::concerts::get_concert(&conn, concert_id)
+            .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?
+            .source_url
+    };
+    Ok(state.scrape_queue.enqueue(concert_id, source_url))
+}
+
+/// Checks each present expectation against the Scrape Driver's observed
+/// counts for `concert_id`, returning every mismatch in one message — same
+/// "check only present fields, report everything, reject a vacuous call"
+/// shape as [`assert_job_observation`].
+fn assert_scrape_observation(
+    scrape_driver: &ScrapeDriver,
+    concert_id: i64,
+    started: Option<u32>,
+    completed: Option<u32>,
+    blocked: Option<u32>,
+    released: Option<u32>,
+) -> anyhow::Result<()> {
+    if started.is_none() && completed.is_none() && blocked.is_none() && released.is_none() {
+        anyhow::bail!(
+            "assert_scrape_observation called for concert {concert_id} with no expectations \
+             (started/completed/blocked/released all omitted or null) — this would silently \
+             pass without checking anything; assert at least one count"
+        );
+    }
+
+    let actual = scrape_driver.observation(concert_id);
+    let mut mismatches = Vec::new();
+    if let Some(expected) = started {
+        if actual.started != expected {
+            mismatches.push(format!(
+                "started: expected {expected}, got {}",
+                actual.started
+            ));
+        }
+    }
+    if let Some(expected) = completed {
+        if actual.completed != expected {
+            mismatches.push(format!(
+                "completed: expected {expected}, got {}",
+                actual.completed
+            ));
+        }
+    }
+    if let Some(expected) = blocked {
+        if actual.blocked != expected {
+            mismatches.push(format!(
+                "blocked: expected {expected}, got {}",
+                actual.blocked
+            ));
+        }
+    }
+    if let Some(expected) = released {
+        if actual.released != expected {
+            mismatches.push(format!(
+                "released: expected {expected}, got {}",
+                actual.released
+            ));
+        }
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "concert {concert_id} scrape observation mismatch: {}",
             mismatches.join("; ")
         );
     }
@@ -693,13 +868,17 @@ fn assert_concert_state(
 /// would leave every later request against that singleton 404ing on a
 /// "Query returned no rows" error for the lifetime of the process.
 ///
-/// Deliberately out of scope for this first slice (see "Out Of Scope For
-/// First Slice" in docs/change/2026-07-11-hurl-web-integration-tests.md):
-/// this does not quiesce in-flight download/split jobs or the background
-/// scrape worker. A reset run concurrently with one of those can still race
-/// with writes it makes after reset returns. Job-command stubbing and scrape
-/// queue controls are explicitly deferred to a later migration slice, and
-/// the first slice's Hurl cases never trigger those paths.
+/// Deliberately out of scope even after the Job Driver (slice 2) and Scrape
+/// Driver (slice 4) migrations (see "Out Of Scope For First Slice" in
+/// docs/change/2026-07-11-hurl-web-integration-tests.md): this is not a
+/// quiescence boundary for either driver. `reset()` (the caller, below) does
+/// drop both drivers' blocked senders so a *currently blocked* download/
+/// split/scrape step is woken and resolves without writing further fixtures
+/// — but a step already queued and not yet started, or one that already
+/// released and is mid-write, is unaffected and can still write after this
+/// function returns. Hurl's `--jobs 1` shared-process convention (see
+/// hurl/README.md) means no file actually calls `/test/reset` mid-run, so
+/// this caveat has not needed a stronger guarantee in practice.
 fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
     for dir_name in ["concerts", "thumbnails"] {
         let dir = state.jobs.working_dir.join(dir_name);
@@ -740,10 +919,11 @@ fn reset_test_data(state: &AppState) -> anyhow::Result<()> {
 pub async fn start(
     state: AppState,
     job_driver: Arc<JobDriver>,
+    scrape_driver: Arc<ScrapeDriver>,
     port: u16,
 ) -> anyhow::Result<(ServerHandle, SocketAddr)> {
     let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
-    let module = TestControlServer::new(state, job_driver).rpc_module();
+    let module = TestControlServer::new(state, job_driver, scrape_driver).rpc_module();
     let methods: jsonrpsee::server::Methods = module.clone().into();
     let server = ServerBuilder::new()
         .set_http_middleware(
@@ -782,6 +962,15 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
 #[cfg(test)]
 fn test_job_driver() -> Arc<JobDriver> {
     Arc::new(JobDriver::new())
+}
+
+/// Shared by this module's own tests and by [`adapter`]'s tests, same
+/// visibility rationale as [`test_job_driver`]. A fresh, never-configured
+/// driver — tests that need specific plans/observations set them up
+/// explicitly.
+#[cfg(test)]
+fn test_scrape_driver() -> Arc<ScrapeDriver> {
+    Arc::new(ScrapeDriver::new())
 }
 
 #[cfg(test)]
@@ -846,7 +1035,7 @@ mod tests {
     async fn seed_methods_persist_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone(), test_job_driver());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server.seed_listing(listing("{}")).await.unwrap();
         assert!(result.id > 0);
@@ -858,7 +1047,7 @@ mod tests {
     async fn seed_lifecycle_concert_via_rpc_maps_persisted_state_into_result_booleans() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state, test_job_driver());
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let inert = server
             .seed_lifecycle_concert(lifecycle("{}"))
@@ -886,7 +1075,7 @@ mod tests {
     async fn seed_lifecycle_concert_tracks_present_persists_through_the_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone(), test_job_driver());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server
             .seed_lifecycle_concert(lifecycle(r#"{"tracks_present": [true, false]}"#))
@@ -903,7 +1092,7 @@ mod tests {
         let conn = db::connection::open_in_memory().unwrap();
         let workdir = tempfile::tempdir().unwrap();
         let state = test_state(conn, workdir.path().to_path_buf());
-        let server = TestControlServer::new(state.clone(), test_job_driver());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server
             .seed_media_concert(media(
@@ -929,7 +1118,7 @@ mod tests {
     async fn seed_album_null_concert_persists_null_album_through_rpc_dispatch_path() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone(), test_job_driver());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let result = server
             .seed_album_null_concert(album_null(
@@ -952,7 +1141,7 @@ mod tests {
         // and not reset by `test.reset`.
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state, test_job_driver());
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let listing_result = server.seed_listing(listing("{}")).await.unwrap();
         reset_test_data(&server.state).unwrap();
@@ -980,7 +1169,7 @@ mod tests {
     async fn explicit_flat_map_seed_params_override_generated_defaults() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state, test_job_driver());
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let listing_result = server
             .seed_listing(listing(
@@ -1037,9 +1226,10 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_accepts_nested_request_object_params() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state, test_job_driver())
-            .rpc_module()
-            .into();
+        let methods: jsonrpsee::server::Methods =
+            TestControlServer::new(state, test_job_driver(), test_scrape_driver())
+                .rpc_module()
+                .into();
 
         let body = raw_json_call(
             &methods,
@@ -1069,9 +1259,10 @@ mod tests {
     async fn raw_jsonrpc_generated_seed_method_rejects_old_flat_params_shape() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let methods: jsonrpsee::server::Methods = TestControlServer::new(state, test_job_driver())
-            .rpc_module()
-            .into();
+        let methods: jsonrpsee::server::Methods =
+            TestControlServer::new(state, test_job_driver(), test_scrape_driver())
+                .rpc_module()
+                .into();
 
         let body = raw_json_call(
             &methods,
@@ -1094,7 +1285,7 @@ mod tests {
     async fn explicit_null_preserves_nullable_domain_absence_through_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state.clone(), test_job_driver());
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
 
         let listing_result = server
             .seed_listing(listing(r#"{"concert_date": null, "teaser": null}"#))
@@ -1128,7 +1319,7 @@ mod tests {
     async fn explicit_null_for_identity_fields_is_accepted_via_rpc() {
         let conn = db::connection::open_in_memory().unwrap();
         let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
-        let server = TestControlServer::new(state, test_job_driver());
+        let server = TestControlServer::new(state, test_job_driver(), test_scrape_driver());
 
         let parsed = params(r#"{"source_url": null, "artist": null}"#)
             .parse::<SeedLifecycleConcert>()
@@ -1533,5 +1724,81 @@ mod tests {
         // a workdir that has never produced any generated files yet.
         let state = test_state(conn, workdir.path().to_path_buf());
         reset_test_data(&state).unwrap();
+    }
+
+    // ---------- Scrape Driver: scrape_enqueue / assert_scrape_observation / reset ----------
+
+    #[tokio::test]
+    async fn scrape_enqueue_marks_pending_and_dedupes_a_second_call() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+
+        let first = super::scrape_enqueue(&state, seeded.id).unwrap();
+        assert!(first, "first enqueue call must queue the scrape");
+        assert!(state.scrape_queue.is_pending(seeded.id));
+
+        let second = super::scrape_enqueue(&state, seeded.id).unwrap();
+        assert!(
+            !second,
+            "a concert already queued/in-flight is a normal dedupe no-op, not an error"
+        );
+    }
+
+    #[tokio::test]
+    async fn scrape_enqueue_reports_an_unknown_id_as_an_error() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = test_state(conn, tempfile::tempdir().unwrap().path().to_path_buf());
+
+        let err = super::scrape_enqueue(&state, 999).unwrap_err();
+        assert!(err.to_string().contains("999"), "{err}");
+    }
+
+    #[test]
+    fn assert_scrape_observation_rejects_a_call_with_no_expectations() {
+        let driver = ScrapeDriver::new();
+        let err = super::assert_scrape_observation(&driver, 1, None, None, None, None).unwrap_err();
+        assert!(err.to_string().contains("no expectations"), "{err}");
+    }
+
+    #[test]
+    fn assert_scrape_observation_reports_every_mismatch_in_one_message() {
+        let driver = ScrapeDriver::new();
+        driver.set_plan(1, ScrapeOutcome::Block);
+        // Never released — `started`/`blocked` will be 0 since nothing ran
+        // `run_item` yet, so every non-zero expectation mismatches.
+        let err = super::assert_scrape_observation(&driver, 1, Some(1), Some(1), Some(1), Some(1))
+            .unwrap_err();
+        for field in ["started", "completed", "blocked", "released"] {
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn reset_clears_scrape_driver_plans_and_observations() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let state = test_state(conn, workdir.path().to_path_buf());
+        let seeded = super::seed_listing(&state, SeedListing::default()).unwrap();
+        let server = TestControlServer::new(state.clone(), test_job_driver(), test_scrape_driver());
+
+        // Bump an observation through the public `ScrapeItemFn` seam (default
+        // plan succeeds immediately, no blocking/threading needed) so there
+        // is state for `reset` to actually clear.
+        let item = scrape_driver::scrape_item_fn(server.scrape_driver.clone());
+        let req = crate::jobs::scrape_queue::ScrapeRequest {
+            concert_id: seeded.id,
+            source_url: seeded.source_url.clone(),
+        };
+        item(&state.db, workdir.path(), &req);
+        assert_eq!(server.scrape_driver.observation(seeded.id).completed, 1);
+
+        TestControlApiServer::reset(&server).await.unwrap();
+
+        assert_eq!(
+            server.scrape_driver.observation(seeded.id),
+            scrape_driver::ScrapeObservation::default(),
+            "reset must clear scrape observations"
+        );
     }
 }
