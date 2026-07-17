@@ -44,3 +44,23 @@ gh_app_token() {
 
   printf '%s' "$token"
 }
+
+if [ "${BASH_SOURCE[0]}" = "$0" ]; then
+  case "${1:-}" in
+    --help|-h)
+      cat <<EOF
+usage: $0
+
+Defines gh_app_token when sourced. When run directly, prints nothing.
+EOF
+      exit 0
+      ;;
+    "")
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+fi

@@ -28,7 +28,8 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use concert_types::{derive_interludes, interlude_filename_stem, ConcertInfo, Song, SongTimestamp};
 use rusqlite::{params, Connection};
 use serde::Deserialize;
 
@@ -38,6 +39,99 @@ use crate::db::split_timestamps;
 use crate::model::Concert;
 
 const DEFAULT_CONCERT_DATE: &str = "2026-01-01";
+
+/// Shared sentinel bytes for every dummy fixture file this module and
+/// [`crate::test_control::job_driver`] write — neither valid audio/video nor
+/// meant to be; handlers that read these files must only check existence,
+/// extension, or (for legacy timestamps.json) JSON shape.
+pub(crate) const SENTINEL_BYTES: &[u8] = b"test-control dummy media\n";
+
+/// Write one sentinel file per title into `output_dir`, named the same way
+/// the real splitter names track output (`sanitize_filename(title).{ext}`).
+/// Shared by [`write_seed_media_files`] (a caller-chosen `ext`, defaulting to
+/// "mp3") and `test_control::job_driver::write_split_output` (always "m4a",
+/// matching the real splitter's split output).
+pub(crate) fn write_track_sentinels<'a>(
+    output_dir: &Path,
+    titles: impl Iterator<Item = &'a str>,
+    ext: &str,
+) -> Result<()> {
+    for title in titles {
+        let stem = crate::model::sanitize_filename(title);
+        std::fs::write(output_dir.join(format!("{stem}.{ext}")), SENTINEL_BYTES)?;
+    }
+    Ok(())
+}
+
+/// Write one sentinel interlude file per gap `derive_interludes` finds
+/// between `songs` and `media_duration`, named the same way the real
+/// splitter names interlude output (`interlude_filename_stem(index).m4a`).
+pub(crate) fn write_interlude_sentinels(
+    output_dir: &Path,
+    songs: &[SongTimestamp],
+    media_duration: f64,
+) -> Result<()> {
+    for interlude in derive_interludes(songs, media_duration) {
+        let stem = interlude_filename_stem(interlude.index);
+        std::fs::write(output_dir.join(format!("{stem}.m4a")), SENTINEL_BYTES)?;
+    }
+    Ok(())
+}
+
+/// Write a legacy on-disk `timestamps.json` (the `ConcertInfo` shape the real
+/// splitter used to write before per-song timestamps moved into the DB),
+/// readable back by `jobs::split::read_analysis_timestamps`. Used both for
+/// `SplitMode::Analyze`'s test-control completion and for seeding a
+/// "legacy concert" fixture that predates the DB columns.
+pub(crate) fn write_legacy_timestamps_json(
+    output_dir: &Path,
+    songs: &[SongTimestamp],
+) -> Result<()> {
+    let info = ConcertInfo {
+        artist: String::new(),
+        source: String::new(),
+        show: String::new(),
+        date: None,
+        album: String::new(),
+        description: None,
+        set_list: songs
+            .iter()
+            .map(|s| Song {
+                title: s.title.clone(),
+            })
+            .collect(),
+        musicians: vec![],
+        preview_image_url: None,
+        teaser: None,
+        timestamps: Some(songs.to_vec()),
+    };
+    let json = serde_json::to_string(&info)?;
+    std::fs::write(output_dir.join("timestamps.json"), json)?;
+    Ok(())
+}
+
+/// Deterministic fake per-song timestamps for a fixture that has no real
+/// analysis to report: 90s spans with a 10s gap between songs, so
+/// `derive_interludes` has real gaps to find for callers that check
+/// interlude behavior. Mirrors `jobs::split`'s own
+/// `config_with_fake_analyze` test helper.
+pub(crate) fn fake_analysis_timestamps(titles: &[String]) -> Vec<SongTimestamp> {
+    let mut cursor = 0.0;
+    titles
+        .iter()
+        .map(|title| {
+            let start = cursor;
+            let end = start + 90.0;
+            cursor = end + 10.0;
+            SongTimestamp {
+                title: title.clone(),
+                start_time: start,
+                end_time: end,
+                duration: end - start,
+            }
+        })
+        .collect()
+}
 
 fn fixture_source_url(n: u64) -> String {
     format!("https://example.test/tiny-desk/test-control-{n}")
@@ -225,19 +319,59 @@ impl<'a> SeedContext<'a> {
 
     pub fn seed_media_concert(&self, workdir: &Path, seed: SeedMediaConcert) -> Result<Concert> {
         validate_seed_media_request(&seed)?;
-        let track_files = seed.track_files.clone();
-        let track_file_extension = seed.track_file_extension.clone();
-        let source_file = seed.source_file;
-        let source_file_extension = seed.source_file_extension.clone();
-        let concert = self.seed_lifecycle_concert(seed.lifecycle)?;
-        write_seed_media_files(
-            workdir,
-            &concert,
-            track_files.as_deref(),
-            &track_file_extension,
-            source_file,
-            &source_file_extension,
+        let concert = self.seed_lifecycle_concert(seed.lifecycle.clone())?;
+        write_seed_media_files(workdir, &concert, &seed)?;
+        concerts::get_concert(self.conn, concert.id)
+    }
+
+    /// A concert with track state but `album = NULL` — a historical/defensive
+    /// shape no current product write path produces (`update_metadata`
+    /// requires an `album: String`), which is exactly why
+    /// `track_details`/`track-details` must tolerate a NULL album on the
+    /// row. Direct SQL for the track-state columns, same
+    /// fixture-normalization rationale as [`reset_fixture_lifecycle_state`].
+    pub fn seed_album_null_concert(&self, seed: SeedAlbumNullConcert) -> Result<Concert> {
+        let n = self.ids.next();
+        let source_url = seed.source_url.unwrap_or_else(|| fixture_source_url(n));
+        let title = seed
+            .title
+            .unwrap_or_else(|| format!("Test Album-Null Concert {n}"));
+        let set_list = seed.set_list.unwrap_or_else(|| fixture_set_list(n));
+
+        let concert = upsert_and_fetch(
+            self.conn,
+            &NewListing {
+                source_url,
+                title,
+                concert_date: Some(DEFAULT_CONCERT_DATE.to_string()),
+                teaser: None,
+            },
         )?;
+        normalize_listing_fields(
+            self.conn,
+            concert.id,
+            &Some(DEFAULT_CONCERT_DATE.to_string()),
+            &None,
+        )?;
+        reset_fixture_lifecycle_state(self.conn, concert.id)?;
+
+        // No product function sets set_list without also requiring an album
+        // (`update_metadata` writes both together) — direct SQL for this
+        // column only, same fixture-normalization rationale as
+        // `reset_fixture_lifecycle_state`. `tracks_present`/`tracks_liked` do
+        // have real product setters, so those compose the normal way.
+        let set_list_json = serde_json::to_string(&set_list)?;
+        self.conn.execute(
+            "UPDATE concerts SET set_list_json = ?1 WHERE id = ?2",
+            params![set_list_json, concert.id],
+        )?;
+        if let Some(tracks_present) = &seed.tracks_present {
+            split_timestamps::set_tracks_present(self.conn, concert.id, tracks_present)?;
+        }
+        if let Some(tracks_liked) = &seed.tracks_liked {
+            split_timestamps::set_tracks_liked(self.conn, concert.id, tracks_liked)?;
+        }
+
         concerts::get_concert(self.conn, concert.id)
     }
 }
@@ -261,16 +395,46 @@ fn validate_seed_media_request(seed: &SeedMediaConcert) -> Result<()> {
             }
         }
     }
+
+    if seed.interlude_files {
+        if seed.lifecycle.user_timestamps.is_none() && seed.lifecycle.auto_timestamps.is_none() {
+            anyhow::bail!(
+                "interlude_files requires user_timestamps or auto_timestamps to derive gaps from"
+            );
+        }
+        if seed.lifecycle.media_duration.is_none() {
+            anyhow::bail!("interlude_files requires media_duration to derive gaps against");
+        }
+    }
+
+    if seed.legacy_timestamps_json && seed.lifecycle.auto_timestamps.is_some() {
+        anyhow::bail!(
+            "legacy_timestamps_json conflicts with auto_timestamps: a legacy concert has no \
+             auto column by definition — its automated timestamps live only in the on-disk \
+             timestamps.json this seed writes"
+        );
+    }
+
+    if seed.source_file_kind == SourceFileKind::RealAudio {
+        if !seed.source_file {
+            anyhow::bail!("source_file_kind: real_audio requires source_file: true");
+        }
+        match seed.source_file_extension.as_deref() {
+            None | Some("m4a") => {}
+            Some(other) => anyhow::bail!(
+                "source_file_kind: real_audio only supports the m4a container ffmpeg \
+                 generates, got extension {other:?}"
+            ),
+        }
+    }
+
     Ok(())
 }
 
 fn write_seed_media_files(
     workdir: &Path,
     concert: &Concert,
-    track_files: Option<&[usize]>,
-    track_file_extension: &Option<String>,
-    source_file: bool,
-    source_file_extension: &Option<String>,
+    seed: &SeedMediaConcert,
 ) -> Result<()> {
     let album = concert
         .album
@@ -279,32 +443,102 @@ fn write_seed_media_files(
     let dir = crate::model::concert_dir(workdir, album);
     std::fs::create_dir_all(&dir)?;
 
-    if source_file {
-        let ext = resolved_media_extension(source_file_extension)?;
+    if seed.source_file {
         let stem = crate::model::sanitize_album(album);
-        std::fs::write(
-            dir.join(format!("{stem}.{ext}")),
-            b"test-control dummy media\n",
-        )?;
+        match seed.source_file_kind {
+            SourceFileKind::Sentinel => {
+                let ext = resolved_media_extension(&seed.source_file_extension)?;
+                std::fs::write(dir.join(format!("{stem}.{ext}")), SENTINEL_BYTES)?;
+            }
+            SourceFileKind::RealAudio => {
+                // validate_seed_media_request already confirmed
+                // source_file_extension is None or "m4a" — always write the
+                // container ffmpeg actually generates rather than falling
+                // through resolved_media_extension's unrelated "mp3" default
+                // for an omitted extension.
+                generate_real_audio_m4a(&dir.join(format!("{stem}.m4a")))?;
+            }
+        }
     }
 
-    let Some(indices) = track_files else {
-        return Ok(());
-    };
-    let ext = resolved_media_extension(track_file_extension)?;
-    for &index in indices {
-        let title = concert.set_list.get(index).ok_or_else(|| {
-            anyhow::anyhow!(
-                "track_files index {index} is out of range for set_list length {}",
-                concert.set_list.len()
-            )
-        })?;
-        let stem = crate::model::sanitize_filename(title);
-        std::fs::write(
-            dir.join(format!("{stem}.{ext}")),
-            b"test-control dummy media\n",
-        )?;
+    if let Some(indices) = &seed.track_files {
+        let ext = resolved_media_extension(&seed.track_file_extension)?;
+        let titles: Vec<&str> = indices
+            .iter()
+            .map(|&index| {
+                concert
+                    .set_list
+                    .get(index)
+                    .map(String::as_str)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "track_files index {index} is out of range for set_list length {}",
+                            concert.set_list.len()
+                        )
+                    })
+            })
+            .collect::<Result<_>>()?;
+        write_track_sentinels(&dir, titles.into_iter(), ext)?;
     }
+
+    if seed.preview_image {
+        std::fs::write(dir.join("preview.jpg"), SENTINEL_BYTES)?;
+    }
+
+    if seed.legacy_timestamps_json {
+        let songs = fake_analysis_timestamps(&concert.set_list);
+        write_legacy_timestamps_json(&dir, &songs)?;
+    }
+
+    if seed.interlude_files {
+        // Both already validated present by validate_seed_media_request; the
+        // ok_or_else messages here are defensive, not reachable in practice.
+        let media_duration = seed
+            .lifecycle
+            .media_duration
+            .ok_or_else(|| anyhow::anyhow!("interlude_files requires media_duration"))?;
+        let songs = seed
+            .lifecycle
+            .user_timestamps
+            .as_ref()
+            .or(seed.lifecycle.auto_timestamps.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!("interlude_files requires user_timestamps or auto_timestamps")
+            })?;
+        write_interlude_sentinels(&dir, songs, media_duration)?;
+    }
+
+    Ok(())
+}
+
+/// Generate a short (~5s), genuinely playable m4a via `ffmpeg` — needed only
+/// for routes whose public behavior depends on real `ffprobe` output (the
+/// split-timestamps POST happy path bounds-checks proposed end times against
+/// the source's real duration). Fails loudly with a clear "requires ffmpeg on
+/// PATH" message rather than silently falling back to a sentinel — a silent
+/// fallback would surface as that route 500ing on a real ffprobe failure
+/// instead of the seed call itself failing with an actionable message.
+fn generate_real_audio_m4a(dest: &Path) -> Result<()> {
+    let output = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=5",
+            "-c:a",
+            "aac",
+            "-b:a",
+            "32k",
+        ])
+        .arg(dest)
+        .output()
+        .context("spawning ffmpeg — source_file_kind: real_audio seeds require ffmpeg on PATH")?;
+    anyhow::ensure!(
+        output.status.success(),
+        "ffmpeg failed to generate real audio fixture: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     Ok(())
 }
 
@@ -497,11 +731,31 @@ impl Default for SeedLifecycleConcert {
     }
 }
 
+/// Whether `seed_media_concert`'s source file is a sentinel (existence/
+/// extension checks only) or genuinely playable audio generated with
+/// `ffmpeg` (for routes whose public behavior depends on real `ffprobe`
+/// output, e.g. the split-timestamps POST happy path). Defaults to
+/// `Sentinel` — real audio is deliberately opt-in since generating it shells
+/// out and is slower.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceFileKind {
+    #[default]
+    Sentinel,
+    RealAudio,
+}
+
 /// Seed input for `SeedContext::seed_media_concert` /
 /// `test.seed_media_concert`. It starts from the lifecycle fixture shape and
-/// can write dummy media files under the configured workdir. These files are
-/// only suitable for handlers that check path existence and extension; they
-/// are not valid audio/video and must not be used for ffprobe-backed paths.
+/// can write dummy media files under the configured workdir. Every field
+/// beyond the flattened lifecycle names a domain artifact (a preview image,
+/// interlude files derived from a timestamp gap, a legacy on-disk
+/// `timestamps.json`, or genuinely playable source audio) rather than a raw
+/// path or bytes, so this stays a scenario-seed vocabulary rather than a
+/// generic filesystem-mutation API. Written files are sentinel bytes — not
+/// valid audio/video and must not be used for ffprobe-backed paths — unless
+/// `source_file_kind: real_audio` is set, which is the one supported way to
+/// get a real ffprobe-readable file.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SeedMediaConcert {
@@ -509,8 +763,37 @@ pub struct SeedMediaConcert {
     pub lifecycle: SeedLifecycleConcert,
     pub source_file: bool,
     pub source_file_extension: Option<String>,
+    pub source_file_kind: SourceFileKind,
     pub track_files: Option<Vec<usize>>,
     pub track_file_extension: Option<String>,
+    /// Write a sentinel `preview.jpg` in the concert directory.
+    pub preview_image: bool,
+    /// Write sentinel interlude files for every gap `derive_interludes` finds
+    /// between the seeded user (falling back to auto) timestamps and
+    /// `media_duration` — both must be present on the seed request.
+    pub interlude_files: bool,
+    /// Write an on-disk `timestamps.json` in the legacy `ConcertInfo` shape
+    /// (predating the DB's `auto_split_timestamps_json` column), generated
+    /// from the set list via the same deterministic fake-analysis timestamps
+    /// the Job Driver uses. Conflicts with `auto_timestamps`: a genuinely
+    /// legacy concert has no auto column by definition.
+    pub legacy_timestamps_json: bool,
+}
+
+/// Seed input for `SeedContext::seed_album_null_concert` /
+/// `test.seed_album_null_concert`. Unlike every other seed, this
+/// deliberately leaves `album` as SQL NULL — `SeedLifecycleConcert`/
+/// `SeedMediaConcert` cannot produce that shape because `update_metadata`
+/// requires a real `album: String`, and `album: null` on those seeds means
+/// "generate a default" rather than "store NULL".
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SeedAlbumNullConcert {
+    pub source_url: Option<String>,
+    pub title: Option<String>,
+    pub set_list: Option<Vec<String>>,
+    pub tracks_present: Option<Vec<bool>>,
+    pub tracks_liked: Option<Vec<bool>>,
 }
 
 #[cfg(test)]
@@ -928,6 +1211,293 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM concerts", [], |row| row.get(0))
             .unwrap();
         assert_eq!(count, 0, "invalid media seed must not write a DB row");
+    }
+
+    // ---------- SeedMediaConcert: preview_image / legacy_timestamps_json / interlude_files ----------
+
+    #[test]
+    fn seed_media_concert_can_write_preview_image() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Preview Fixture Album".to_string()),
+                        ..Default::default()
+                    },
+                    preview_image: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        assert!(dir.join("preview.jpg").exists());
+    }
+
+    #[test]
+    fn seed_media_concert_legacy_timestamps_json_is_readable_by_the_splitter_backfill() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Legacy Timestamps Album".to_string()),
+                        set_list: Some(vec!["Old A".to_string(), "Old B".to_string()]),
+                        ..Default::default()
+                    },
+                    legacy_timestamps_json: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        assert!(dir.join("timestamps.json").exists());
+        let timestamps = crate::jobs::split::read_analysis_timestamps(&dir).unwrap();
+        assert_eq!(timestamps.len(), 2);
+        assert_eq!(timestamps[0].title, "Old A");
+    }
+
+    #[test]
+    fn seed_media_concert_legacy_timestamps_json_conflicts_with_auto_timestamps() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        set_list: Some(vec!["A".to_string()]),
+                        auto_timestamps: Some(vec![]),
+                        ..Default::default()
+                    },
+                    legacy_timestamps_json: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("conflicts with auto_timestamps"));
+    }
+
+    #[test]
+    fn seed_media_concert_interlude_files_writes_sentinels_for_gaps() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let ts = vec![
+            concert_types::SongTimestamp {
+                title: "Song A".to_string(),
+                start_time: 0.0,
+                end_time: 55.0,
+                duration: 55.0,
+            },
+            concert_types::SongTimestamp {
+                title: "Song B".to_string(),
+                start_time: 60.0,
+                end_time: 115.0,
+                duration: 55.0,
+            },
+        ];
+        let concert = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Interlude Fixture Album".to_string()),
+                        set_list: Some(vec!["Song A".to_string(), "Song B".to_string()]),
+                        user_timestamps: Some(ts),
+                        media_duration: Some(115.0),
+                        ..Default::default()
+                    },
+                    interlude_files: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        assert!(
+            dir.join("interlude_01.m4a").exists(),
+            "the 55s-60s gap should produce interlude_01"
+        );
+    }
+
+    #[test]
+    fn seed_media_concert_interlude_files_requires_timestamps() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        media_duration: Some(115.0),
+                        ..Default::default()
+                    },
+                    interlude_files: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("requires user_timestamps or auto_timestamps"));
+    }
+
+    #[test]
+    fn seed_media_concert_interlude_files_requires_media_duration() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        user_timestamps: Some(vec![]),
+                        ..Default::default()
+                    },
+                    interlude_files: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("requires media_duration"));
+    }
+
+    // ---------- SeedMediaConcert: source_file_kind: real_audio ----------
+
+    /// Runs ffmpeg to generate a tiny real audio file; skips (returns) when
+    /// ffmpeg isn't installed, matching the project's existing
+    /// `create_test_audio_sync`-style skip convention (see `scan.rs`).
+    #[tokio::test]
+    async fn seed_media_concert_real_audio_produces_a_file_ffprobe_accepts() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds.seed_media_concert(
+            workdir.path(),
+            SeedMediaConcert {
+                lifecycle: SeedLifecycleConcert {
+                    album: Some("Real Audio Fixture Album".to_string()),
+                    ..Default::default()
+                },
+                source_file: true,
+                source_file_kind: SourceFileKind::RealAudio,
+                ..Default::default()
+            },
+        );
+        let concert = match concert {
+            Ok(c) => c,
+            // Only skip when ffmpeg genuinely isn't on PATH (the spawn
+            // itself failed) — matching on this narrower "spawning ffmpeg"
+            // message, not any error that happens to mention "ffmpeg",
+            // keeps a real generation failure (wrong container, bad args,
+            // ffmpeg present but erroring) a hard test failure instead of a
+            // silently-skipped false pass.
+            Err(e) if e.to_string().contains("spawning ffmpeg") => {
+                eprintln!("skipping: ffmpeg not available ({e})");
+                return;
+            }
+            Err(e) => panic!("unexpected error: {e}"),
+        };
+
+        let dir = crate::model::concert_dir(workdir.path(), concert.album.as_deref().unwrap());
+        let source = dir.join("Real Audio Fixture Album.m4a");
+        assert!(source.exists());
+        // Prove ffprobe (the real product code path, not just file existence)
+        // accepts this file and reports the ~5s duration the seed generates —
+        // this is the whole point of `real_audio` over a sentinel byte file.
+        let duration = crate::split_timestamps::probe_media_duration(&source)
+            .await
+            .expect("ffprobe must accept the generated real-audio fixture");
+        assert!(
+            (duration - 5.0).abs() < 1.0,
+            "expected ~5s duration, got {duration}"
+        );
+    }
+
+    #[test]
+    fn seed_media_concert_real_audio_requires_source_file_true() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    source_file_kind: SourceFileKind::RealAudio,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("requires source_file: true"));
+    }
+
+    #[test]
+    fn seed_media_concert_real_audio_rejects_non_m4a_extension() {
+        let conn = open_in_memory().unwrap();
+        let workdir = tempfile::tempdir().unwrap();
+        let seeds = ctx(&conn);
+        let err = seeds
+            .seed_media_concert(
+                workdir.path(),
+                SeedMediaConcert {
+                    source_file: true,
+                    source_file_extension: Some("mp4".to_string()),
+                    source_file_kind: SourceFileKind::RealAudio,
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(err.to_string().contains("only supports the m4a container"));
+    }
+
+    // ---------- SeedAlbumNullConcert ----------
+
+    #[test]
+    fn seed_album_null_concert_leaves_album_null_but_persists_track_state() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_album_null_concert(SeedAlbumNullConcert {
+                set_list: Some(vec!["Song A".to_string()]),
+                tracks_present: Some(vec![true]),
+                tracks_liked: Some(vec![true]),
+                ..Default::default()
+            })
+            .unwrap();
+
+        assert_eq!(concert.album, None);
+        assert_eq!(concert.set_list, vec!["Song A".to_string()]);
+        assert_eq!(concert.tracks_present, vec![true]);
+        assert_eq!(concert.tracks_liked, vec![true]);
+    }
+
+    #[test]
+    fn seed_album_null_concert_defaults_are_unique_and_inert() {
+        let conn = open_in_memory().unwrap();
+        let seeds = ctx(&conn);
+        let concert = seeds
+            .seed_album_null_concert(SeedAlbumNullConcert::default())
+            .unwrap();
+
+        assert_eq!(concert.album, None);
+        assert_eq!(concert.set_list.len(), 3);
+        assert!(concert.tracks_present.is_empty());
+        assert_eq!(
+            concert.download_status(),
+            crate::model::DownloadStatus::NotDownloaded
+        );
     }
 
     #[test]

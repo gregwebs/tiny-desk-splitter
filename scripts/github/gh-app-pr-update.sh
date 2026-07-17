@@ -19,9 +19,14 @@ source "$SCRIPT_DIR/lib.sh"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/gh-app-token.sh"
 
+usage() {
+  echo "usage: $0 --pr NUMBER [--repo OWNER/REPO] [--title TITLE] [--body TEXT | --body-file FILE] [--base BASE] [--state open|closed]"
+}
+
 repo="" pr="" title="" body="" body_file="" base="" state=""
 while [ $# -gt 0 ]; do
   case "$1" in
+    --help|-h) usage; exit 0 ;;
     --repo)      repo="$2";      shift 2 ;;
     --pr)        pr="$2";        shift 2 ;;
     --title)     title="$2";     shift 2 ;;
@@ -35,7 +40,7 @@ done
 
 [ -n "$repo" ] || repo=$(gh_app_default_repo) || { echo "--repo required (not in a github.com git repo)" >&2; exit 1; }
 if [ -z "$pr" ]; then
-  echo "usage: $0 --pr NUMBER [--repo OWNER/REPO] [--title TITLE] [--body TEXT | --body-file FILE] [--base BASE] [--state open|closed]" >&2
+  usage >&2
   exit 1
 fi
 if [ -z "$title" ] && [ -z "$body" ] && [ -z "$body_file" ] && [ -z "$base" ] && [ -z "$state" ]; then
