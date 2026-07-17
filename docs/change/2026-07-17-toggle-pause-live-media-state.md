@@ -4,7 +4,7 @@ Resolves #40.
 
 ## Status
 
-Implementation, review, and local non-browser verification complete; CI browser verification pending.
+Complete. Implementation, review, local verification, and CI browser verification passed.
 
 ## Root cause
 
@@ -71,7 +71,7 @@ must depend on the media element's synchronous state transition, not promise-res
 - [x] Update `model.ts`'s stale `TogglePause` cross-reference; review `message.ts` and
   `docs/change/2026-07-03-player-keyboard-shortcut-targets.md` cross-references for accuracy.
 - [x] Perform adversarial engineering-lead review and required follow-up review.
-- [ ] Commit, push, open a PR, and monitor CI.
+- [x] Commit, push, open PR #117, and monitor CI.
 
 ### Verification plan
 
@@ -138,6 +138,8 @@ the non-adversarial engineering-lead follow-up approved the implementation for v
 - Isolated live server using a separate database, workdir, and port served the rebuilt
   `static/player.js`; the served bundle contains `ToggleAudio`.
 - Local Playwright execution could not reach the test because Chromium crashed at launch with
-  `SIGTRAP`, both normally and with the repository's `E2E_SANDBOX=1` single-process mode. The test
-  remains scheduled for CI; visual/interaction verification is therefore delegated to the PR's
-  Playwright job rather than claimed as locally complete.
+  `SIGTRAP`, both normally and with the repository's `E2E_SANDBOX=1` single-process mode.
+  Visual/interaction verification was therefore completed by the PR's Playwright job rather than
+  claimed as locally complete.
+- PR #117 CI — passed: frontend, Playwright, Rust, and shellcheck jobs. The Playwright job provides
+  the real-browser acceptance evidence that local Chromium could not provide.
