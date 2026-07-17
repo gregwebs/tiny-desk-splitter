@@ -234,10 +234,10 @@ export const Model = S.Struct({
     loadGen: S.Number,
   }),
   video: S.Struct({ open: S.Boolean }),
-  /** Mirrors the real `<audio>` element's play/pause state, driven by the
-   *  StartedAudio/PausedAudio/EndedAudio messages a later commit's
-   *  Subscription will dispatch from the element's real events — never set
-   *  optimistically by a user-action message (see update.ts's TogglePause). */
+  /** Projects the real `<audio>` element's play/pause state. Native media
+   *  events drive successful immediate transitions; failure and terminal
+   *  paths may defensively reset it false. User toggle messages never set it
+   *  optimistically: ToggleAudio reads live media state; see docs/player.md. */
   isPlaying: S.Boolean,
   /** A seek requested before the audio element had metadata loaded (e.g. a
    *  splitter preview click); mirrors player.ts's `seekWhenReady`. Applied

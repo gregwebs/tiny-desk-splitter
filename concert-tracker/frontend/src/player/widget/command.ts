@@ -463,6 +463,28 @@ export const ResumeAudio = Command.define(
   ),
 );
 
+// Toggle decisions must use the media element's live state. Model.isPlaying
+// is event-derived and can still be stale when rapid host commands arrive.
+export const ToggleAudio = Command.define(
+  "ToggleAudio",
+  Acked,
+  RejectedAudioPlay,
+)(
+  Effect.sync(() => byIdOfOrNull("player-audio", HTMLMediaElement)).pipe(
+    Effect.flatMap((audio) => {
+      if (!audio) return Effect.succeed(Acked());
+      if (!audio.paused) {
+        audio.pause();
+        return Effect.succeed(Acked());
+      }
+      return Effect.tryPromise(() => audio.play()).pipe(
+        Effect.as(Acked()),
+        Effect.catch(() => Effect.succeed(RejectedAudioPlay())),
+      );
+    }),
+  ),
+);
+
 export const SeekAudio = Command.define(
   "SeekAudio",
   { seconds: S.Number },

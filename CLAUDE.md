@@ -1,5 +1,10 @@
 @AGENTS.md
 
+## Spawning Subagents
+
+For any read only tasks, spawn subagents using /codex:rescue rather than a normal claude subagent spawn.
+The Agent Review is documented below, but agents analyzing the codebase should also use this.
+
 ## Addendum: Agent Review
 
 When running from Claude Code, if the codex plugin is installed, use Codex for review as defined below.

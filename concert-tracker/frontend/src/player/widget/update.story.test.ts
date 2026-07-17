@@ -32,6 +32,7 @@ import {
   ShowVideoPanel,
   SyncLikeButtonsExternal,
   SyncNowPlayingMirror,
+  ToggleAudio,
   ToggleLikeRequest,
 } from "./command";
 import {
@@ -1150,13 +1151,21 @@ describe("player update — audio events", () => {
     );
   });
 
-  test("TogglePause when playing emits PauseAudio", () => {
+  test("TogglePause delegates to live media state when cached model says playing", () => {
     Story.story(
       update,
       Story.with(playingModel),
       Story.message(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
-      Story.Command.expectHas(PauseAudio),
-      Story.Command.resolve(PauseAudio, Acked()),
+      Story.Command.resolve(ToggleAudio, Acked()),
+    );
+  });
+
+  test("TogglePause delegates to live media state when cached model says paused", () => {
+    Story.story(
+      update,
+      Story.with(initialModel),
+      Story.message(CommandReceived({ command: PlayerCommandValue.TogglePause() })),
+      Story.Command.resolve(ToggleAudio, Acked()),
     );
   });
 

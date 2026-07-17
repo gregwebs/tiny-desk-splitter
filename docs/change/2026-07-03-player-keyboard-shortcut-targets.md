@@ -78,9 +78,10 @@ of a resume.
 `player.ts`'s `togglePause()`, which read `audio.paused` directly rather than a cached flag.
 `update.ts`'s handler branches on the payload instead of `model.isPlaying`.
 
-The same `model.isPlaying`-staleness pattern also exists, unfixed, in the play/pause **button**'s
-`TogglePause` host command (`widget/update/handleHostCommand.ts:66`) — out of scope here (no
-keyboard event to sample `audioPaused` from; needs its own Command-layer fix), tracked as #40.
+The same `model.isPlaying`-staleness pattern also existed in the play/pause **button**'s
+`TogglePause` host command (`widget/update/handleHostCommand.ts`) and was intentionally left out of
+this change. It was subsequently fixed at the Command layer by #40; see `docs/player.md` for the
+lasting playback-state invariant.
 
 ## Bug 3: a later, unrelated commit had re-broken Enter/Space activation the other way
 

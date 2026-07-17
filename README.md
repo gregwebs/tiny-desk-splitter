@@ -113,6 +113,9 @@ Opens a local web UI at `http://localhost:<port>` built with axum, htmx, and ask
 
 #### Media player
 
+See [docs/player.md](docs/player.md) for the player state model and the boundary between
+event-derived model state and live browser media state.
+
 - **Persistent player bar** fixed to the bottom of the page
 - **Album playback**: play the full downloaded concert file (audio or video)
 - **Track playback**: play individual split tracks, with auto-advance to the next track
