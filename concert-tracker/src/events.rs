@@ -363,21 +363,10 @@ mod tests {
         crate::db::connection::open_in_memory().unwrap()
     }
 
+    /// Identical fixture values to `db::tests::seed` — delegates there rather
+    /// than duplicating the `upsert_listing` call.
     fn seed(conn: &Connection) -> i64 {
-        crate::db::concerts::upsert_listing(
-            conn,
-            &crate::db::concerts::NewListing {
-                source_url: "https://npr.org/c/1".to_string(),
-                title: "Test Concert".to_string(),
-                concert_date: Some("2024-06-01".to_string()),
-                teaser: Some("Great show".to_string()),
-            },
-        )
-        .unwrap();
-        let c = crate::db::concerts::get_concert_by_url(conn, "https://npr.org/c/1")
-            .unwrap()
-            .unwrap();
-        c.id
+        crate::db::tests::seed(conn)
     }
 
     fn event_count(conn: &Connection) -> i64 {

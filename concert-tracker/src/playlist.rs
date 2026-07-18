@@ -150,37 +150,21 @@ pub fn summarize_playlist(conn: &Connection, playlist_id: i64) -> Result<Playlis
 mod tests {
     use super::*;
     use crate::db;
-    use crate::db::concerts::{MetadataUpdate, NewListing};
+    use crate::db::concerts::MetadataUpdate;
     use crate::model::PlaylistItemKind;
 
     fn seed_concert(conn: &Connection, url: &str, title: &str, set_list: &[&str]) -> i64 {
-        db::concerts::upsert_listing(
-            conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: title.to_string(),
+        db::seeds::SeedContext::new(conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(url.to_string()),
+                title: Some(title.to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        let id = db::concerts::get_concert_by_url(conn, url)
+                artist: Some("Artist".to_string()),
+                album: Some(title.to_string()),
+                set_list: Some(set_list.iter().map(|s| s.to_string()).collect()),
+            })
             .unwrap()
-            .unwrap()
-            .id;
-        db::concerts::update_metadata(
-            conn,
-            id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: title.to_string(),
-                description: None,
-                set_list: set_list.iter().map(|s| s.to_string()).collect(),
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        id
+            .id
     }
 
     fn ts(title: &str, start: f64, end: f64) -> concert_types::SongTimestamp {

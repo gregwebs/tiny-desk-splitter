@@ -295,7 +295,7 @@ fn write_thumbnail_jpeg(working_dir: &Path, album: &str) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::concerts::{get_concert, upsert_listing, NewListing};
+    use crate::db::concerts::get_concert;
     use std::time::Duration;
 
     fn dummy_db() -> Arc<Mutex<Connection>> {
@@ -306,18 +306,13 @@ mod tests {
     /// has a row to update, and return its id.
     fn seeded_concert(db: &Arc<Mutex<Connection>>, url: &str) -> i64 {
         let conn = db.lock().unwrap();
-        upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: "Seed".to_string(),
+        crate::db::seeds::SeedContext::new(&conn)
+            .seed_listing(crate::db::seeds::SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some("Seed".to_string()),
                 concert_date: Some("2026-05-01".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
-        crate::db::concerts::get_concert_by_url(&conn, url)
-            .unwrap()
+            })
             .unwrap()
             .id
     }

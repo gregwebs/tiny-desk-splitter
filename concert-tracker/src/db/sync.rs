@@ -69,9 +69,8 @@ pub fn earliest_concert_date(conn: &Connection) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::concerts::{upsert_listing, NewListing};
     use crate::db::connection::open_in_memory;
-    use crate::db::tests::listing;
+    use crate::db::seeds::{SeedContext, SeedListing};
 
     #[test]
     fn mark_month_synced_and_list() {
@@ -161,17 +160,23 @@ mod tests {
     #[test]
     fn earliest_concert_date_returns_min() {
         let conn = open_in_memory().unwrap();
-        upsert_listing(&conn, &listing("https://npr.org/c/1", "A")).unwrap();
-        upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: "https://npr.org/c/2".to_string(),
-                title: "B".to_string(),
+        let seeds = SeedContext::new(&conn);
+        seeds
+            .seed_listing(SeedListing {
+                source_url: Some("https://npr.org/c/1".to_string()),
+                title: Some("A".to_string()),
+                concert_date: Some("2024-06-01".to_string()),
+                teaser: Some("Great show".to_string()),
+            })
+            .unwrap();
+        seeds
+            .seed_listing(SeedListing {
+                source_url: Some("https://npr.org/c/2".to_string()),
+                title: Some("B".to_string()),
                 concert_date: Some("2020-01-15".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         let earliest = earliest_concert_date(&conn).unwrap();
         assert_eq!(earliest, Some("2020-01-15".to_string()));
     }

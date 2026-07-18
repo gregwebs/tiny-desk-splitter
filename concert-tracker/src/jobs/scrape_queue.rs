@@ -329,32 +329,17 @@ mod tests {
         let url = "https://npr.org/c/already-scraped";
         let id = {
             let conn = db.lock().unwrap();
-            db::concerts::upsert_listing(
-                &conn,
-                &db::concerts::NewListing {
-                    source_url: url.to_string(),
-                    title: "X".to_string(),
+            db::seeds::SeedContext::new(&conn)
+                .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                    source_url: Some(url.to_string()),
+                    title: Some("X".to_string()),
                     concert_date: Some("2026-05-01".to_string()),
-                    teaser: None,
-                },
-            )
-            .unwrap();
-            let c = db::concerts::get_concert_by_url(&conn, url)
+                    artist: Some("Artist".to_string()),
+                    album: Some("Album".to_string()),
+                    set_list: Some(vec![]),
+                })
                 .unwrap()
-                .unwrap();
-            db::concerts::update_metadata(
-                &conn,
-                c.id,
-                &db::concerts::MetadataUpdate {
-                    artist: "Artist".to_string(),
-                    album: "Album".to_string(),
-                    description: None,
-                    set_list: vec![],
-                    musicians: vec![],
-                },
-            )
-            .unwrap();
-            c.id
+                .id
         };
 
         // The already-scraped guard returns before any network/disk work, so this

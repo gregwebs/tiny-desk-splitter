@@ -561,7 +561,6 @@ impl TimestampPayloadSong {
 mod tests {
     use super::*;
     use crate::db;
-    use crate::db::concerts::{MetadataUpdate, NewListing};
     use crate::jobs::{JobConfig, JobRegistry};
     use crate::model::concert_dir;
     use std::sync::{Arc, Mutex};
@@ -591,36 +590,17 @@ mod tests {
     }
 
     fn seed_ts_concert(conn: &rusqlite::Connection, album: &str, songs: &[&str]) -> i64 {
-        db::concerts::upsert_listing(
-            conn,
-            &NewListing {
-                source_url: format!("https://npr.org/split-timestamps/{album}"),
-                title: format!("{album} Concert"),
+        db::seeds::SeedContext::new(conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(format!("https://npr.org/split-timestamps/{album}")),
+                title: Some(format!("{album} Concert")),
                 concert_date: Some("2024-06-01".to_string()),
-                teaser: None,
-            },
-        )
-        .unwrap();
-        let id = db::concerts::get_concert_by_url(
-            conn,
-            &format!("https://npr.org/split-timestamps/{album}"),
-        )
-        .unwrap()
-        .unwrap()
-        .id;
-        db::concerts::update_metadata(
-            conn,
-            id,
-            &MetadataUpdate {
-                artist: "Test Artist".to_string(),
-                album: album.to_string(),
-                description: None,
-                set_list: songs.iter().map(|s| s.to_string()).collect(),
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        id
+                artist: Some("Test Artist".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(songs.iter().map(|s| s.to_string()).collect()),
+            })
+            .unwrap()
+            .id
     }
 
     fn sample_timestamps(songs: &[&str]) -> Vec<SongTimestamp> {

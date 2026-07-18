@@ -385,13 +385,12 @@ fn append_error(conn: &Connection, id: i64, column: &str, error: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::concerts::{get_concert_by_url, upsert_listing};
     use crate::db::connection::open_in_memory;
     use crate::db::split_timestamps::tests::make_timestamps;
     use crate::db::split_timestamps::{
         get_split_timestamps, set_auto_split_timestamps, set_user_split_timestamps,
     };
-    use crate::db::tests::{events_for, listing, seed, seed_with_album};
+    use crate::db::tests::{events_for, seed, seed_with_album};
 
     #[test]
     fn try_mark_download_started_blocks_double_start() {
@@ -471,11 +470,7 @@ mod tests {
     fn reset_in_progress_clears_stale_flags_and_returns_count() {
         let conn = open_in_memory().unwrap();
         let id1 = seed(&conn);
-        upsert_listing(&conn, &listing("https://npr.org/c/2", "B")).unwrap();
-        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2")
-            .unwrap()
-            .unwrap()
-            .id;
+        let id2 = seed_url(&conn, "https://npr.org/c/2", "B");
 
         try_mark_download_started(&conn, id1).unwrap();
         mark_download_succeeded(&conn, id1, "mp4").unwrap();
@@ -495,11 +490,7 @@ mod tests {
     fn fail_in_progress_jobs_appends_error_and_clears_flags() {
         let conn = open_in_memory().unwrap();
         let id1 = seed(&conn);
-        upsert_listing(&conn, &listing("https://npr.org/c/2", "B")).unwrap();
-        let id2 = get_concert_by_url(&conn, "https://npr.org/c/2")
-            .unwrap()
-            .unwrap()
-            .id;
+        let id2 = seed_url(&conn, "https://npr.org/c/2", "B");
 
         // id1: split in progress; id2: download in progress.
         try_mark_download_started(&conn, id1).unwrap();
@@ -716,9 +707,18 @@ mod tests {
         assert_eq!(SplitStatus::from_concert(&after), SplitStatus::NotSplit);
     }
 
+    /// Same values as `db::tests::listing(url, title)` (date `2024-06-01`,
+    /// teaser "Great show"), via `SeedContext::seed_listing`.
     fn seed_url(conn: &Connection, url: &str, title: &str) -> i64 {
-        upsert_listing(conn, &listing(url, title)).unwrap();
-        get_concert_by_url(conn, url).unwrap().unwrap().id
+        crate::db::seeds::SeedContext::new(conn)
+            .seed_listing(crate::db::seeds::SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some(title.to_string()),
+                concert_date: Some("2024-06-01".to_string()),
+                teaser: Some("Great show".to_string()),
+            })
+            .unwrap()
+            .id
     }
 
     #[test]
@@ -917,8 +917,7 @@ mod tests {
     }
 
     fn seed_downloaded(conn: &Connection, url: &str) -> i64 {
-        upsert_listing(conn, &listing(url, "Concert")).unwrap();
-        let id = get_concert_by_url(conn, url).unwrap().unwrap().id;
+        let id = seed_url(conn, url, "Concert");
         try_mark_download_started(conn, id).unwrap();
         mark_download_succeeded(conn, id, "mp4").unwrap();
         id

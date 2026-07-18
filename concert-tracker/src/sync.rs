@@ -479,18 +479,13 @@ mod tests {
         let conn = db::connection::open_in_memory().unwrap();
         let url = "https://npr.org/c/done";
         // Seed an existing, already-scraped concert with a clean title.
-        db::concerts::upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: "Clean Title".to_string(),
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some("Clean Title".to_string()),
                 concert_date: Some("2026-05-20".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
-        let id = db::concerts::get_concert_by_url(&conn, url)
-            .unwrap()
+            })
             .unwrap()
             .id;
         scrape(&conn, id);
@@ -511,18 +506,13 @@ mod tests {
     fn import_listings_requeues_existing_unscraped_without_overwriting() {
         let conn = db::connection::open_in_memory().unwrap();
         let url = "https://npr.org/c/halfdone";
-        db::concerts::upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: "Original Title".to_string(),
+        let original_id = db::seeds::SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some("Original Title".to_string()),
                 concert_date: Some("2026-05-20".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
-        let original_id = db::concerts::get_concert_by_url(&conn, url)
-            .unwrap()
+            })
             .unwrap()
             .id;
 
