@@ -290,7 +290,6 @@ pub fn ffprobe_duration_sync(path: &Path) -> Result<f64> {
 mod tests {
     use super::*;
     use crate::db;
-    use crate::db::concerts::{MetadataUpdate, NewListing};
     use std::fs;
     use tempfile::TempDir;
 
@@ -299,32 +298,17 @@ mod tests {
     }
 
     fn seed_concert_with_album(conn: &rusqlite::Connection, url: &str, album: &str) -> i64 {
-        db::concerts::upsert_listing(
-            conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: album.to_string(),
+        db::seeds::SeedContext::new(conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(url.to_string()),
+                title: Some(album.to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        let c = db::concerts::get_concert_by_url(conn, url)
+                artist: Some("Artist".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(vec![]),
+            })
             .unwrap()
-            .unwrap();
-        db::concerts::update_metadata(
-            conn,
-            c.id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: album.to_string(),
-                description: None,
-                set_list: vec![],
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        c.id
+            .id
     }
 
     fn make_concert_dir(working_dir: &Path, album: &str) -> std::path::PathBuf {
@@ -432,16 +416,14 @@ mod tests {
     fn scan_skips_concerts_without_album() {
         let dir = temp_dir();
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: "https://npr.org/c/noalbum".to_string(),
-                title: "No Album Concert".to_string(),
+        db::seeds::SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some("https://npr.org/c/noalbum".to_string()),
+                title: Some("No Album Concert".to_string()),
                 concert_date: None,
                 teaser: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         let report = scan(&conn, dir.path()).unwrap();
         assert_eq!(report.downloads_found, 0);

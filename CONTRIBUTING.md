@@ -72,6 +72,11 @@ cargo test -p tiny-desk-scraper
 just test-ts                  # pure node:test suites + Foldkit Story/Scene (vitest) tests
 ```
 
+For a persistence-backed module's co-located Rust tests, arrange fixtures with
+`db::seeds::SeedContext` against a fresh database rather than hand-rolling
+`upsert_listing`/`update_metadata` calls — see
+[Testing persistence-backed modules](docs/backend-persistence.md#testing-persistence-backed-modules).
+
 ### End-to-end (Playwright)
 
 ```sh

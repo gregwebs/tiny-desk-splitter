@@ -186,31 +186,20 @@ mod tests {
     use super::*;
     use crate::db;
 
-    fn setup_db_with_concert(album: &str) -> Connection {
+    fn setup_db_with_concert(album: &str) -> (Connection, i64) {
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &db::concerts::NewListing {
-                source_url: format!("https://npr.org/{}", album),
-                title: album.to_string(),
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(format!("https://npr.org/{}", album)),
+                title: Some(album.to_string()),
                 concert_date: Some("2024-01-01".to_string()),
-                teaser: None,
-            },
-        )
-        .unwrap();
-        db::concerts::update_metadata(
-            &conn,
-            1,
-            &db::concerts::MetadataUpdate {
-                artist: "Test".to_string(),
-                album: album.to_string(),
-                description: None,
-                set_list: vec![],
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        conn
+                artist: Some("Test".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(vec![]),
+            })
+            .unwrap()
+            .id;
+        (conn, id)
     }
 
     #[test]
@@ -232,14 +221,14 @@ mod tests {
         let working_dir = tmp.path().join("workdir");
         std::fs::create_dir_all(&working_dir).unwrap();
 
-        let conn = setup_db_with_concert("Test: Concert");
+        let (conn, id) = setup_db_with_concert("Test: Concert");
         let report = import_archive(&conn, &archive_dir, &working_dir).unwrap();
 
         assert_eq!(report.imported, 1);
         assert_eq!(report.skipped, 0);
         assert!(report.errors.is_empty());
 
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.archived_at.is_some());
         assert!(c.downloaded_at.is_some());
         assert!(c.split_at.is_some());
@@ -265,7 +254,7 @@ mod tests {
         let working_dir = tmp.path().join("workdir");
         std::fs::create_dir_all(&working_dir).unwrap();
 
-        let conn = setup_db_with_concert("Test: Concert");
+        let (conn, _id) = setup_db_with_concert("Test: Concert");
 
         let r1 = import_archive(&conn, &archive_dir, &working_dir).unwrap();
         assert_eq!(r1.imported, 1);

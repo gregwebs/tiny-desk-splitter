@@ -500,32 +500,25 @@ mod tests {
         )
     }
 
-    fn seeded_db(album: &str, set_list: Vec<String>) -> Arc<Mutex<Connection>> {
+    /// Delegates the scraped-concert arrangement to `SeedContext`, then keeps
+    /// the `set_downloaded_at_if_missing` backfill call local — that function
+    /// (the scan-backfill path: no `downloaded_extension`, no Download event)
+    /// is not equivalent to `seed_lifecycle_concert { downloaded: true }`.
+    fn seeded_db(album: &str, set_list: Vec<String>) -> (Arc<Mutex<Connection>>, i64) {
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &db::concerts::NewListing {
-                source_url: format!("https://npr.org/c/{}", album),
-                title: album.to_string(),
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(format!("https://npr.org/c/{}", album)),
+                title: Some(album.to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        db::concerts::update_metadata(
-            &conn,
-            1,
-            &db::concerts::MetadataUpdate {
-                artist: "Test Artist".to_string(),
-                album: album.to_string(),
-                description: None,
-                set_list,
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01T00:00:00Z").unwrap();
-        Arc::new(Mutex::new(conn))
+                artist: Some("Test Artist".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(set_list),
+            })
+            .unwrap()
+            .id;
+        db::lifecycle::set_downloaded_at_if_missing(&conn, id, "2024-01-01T00:00:00Z").unwrap();
+        (Arc::new(Mutex::new(conn)), id)
     }
 
     #[tokio::test]
@@ -548,13 +541,13 @@ mod tests {
             fs::write(cd.join(format!("{}.mp4", t)), b"video").unwrap();
         }
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         let registry = Arc::new(JobRegistry::new());
         let outcome = start_split(
             db.clone(),
             registry.clone(),
             config_for(tmp.path().to_path_buf()),
-            1,
+            id,
             SplitMode::Analyze,
         )
         .await
@@ -562,13 +555,13 @@ mod tests {
 
         assert!(matches!(outcome, StartOutcome::AlreadySplit));
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_some(), "split_at should be set");
         assert_eq!(c.tracks_present, vec![true; 4]);
         assert!(c.split_errors.is_empty(), "no error should be recorded");
         // Auto-recovery must not spawn a splitter job.
         assert!(!registry.is_running(&JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         }));
     }
@@ -584,13 +577,13 @@ mod tests {
         fs::write(cd.join("A.m4a"), b"audio").unwrap();
         fs::write(cd.join("C.m4a"), b"audio").unwrap();
 
-        let db = seeded_db(album, set_list);
+        let (db, id) = seeded_db(album, set_list);
         let registry = Arc::new(JobRegistry::new());
         let outcome = start_split(
             db.clone(),
             registry,
             config_for(tmp.path().to_path_buf()),
-            1,
+            id,
             SplitMode::Analyze,
         )
         .await
@@ -598,7 +591,7 @@ mod tests {
 
         assert!(matches!(outcome, StartOutcome::AlreadySplit));
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_some());
         assert_eq!(c.tracks_present, vec![true, false, true]);
     }
@@ -610,13 +603,13 @@ mod tests {
         let set_list = vec!["Song".to_string()];
         // Concert dir does not exist at all — no source, no tracks.
 
-        let db = seeded_db(album, set_list);
+        let (db, id) = seeded_db(album, set_list);
         let registry = Arc::new(JobRegistry::new());
         let err = start_split(
             db.clone(),
             registry,
             config_for(tmp.path().to_path_buf()),
-            1,
+            id,
             SplitMode::Analyze,
         )
         .await
@@ -624,7 +617,7 @@ mod tests {
 
         assert!(err.to_string().contains("Downloaded file"));
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_none());
         assert!(!c.split_errors.is_empty(), "split error should be recorded");
     }
@@ -639,13 +632,13 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join("Has Source.mp4"), b"video").unwrap();
 
-        let db = seeded_db(album, set_list);
+        let (db, id) = seeded_db(album, set_list);
         let registry = Arc::new(JobRegistry::new());
         let outcome = start_split(
             db.clone(),
             registry.clone(),
             config_for(tmp.path().to_path_buf()),
-            1,
+            id,
             SplitMode::Analyze,
         )
         .await
@@ -654,12 +647,12 @@ mod tests {
         assert!(matches!(outcome, StartOutcome::Spawned));
         // The splitter command we configured `sleep 10`, so the job is running.
         assert!(registry.is_running(&JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         }));
         // Stop the background sleeper so the test exits promptly.
         registry.cancel(&JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         });
     }
@@ -734,10 +727,10 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join("Analyze Album.mp4"), b"video").unwrap();
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         let registry = Arc::new(JobRegistry::new());
         let config = config_with_fake_analyze(tmp.path().to_path_buf(), &set_list);
-        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+        let outcome = start_split(db.clone(), registry.clone(), config, id, SplitMode::Analyze)
             .await
             .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
@@ -745,7 +738,7 @@ mod tests {
         // Wait for job to finish
         for _ in 0..100 {
             if !registry.is_running(&JobKey {
-                concert_id: 1,
+                concert_id: id,
                 kind: JobKind::Split,
             }) {
                 break;
@@ -754,7 +747,7 @@ mod tests {
         }
 
         let conn = db.lock().unwrap();
-        let stored = db::split_timestamps::get_split_timestamps(&conn, 1).unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&conn, id).unwrap();
         assert!(stored.auto.is_some(), "auto timestamps should be stored");
         assert!(stored.user.is_none(), "user timestamps should be cleared");
         let auto = stored.auto.unwrap();
@@ -773,7 +766,7 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join("User Album.mp4"), b"video").unwrap();
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         let registry = Arc::new(JobRegistry::new());
         let config = config_with_timestamps_check(tmp.path().to_path_buf(), &set_list);
 
@@ -795,7 +788,7 @@ mod tests {
             db.clone(),
             registry.clone(),
             config,
-            1,
+            id,
             SplitMode::UserTimestamps {
                 ts,
                 media_duration: 200.0,
@@ -807,7 +800,7 @@ mod tests {
 
         for _ in 0..100 {
             if !registry.is_running(&JobKey {
-                concert_id: 1,
+                concert_id: id,
                 kind: JobKind::Split,
             }) {
                 break;
@@ -816,7 +809,7 @@ mod tests {
         }
 
         let conn = db.lock().unwrap();
-        let stored = db::split_timestamps::get_split_timestamps(&conn, 1).unwrap();
+        let stored = db::split_timestamps::get_split_timestamps(&conn, id).unwrap();
         assert!(stored.user.is_some(), "user timestamps should be stored");
         let user = stored.user.unwrap();
         assert_eq!(user.len(), 2);
@@ -837,7 +830,7 @@ mod tests {
         // Track exists on disk but NO source file
         fs::write(cd.join("Song A.m4a"), b"audio").unwrap();
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         let registry = Arc::new(JobRegistry::new());
         let config = config_for(tmp.path().to_path_buf());
 
@@ -852,7 +845,7 @@ mod tests {
             db.clone(),
             registry,
             config,
-            1,
+            id,
             SplitMode::UserTimestamps {
                 ts,
                 media_duration: 90.0,
@@ -891,16 +884,16 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join("Resplit Success.mp4"), b"video").unwrap();
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         // Simulate a prior successful split
         {
             let conn = db.lock().unwrap();
-            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
-            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+            db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
         }
         let initial_errors = {
             let conn = db.lock().unwrap();
-            db::concerts::get_concert(&conn, 1)
+            db::concerts::get_concert(&conn, id)
                 .unwrap()
                 .split_errors
                 .len()
@@ -908,13 +901,13 @@ mod tests {
 
         let registry = Arc::new(JobRegistry::new());
         let config = config_with_fake_analyze(tmp.path().to_path_buf(), &set_list);
-        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+        let outcome = start_split(db.clone(), registry.clone(), config, id, SplitMode::Analyze)
             .await
             .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
 
         let key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         };
         for _ in 0..100 {
@@ -926,7 +919,7 @@ mod tests {
 
         let post_errors = {
             let conn = db.lock().unwrap();
-            db::concerts::get_concert(&conn, 1)
+            db::concerts::get_concert(&conn, id)
                 .unwrap()
                 .split_errors
                 .len()
@@ -949,16 +942,16 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join("Resplit Failure.mp4"), b"video").unwrap();
 
-        let db = seeded_db(album, set_list.clone());
+        let (db, id) = seeded_db(album, set_list.clone());
         // Simulate a prior successful split
         {
             let conn = db.lock().unwrap();
-            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
-            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
+            db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
         }
         let initial_errors = {
             let conn = db.lock().unwrap();
-            db::concerts::get_concert(&conn, 1)
+            db::concerts::get_concert(&conn, id)
                 .unwrap()
                 .split_errors
                 .len()
@@ -966,13 +959,13 @@ mod tests {
 
         let registry = Arc::new(JobRegistry::new());
         let config = config_with_failing_split(tmp.path().to_path_buf());
-        let outcome = start_split(db.clone(), registry.clone(), config, 1, SplitMode::Analyze)
+        let outcome = start_split(db.clone(), registry.clone(), config, id, SplitMode::Analyze)
             .await
             .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
 
         let key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         };
         for _ in 0..100 {
@@ -984,7 +977,7 @@ mod tests {
 
         let post_errors = {
             let conn = db.lock().unwrap();
-            db::concerts::get_concert(&conn, 1)
+            db::concerts::get_concert(&conn, id)
                 .unwrap()
                 .split_errors
                 .len()

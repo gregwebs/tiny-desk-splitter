@@ -3039,30 +3039,20 @@ pub async fn playlists_js() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{
-        self,
-        concerts::{MetadataUpdate, NewListing},
-    };
+    use crate::db::{self, concerts::MetadataUpdate};
     use crate::model::Musician;
     use std::cell::Cell;
 
     fn seed_listing(conn: &Connection, url: &str) -> i64 {
-        db::concerts::upsert_listing(
-            conn,
-            &NewListing {
-                source_url: url.to_string(),
-                title: "Test Concert".to_string(),
+        db::seeds::SeedContext::new(conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some("Test Concert".to_string()),
                 concert_date: Some("2026-05-20".to_string()),
                 teaser: Some("a teaser".to_string()),
-            },
-        )
-        .unwrap();
-        conn.query_row(
-            "SELECT id FROM concerts WHERE source_url = ?1",
-            [url],
-            |r| r.get::<_, i64>(0),
-        )
-        .unwrap()
+            })
+            .unwrap()
+            .id
     }
 
     #[test]

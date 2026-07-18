@@ -25,7 +25,7 @@ dependency rules, and the invariants that hold across all of them.
 | `db::settings` | Singleton settings row (archive location, theme) | `Theme`, `Settings` |
 | `db::failed_jobs` | Job-failure audit log | `FailedJob` |
 | `db::time` | `now_string()` — the one place Rust code formats a `concerts`-table timestamp | — |
-| `db::seeds` (test-only: `cfg(any(test, feature = "test-control"))`) | Database Seed API — reusable fixture creation for Rust tests and the Test Control API (`crate::test_control`) | `SeedContext`, `FixtureIds`, `SeedListing`, `SeedScrapedConcert`, `SeedLifecycleConcert` |
+| `db::seeds` (test-only: `cfg(any(test, feature = "test-control"))`) | Database Seed API — the shared fixture vocabulary for co-located Rust module tests crate-wide and for the Test Control API (`crate::test_control`) | `SeedContext`, `FixtureIds`, `SeedListing`, `SeedScrapedConcert`, `SeedLifecycleConcert`, `SeedMediaConcert`, `SeedAlbumNullConcert` |
 
 `Concert` itself (the read model returned by most `db::concerts` and
 `db::lifecycle` queries) lives in `crate::model`, not in `db` — it's a
@@ -59,9 +59,18 @@ cross-domain-module dependencies exist among `concerts`, `lifecycle`,
 
 `db::seeds` depends on `db::concerts`, `db::lifecycle`, and
 `db::split_timestamps` (it composes their domain functions to build
-fixtures); nothing outside `db::seeds` and `crate::test_control` depends on
-it — it is test-only and sits outside the production dependency graph above.
-Direct SQL inside `db::seeds` is limited to fixture *normalization* (resolving
+fixtures). It is test-only and sits outside the *production* dependency graph
+above: no production code and no non-test build depends on it. Within
+`cfg(test)`, the relationship is inverted — `db::seeds` is the shared fixture
+vocabulary, and co-located test modules across the crate (`db::lifecycle`,
+`db::sync`, `playlist`, `lifecycle`, `scan`, `split_timestamps`,
+`archive_import`, `jobs::*`, `web::handlers`, `sync`, `events`,
+`test_control`/`test_control::scrape_driver`, ...) intentionally depend on it
+to arrange concert fixtures — see
+[Testing persistence-backed modules](#testing-persistence-backed-modules)
+below. `crate::test_control` additionally depends on it at the
+`test-control`-feature build, not only under `cfg(test)`. Direct SQL inside
+`db::seeds` is limited to fixture *normalization* (resolving
 `upsert_listing`'s `COALESCE`-on-conflict semantics and clearing stale
 lifecycle/timestamp state on a reused `source_url`) where the equivalent
 domain functions would record misleading events for state nothing real ever
@@ -158,6 +167,96 @@ Full transition prose (which columns each clear step touches, cascading
 effects on `tracks_present`, redundant-source deletion, track deletion) is in
 [`./data.md`](./data.md#lifecycle-transitions) — this diagram is the shape,
 that doc is the detail.
+
+## Testing persistence-backed modules
+
+Co-located tests (`#[cfg(test)] mod tests` inside the module under test) are
+the default seam for a persistence-backed deep module. Crate-level
+integration tests (`concert-tracker/tests/`) remain appropriate only when a
+test intentionally crosses crate boundaries, e.g. `tests/web_integration.rs`
+driving the HTTP surface.
+
+Every module test owns a fresh, migrated SQLite database:
+
+- **In-memory is the default** — `db::connection::open_in_memory()`. It is
+  fast, fully migrated, and isolated per test with no shared state or
+  rollback-based cleanup.
+- **A unique temporary file-backed database** is used only when the behavior
+  under test genuinely depends on multiple connections, locking, process
+  restart, or on-disk durability — cases where an in-memory database can't
+  exercise the real code path.
+
+Tests never share a database across cases and never rely on transaction
+rollback for isolation; coexistence and query-scoping behavior is tested by
+deliberately seeding unrelated records in the same fresh database, not by
+relying on ordering or a shared fixture.
+
+`db::seeds::SeedContext` (gated `cfg(any(test, feature = "test-control"))`,
+see the module map above) is the shared arrangement vocabulary:
+
+```
+ open_in_memory() ──migrations──▶ fresh schema
+        │
+        ▼
+ SeedContext::new(&conn).seed_*(…)          ← arrange: canonical valid state
+        │            (returns Concert — use its id/urls/titles, never assume)
+        ▼
+ module/domain interface calls               ← arrange: module-specific state
+ (update_metadata, try_mark_*, set_*…)
+        │
+        ▼
+ module operation under test                 ← act
+        │
+        ▼
+ assert interface-visible behavior           ← observe (persistence reads next;
+                                               raw SQL only for unobservable invariants)
+```
+
+- **Arrange with a seed, then compose module-specific state through the
+  normal interface.** `SeedContext::seed_listing`/`seed_scraped_concert`/
+  `seed_lifecycle_concert`/`seed_media_concert`/`seed_album_null_concert`
+  cover a small set of canonical valid starting states. A test that needs
+  more (e.g. a specific lifecycle transition, a set of unliked tracks) calls
+  the relevant domain function (`db::lifecycle::mark_split_succeeded`,
+  `db::split_timestamps::set_tracks_liked`, ...) after seeding — the same way
+  product code would reach that state. Seed shapes are not extended with
+  controls for every module-specific combination; a new shared seed is
+  justified only by a recurring canonical need.
+- **Consume the Seed Result.** Seed methods return the created `Concert` (or,
+  for Test Control's adapter layer, an equivalent result type) — tests use
+  its `id`, `source_url`, `title`, etc. rather than assuming a generated
+  value or a specific row id. Relying on SQLite's `id`-allocation order (e.g.
+  assuming a fresh database's first insert is always id `1`) is exactly the
+  kind of incidental coupling this avoids.
+- **Behavior-relevant fields are explicit on the seed call.** A field a test's
+  assertions depend on (e.g. an explicit `concert_date: None` to pin down
+  NULL vs. a generated default) is passed explicitly rather than left to
+  whatever the seed's `Default` happens to produce, even when that default
+  would also satisfy the test today.
+- **Assert interface-visible behavior first.** A test asserts what the module
+  under test returns or what a normal persistence read (`db::concerts::
+  get_concert`, `db::split_timestamps::get_split_timestamps`, ...) reports.
+  Direct SQL in a test is reserved for otherwise-unobservable storage
+  invariants (e.g. asserting an exact `events` row, or a raw column with no
+  read API) — the same restraint `db::seeds` itself follows for fixture
+  normalization.
+- **Database-only seeds for persistence-only modules; a Scenario Seed plus a
+  test-owned temp directory when the module's contract includes files.**
+  `seed_media_concert` writes sentinel (or, opt-in, real-audio) files under a
+  caller-supplied workdir — use it, with `tempfile::tempdir()`, only when the
+  test genuinely exercises filesystem behavior (track/interlude/preview
+  files, legacy `timestamps.json`). A test that only needs database state
+  should not write unrelated dummy files just because a media seed exists.
+- **No generic Test Database harness or fixture-builder abstraction.** Tests
+  call `db::connection::open_in_memory()` / `SeedContext::new` directly.
+  Local helpers that encode a meaningful module-specific transition (a
+  scan-backfill call, a lifecycle state machine walk, a file-arrangement
+  helper) stay local, delegating only the canonical concert-creation part to
+  `SeedContext` where doing so preserves the exact prior state (including
+  `NULL`s, defaults, and emitted events).
+
+See `docs/change/2026-07-17-seed-reuse-module-tests.md` for the migration
+inventory that applied this convention across the existing test suite.
 
 ## Change history
 

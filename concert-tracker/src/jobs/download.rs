@@ -132,43 +132,36 @@ mod tests {
         )
     }
 
-    fn seeded_db_with_set_list(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
+    fn seeded_db_with_set_list(set_list: Vec<String>) -> (Arc<Mutex<Connection>>, i64) {
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &db::concerts::NewListing {
-                source_url: "https://npr.org/test/dl".to_string(),
-                title: "Test Concert".to_string(),
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some("https://npr.org/test/dl".to_string()),
+                title: Some("Test Concert".to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        db::concerts::update_metadata(
-            &conn,
-            1,
-            &db::concerts::MetadataUpdate {
-                artist: "Test Artist".to_string(),
-                album: "Test Album".to_string(),
-                description: None,
-                set_list,
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        Arc::new(Mutex::new(conn))
+                artist: Some("Test Artist".to_string()),
+                album: Some("Test Album".to_string()),
+                set_list: Some(set_list),
+            })
+            .unwrap()
+            .id;
+        (Arc::new(Mutex::new(conn)), id)
     }
 
-    fn seeded_db() -> Arc<Mutex<Connection>> {
+    fn seeded_db() -> (Arc<Mutex<Connection>>, i64) {
         seeded_db_with_set_list(vec![])
     }
 
     /// Poll `check` every 50ms until it returns true or ~5s elapse.
-    async fn wait_for(db: &Arc<Mutex<Connection>>, check: impl Fn(&crate::model::Concert) -> bool) {
+    async fn wait_for(
+        db: &Arc<Mutex<Connection>>,
+        id: i64,
+        check: impl Fn(&crate::model::Concert) -> bool,
+    ) {
         for _ in 0..100 {
             {
                 let conn = db.lock().unwrap();
-                if let Ok(c) = db::concerts::get_concert(&conn, 1) {
+                if let Ok(c) = db::concerts::get_concert(&conn, id) {
                     if check(&c) {
                         return;
                     }
@@ -180,28 +173,28 @@ mod tests {
 
     #[tokio::test]
     async fn successful_download_marks_downloaded_at() {
-        let db = seeded_db();
+        let (db, id) = seeded_db();
         let registry = Arc::new(JobRegistry::new());
-        start_download(db.clone(), registry, config_success(), 1)
+        start_download(db.clone(), registry, config_success(), id)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let conn = db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, 1).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.downloaded_at.is_some());
         assert!(concert.download_errors.is_empty());
     }
 
     #[tokio::test]
     async fn failed_download_records_error() {
-        let db = seeded_db();
+        let (db, id) = seeded_db();
         let registry = Arc::new(JobRegistry::new());
-        start_download(db.clone(), registry, config_failure(), 1)
+        start_download(db.clone(), registry, config_failure(), id)
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let conn = db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, 1).unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
         assert!(concert.downloaded_at.is_none());
         assert!(!concert.download_errors.is_empty());
     }
@@ -209,7 +202,7 @@ mod tests {
     #[tokio::test]
     async fn download_success_starts_dependent_split() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seeded_db_with_set_list(vec!["Song A".to_string(), "Song B".to_string()]);
+        let (db, id) = seeded_db_with_set_list(vec!["Song A".to_string(), "Song B".to_string()]);
         // The no-op download command creates no file, so place the "downloaded"
         // source file where find_downloaded_file expects it.
         let cd = crate::model::concert_dir(tmp.path(), "Test Album");
@@ -234,22 +227,22 @@ mod tests {
 
         let registry = Arc::new(JobRegistry::new());
         let download_key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Download,
         };
         let split_key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         };
         registry.add_dependent(download_key, split_key);
 
-        start_download(db.clone(), registry.clone(), config, 1)
+        start_download(db.clone(), registry.clone(), config, id)
             .await
             .unwrap();
-        wait_for(&db, |c| c.split_at.is_some()).await;
+        wait_for(&db, id, |c| c.split_at.is_some()).await;
 
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_some(), "download should have succeeded");
         assert!(c.split_at.is_some(), "dependent split should have run");
         assert_eq!(c.tracks_present, vec![true, true]);
@@ -258,25 +251,25 @@ mod tests {
 
     #[tokio::test]
     async fn download_failure_drops_dependent_split() {
-        let db = seeded_db_with_set_list(vec!["Song A".to_string()]);
+        let (db, id) = seeded_db_with_set_list(vec!["Song A".to_string()]);
         let registry = Arc::new(JobRegistry::new());
         let download_key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Download,
         };
         let split_key = JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         };
         registry.add_dependent(download_key.clone(), split_key.clone());
 
-        start_download(db.clone(), registry.clone(), config_failure(), 1)
+        start_download(db.clone(), registry.clone(), config_failure(), id)
             .await
             .unwrap();
-        wait_for(&db, |c| !c.download_errors.is_empty()).await;
+        wait_for(&db, id, |c| !c.download_errors.is_empty()).await;
 
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(!c.download_errors.is_empty());
         assert!(c.split_started_at.is_none(), "split must never start");
         assert!(c.split_at.is_none());
@@ -288,7 +281,7 @@ mod tests {
 
     #[tokio::test]
     async fn duplicate_start_returns_already_running() {
-        let db = seeded_db();
+        let (db, id) = seeded_db();
         let registry = Arc::new(JobRegistry::new());
         let config = JobConfig::from_commands(
             PathBuf::from("/tmp"),
@@ -300,11 +293,11 @@ mod tests {
             Arc::new(|_| unreachable!()),
             Arc::new(|_| Command::new("true")),
         );
-        let r1 = start_download(db.clone(), registry.clone(), config.clone(), 1)
+        let r1 = start_download(db.clone(), registry.clone(), config.clone(), id)
             .await
             .unwrap();
         assert!(matches!(r1, StartOutcome::Spawned));
-        let r2 = start_download(db.clone(), registry.clone(), config, 1)
+        let r2 = start_download(db.clone(), registry.clone(), config, id)
             .await
             .unwrap();
         assert!(matches!(r2, StartOutcome::AlreadyRunning));

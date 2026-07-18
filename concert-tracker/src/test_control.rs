@@ -977,7 +977,6 @@ fn test_scrape_driver() -> Arc<ScrapeDriver> {
 mod tests {
     use super::*;
     use crate::db;
-    use crate::db::concerts::NewListing;
     use crate::db::settings;
     use jsonrpsee::types::Params;
 
@@ -1622,16 +1621,14 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_concerts_and_settings_but_leaves_the_settings_row() {
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: "https://npr.org/c/reset-test".to_string(),
-                title: "Reset Test Concert".to_string(),
+        db::seeds::SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some("https://npr.org/c/reset-test".to_string()),
+                title: Some("Reset Test Concert".to_string()),
                 concert_date: Some("2024-01-15".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
         settings::update_archive_location(&conn, "/nas/media").unwrap();
         settings::update_theme(&conn, settings::Theme::Dark).unwrap();
         db::sync::mark_month_synced(&conn, 2024, 1).unwrap();
@@ -1674,16 +1671,14 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &NewListing {
-                source_url: "https://npr.org/c/reset-fs-fail".to_string(),
-                title: "Reset FS Fail Concert".to_string(),
+        db::seeds::SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing {
+                source_url: Some("https://npr.org/c/reset-fs-fail".to_string()),
+                title: Some("Reset FS Fail Concert".to_string()),
                 concert_date: Some("2024-01-15".to_string()),
                 teaser: None,
-            },
-        )
-        .unwrap();
+            })
+            .unwrap();
 
         let workdir = tempfile::tempdir().unwrap();
         let blocked = workdir.path().join("concerts").join("blocked");

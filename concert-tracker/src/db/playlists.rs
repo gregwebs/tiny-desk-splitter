@@ -501,16 +501,25 @@ pub fn playlists_nesting_playlist(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::concerts::{
-        get_concert_by_url, update_metadata, upsert_listing, MetadataUpdate,
-    };
+    use crate::db::concerts::{update_metadata, MetadataUpdate};
     use crate::db::connection::open_in_memory;
-    use crate::db::tests::listing;
+    use crate::db::seeds::{SeedContext, SeedListing};
 
-    /// Seed a concert with the given url/title and a set list, returning its id.
+    /// Seed a concert with the given url/title and a set list, returning its
+    /// id. The row keeps `db::tests::listing`'s teaser (`"Great show"`),
+    /// which `seed_scraped_concert` cannot produce (it always writes
+    /// `teaser: None`) — so the listing is seeded via `seed_listing` with
+    /// `listing()`'s exact values, and the metadata transition stays local.
     fn seed_concert(conn: &Connection, url: &str, title: &str, set_list: &[&str]) -> i64 {
-        upsert_listing(conn, &listing(url, title)).unwrap();
-        let id = get_concert_by_url(conn, url).unwrap().unwrap().id;
+        let id = SeedContext::new(conn)
+            .seed_listing(SeedListing {
+                source_url: Some(url.to_string()),
+                title: Some(title.to_string()),
+                concert_date: Some("2024-06-01".to_string()),
+                teaser: Some("Great show".to_string()),
+            })
+            .unwrap()
+            .id;
         update_metadata(
             conn,
             id,

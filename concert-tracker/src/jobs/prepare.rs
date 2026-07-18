@@ -155,31 +155,20 @@ mod tests {
 
     const ALBUM: &str = "Prepare Album";
 
-    fn seeded_db(set_list: Vec<String>) -> Arc<Mutex<Connection>> {
+    fn seeded_db(set_list: Vec<String>) -> (Arc<Mutex<Connection>>, i64) {
         let conn = db::connection::open_in_memory().unwrap();
-        db::concerts::upsert_listing(
-            &conn,
-            &db::concerts::NewListing {
-                source_url: "https://npr.org/test/prepare".to_string(),
-                title: "Prepare Concert".to_string(),
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some("https://npr.org/test/prepare".to_string()),
+                title: Some("Prepare Concert".to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        db::concerts::update_metadata(
-            &conn,
-            1,
-            &db::concerts::MetadataUpdate {
-                artist: "Test Artist".to_string(),
-                album: ALBUM.to_string(),
-                description: None,
-                set_list,
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        Arc::new(Mutex::new(conn))
+                artist: Some("Test Artist".to_string()),
+                album: Some(ALBUM.to_string()),
+                set_list: Some(set_list),
+            })
+            .unwrap()
+            .id;
+        (Arc::new(Mutex::new(conn)), id)
     }
 
     /// Config whose download "fetches" the source file and whose splitter
@@ -213,11 +202,15 @@ mod tests {
         )
     }
 
-    async fn wait_for(db: &Arc<Mutex<Connection>>, check: impl Fn(&crate::model::Concert) -> bool) {
+    async fn wait_for(
+        db: &Arc<Mutex<Connection>>,
+        id: i64,
+        check: impl Fn(&crate::model::Concert) -> bool,
+    ) {
         for _ in 0..100 {
             {
                 let conn = db.lock().unwrap();
-                if let Ok(c) = db::concerts::get_concert(&conn, 1) {
+                if let Ok(c) = db::concerts::get_concert(&conn, id) {
                     if check(&c) {
                         return;
                     }
@@ -236,21 +229,21 @@ mod tests {
         for s in songs {
             fs::write(cd.join(format!("{}.m4a", s)), b"audio").unwrap();
         }
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         let registry = Arc::new(JobRegistry::new());
 
         let outcome = prepare(
             db,
             registry.clone(),
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Ready);
         assert!(!registry.is_running(&JobKey {
-            concert_id: 1,
+            concert_id: id,
             kind: JobKind::Split,
         }));
     }
@@ -262,10 +255,10 @@ mod tests {
         let cd = concert_dir(tmp.path(), ALBUM);
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join(format!("{}.mp4", ALBUM)), b"video").unwrap();
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, id, "2024-01-01 00:00:00").unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -273,15 +266,15 @@ mod tests {
             db.clone(),
             registry,
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Splitting);
-        wait_for(&db, |c| c.split_at.is_some()).await;
+        wait_for(&db, id, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert_eq!(c.tracks_present, vec![true, true]);
     }
 
@@ -293,22 +286,22 @@ mod tests {
         let cd = concert_dir(tmp.path(), ALBUM);
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join(format!("{}.mp4", ALBUM)), b"video").unwrap();
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         let registry = Arc::new(JobRegistry::new());
 
         let outcome = prepare(
             db.clone(),
             registry,
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Splitting);
-        wait_for(&db, |c| c.split_at.is_some()).await;
+        wait_for(&db, id, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_some(), "downloaded_at reconciled");
         assert_eq!(c.tracks_present, vec![true]);
     }
@@ -317,22 +310,22 @@ mod tests {
     async fn downloads_then_splits_when_source_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let songs = ["Alpha", "Beta"];
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         let registry = Arc::new(JobRegistry::new());
 
         let outcome = prepare(
             db.clone(),
             registry.clone(),
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Downloading);
-        wait_for(&db, |c| c.split_at.is_some()).await;
+        wait_for(&db, id, |c| c.split_at.is_some()).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.downloaded_at.is_some());
         assert!(c.split_at.is_some());
         assert_eq!(c.tracks_present, vec![true, true]);
@@ -348,13 +341,13 @@ mod tests {
         fs::create_dir_all(&cd).unwrap();
         fs::write(cd.join(format!("{}.mp4", ALBUM)), b"video").unwrap();
         fs::write(cd.join("Beta.m4a"), b"audio").unwrap(); // Alpha deleted
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
-            db::lifecycle::try_mark_split_started(&conn, 1).unwrap();
-            db::lifecycle::mark_split_succeeded(&conn, 1).unwrap();
-            db::split_timestamps::set_tracks_present(&conn, 1, &[false, true]).unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, id, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+            db::split_timestamps::set_tracks_present(&conn, id, &[false, true]).unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -362,15 +355,15 @@ mod tests {
             db.clone(),
             registry,
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Splitting);
-        wait_for(&db, |c| c.tracks_present == vec![true, true]).await;
+        wait_for(&db, id, |c| c.tracks_present == vec![true, true]).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert_eq!(c.tracks_present, vec![true, true], "deleted track restored");
     }
 
@@ -380,10 +373,10 @@ mod tests {
         // prepare must chain download → split, not trust the stale column.
         let tmp = tempfile::tempdir().unwrap();
         let songs = ["Alpha"];
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         {
             let conn = db.lock().unwrap();
-            db::lifecycle::set_downloaded_at_if_missing(&conn, 1, "2024-01-01 00:00:00").unwrap();
+            db::lifecycle::set_downloaded_at_if_missing(&conn, id, "2024-01-01 00:00:00").unwrap();
         }
         let registry = Arc::new(JobRegistry::new());
 
@@ -391,15 +384,15 @@ mod tests {
             db.clone(),
             registry.clone(),
             config_for(tmp.path().to_path_buf(), &songs),
-            1,
+            id,
         )
         .await
         .unwrap();
 
         assert_eq!(outcome, PrepareOutcome::Downloading);
-        wait_for(&db, |c| c.tracks_present == vec![true]).await;
+        wait_for(&db, id, |c| c.tracks_present == vec![true]).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert_eq!(c.tracks_present, vec![true]);
     }
 
@@ -407,7 +400,7 @@ mod tests {
     async fn repeat_prepare_while_running_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let songs = ["Alpha"];
-        let db = seeded_db(songs.iter().map(|s| s.to_string()).collect());
+        let (db, id) = seeded_db(songs.iter().map(|s| s.to_string()).collect());
         let registry = Arc::new(JobRegistry::new());
         // Slow download so the second prepare arrives mid-job.
         let cd = concert_dir(tmp.path(), ALBUM);
@@ -433,18 +426,18 @@ mod tests {
             Arc::new(|_| Command::new("true")),
         );
 
-        let o1 = prepare(db.clone(), registry.clone(), config.clone(), 1)
+        let o1 = prepare(db.clone(), registry.clone(), config.clone(), id)
             .await
             .unwrap();
-        let o2 = prepare(db.clone(), registry.clone(), config.clone(), 1)
+        let o2 = prepare(db.clone(), registry.clone(), config.clone(), id)
             .await
             .unwrap();
         assert_eq!(o1, PrepareOutcome::Downloading);
         assert_eq!(o2, PrepareOutcome::Downloading);
 
-        wait_for(&db, |c| c.tracks_present == vec![true]).await;
+        wait_for(&db, id, |c| c.tracks_present == vec![true]).await;
         let conn = db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, 1).unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
         assert_eq!(c.tracks_present, vec![true]);
         assert!(c.download_errors.is_empty());
         assert!(c.split_errors.is_empty());
@@ -453,9 +446,9 @@ mod tests {
     #[tokio::test]
     async fn errors_without_set_list() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seeded_db(vec![]);
+        let (db, id) = seeded_db(vec![]);
         let registry = Arc::new(JobRegistry::new());
-        let result = prepare(db, registry, config_for(tmp.path().to_path_buf(), &[]), 1).await;
+        let result = prepare(db, registry, config_for(tmp.path().to_path_buf(), &[]), id).await;
         assert!(result.is_err());
     }
 }

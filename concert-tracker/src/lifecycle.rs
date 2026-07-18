@@ -298,41 +298,21 @@ mod tests {
     use std::fs;
     use tokio::sync::oneshot;
 
-    use crate::db::concerts::{MetadataUpdate, NewListing};
     use crate::model::{concert_dir, sanitize_filename};
 
     fn insert_concert(conn: &Connection, album: &str, tracks: &[&str]) -> i64 {
         let source_url = format!("https://example.test/{album}");
-        db::concerts::upsert_listing(
-            conn,
-            &NewListing {
-                source_url: source_url.clone(),
-                title: album.to_string(),
+        db::seeds::SeedContext::new(conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(source_url),
+                title: Some(album.to_string()),
                 concert_date: None,
-                teaser: None,
-            },
-        )
-        .unwrap();
-        let id = conn
-            .query_row(
-                "SELECT id FROM concerts WHERE source_url = ?1",
-                [&source_url],
-                |row| row.get::<_, i64>(0),
-            )
-            .unwrap();
-        db::concerts::update_metadata(
-            conn,
-            id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: album.to_string(),
-                description: None,
-                set_list: tracks.iter().map(|track| track.to_string()).collect(),
-                musicians: Vec::new(),
-            },
-        )
-        .unwrap();
-        id
+                artist: Some("Artist".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(tracks.iter().map(|track| track.to_string()).collect()),
+            })
+            .unwrap()
+            .id
     }
 
     fn downloaded_file(working_dir: &Path, album: &str) -> PathBuf {
