@@ -4,6 +4,18 @@ Tiny Desk Splitter tracks the lifecycle of Tiny Desk concerts from discovery thr
 
 ## Language
 
+**Job Request**:
+A request to begin download, split, or archive work for a concert. A Job Request may be rejected before work is accepted, in which case it does not create lifecycle history or a failed job. Opening media is not a Job Request because it has no persistent job lifecycle.
+_Avoid_: Job failure, Job Run
+
+**Job Run**:
+An accepted attempt to perform download, split, or archive work for a concert. A Job Run records that it started and reaches exactly one terminal outcome: succeeded, failed, or cancelled. Cancellation is recorded as a failed outcome with a cancellation reason. Opening media is not a Job Run because it has no persistent job lifecycle.
+_Avoid_: Job Request, subprocess
+
+**Failed Job**:
+A Job Run that ended in failure or user cancellation and is retained for inspection in failed-job history. A rejected Job Request is not a Failed Job because it never became a Job Run and its error is returned synchronously.
+_Avoid_: Rejected Job Request, validation error
+
 **Test Control API**:
 A test-only HTTP control surface mounted inside the `concert-web` process so black-box HTTP tests can arrange fixture state and inspect necessary postconditions without linking to application internals. It is compiled only for non-release test-control builds and started only when explicitly requested.
 _Avoid_: Seed proxy, seed backdoor
