@@ -401,6 +401,17 @@ HTTP 200
 [Asserts]
 jsonpath "$.download" == "download-error"
 
+POST {{test_control_url}}/test/assert/job_observation
+Content-Type: application/json
+{
+  "concert_id": {{cancel_dl_id}},
+  "kind": "split",
+  "started": 0
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
 # ── download_force_starts_when_tracks_present_but_source_missing ────────────
 # All track files exist on disk but the source video is missing and
 # downloaded_at is NULL. The Download button must still start a download so

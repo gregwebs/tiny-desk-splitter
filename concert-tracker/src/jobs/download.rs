@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::db;
-use crate::jobs::run::{self, Admission, JobRequest};
+use crate::jobs::run::{self, Admission, JobCancellation, JobRequest};
 use crate::jobs::{
     download_job_from_concert, DownloadJob, JobConfig, JobKey, JobKind, JobRegistry, JobRunFuture,
     JobStepOutcome,
@@ -34,8 +34,7 @@ pub async fn start_download(
 
 /// The download [`JobRequest`]. `Setup` is the identity of `Input`
 /// (`DownloadJob`) — download has no separate post-acceptance preparation
-/// step today; split will use `Setup` for real (temp files, output paths)
-/// when it migrates in #126.
+/// step; split uses `Setup` for temp files and output paths.
 ///
 /// `pub(crate)` so `crate::lifecycle::cancel_job` can build one to route a
 /// user-initiated cancellation through [`run::cancel`].
@@ -50,13 +49,17 @@ impl DownloadRequest {
     }
 }
 
-impl JobRequest for DownloadRequest {
-    type Input = DownloadJob;
-    type Setup = DownloadJob;
-    /// The downloaded file's extension, resolved from disk after `execute`
-    /// succeeds.
-    type Facts = String;
+pub(crate) struct DownloadCancellation {
+    concert_id: i64,
+}
 
+impl DownloadCancellation {
+    pub(crate) fn new(concert_id: i64) -> Self {
+        Self { concert_id }
+    }
+}
+
+impl JobCancellation for DownloadCancellation {
     fn key(&self) -> JobKey {
         JobKey {
             concert_id: self.concert_id,
@@ -67,6 +70,51 @@ impl JobRequest for DownloadRequest {
     fn job_name(&self) -> &'static str {
         "download"
     }
+
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+        db::lifecycle::mark_download_failed(conn, self.concert_id, error)
+    }
+
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+            [self.concert_id],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+impl JobCancellation for DownloadRequest {
+    fn key(&self) -> JobKey {
+        JobKey {
+            concert_id: self.concert_id,
+            kind: JobKind::Download,
+        }
+    }
+
+    fn job_name(&self) -> &'static str {
+        "download"
+    }
+
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+        db::lifecycle::mark_download_failed(conn, self.concert_id, error)
+    }
+
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+            [self.concert_id],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+impl JobRequest for DownloadRequest {
+    type Input = DownloadJob;
+    type Setup = DownloadJob;
+    /// The downloaded file's extension, resolved from disk after `execute`
+    /// succeeds.
+    type Facts = String;
 
     fn validate(&self, conn: &Connection) -> Result<DownloadJob> {
         let concert = db::concerts::get_concert(conn, self.concert_id)?;
@@ -103,18 +151,6 @@ impl JobRequest for DownloadRequest {
 
     fn commit_success(&self, conn: &Connection, extension: String) -> Result<()> {
         db::lifecycle::mark_download_succeeded(conn, self.concert_id, &extension)
-    }
-
-    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
-        db::lifecycle::mark_download_failed(conn, self.concert_id, error)
-    }
-
-    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
-        Ok(conn.query_row(
-            "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
-            [self.concert_id],
-            |row| row.get(0),
-        )?)
     }
 
     fn log_dir(&self) -> Option<PathBuf> {
@@ -238,12 +274,14 @@ mod tests {
             tmp.path().to_path_buf(),
             Arc::new(|_| Command::new("true")),
             // Real command (no mock): the "splitter" creates the per-song
-            // files the rescan expects.
+            // files and required analysis timestamps.
             Arc::new(|job: &crate::jobs::SplitJob| {
                 let mut cmd = Command::new("sh");
                 cmd.arg("-c").arg(format!(
-                    "touch '{0}/Song A.m4a' '{0}/Song B.m4a'",
-                    job.output_dir.display()
+                    "touch '{0}/Song A.m4a' '{0}/Song B.m4a'; \
+                     printf '%s' '{1}' > '{0}/timestamps.json'",
+                    job.output_dir.display(),
+                    r#"{"artist":"A","source":"","show":"","album":"","set_list":[],"musicians":[],"timestamps":[{"title":"Song A","start_time":0.0,"end_time":10.0,"duration":10.0},{"title":"Song B","start_time":10.0,"end_time":20.0,"duration":10.0}]}"#
                 ));
                 cmd
             }),
@@ -302,6 +340,142 @@ mod tests {
             !registry.has_dependent(&download_key, &split_key),
             "queued split should be dropped on download failure"
         );
+    }
+
+    #[tokio::test]
+    async fn released_split_intent_revalidates_current_download_state() {
+        let (db, id) = seeded_db_with_set_list(vec!["Song A".to_string()]);
+        let registry = Arc::new(JobRegistry::new());
+        let download_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Download,
+        };
+        let split_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Split,
+        };
+        registry.add_dependent(download_key.clone(), split_key.clone());
+        {
+            let conn = db.lock().unwrap();
+            db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+            db::lifecycle::clear_download_state(&conn, id).unwrap();
+        }
+
+        crate::jobs::spawn_dependents(
+            db.clone(),
+            registry.clone(),
+            config_success(),
+            &download_key,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let conn = db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.split_started_at.is_none());
+        assert!(concert.split_errors.is_empty());
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert!(!registry.has_dependent(&download_key, &split_key));
+    }
+
+    #[tokio::test]
+    async fn released_split_intent_rejects_a_deleted_concert() {
+        let (db, id) = seeded_db_with_set_list(vec!["Song A".to_string()]);
+        let registry = Arc::new(JobRegistry::new());
+        let download_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Download,
+        };
+        registry.add_dependent(
+            download_key.clone(),
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Split,
+            },
+        );
+        db.lock()
+            .unwrap()
+            .execute("DELETE FROM concerts WHERE id = ?1", [id])
+            .unwrap();
+
+        crate::jobs::spawn_dependents(
+            db.clone(),
+            registry.clone(),
+            config_success(),
+            &download_key,
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(db::failed_jobs::list_failed_jobs(&db.lock().unwrap(), 10)
+            .unwrap()
+            .is_empty());
+        assert!(!registry.is_running(&JobKey {
+            concert_id: id,
+            kind: JobKind::Split
+        }));
+    }
+
+    #[tokio::test]
+    async fn released_split_intent_builds_input_from_changed_set_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, id) = seeded_db_with_set_list(vec!["Old Song".to_string()]);
+        let album = "Test Album";
+        let output_dir = crate::model::concert_dir(tmp.path(), album);
+        std::fs::create_dir_all(&output_dir).unwrap();
+        std::fs::write(output_dir.join("Test Album.mp4"), b"video").unwrap();
+        {
+            let conn = db.lock().unwrap();
+            db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+            db::concerts::update_metadata(
+                &conn,
+                id,
+                &db::concerts::MetadataUpdate {
+                    artist: "Changed Artist".to_string(),
+                    album: album.to_string(),
+                    description: None,
+                    set_list: vec!["New Song".to_string()],
+                    musicians: vec![],
+                },
+            )
+            .unwrap();
+        }
+        let config = JobConfig::from_commands(
+            tmp.path().to_path_buf(),
+            Arc::new(|_| Command::new("true")),
+            Arc::new(|job: &crate::jobs::SplitJob| {
+                let mut command = Command::new("sh");
+                command.arg("-c").arg(format!(
+                    "grep -q 'New Song' '{}'; touch '{}/New Song.m4a'; \
+                     printf '%s' '{}' > '{}/timestamps.json'",
+                    job.json_path.display(),
+                    job.output_dir.display(),
+                    r#"{"artist":"A","source":"","show":"","album":"","set_list":[],"musicians":[],"timestamps":[{"title":"New Song","start_time":0.0,"end_time":10.0,"duration":10.0}]}"#,
+                    job.output_dir.display()
+                ));
+                command
+            }),
+            Arc::new(|_| Command::new("true")),
+        );
+        let registry = Arc::new(JobRegistry::new());
+        let download_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Download,
+        };
+        registry.add_dependent(
+            download_key.clone(),
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Split,
+            },
+        );
+
+        crate::jobs::spawn_dependents(db.clone(), registry, config, &download_key);
+        wait_for(&db, id, |concert| concert.split_at.is_some()).await;
+
+        let concert = db::concerts::get_concert(&db.lock().unwrap(), id).unwrap();
+        assert_eq!(concert.set_list, vec!["New Song"]);
+        assert_eq!(concert.tracks_present, vec![true]);
     }
 
     #[tokio::test]

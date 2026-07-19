@@ -14,12 +14,12 @@ Download and split routes share the same lifecycle orchestration:
 
 ## Job Run orchestration
 
-Download is the first job kind migrated onto the `jobs::run` engine
-(issue [#125](https://github.com/gregwebs/tiny-desk-splitter/issues/125), part
-of the deepening tracked by [#124](https://github.com/gregwebs/tiny-desk-splitter/issues/124)).
-Split and archive still use their own hand-rolled admission/lifecycle code
-(`jobs::split`, `jobs::archive`) until they migrate in #126 and #127; #128
-then contracts the legacy protocol once all three share the engine. See
+Download and split use the `jobs::run` engine (issues
+[#125](https://github.com/gregwebs/tiny-desk-splitter/issues/125) and
+[#126](https://github.com/gregwebs/tiny-desk-splitter/issues/126), part of the
+deepening tracked by [#124](https://github.com/gregwebs/tiny-desk-splitter/issues/124)).
+Archive keeps its hand-rolled admission/lifecycle code until #127; #128 then
+contracts the legacy protocol once all three share the engine. See
 `CONTEXT.md` for the **Job Request** / **Job Run** / **Failed Job** domain
 vocabulary this section assumes.
 
@@ -90,12 +90,49 @@ Three invariants make this safe under `tokio::spawn`/abort and a shared
    commit. A losing side does nothing further — an in-flight `abort()` on
    an already-finished task is harmless.
 
-A `JobRequest` implementor (currently only `jobs::download::DownloadRequest`)
+A `JobRequest` implementor (`jobs::download::DownloadRequest` or
+`jobs::split::SplitRequest`)
 supplies `validate` / `try_mark_started` / `setup` / `execute` /
 `gather_success_facts` / `commit_success` / `record_failure`, each mapping to
 one phase of the diagram above; `jobs::run::submit` and `jobs::run::cancel`
-are the only two engine entry points split/archive will adopt when they
-migrate.
+are the only two engine entry points archive will adopt when it migrates.
+
+### Split completion and dependency intent
+
+Split uses the engine's two preparation phases. Pre-acceptance validation
+re-reads the concert and constructs typed input; a rejected request creates no
+split lifecycle or Failed Job history. Post-acceptance setup creates temporary
+splitter inputs, rechecks the filesystem, and removes stale interludes. Any
+failure after acceptance reaches the normal failed terminal transaction.
+
+Before a successful terminal commit, split gathers filesystem completion facts.
+Executed analysis requires readable generated timestamps. Existing-track
+recovery requires track presence but treats missing legacy timestamp metadata
+as repairable: it preserves stored timestamp columns and logs a warning.
+Required lifecycle, track-presence, timestamp, and event writes commit in the
+same transaction before the Job Run is visible as successful.
+
+The automatic download-to-split edge stores only a `JobKey` identifying split
+intent:
+
+```text
+Download Job Run ── queued Split JobKey ──▶ download success commits
+                                                   │
+                                                   ▼
+                                        take intent exactly once
+                                                   │
+                                                   ▼
+                                        re-read current concert state
+                                                   │
+                                        submit SplitRequest(Analyze)
+
+download failure/cancellation ──▶ drop queued key; no Split Job Run
+```
+
+No validated concert data, timestamps, paths, or `SplitJob` are retained in the
+edge. Release constructs a fresh automatic request from current state. Key
+identity continues to provide deduplication, queued-status rendering, and
+queued cancellation.
 
 ## Typed runner boundary
 

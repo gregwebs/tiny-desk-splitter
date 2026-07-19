@@ -181,6 +181,34 @@ mod tests {
             .map(|s| format!("'{}.m4a'", cd.join(s).display()))
             .collect();
         let touch_songs = format!("touch {}", song_files.join(" "));
+        let timestamps = songs
+            .iter()
+            .enumerate()
+            .map(|(index, title)| {
+                serde_json::json!({
+                    "title": title,
+                    "start_time": index as f64 * 10.0,
+                    "end_time": (index + 1) as f64 * 10.0,
+                    "duration": 10.0,
+                })
+            })
+            .collect::<Vec<_>>();
+        let timestamps_json = serde_json::json!({
+            "artist": "Test Artist",
+            "source": "",
+            "show": "",
+            "album": ALBUM,
+            "set_list": [],
+            "musicians": [],
+            "timestamps": timestamps,
+        })
+        .to_string();
+        let complete_split = format!(
+            "{}; printf '%s' '{}' > '{}/timestamps.json'",
+            touch_songs,
+            timestamps_json,
+            cd.display()
+        );
         let fetch_source = format!(
             "mkdir -p '{}' && touch '{}'",
             cd.display(),
@@ -195,7 +223,7 @@ mod tests {
             }),
             Arc::new(move |_: &SplitJob| {
                 let mut cmd = Command::new("sh");
-                cmd.arg("-c").arg(touch_songs.clone());
+                cmd.arg("-c").arg(complete_split.clone());
                 cmd
             }),
             Arc::new(|_| Command::new("true")),
@@ -410,7 +438,12 @@ mod tests {
             cd.display(),
             source.display()
         );
-        let touch = format!("touch '{}'", cd.join("Alpha.m4a").display());
+        let touch = format!(
+            "touch '{}'; printf '%s' '{}' > '{}/timestamps.json'",
+            cd.join("Alpha.m4a").display(),
+            r#"{"artist":"A","source":"","show":"","album":"","set_list":[],"musicians":[],"timestamps":[{"title":"Alpha","start_time":0.0,"end_time":10.0,"duration":10.0}]}"#,
+            cd.display()
+        );
         let config = JobConfig::from_commands(
             tmp.path().to_path_buf(),
             Arc::new(move |_: &DownloadJob| {

@@ -4,9 +4,8 @@
 //! cancellation), Failed Job history. See `docs/jobs.md` for the state
 //! diagram and the invariants this module upholds.
 //!
-//! Download is the first (and, while #126/#127 are pending, only) job kind
-//! routed through this engine; split and archive keep their own
-//! hand-rolled admission/lifecycle code until they migrate.
+//! Download and split route through this engine; archive keeps its hand-rolled
+//! admission/lifecycle code until it migrates in #127.
 
 use std::any::Any;
 use std::future::Future;
@@ -43,18 +42,20 @@ pub const CANCELLED_BY_USER: &str = "cancelled by user";
 ///   inside the terminal transaction).
 /// - [`record_failure`](Self::record_failure): the DB-only failure commit,
 ///   covering setup failure, execution failure, panic, and cancellation.
-pub trait JobRequest: Send + Sync + 'static {
+pub trait JobCancellation {
+    fn key(&self) -> JobKey;
+    fn job_name(&self) -> &'static str;
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()>;
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool>;
+}
+
+pub trait JobRequest: JobCancellation + Send + Sync + 'static {
     /// Built pre-acceptance by [`validate`](Self::validate).
     type Input: Send + 'static;
     /// Built post-acceptance by [`setup`](Self::setup).
     type Setup: Send + 'static;
     /// Facts gathered (FS only) after success, before the terminal commit.
     type Facts: Send + 'static;
-
-    fn key(&self) -> JobKey;
-
-    /// `failed_jobs.name` for this kind, e.g. `"download"`.
-    fn job_name(&self) -> &'static str;
 
     /// Pre-acceptance validation and input construction.
     fn validate(&self, conn: &Connection) -> Result<Self::Input>;
@@ -80,15 +81,6 @@ pub trait JobRequest: Send + Sync + 'static {
 
     /// DB-only success commit; runs inside the terminal transaction.
     fn commit_success(&self, conn: &Connection, facts: Self::Facts) -> Result<()>;
-
-    /// DB-only failure commit (setup failure, execution failure, panic, or
-    /// cancellation); runs inside the terminal transaction.
-    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()>;
-
-    /// Whether the DB still shows this job as started even though no
-    /// registry entry exists (e.g. after an unclean shutdown, before
-    /// recovery runs). Used only by [`cancel`]'s stale fallback.
-    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool>;
 
     /// Directory for this Job Run's log file (mirrors the pre-#125
     /// `persist_job_log` behavior). Default: no log file.
@@ -191,7 +183,7 @@ pub async fn submit<R: JobRequest>(
 /// terminal outcome for the same Job Run. A Reserved-but-not-yet-accepted
 /// slot (admission still in progress) has no terminal gate exposed by the
 /// registry, so it falls through to the same "nothing to cancel yet" path.
-pub fn cancel<R: JobRequest>(
+pub fn cancel<R: JobCancellation>(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
     request: &R,
@@ -206,18 +198,9 @@ pub fn cancel<R: JobRequest>(
         // find the gate already taken and do nothing — so from here on we
         // exclusively own this Job Run's terminal outcome.
         registry.drop_dependency_edges(&key);
-        if let Err(e) = commit_failure_tx(conn, request, &key, CANCELLED_BY_USER) {
-            // Logged, not propagated: this function has already won the
-            // gate, so returning Err here (skipping abort_and_release below)
-            // would leak the registry reservation forever with no run task
-            // left to release it. Reporting CancelledRunning regardless is a
-            // deliberate tradeoff — the task is aborted and the gate is
-            // permanently closed either way, so no second terminal can ever
-            // be written for this key even though this particular write may
-            // not have persisted.
-            tracing::error!(?key, "failed to commit cancelled terminal: {:#}", e);
-        }
+        let commit = commit_failure_tx(conn, request, &key, CANCELLED_BY_USER);
         registry.abort_and_release(&key);
+        commit.context("Failed to commit cancelled terminal")?;
         return Ok(CancelOutcome::CancelledRunning);
     }
 
@@ -364,7 +347,7 @@ fn commit_success_tx<R: JobRequest>(conn: &Connection, request: &R, facts: R::Fa
     Ok(())
 }
 
-fn commit_failure_tx<R: JobRequest>(
+fn commit_failure_tx<R: JobCancellation>(
     conn: &Connection,
     request: &R,
     key: &JobKey,
@@ -485,11 +468,7 @@ mod tests {
         }
     }
 
-    impl JobRequest for TestRequest {
-        type Input = ();
-        type Setup = ();
-        type Facts = ();
-
+    impl JobCancellation for TestRequest {
         fn key(&self) -> JobKey {
             JobKey {
                 concert_id: self.concert_id,
@@ -500,6 +479,25 @@ mod tests {
         fn job_name(&self) -> &'static str {
             self.column
         }
+
+        fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+            db::lifecycle::mark_download_failed(conn, self.concert_id, error)
+        }
+
+        fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+            conn.query_row(
+                "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+                [self.concert_id],
+                |row| row.get(0),
+            )
+            .context("Failed to check stale state")
+        }
+    }
+
+    impl JobRequest for TestRequest {
+        type Input = ();
+        type Setup = ();
+        type Facts = ();
 
         fn validate(&self, conn: &Connection) -> Result<()> {
             db::concerts::get_concert(conn, self.concert_id)?;
@@ -551,19 +549,6 @@ mod tests {
             db::lifecycle::mark_download_succeeded(conn, self.concert_id, "mp4")
         }
 
-        fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
-            db::lifecycle::mark_download_failed(conn, self.concert_id, error)
-        }
-
-        fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
-            conn.query_row(
-                "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
-                [self.concert_id],
-                |row| row.get(0),
-            )
-            .context("Failed to check stale state")
-        }
-
         fn spawn_dependents(&self, _db: Arc<Mutex<Connection>>, _registry: Arc<JobRegistry>) {
             self.dependents_spawned.fetch_add(1, Ordering::SeqCst);
         }
@@ -574,11 +559,7 @@ mod tests {
         concert_id: i64,
     }
 
-    impl JobRequest for RejectingRequest {
-        type Input = ();
-        type Setup = ();
-        type Facts = ();
-
+    impl JobCancellation for RejectingRequest {
         fn key(&self) -> JobKey {
             JobKey {
                 concert_id: self.concert_id,
@@ -588,6 +569,19 @@ mod tests {
         fn job_name(&self) -> &'static str {
             "download"
         }
+        fn record_failure(&self, _conn: &Connection, _error: &str) -> Result<()> {
+            unreachable!()
+        }
+        fn has_stale_in_progress(&self, _conn: &Connection) -> Result<bool> {
+            unreachable!()
+        }
+    }
+
+    impl JobRequest for RejectingRequest {
+        type Input = ();
+        type Setup = ();
+        type Facts = ();
+
         fn validate(&self, _conn: &Connection) -> Result<()> {
             Err(anyhow::anyhow!("rejected for test"))
         }
@@ -608,12 +602,6 @@ mod tests {
             unreachable!()
         }
         fn commit_success(&self, _conn: &Connection, _facts: ()) -> Result<()> {
-            unreachable!()
-        }
-        fn record_failure(&self, _conn: &Connection, _error: &str) -> Result<()> {
-            unreachable!()
-        }
-        fn has_stale_in_progress(&self, _conn: &Connection) -> Result<bool> {
             unreachable!()
         }
     }
