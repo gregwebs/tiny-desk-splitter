@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Perform a Code Review. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
+description: Perform a Code Review. Use when the user wants to review a branch, a PR, work-in-progress changes, or asks to "review since X".
 ---
 
 # /code-review - project wrapper
