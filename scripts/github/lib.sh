@@ -4,6 +4,10 @@
 # GitHub App installation - see ./gh-app-token.sh in this directory.
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck disable=SC1091
+source "$SCRIPT_DIR/gh-app-token.sh"
+
 GH_APP_API_VERSION="2022-11-28"
 
 # Best-effort "owner/repo" from the current directory's origin remote.
@@ -32,7 +36,7 @@ gh_app_resolve_body() {
 gh_app_api_post() {
   local path="$1" payload="$2" token response status body
   token=$(gh_app_token)
-  response=$(curl -s -w '\n%{http_code}' -X POST \
+  response=$(gh_app_curl -s -w '\n%{http_code}' -X POST \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
@@ -55,7 +59,7 @@ gh_app_api_post() {
 gh_app_api_patch() {
   local path="$1" payload="$2" token response status body
   token=$(gh_app_token)
-  response=$(curl -s -w '\n%{http_code}' -X PATCH \
+  response=$(gh_app_curl -s -w '\n%{http_code}' -X PATCH \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
@@ -78,7 +82,7 @@ gh_app_api_patch() {
 gh_app_api_get() {
   local path="$1" token response status body
   token=$(gh_app_token)
-  response=$(curl -s -w '\n%{http_code}' -X GET \
+  response=$(gh_app_curl -s -w '\n%{http_code}' -X GET \
     -H "Authorization: token $token" \
     -H "Accept: application/vnd.github+json" \
     -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \

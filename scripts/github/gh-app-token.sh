@@ -14,6 +14,14 @@ _gh_app_b64url() {
   openssl base64 -A | tr '+/' '-_' | tr -d '='
 }
 
+gh_app_curl() {
+  if [ -x /opt/homebrew/opt/curl/bin/curl ]; then
+    /opt/homebrew/opt/curl/bin/curl "$@"
+  else
+    curl "$@"
+  fi
+}
+
 gh_app_token() {
   local secrets_dir client_id installation_id
   secrets_dir="${GITHUB_APP_SECRETS_DIR:-$HOME/.config/github-app}"
@@ -31,7 +39,7 @@ gh_app_token() {
   jwt="${signing_input}.${signature}"
 
   local token
-  token=$(curl -sf -X POST \
+  token=$(gh_app_curl -sf -X POST \
     -H "Authorization: Bearer $jwt" \
     -H "Accept: application/vnd.github+json" \
     "https://api.github.com/app/installations/${installation_id}/access_tokens" \

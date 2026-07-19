@@ -1,10 +1,11 @@
 ---
 name: github-app
-description: Create GitHub pull requests, issues, and issue/PR comments for this repo via the App-authenticated scripts in ./scripts/github/. Use when the user asks to open a PR, file an issue, or comment on an issue/PR from this project. Triggers on "open a PR", "send a pull request", "file an issue", "comment on the PR/issue".
+description: Read and update GitHub issues, push branches, and create or update pull requests, issues, and comments for this repo via the App-authenticated scripts in ./scripts/github/. Use for GitHub reads or writes, including "open a PR", "send a pull request", "file/read/update an issue", "comment on the PR/issue", or an App-authenticated push.
 user-invocable: true
 allowed-tools:
   - Read
   - Write
+  - Bash(./scripts/github/gh-app.sh*)
   - Bash(./scripts/github/*)
   - Bash(git push*)
   - Bash(git rev-parse*)
@@ -26,18 +27,42 @@ Confirm the target (repo, branch, title) before running if there's any ambiguity
 
 ## The scripts
 
-| Action | Script | Required args |
+| Action | Dispatcher command | Required args |
 |---|---|---|
-| Open a PR | `gh-app-pr-create.sh` | `--base BASE --head HEAD --title TITLE` |
-| File an issue | `gh-app-issue-create.sh` | `--title TITLE` |
-| Link sub-issue | `gh-app-issue-sub-add.sh` | `--parent NUMBER --child NUMBER` |
-| Comment on issue/PR | `gh-app-issue-comment.sh` | `--issue NUMBER` (PRs count as issues here) |
+| Open a PR | `gh-app.sh pr-create` | `--base BASE --head HEAD --title TITLE` |
+| Read an issue | `gh-app.sh issue-get` | `--issue NUMBER` |
+| File an issue | `gh-app.sh issue-create` | `--title TITLE` |
+| Link sub-issue | `gh-app.sh issue-sub-add` | `--parent NUMBER --child NUMBER` |
+| Comment on issue/PR | `gh-app.sh issue-comment` | `--issue NUMBER` (PRs count as issues here) |
 
 Common optional args: `--repo OWNER/REPO`, `--body TEXT`, `--body-file FILE`.
 Issue creation also takes repeatable `--label LABEL`.
 
 `--repo` defaults to this directory's `github.com` origin remote — **omit it**
 unless acting on a different repo.
+
+## Permission-efficient command shapes
+
+Use the repository dispatcher directly. Do not prefix it with `PATH=...`, call
+the GitHub API with raw `curl`, or substitute `gh`. The dispatcher and git
+credential helper select `/opt/homebrew/opt/curl/bin/curl` internally when it
+exists, so the command remains compatible with a narrow persistent approval
+rule.
+
+Stable command prefixes are:
+
+```text
+./scripts/github/gh-app.sh
+git push
+```
+
+GitHub requires network access. In a restricted Codex sandbox, request network
+escalation on the first attempt with the narrow dispatcher or `git push` prefix;
+do not first run a command that is expected to fail DNS and then retry it. A
+previously persisted approval can then match without another prompt.
+
+Use the `github-actions-ci` skill for check status and waiting; do not use raw
+Actions API calls from this skill.
 
 ## Body text: always use `--body-file`, never `--body`
 
@@ -66,7 +91,7 @@ Reasons:
 ```
 # 1. Write the body to /private/tmp/pr-body.md
 # 2. Pass it
-./scripts/github/gh-app-pr-create.sh --base main --head my-branch \
+./scripts/github/gh-app.sh pr-create --base main --head my-branch \
   --title "..." --body-file /private/tmp/pr-body.md
 ```
 
@@ -77,7 +102,8 @@ Reasons:
    pushes via the same App credentials). Confirm with the user before pushing if
    they haven't asked.
 2. `--base` is usually `main`; `--head` is the current feature branch
-   (`git rev-parse --abbrev-ref HEAD`).
+   (`git rev-parse --abbrev-ref HEAD`). Use plain `git push`; the configured
+   credential helper handles App authentication and curl selection.
 3. Per this project's CLAUDE.md workflow, the **PR description should point to
    the change's entry in `./docs/change/`** — summarize there and reference it
    in the body.
@@ -86,7 +112,7 @@ Reasons:
 ## Filing an issue
 
 ```
-./scripts/github/gh-app-issue-create.sh --title "Title" \
+./scripts/github/gh-app.sh issue-create --title "Title" \
   --body-file "$TMPDIR/issue-body.md" --label bug --label "needs triage"
 ```
 `--label` repeats per label. Relay the printed issue URL.
@@ -96,7 +122,7 @@ Reasons:
 GitHub treats PR conversation comments as issue comments, so the **same script
 and PR/issue number** work for both:
 ```
-./scripts/github/gh-app-issue-comment.sh --issue 1 --body-file "$TMPDIR/comment.md"
+./scripts/github/gh-app.sh issue-comment --issue 1 --body-file "$TMPDIR/comment.md"
 ```
 
 ## Failure modes
@@ -112,7 +138,8 @@ and PR/issue number** work for both:
   exists for that branch, or base == head. Check the error body the script
   prints to stderr.
 - These scripts use `curl`/`jq` (not `gh`) on purpose: `gh` fails TLS against
-  `api.github.com` in this sandbox. Don't substitute `gh`.
+  `api.github.com` in this sandbox. They automatically prefer the Homebrew curl
+  required on this host. Don't add a `PATH` prefix or substitute `gh`.
 
 ## Setup reference
 
