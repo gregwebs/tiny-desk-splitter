@@ -6,6 +6,7 @@ allowed-tools:
   - Read
   - Write
   - Bash(./scripts/github/*)
+  - Bash(./scripts/github/gh-app.sh*)
   - Bash(git push*)
   - Bash(git rev-parse*)
   - Bash(git branch*)
