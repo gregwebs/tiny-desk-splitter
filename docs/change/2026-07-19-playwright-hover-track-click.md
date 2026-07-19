@@ -34,7 +34,7 @@ card hovered -> tracks visible -> DOM click -> prepare -> split -> autoplay
 - [x] Attempt the focused automated-splitting scenario repeatedly locally.
 - [x] Record the local Chromium launch limitation for Playwright verification.
 - [x] Obtain an engineering-lead review.
-- [ ] Verify the pull request's Playwright CI job passes.
+- [x] Verify the pull request's Playwright CI job passes.
 
 ## Verification plan
 
@@ -59,4 +59,5 @@ then run the full Playwright suite to check for interaction regressions.
   `SIGTRAP` during browser launch. This is the same host limitation observed
   during investigation and is independent of the changed test interaction.
 - Initial adversarial engineering-lead review: approved with no code findings.
-- Linux Playwright CI: pending pull request execution.
+- Linux Playwright CI: passed in
+  [run 29687340937](https://github.com/gregwebs/tiny-desk-splitter/actions/runs/29687340937/job/88193864651).
