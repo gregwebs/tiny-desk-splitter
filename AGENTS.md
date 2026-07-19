@@ -15,10 +15,12 @@
   Do not request escalation merely to read or write `/private/tmp`.
 - Prefer `mktemp -d /private/tmp/tiny-desk-splitter.XXXXXX` for isolated temporary work.
 
-## Github auth
+## Github
 
-For write access to the repo, use the github-app skill in .claude/skills/github-app/SKILL.md
-For read access, the repo is public, but there are also github-app convenience scripts.
+Use the /github-app skill for access to the Github repo.
+Even if you don't need to auth, still use that skill because its operations are allowed.
+If you need to perform any operations that aren't allowed, determine how to allow list these operations in the future.
+There is also a /github-actions-ci skill for allow listed interactions with Github CI.
 
 # General workflow
 

@@ -13,6 +13,7 @@ If there is already an **Implementation Plan** that satisfies the "What to inclu
 
 If there is already a spec, that is your starting point.
 If not, use /grill-me-with-docs to align on changes and then /to-spec to first create a spec.
+If this is a github issue, use the /github-app skill to retrieve the issue.
 
 Use conversation context and /breakdown to determine whether this spec should be broken up into multiple work items.
 If it is a single work item, then proceed to /implement it.

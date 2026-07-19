@@ -5,7 +5,6 @@ user-invocable: true
 allowed-tools:
   - Read
   - Write
-  - Bash(./scripts/github/gh-app.sh*)
   - Bash(./scripts/github/*)
   - Bash(git push*)
   - Bash(git rev-parse*)
