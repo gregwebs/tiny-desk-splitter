@@ -1996,7 +1996,7 @@ pub async fn cancel_job(
 
     let outcome = {
         let conn = state.db.lock().unwrap();
-        crate::lifecycle::cancel_job(&conn, &state.registry, id, job_kind)?
+        crate::lifecycle::cancel_job(&conn, &state.registry, &state.jobs, id, job_kind)?
     };
     tracing::info!(
         "cancel_job: concert={} kind={} outcome={:?}",

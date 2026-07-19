@@ -1,12 +1,13 @@
 use anyhow::Result;
 use rusqlite::Connection;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tempfile::NamedTempFile;
 
 use crate::db;
+use crate::jobs::run::{self, Admission, JobRequest};
 use crate::jobs::{
-    download_job_from_concert, persist_job_log, DownloadJob, JobConfig, JobKey, JobKind,
-    JobRegistry, JobStepOutcome,
+    download_job_from_concert, DownloadJob, JobConfig, JobKey, JobKind, JobRegistry, JobRunFuture,
+    JobStepOutcome,
 };
 
 pub enum StartOutcome {
@@ -14,90 +15,114 @@ pub enum StartOutcome {
     AlreadyRunning,
 }
 
-/// Start a download job for the given concert. Returns Spawned or AlreadyRunning.
+/// Start a download job for the given concert. Returns Spawned or
+/// AlreadyRunning. Goes through the Job Run engine (`jobs::run`): race-safe
+/// admission, exactly one terminal outcome, and Failed Job history on any
+/// unsuccessful outcome including cancellation. See `docs/jobs.md`.
 pub async fn start_download(
     db: Arc<Mutex<Connection>>,
     registry: Arc<JobRegistry>,
     config: JobConfig,
     concert_id: i64,
 ) -> Result<StartOutcome> {
-    let key = JobKey {
-        concert_id,
-        kind: JobKind::Download,
-    };
-    if registry.is_running(&key) {
-        return Ok(StartOutcome::AlreadyRunning);
+    let request = DownloadRequest::new(concert_id, config);
+    match run::submit(db, registry, request).await? {
+        Admission::Accepted => Ok(StartOutcome::Spawned),
+        Admission::AlreadyRunning => Ok(StartOutcome::AlreadyRunning),
     }
+}
 
-    {
-        let conn = db.lock().unwrap();
-        if !db::lifecycle::try_mark_download_started(&conn, concert_id)? {
-            tracing::info!("download already running for concert {}", concert_id);
-            return Ok(StartOutcome::AlreadyRunning);
+/// The download [`JobRequest`]. `Setup` is the identity of `Input`
+/// (`DownloadJob`) — download has no separate post-acceptance preparation
+/// step today; split will use `Setup` for real (temp files, output paths)
+/// when it migrates in #126.
+///
+/// `pub(crate)` so `crate::lifecycle::cancel_job` can build one to route a
+/// user-initiated cancellation through [`run::cancel`].
+pub(crate) struct DownloadRequest {
+    concert_id: i64,
+    config: JobConfig,
+}
+
+impl DownloadRequest {
+    pub(crate) fn new(concert_id: i64, config: JobConfig) -> Self {
+        DownloadRequest { concert_id, config }
+    }
+}
+
+impl JobRequest for DownloadRequest {
+    type Input = DownloadJob;
+    type Setup = DownloadJob;
+    /// The downloaded file's extension, resolved from disk after `execute`
+    /// succeeds.
+    type Facts = String;
+
+    fn key(&self) -> JobKey {
+        JobKey {
+            concert_id: self.concert_id,
+            kind: JobKind::Download,
         }
     }
 
-    let (job, title) = {
-        let conn = db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, concert_id)?;
-        let title = concert.title.clone();
-        let job = download_job_from_concert(&concert, &config.working_dir)?;
-        (job, title)
-    };
+    fn job_name(&self) -> &'static str {
+        "download"
+    }
 
-    tracing::info!("download started for concert {} ({})", concert_id, title);
-    let handle = tokio::task::spawn(run_download(db.clone(), registry.clone(), config, job));
-    registry.insert(key, handle);
+    fn validate(&self, conn: &Connection) -> Result<DownloadJob> {
+        let concert = db::concerts::get_concert(conn, self.concert_id)?;
+        download_job_from_concert(&concert, &self.config.working_dir)
+    }
 
-    Ok(StartOutcome::Spawned)
-}
+    fn try_mark_started(&self, conn: &Connection) -> Result<bool> {
+        db::lifecycle::try_mark_download_started(conn, self.concert_id)
+    }
 
-async fn run_download(
-    db: Arc<Mutex<Connection>>,
-    registry: Arc<JobRegistry>,
-    config: JobConfig,
-    job: DownloadJob,
-) {
-    let concert_id = job.concert_id;
-    let key = JobKey {
-        concert_id,
-        kind: JobKind::Download,
-    };
-    let log_dir = config.log_dir();
-    let temp_file =
-        match std::fs::create_dir_all(&log_dir).and_then(|_| NamedTempFile::new_in(&log_dir)) {
-            Ok(f) => Some(f),
-            Err(e) => {
-                tracing::warn!("failed to create temp log file: {}", e);
-                None
-            }
-        };
-    let temp_path = temp_file.as_ref().map(|f| f.path().to_path_buf());
+    fn setup(&self, input: DownloadJob) -> Result<DownloadJob> {
+        Ok(input)
+    }
 
-    match config.run_download(&job, temp_path.as_deref()).await {
-        JobStepOutcome::Succeeded => {
-            tracing::info!("download completed for concert {}", concert_id);
-            drop(temp_file);
-            let ext = crate::concert_media::find_downloaded_file(&config.working_dir, &job.album)
+    fn execute<'a>(
+        &'a self,
+        setup: &'a DownloadJob,
+        log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome> {
+        Box::pin(self.config.run_download(setup, log_file))
+    }
+
+    fn gather_success_facts(&self, setup: &DownloadJob) -> Result<String> {
+        let ext =
+            crate::concert_media::find_downloaded_file(&self.config.working_dir, &setup.album)
                 .and_then(|p| {
                     p.extension()
                         .and_then(|e| e.to_str())
                         .map(|s| s.to_string())
                 })
                 .unwrap_or_else(|| "mp4".to_string());
-            {
-                let conn = db.lock().unwrap();
-                let _ = db::lifecycle::mark_download_succeeded(&conn, concert_id, &ext);
-            }
-            crate::jobs::spawn_dependents(db, registry, config, &key);
-        }
-        JobStepOutcome::Failed { message } => {
-            tracing::warn!("download failed for concert {}: {}", concert_id, message);
-            registry.drop_dependency_edges(&key);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_download_failed(&conn, concert_id, &message);
-            persist_job_log(&conn, concert_id, "download", &message, temp_file, &log_dir);
-        }
+        Ok(ext)
+    }
+
+    fn commit_success(&self, conn: &Connection, extension: String) -> Result<()> {
+        db::lifecycle::mark_download_succeeded(conn, self.concert_id, &extension)
+    }
+
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+        db::lifecycle::mark_download_failed(conn, self.concert_id, error)
+    }
+
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT download_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+            [self.concert_id],
+            |row| row.get(0),
+        )?)
+    }
+
+    fn log_dir(&self) -> Option<PathBuf> {
+        Some(self.config.log_dir())
+    }
+
+    fn spawn_dependents(&self, db: Arc<Mutex<Connection>>, registry: Arc<JobRegistry>) {
+        crate::jobs::spawn_dependents(db, registry, self.config.clone(), &self.key());
     }
 }
 

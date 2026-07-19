@@ -7,9 +7,8 @@ use rusqlite::Connection;
 use crate::concert_media::{find_downloaded_file, source_redundant};
 use crate::db;
 use crate::events::{self, Event};
-use crate::jobs::{JobKey, JobKind, JobRegistry, RegistryCancelOutcome};
-
-const CANCELLED_BY_USER: &str = "cancelled by user";
+use crate::jobs::run::CANCELLED_BY_USER;
+use crate::jobs::{JobConfig, JobKey, JobKind, JobRegistry, RegistryCancelOutcome};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteDownloadOutcome {
@@ -199,12 +198,33 @@ pub fn delete_track(
     })
 }
 
+/// Cancel the running/queued/stale job named by `(id, job_kind)`.
+///
+/// `Download` routes through the Job Run engine's [`crate::jobs::run::cancel`]:
+/// gate-arbitrated exactly-one-terminal-outcome, and a Failed Job row on a
+/// won cancellation (see `docs/jobs.md`). `Split` and `Archive` keep the
+/// legacy registry-only path until they migrate (#126/#127) — cancelling
+/// them still clears the lifecycle `*_started_at` flag but does not create
+/// Failed Job history.
 pub fn cancel_job(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
+    jobs: &JobConfig,
     id: i64,
     job_kind: JobKind,
 ) -> Result<CancelJobOutcome> {
+    if job_kind == JobKind::Download {
+        let request = crate::jobs::download::DownloadRequest::new(id, jobs.clone());
+        return Ok(match crate::jobs::run::cancel(conn, registry, &request)? {
+            crate::jobs::run::CancelOutcome::CancelledRunning => CancelJobOutcome::CancelledRunning,
+            crate::jobs::run::CancelOutcome::DroppedQueued => CancelJobOutcome::DroppedQueued,
+            crate::jobs::run::CancelOutcome::MarkedStaleFailed => {
+                CancelJobOutcome::MarkedStaleFailed
+            }
+            crate::jobs::run::CancelOutcome::NoSuchActiveJob => CancelJobOutcome::NoSuchActiveJob,
+        });
+    }
+
     let key = JobKey {
         concert_id: id,
         kind: job_kind,
@@ -485,6 +505,7 @@ mod tests {
     async fn cancel_distinguishes_running_queued_stale_and_absent_jobs() {
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
+        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let running_id = insert_concert(&conn, "Running", &["One"]);
         let queued_id = insert_concert(&conn, "Queued", &["One"]);
         let stale_id = insert_concert(&conn, "Stale", &["One"]);
@@ -517,19 +538,19 @@ mod tests {
         db::lifecycle::try_mark_split_started(&conn, stale_id).unwrap();
 
         assert_eq!(
-            cancel_job(&conn, &registry, queued_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, &jobs, queued_id, JobKind::Split).unwrap(),
             CancelJobOutcome::DroppedQueued
         );
         assert_eq!(
-            cancel_job(&conn, &registry, running_id, JobKind::Download).unwrap(),
+            cancel_job(&conn, &registry, &jobs, running_id, JobKind::Download).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
         assert_eq!(
-            cancel_job(&conn, &registry, stale_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, &jobs, stale_id, JobKind::Split).unwrap(),
             CancelJobOutcome::MarkedStaleFailed
         );
         assert_eq!(
-            cancel_job(&conn, &registry, absent_id, JobKind::Archive).unwrap(),
+            cancel_job(&conn, &registry, &jobs, absent_id, JobKind::Archive).unwrap(),
             CancelJobOutcome::NoSuchActiveJob
         );
 
@@ -541,6 +562,44 @@ mod tests {
             .unwrap()
             .split_started_at
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_download_creates_failed_job_history() {
+        // #125 acceptance criterion: user cancellation of an accepted Job
+        // Run produces exactly one terminal outcome AND a Failed Job — the
+        // legacy Split/Archive path only cleared lifecycle columns.
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
+        let id = insert_concert(&conn, "Cancel Me", &["One"]);
+        db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        let (_tx, rx) = oneshot::channel::<()>();
+        registry.insert(
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Download,
+            },
+            tokio::spawn(async move {
+                let _ = rx.await;
+            }),
+        );
+
+        assert_eq!(
+            cancel_job(&conn, &registry, &jobs, id, JobKind::Download).unwrap(),
+            CancelJobOutcome::CancelledRunning
+        );
+
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.download_started_at.is_none());
+        assert_eq!(
+            concert.download_errors.last().unwrap().error,
+            CANCELLED_BY_USER
+        );
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].concert_id, id);
+        assert_eq!(failed[0].failure_message, CANCELLED_BY_USER);
     }
 
     #[test]

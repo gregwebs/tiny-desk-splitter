@@ -322,6 +322,85 @@ HTTP 200
 [Asserts]
 jsonpath "$.result.ok" == true
 
+# ── cancel_running_download_creates_failed_job_history ──────────────────────
+# #125: cancelling an accepted download Job Run through the Job Run engine
+# must produce exactly one terminal outcome (a Failed Job, "cancelled by
+# user") and clear the concert back to download-error — not silently leave
+# it stuck, and not also let the blocked download itself go on to succeed.
+
+POST {{test_control_url}}/test/seed/scraped_concert
+Content-Type: application/json
+{
+  "title": "Job Chain Cancel Download",
+  "album": "Job Chain Cancel Download",
+  "set_list": ["Song 1"]
+}
+HTTP 200
+[Captures]
+cancel_dl_id: jsonpath "$.result.id"
+
+POST {{test_control_url}}/test/job/set_plan
+Content-Type: application/json
+{
+  "concert_id": {{cancel_dl_id}},
+  "download": "block"
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+POST {{base_url}}/concerts/{{cancel_dl_id}}/download
+HTTP 200
+
+POST {{test_control_url}}/test/assert/job_observation
+Content-Type: application/json
+[Options]
+retry: 30
+retry-interval: 50ms
+{
+  "concert_id": {{cancel_dl_id}},
+  "kind": "download",
+  "blocked": 1
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+POST {{base_url}}/jobs/{{cancel_dl_id}}/cancel/download
+HTTP 200
+
+GET {{base_url}}/concerts/{{cancel_dl_id}}/prepare-status
+[Options]
+retry: 30
+retry-interval: 50ms
+HTTP 200
+[Asserts]
+jsonpath "$.download" == "download-error"
+
+GET {{base_url}}/jobs
+HTTP 200
+[Asserts]
+body contains "cancelled by user"
+body contains "Job Chain Cancel Download"
+
+# Releasing the (now-cancelled) blocked download must not resurrect a
+# success: the Job Run's terminal gate was already claimed by cancel.
+POST {{test_control_url}}/test/job/release
+Content-Type: application/json
+{
+  "concert_id": {{cancel_dl_id}},
+  "kind": "download",
+  "outcome": "succeed"
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+GET {{base_url}}/concerts/{{cancel_dl_id}}/prepare-status
+HTTP 200
+[Asserts]
+jsonpath "$.download" == "download-error"
+
 # ── download_force_starts_when_tracks_present_but_source_missing ────────────
 # All track files exist on disk but the source video is missing and
 # downloaded_at is NULL. The Download button must still start a download so

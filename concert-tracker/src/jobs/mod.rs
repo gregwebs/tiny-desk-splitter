@@ -1,6 +1,7 @@
 pub mod archive;
 pub mod download;
 pub mod prepare;
+pub mod run;
 pub mod scrape_queue;
 pub mod split;
 
@@ -10,9 +11,11 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::{ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 
 pub use crate::concert_media::find_downloaded_file;
@@ -33,8 +36,97 @@ pub struct JobKey {
     pub kind: JobKind,
 }
 
+/// Arbitrates exactly one terminal outcome (succeeded / failed / cancelled)
+/// for a single Job Run. `claim` is a one-shot compare-and-swap: the first
+/// caller to succeed owns writing the terminal state and releasing the
+/// registry slot; every later caller must write nothing. See the Job Run
+/// invariants in `docs/jobs.md`.
+pub struct TerminalGate(AtomicBool);
+
+impl TerminalGate {
+    fn new() -> Self {
+        TerminalGate(AtomicBool::new(false))
+    }
+
+    /// Attempt to claim the gate. Returns `true` for exactly one caller
+    /// across this gate's lifetime.
+    pub fn claim(&self) -> bool {
+        self.0
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+}
+
+struct JobSlot {
+    /// `None` while the slot is Reserved (admission in progress, not yet an
+    /// accepted Job Run); `Some` once the spawned run task's handle has been
+    /// attached via [`JobReservation::activate`]. Legacy `insert` (split /
+    /// archive during migration) always creates an already-`Some` slot.
+    handle: Option<JoinHandle<()>>,
+    terminal: Arc<TerminalGate>,
+}
+
+type SlotsMap = Arc<Mutex<HashMap<JobKey, JobSlot>>>;
+
+/// A reservation for a not-yet-accepted Job Run. Dropping it without calling
+/// [`activate`](Self::activate) rolls the reservation back (removes the
+/// slot) — this is admission rollback for synchronous rejection or an
+/// acceptance failure between `try_reserve` and spawning the run task.
+pub struct JobReservation {
+    key: JobKey,
+    slots: SlotsMap,
+    terminal: Arc<TerminalGate>,
+    activate_tx: Option<oneshot::Sender<()>>,
+    activated: bool,
+}
+
+impl JobReservation {
+    pub fn terminal_gate(&self) -> Arc<TerminalGate> {
+        self.terminal.clone()
+    }
+
+    /// Attach the spawned task's handle to the registry slot and release the
+    /// paired [`ActivationSignal`] so the task can begin work. Must be
+    /// called exactly once, after `tokio::spawn` returns — both steps are
+    /// infallible, which is what lets `try_mark_started` remain the last
+    /// fallible step of admission (its `download_started` event cannot be
+    /// rolled back; see [`run::submit`]).
+    pub fn activate(mut self, handle: JoinHandle<()>) {
+        self.activated = true;
+        {
+            let mut slots = self.slots.lock().unwrap();
+            if let Some(slot) = slots.get_mut(&self.key) {
+                slot.handle = Some(handle);
+            }
+        }
+        if let Some(tx) = self.activate_tx.take() {
+            let _ = tx.send(());
+        }
+    }
+}
+
+impl Drop for JobReservation {
+    fn drop(&mut self) {
+        if !self.activated {
+            self.slots.lock().unwrap().remove(&self.key);
+        }
+    }
+}
+
+/// Awaited by the spawned run task before it does any work (setup, execute,
+/// terminal commit). This closes the race where a trivially fast run could
+/// reach `release` before [`JobReservation::activate`] has even attached its
+/// handle to the registry slot.
+pub struct ActivationSignal(oneshot::Receiver<()>);
+
+impl ActivationSignal {
+    pub async fn wait(self) {
+        let _ = self.0.await;
+    }
+}
+
 pub struct JobRegistry {
-    running: Mutex<HashMap<JobKey, JoinHandle<()>>>,
+    slots: SlotsMap,
     /// dependents[upstream] = jobs to start when `upstream` completes
     /// successfully. The reverse view (dependent → upstream) is the
     /// dependent's `depends_on`; a queued dependent has no spawned task
@@ -53,18 +145,106 @@ pub enum RegistryCancelOutcome {
 impl JobRegistry {
     pub fn new() -> Self {
         JobRegistry {
-            running: Mutex::new(HashMap::new()),
+            slots: Arc::new(Mutex::new(HashMap::new())),
             dependents: Mutex::new(HashMap::new()),
         }
     }
 
+    /// True for a Reserved slot (admission in progress) or an unfinished
+    /// accepted Job Run — i.e. whether a new request for `key` must be
+    /// rejected as a duplicate. Preserves `prepare.rs`'s existing semantics.
     pub fn is_running(&self, key: &JobKey) -> bool {
-        let map = self.running.lock().unwrap();
-        map.get(key).map(|h| !h.is_finished()).unwrap_or(false)
+        let slots = self.slots.lock().unwrap();
+        match slots.get(key) {
+            None => false,
+            Some(slot) => match &slot.handle {
+                None => true,
+                Some(h) => !h.is_finished(),
+            },
+        }
     }
 
+    /// Reserve `key` for a new Job Run before any DB acceptance work runs.
+    /// `None` means `key` is already reserved or running. A slot left by a
+    /// finished handle is treated as free and replaced. Returns the
+    /// reservation guard plus the signal the spawned run task must await.
+    pub fn try_reserve(&self, key: JobKey) -> Option<(JobReservation, ActivationSignal)> {
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(existing) = slots.get(&key) {
+            let occupied = match &existing.handle {
+                None => true,
+                Some(h) => !h.is_finished(),
+            };
+            if occupied {
+                return None;
+            }
+        }
+        let terminal = Arc::new(TerminalGate::new());
+        let (tx, rx) = oneshot::channel();
+        slots.insert(
+            key.clone(),
+            JobSlot {
+                handle: None,
+                terminal: terminal.clone(),
+            },
+        );
+        Some((
+            JobReservation {
+                key,
+                slots: self.slots.clone(),
+                terminal,
+                activate_tx: Some(tx),
+                activated: false,
+            },
+            ActivationSignal(rx),
+        ))
+    }
+
+    /// Remove `key`'s slot outright. Called by whichever party wins the
+    /// terminal gate (the run task on success/failure, `run::cancel` on a
+    /// won cancel), after the terminal transaction commits and dependency
+    /// handling completes.
+    pub fn release(&self, key: &JobKey) {
+        self.slots.lock().unwrap().remove(key);
+    }
+
+    /// Abort `key`'s handle if it is still running, then remove the slot.
+    /// Used only by a caller that has already won the terminal gate for
+    /// `key` — the abort is a courtesy to stop wasted work, not what makes
+    /// the terminal outcome exclusive (the gate does that).
+    pub fn abort_and_release(&self, key: &JobKey) {
+        if let Some(slot) = self.slots.lock().unwrap().remove(key) {
+            if let Some(handle) = slot.handle {
+                if !handle.is_finished() {
+                    handle.abort();
+                }
+            }
+        }
+    }
+
+    /// The terminal gate for `key`, if `key` names an *accepted* Job Run
+    /// (a slot with an attached handle). A merely Reserved slot (admission
+    /// still in progress) has no cancellable Job Run yet, so this returns
+    /// `None` for it — see [`run::cancel`].
+    pub fn terminal_gate(&self, key: &JobKey) -> Option<Arc<TerminalGate>> {
+        let slots = self.slots.lock().unwrap();
+        let slot = slots.get(key)?;
+        slot.handle.as_ref()?;
+        Some(slot.terminal.clone())
+    }
+
+    /// Legacy admission path for split/archive during migration: creates an
+    /// already-accepted slot (handle attached immediately) with a fresh,
+    /// winnable gate, so cancellation for these kinds keeps working via
+    /// [`cancel_with_outcome`] unchanged.
     pub fn insert(&self, key: JobKey, handle: JoinHandle<()>) {
-        self.running.lock().unwrap().insert(key, handle);
+        self.slots.lock().unwrap().insert(
+            key,
+            JobSlot {
+                handle: Some(handle),
+                terminal: Arc::new(TerminalGate::new()),
+            },
+        );
     }
 
     /// Register `dependent` to start when `upstream` completes successfully.
@@ -129,11 +309,13 @@ impl JobRegistry {
 
     pub fn cancel_with_outcome(&self, key: &JobKey) -> RegistryCancelOutcome {
         let dropped_queued = self.drop_dependency_edges(key);
-        let mut map = self.running.lock().unwrap();
-        if let Some(handle) = map.remove(key) {
-            if !handle.is_finished() {
-                handle.abort();
-                return RegistryCancelOutcome::CancelledRunning;
+        let mut slots = self.slots.lock().unwrap();
+        if let Some(slot) = slots.remove(key) {
+            if let Some(handle) = slot.handle {
+                if !handle.is_finished() {
+                    handle.abort();
+                    return RegistryCancelOutcome::CancelledRunning;
+                }
             }
         }
         if dropped_queued {
@@ -147,12 +329,14 @@ impl JobRegistry {
     /// number of tasks aborted.
     pub fn cancel_all(&self) -> usize {
         self.dependents.lock().unwrap().clear();
-        let mut map = self.running.lock().unwrap();
+        let mut slots = self.slots.lock().unwrap();
         let mut count = 0;
-        for (_, handle) in map.drain() {
-            if !handle.is_finished() {
-                handle.abort();
-                count += 1;
+        for (_, slot) in slots.drain() {
+            if let Some(handle) = slot.handle {
+                if !handle.is_finished() {
+                    handle.abort();
+                    count += 1;
+                }
             }
         }
         count
@@ -746,6 +930,141 @@ mod tests {
 
         assert!(registry.cancel(&key));
         assert!(!registry.is_running(&key));
+    }
+
+    // ── TerminalGate / JobReservation ───────────────────────────────────────
+
+    #[test]
+    fn terminal_gate_claim_wins_exactly_once() {
+        let gate = TerminalGate::new();
+        assert!(gate.claim());
+        assert!(!gate.claim());
+        assert!(!gate.claim());
+    }
+
+    fn dl_key_n(concert_id: i64) -> JobKey {
+        JobKey {
+            concert_id,
+            kind: JobKind::Download,
+        }
+    }
+
+    #[test]
+    fn try_reserve_marks_key_running_before_acceptance() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let (_reservation, _signal) = registry.try_reserve(key.clone()).unwrap();
+        assert!(
+            registry.is_running(&key),
+            "a Reserved slot must block duplicate admission"
+        );
+    }
+
+    #[test]
+    fn try_reserve_rejects_when_already_reserved_or_running() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let (_reservation, _signal) = registry.try_reserve(key.clone()).unwrap();
+        assert!(
+            registry.try_reserve(key).is_none(),
+            "second reservation for the same key must be rejected"
+        );
+    }
+
+    #[test]
+    fn dropping_reservation_without_activating_rolls_back() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        {
+            let (_reservation, _signal) = registry.try_reserve(key.clone()).unwrap();
+            assert!(registry.is_running(&key));
+        } // reservation dropped without activate()
+        assert!(
+            !registry.is_running(&key),
+            "un-activated reservation must roll back on drop"
+        );
+        assert!(
+            registry.terminal_gate(&key).is_none(),
+            "rolled-back key has no accepted Job Run"
+        );
+    }
+
+    #[test]
+    fn try_reserve_after_rollback_succeeds() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        drop(registry.try_reserve(key.clone()).unwrap());
+        assert!(
+            registry.try_reserve(key).is_some(),
+            "a rolled-back key must be reservable again"
+        );
+    }
+
+    #[tokio::test]
+    async fn activate_attaches_handle_and_exposes_terminal_gate() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let (reservation, signal) = registry.try_reserve(key.clone()).unwrap();
+        assert!(
+            registry.terminal_gate(&key).is_none(),
+            "Reserved (not yet activated) slot has no cancellable Job Run"
+        );
+
+        let handle = tokio::spawn(async move {
+            signal.wait().await;
+        });
+        reservation.activate(handle);
+
+        assert!(registry.is_running(&key));
+        assert!(
+            registry.terminal_gate(&key).is_some(),
+            "activated slot has a cancellable Job Run"
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_signal_blocks_task_until_activate_is_called() {
+        // Guards the activate-vs-fast-finish race: even a task that would
+        // finish instantly must not observe completion (here: the shared
+        // counter) before `activate` releases it.
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let (reservation, signal) = registry.try_reserve(key.clone()).unwrap();
+
+        let ran = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let ran_in_task = ran.clone();
+        let handle = tokio::spawn(async move {
+            signal.wait().await;
+            ran_in_task.store(true, Ordering::SeqCst);
+        });
+
+        // Give the spawned task every chance to run ahead if it weren't
+        // parked on the signal.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(
+            !ran.load(Ordering::SeqCst),
+            "task must not proceed before activate() is called"
+        );
+
+        reservation.activate(handle);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            ran.load(Ordering::SeqCst),
+            "task must proceed once activated"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_legacy_slot_has_a_winnable_terminal_gate() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let handle = tokio::spawn(async {});
+        registry.insert(key.clone(), handle);
+        let gate = registry
+            .terminal_gate(&key)
+            .expect("legacy insert must produce an accepted, cancellable slot");
+        assert!(gate.claim());
     }
 
     fn dl_key(concert_id: i64) -> JobKey {
