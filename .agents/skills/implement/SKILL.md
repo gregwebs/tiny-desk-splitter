@@ -6,9 +6,11 @@ disable-model-invocation: true
 
 # Overview
 
-The following is similar to the /implement personal skill but ensures a thorough planning phase.
+The following is similar to the /implement personal skill but ensures
+* a thorough planning phase at the beginning
+* a Pull Request at the end
 
-# Implement - with a plan
+# Flow
 
 Use /implementation-plan to generate a detailed Implementation Plan.
 
@@ -20,4 +22,4 @@ Run typechecking regularly, single test files regularly, and the full test suite
 
 Once done, use /code-review to review the work.
 
-Commit your work to the current branch.
+Commit your work and send a Pull Request.

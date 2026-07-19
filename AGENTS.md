@@ -68,6 +68,12 @@ If the PR resolves an issue, ensure it is auto-closed by using the "Resolves" ke
 Check on the CI status after sending the PR using ./scripts/check-ci-runs.sh.
 If there are failures, investigate them and change the PR following the Coding instructions.
 
+If you are on main, create a new branch.
+If you are working on a sub issue of a parent issue, then there should be a parent branch.
+All sub issues that don't have dependencies should use the parent branch as their base branch to send a pull request against.
+If the sub issue requires an existing PR to be merged, then the base branch will be the branch for that PR and the PR should use github's pull request stack feature.
+
+
 ## Verification
 
 Perform an /code-review before Verification and a followup review if any changes are made during/after verification.
