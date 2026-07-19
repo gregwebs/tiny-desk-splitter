@@ -28,17 +28,11 @@ For read access, the repo is public, but there are also github-app convenience s
 - start **Coding**
 - Write a **Change Record**
 - Review and finalize **Technical Documentation**
-- perform an **Agent Review** of the changes
+- perform an /code-review of the changes
 - perform a **Verification**
 - Send a **Pull Request**
 
 # Workflow Components
-
-## Agent Review
-
-Reviews should be done be the engineeering-lead agent defined in .claude/agents/engineering-lead.md
-Initial reviews should be adversarial. After an initial adversarial review, follow up reviews should not be adversarial.
-Follow CODING_STANDARDS.md for how code should be written.
 
 ## Documentation
 
@@ -74,7 +68,7 @@ If there are failures, investigate them and change the PR following the Coding i
 
 ## Verification
 
-Perform an Agent Review before Verification and a followup review if any changes are made during/after verification.
+Perform an /code-review before Verification and a followup review if any changes are made during/after verification.
 Verify manually that the changes work as expected in a live application.
 Test edge cases and failure modes in addition to the happy path.
 Look at the **Implementation Plan** for verification tests to peform.
@@ -90,29 +84,8 @@ When updating database data, first create a backup of the existing database.
 
 ## Implementation Plan
 
-If there is already an **Implementation Plan** and it satisfies the criteria here, use it.
-
-If there is already a spec, that is your starting point.
-If not, use /grill-me-with-docs to align on changes and then /to-spec to first create a spec.
-Use /to-tickets to break up a spec into one or more tickets.
-Each ticket needs its own **Implementation Plan**.
-An **Implementation plan** will correspond to a single **Pull Request**.
-
-The spec and ticket will not include enough implementation details.
-An **Implementation plan** will focus on code changes and how they will be tested in verified.
-Code change description will be detailed- including specific file paths and code snippets.
-User stories from the spec should be converted to a **Verification** plan section.
-The spec can be referenced from the **Implementation Plan**.
-
-If creating the **Implementation Plan** discovers more work than anticipated, suggest
-* modifying the spec/tickets
-* creating an additional ticket
-
-Create state diagrams for all state changes- this can be done with ascii tables, art, or an html artifact.
-List required changes as a checklist to be completed.
-In addition to code changes describe changes to tests and documentation, and how to do **Verification**. 
-
-Perform an **Agent Review** on the plan (unless it is a trivial change) and adjust the plan according to that feedback.
+Use the /implementation-plan skill (`.agents/skills/implementation-plan/SKILL.md`).
+If there is already an Implementation Plan that satisfies the skill's criteria, use it.
 
 ## Coding
 
