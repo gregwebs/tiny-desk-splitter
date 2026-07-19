@@ -7,6 +7,8 @@ description: "Create a detailed Implementation Plan for a ticket or spec, corres
 
 Create a detailed Implementation Plan for a ticket or spec. Each Implementation Plan corresponds to a single **Pull Request** (see AGENTS.md for Pull Request and Agent Review details).
 
+Use /plan mode and a thinking model for the plan creation.
+
 ## Prerequisites
 
 If there is already an **Implementation Plan** that satisfies the "What to include" criteria below, use it rather than creating a new one.
@@ -38,4 +40,6 @@ If creating the Implementation Plan discovers more work than anticipated, sugges
 
 ## Agent Review
 
-Perform an **Agent Review** on the plan (unless it is a trivial change) and adjust the plan according to that feedback. See AGENTS.md for Agent Review details.
+Perform a review of the plan using /code-review but noting that it is just a plan without any actual code changes yet.
+Adjust the plan according to that feedback.
+If the change is a trivial change, /code-review can be skipped.
