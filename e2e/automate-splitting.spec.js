@@ -113,7 +113,7 @@ test.describe("Automated split on play", () => {
     await page.goto("/");
     await openTracks(page, UNSPLIT);
 
-    await page.locator(trackBtn(UNSPLIT, 0)).click();
+    await page.locator(trackBtn(UNSPLIT, 0)).evaluate((el) => el.click());
 
     // The clicked track is marked pending and the player bar reports progress
     // while the (deliberately slowed) stub splitter runs.
