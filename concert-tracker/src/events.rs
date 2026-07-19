@@ -163,12 +163,37 @@ pub fn list_for_concert(conn: &Connection, concert_id: i64) -> Vec<EventRow> {
         .unwrap_or_default()
 }
 
-pub fn record(conn: &Connection, concert_id: i64, event: Event, at: &str, json: Option<&str>) {
-    let result = conn.execute(
+/// Fallible variant of [`record`]. Callers that need an insert failure to
+/// roll back an enclosing transaction (e.g. a Job Run terminal commit, where
+/// "lifecycle state + event + Failed Job commit atomically" is a correctness
+/// requirement, not a nice-to-have) must use this instead of the best-effort
+/// `record`/`record_now`, which log and swallow the error.
+pub fn try_record(
+    conn: &Connection,
+    concert_id: i64,
+    event: Event,
+    at: &str,
+    json: Option<&str>,
+) -> rusqlite::Result<()> {
+    conn.execute(
         "INSERT INTO events (concert_id, event, at, json) VALUES (?1, ?2, ?3, ?4)",
         params![concert_id, event.as_str(), at, json],
-    );
-    if let Err(e) = result {
+    )?;
+    Ok(())
+}
+
+pub fn try_record_now(
+    conn: &Connection,
+    concert_id: i64,
+    event: Event,
+    json: Option<&str>,
+) -> rusqlite::Result<()> {
+    let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    try_record(conn, concert_id, event, &now, json)
+}
+
+pub fn record(conn: &Connection, concert_id: i64, event: Event, at: &str, json: Option<&str>) {
+    if let Err(e) = try_record(conn, concert_id, event, at, json) {
         tracing::warn!(
             "failed to record event {:?} for concert {}: {}",
             event,

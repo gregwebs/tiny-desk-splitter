@@ -12,6 +12,91 @@ Download and split routes share the same lifecycle orchestration:
 - successful split completion refreshes track availability and timestamp state,
 - failed jobs record user-visible errors and job logs.
 
+## Job Run orchestration
+
+Download is the first job kind migrated onto the `jobs::run` engine
+(issue [#125](https://github.com/gregwebs/tiny-desk-splitter/issues/125), part
+of the deepening tracked by [#124](https://github.com/gregwebs/tiny-desk-splitter/issues/124)).
+Split and archive still use their own hand-rolled admission/lifecycle code
+(`jobs::split`, `jobs::archive`) until they migrate in #126 and #127; #128
+then contracts the legacy protocol once all three share the engine. See
+`CONTEXT.md` for the **Job Request** / **Job Run** / **Failed Job** domain
+vocabulary this section assumes.
+
+A **Job Request** (`jobs::run::JobRequest`) becomes a **Job Run** only after
+acceptance. Every accepted Job Run reaches exactly one terminal outcome —
+succeeded, failed, or cancelled — and every unsuccessful terminal outcome
+creates **Failed Job** history:
+
+```
+                         Job Request
+                              │
+                    registry.try_reserve(key)
+                              │
+              ┌───────────────┴─ occupied ──▶ AlreadyRunning (no history)
+              ▼
+        [Reserved] ── validate(conn) fails ──▶ Rejected (reservation rolled
+              │                                back; NO lifecycle, NO Failed Job)
+       try_mark_started (DB, atomic)
+              │
+              ├─ false ──▶ AlreadyRunning (reservation rolled back)
+              ▼
+        [Accepted = Job Run]  (spawn task, attach handle to reservation)
+              │
+        post-acceptance setup ── Err ─┐
+              │                       │
+           execute ──────── panic ────┤        ┌──────────────────────────┐
+              │                       ├───────▶│ Failed terminal          │
+              ├─ Failed{msg} ─────────┤        │ ONE TX: lifecycle cols + │
+              │                       │        │ event + Failed Job row   │
+        commit_success (ONE TX) ─ Err ┘        └──────────────────────────┘
+              │                                        ▲
+              ▼                                        │
+     ┌─────────────────────┐            user cancel wins terminal gate
+     │ Succeeded terminal  │            ("cancelled by user" + Failed Job,
+     │ (persisted first)   │            then abort the task)
+     └─────────────────────┘
+              │                                        │
+       spawn_dependents(key)                 drop_dependency_edges(key)
+              │                                        │
+              └────────────► registry.release(key) ◄───┘
+                    (reservation held through terminal commit
+                     and dependency handling, then removed)
+```
+
+Exactly one of {Succeeded, Failed, Cancelled} commits, arbitrated by a
+per-run `TerminalGate` (an atomic claim): whichever of the run task or a
+concurrent `run::cancel` call claims it first owns writing the terminal
+state and releasing the `JobRegistry` slot; the other party writes nothing.
+
+Three invariants make this safe under `tokio::spawn`/abort and a shared
+`Arc<Mutex<Connection>>`:
+
+1. **No `.await` and no async filesystem I/O between claiming the gate and
+   committing the terminal transaction.** Terminal commits are synchronous
+   rusqlite calls inside `unchecked_transaction()`, so a gate winner cannot
+   be interrupted mid-commit — this is what makes shutdown's gate-blind
+   `JobRegistry::cancel_all()` safe to abort a task that might be
+   mid-success. (Success's FS-only fact-gathering, e.g. resolving the
+   downloaded extension, deliberately runs *before* the gate is claimed and
+   before the DB mutex is taken, so a slow working dir can't freeze other
+   handlers waiting on that mutex.)
+2. **DB → registry lock ordering only.** A registry lock is never held
+   while acquiring the DB mutex; the run task and `run::cancel` both take
+   registry locks only after releasing the DB mutex.
+3. **The terminal-gate winner owns `release`.** The run task calls
+   `spawn_dependents` and `registry.release` after its own commit; a
+   winning `run::cancel` calls `registry.abort_and_release` after its
+   commit. A losing side does nothing further — an in-flight `abort()` on
+   an already-finished task is harmless.
+
+A `JobRequest` implementor (currently only `jobs::download::DownloadRequest`)
+supplies `validate` / `try_mark_started` / `setup` / `execute` /
+`gather_success_facts` / `commit_success` / `record_failure`, each mapping to
+one phase of the diagram above; `jobs::run::submit` and `jobs::run::cancel`
+are the only two engine entry points split/archive will adopt when they
+migrate.
+
 ## Typed runner boundary
 
 Download, split, and opener execution goes through `JobRunner`, held by

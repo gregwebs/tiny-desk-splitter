@@ -21,6 +21,12 @@ pub fn try_mark_download_started(conn: &Connection, id: i64) -> Result<bool> {
     Ok(rows > 0)
 }
 
+/// Marks a download's terminal success. Uses [`events::try_record_now`] (not
+/// the best-effort `record_now`) because the Job Run engine calls this inside
+/// its terminal transaction (see `jobs/run.rs`) — an event-insert failure
+/// there must roll the whole terminal commit back rather than be logged and
+/// silently dropped, per the "lifecycle state + event + Failed Job commit
+/// atomically" requirement (#125).
 pub fn mark_download_succeeded(conn: &Connection, id: i64, extension: &str) -> Result<()> {
     tracing::debug!(
         concert_id = id,
@@ -34,10 +40,15 @@ pub fn mark_download_succeeded(conn: &Connection, id: i64, extension: &str) -> R
         params![id, extension],
     )
     .context("Failed to mark download succeeded")?;
-    events::record_now(conn, id, Event::Downloaded, None);
+    events::try_record_now(conn, id, Event::Downloaded, None)
+        .context("Failed to record downloaded event")?;
     Ok(())
 }
 
+/// Marks a download's terminal failure (including cancellation). See
+/// [`mark_download_succeeded`] for why this uses the fallible event recorder:
+/// the Job Run engine wraps this in a terminal transaction, so an event
+/// failure here must abort the transaction rather than be swallowed.
 pub fn mark_download_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
     append_error(conn, id, "download_errors_json", error)?;
     conn.execute(
@@ -46,7 +57,8 @@ pub fn mark_download_failed(conn: &Connection, id: i64, error: &str) -> Result<(
     )
     .context("Failed to clear download_started_at")?;
     let json = serde_json::json!({"error": error}).to_string();
-    events::record_now(conn, id, Event::DownloadError, Some(&json));
+    events::try_record_now(conn, id, Event::DownloadError, Some(&json))
+        .context("Failed to record download_error event")?;
     Ok(())
 }
 
