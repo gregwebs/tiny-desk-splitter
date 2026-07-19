@@ -1,5 +1,5 @@
 ---
-name: github
+name: github-app
 description: Create GitHub pull requests, issues, and issue/PR comments for this repo via the App-authenticated scripts in ./scripts/github/. Use when the user asks to open a PR, file an issue, or comment on an issue/PR from this project. Triggers on "open a PR", "send a pull request", "file an issue", "comment on the PR/issue".
 user-invocable: true
 allowed-tools:
@@ -10,9 +10,10 @@ allowed-tools:
   - Bash(git rev-parse*)
   - Bash(git branch*)
   - Bash(git status*)
+  - Bash(git commit*)
 ---
 
-# /github — GitHub PR / issue / comment via the App scripts
+# /github-app — GitHub PR / issue / comment via the App scripts
 
 Thin wrappers in `scripts/github/` that hit the GitHub REST API authenticated as
 the `greg-weber-claude-agent` GitHub App installation. They mint their own
