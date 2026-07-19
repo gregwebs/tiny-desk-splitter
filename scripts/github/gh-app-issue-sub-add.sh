@@ -13,8 +13,6 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 source "$SCRIPT_DIR/lib.sh"
-# shellcheck disable=SC1091
-source "$SCRIPT_DIR/gh-app-token.sh"
 
 usage() {
   echo "usage: $0 --parent NUMBER --child NUMBER [--repo OWNER/REPO]"
