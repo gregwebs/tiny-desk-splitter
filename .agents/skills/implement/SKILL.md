@@ -13,6 +13,8 @@ The following is similar to the /implement personal skill but ensures
 # Flow
 
 Use /implementation-plan to generate a detailed Implementation Plan.
+The user does not need to approve the plan if it was approved via /code-review.
+After the plan is approved, exit /plan mode and use an efficient coding model.
 
 Implement the work described by the Implementation Plan.
 
