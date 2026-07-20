@@ -20,10 +20,13 @@
 Run approved repository scripts directly- do not prefix these commands with zsh -lc, env, PATH=..., or similar wrappers unless the command cannot run directly. Only use `/bin/zsh -lc` when shell syntax, environment assignment, or a multi-command pipeline is strictly required.
 If an environment adjustment is required, see if the shell scripts can be updated so that the adjustment is no longer needed.
 
+If you nedd to run commands that are not already approved, propose writing a script for that which can be permanently allow listed.
+
+
 ## Github
 
 Use the /github-app skill for access to the Github repo.
-Even if you don't need to auth, still use that skill because its operations are allowed.
+Even if you don't need to auth, still use that skill because it allow lists scripts for the interaction patterns we used.
 If you need to perform any operations that aren't allowed, determine how to allow list these operations in the future.
 
 #### Github Actions CI
