@@ -15,12 +15,20 @@
   Do not request escalation merely to read or write `/private/tmp`.
 - Prefer `mktemp -d /private/tmp/tiny-desk-splitter.XXXXXX` for isolated temporary work.
 
+## Shell command execution
+
+Run approved repository scripts directly- do not prefix these commands with zsh -lc, env, PATH=..., or similar wrappers unless the command cannot run directly. Only use `/bin/zsh -lc` when shell syntax, environment assignment, or a multi-command pipeline is strictly required.
+If an environment adjustment is required, see if the shell scripts can be updated so that the adjustment is no longer needed.
+
 ## Github
 
 Use the /github-app skill for access to the Github repo.
 Even if you don't need to auth, still use that skill because its operations are allowed.
 If you need to perform any operations that aren't allowed, determine how to allow list these operations in the future.
-There is also a /github-actions-ci skill for allow listed interactions with Github CI.
+
+#### Github Actions CI
+
+Use the /github-actions-ci skill for interactions with Github CI.
 
 # General workflow
 
