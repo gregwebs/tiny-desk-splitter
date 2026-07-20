@@ -7,7 +7,7 @@ use rusqlite::Connection;
 use crate::concert_media::{find_downloaded_file, source_redundant};
 use crate::db;
 use crate::events::{self, Event};
-use crate::jobs::{JobConfig, JobKind, JobRegistry};
+use crate::jobs::{JobKind, JobRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteDownloadOutcome {
@@ -205,7 +205,6 @@ pub fn delete_track(
 pub fn cancel_job(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
-    _jobs: &JobConfig,
     id: i64,
     job_kind: JobKind,
 ) -> Result<CancelJobOutcome> {
@@ -303,6 +302,18 @@ mod tests {
     use crate::jobs::run::CANCELLED_BY_USER;
     use crate::jobs::JobKey;
     use crate::model::{concert_dir, sanitize_filename};
+
+    /// Reserve `key` and immediately activate it with `handle`, producing an
+    /// accepted, cancellable slot equivalent to what production admission
+    /// (`jobs::run::submit`) creates, without driving the full async engine.
+    /// Stands in for the removed legacy `JobRegistry::insert` in tests that
+    /// only need a running slot for `cancel_job` to act on.
+    fn reserve_running(registry: &JobRegistry, key: JobKey, handle: tokio::task::JoinHandle<()>) {
+        let (reservation, _signal) = registry
+            .try_reserve(key)
+            .expect("key must not already be reserved/running");
+        reservation.activate(handle);
+    }
 
     fn insert_concert(conn: &Connection, album: &str, tracks: &[&str]) -> i64 {
         let source_url = format!("https://example.test/{album}");
@@ -489,7 +500,6 @@ mod tests {
     async fn cancel_distinguishes_running_queued_stale_and_absent_jobs() {
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
-        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let running_id = insert_concert(&conn, "Running", &["One"]);
         let queued_id = insert_concert(&conn, "Queued", &["One"]);
         let stale_id = insert_concert(&conn, "Stale", &["One"]);
@@ -497,7 +507,8 @@ mod tests {
 
         db::lifecycle::try_mark_download_started(&conn, running_id).unwrap();
         let (_tx, rx) = oneshot::channel::<()>();
-        registry.insert(
+        reserve_running(
+            &registry,
             JobKey {
                 concert_id: running_id,
                 kind: JobKind::Download,
@@ -522,19 +533,19 @@ mod tests {
         db::lifecycle::try_mark_split_started(&conn, stale_id).unwrap();
 
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, queued_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, queued_id, JobKind::Split).unwrap(),
             CancelJobOutcome::DroppedQueued
         );
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, running_id, JobKind::Download).unwrap(),
+            cancel_job(&conn, &registry, running_id, JobKind::Download).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, stale_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, stale_id, JobKind::Split).unwrap(),
             CancelJobOutcome::MarkedStaleFailed
         );
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, absent_id, JobKind::Archive).unwrap(),
+            cancel_job(&conn, &registry, absent_id, JobKind::Archive).unwrap(),
             CancelJobOutcome::NoSuchActiveJob
         );
 
@@ -555,11 +566,11 @@ mod tests {
         // legacy Split/Archive path only cleared lifecycle columns.
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
-        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let id = insert_concert(&conn, "Cancel Me", &["One"]);
         db::lifecycle::try_mark_download_started(&conn, id).unwrap();
         let (_tx, rx) = oneshot::channel::<()>();
-        registry.insert(
+        reserve_running(
+            &registry,
             JobKey {
                 concert_id: id,
                 kind: JobKind::Download,
@@ -570,7 +581,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, id, JobKind::Download).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Download).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -590,12 +601,12 @@ mod tests {
     async fn cancelling_a_running_split_creates_failed_job_history() {
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
-        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let id = insert_concert(&conn, "Cancel Split", &["One"]);
         db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
         db::lifecycle::try_mark_split_started(&conn, id).unwrap();
         let (_tx, rx) = oneshot::channel::<()>();
-        registry.insert(
+        reserve_running(
+            &registry,
             JobKey {
                 concert_id: id,
                 kind: JobKind::Split,
@@ -606,7 +617,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Split).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -629,12 +640,12 @@ mod tests {
         // Job (the pre-#127 legacy path only cleared lifecycle columns).
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
-        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let id = insert_concert(&conn, "Cancel Archive", &["One"]);
         db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
         db::lifecycle::try_mark_archive_started(&conn, id).unwrap();
         let (_tx, rx) = oneshot::channel::<()>();
-        registry.insert(
+        reserve_running(
+            &registry,
             JobKey {
                 concert_id: id,
                 kind: JobKind::Archive,
@@ -645,7 +656,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, &jobs, id, JobKind::Archive).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Archive).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -666,7 +677,6 @@ mod tests {
     async fn split_cancellation_reports_terminal_persistence_failure() {
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
-        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
         let id = insert_concert(&conn, "Cancel Persistence Failure", &["One"]);
         db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
         db::lifecycle::try_mark_split_started(&conn, id).unwrap();
@@ -675,7 +685,8 @@ mod tests {
             concert_id: id,
             kind: JobKind::Split,
         };
-        registry.insert(
+        reserve_running(
+            &registry,
             key.clone(),
             tokio::spawn(async move {
                 let _ = rx.await;
@@ -689,7 +700,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = cancel_job(&conn, &registry, &jobs, id, JobKind::Split).unwrap_err();
+        let error = cancel_job(&conn, &registry, id, JobKind::Split).unwrap_err();
 
         assert!(error
             .to_string()

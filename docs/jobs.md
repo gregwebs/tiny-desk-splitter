@@ -19,14 +19,21 @@ Download, split, and archive all use the `jobs::run` engine (issues
 [#126](https://github.com/gregwebs/tiny-desk-splitter/issues/126), and
 [#127](https://github.com/gregwebs/tiny-desk-splitter/issues/127), part of the
 deepening tracked by [#124](https://github.com/gregwebs/tiny-desk-splitter/issues/124)).
-#128 will contract the legacy protocol now that all three kinds share the
-engine. See `CONTEXT.md` for the **Job Request** / **Job Run** / **Failed
-Job** / **Job Run Recovery** domain vocabulary this section assumes.
+[#128](https://github.com/gregwebs/tiny-desk-splitter/issues/128) contracted
+the legacy protocol: the registry's pre-reservation `insert` admission path
+and single-key `cancel`/`cancel_with_outcome` are gone now that all three
+kinds share the engine end to end, and `jobs::run` is the sole Job Run
+protocol. See [`CONTEXT.md`](../CONTEXT.md) for the **Job Request** / **Job
+Run** / **Failed Job** / **Job Run Recovery** domain vocabulary this section
+assumes.
 
 A **Job Request** (`jobs::run::JobRequest`) becomes a **Job Run** only after
 acceptance. Every accepted Job Run reaches exactly one terminal outcome —
 succeeded, failed, or cancelled — and every unsuccessful terminal outcome
-creates **Failed Job** history:
+creates **Failed Job** history: a row in the `jobs` table, inserted in the
+same transaction as the lifecycle failure columns and event, retained for
+inspection on the `/jobs` page. A rejected Job Request is never a Failed Job
+— rejection happens before acceptance, so it has no lifecycle history at all.
 
 ```
                          Job Request
