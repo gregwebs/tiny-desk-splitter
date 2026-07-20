@@ -312,7 +312,7 @@ independent verification surface.
 - [x] Run focused checks, full Rust/Hurl suites, lint, and live verification.
 - [x] Run adversarial code review and a follow-up review after fixes.
 - [x] Commit, push, and open PR #133 against `job-module` with `Resolves #126`.
-- [ ] Wait for the complete post-fix CI result.
+- [x] Wait for the complete post-fix CI result.
 
 ## Review and verification record
 
@@ -366,4 +366,5 @@ valid `ConcertInfo`-shaped automatic timestamp artifact in Analyze mode while
 leaving user-timestamp mode unchanged. A focused local Playwright attempt could
 not enter test logic because Chromium hit the repository's known macOS
 `SIGTRAP` launch failure; the replacement Linux CI run is the browser
-verification for this correction.
+verification for this correction. That replacement run passed all four jobs:
+frontend, Playwright (172 tests), Rust, and ShellCheck.
