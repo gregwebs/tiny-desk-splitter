@@ -191,6 +191,12 @@ pub fn try_mark_archive_started(conn: &Connection, id: i64) -> Result<bool> {
     Ok(rows > 0)
 }
 
+/// Marks an archive's terminal success. Uses [`events::try_record_now`] (not
+/// the best-effort `record_now`) because the Job Run engine calls this inside
+/// its terminal transaction (see `jobs/run.rs`) — an event-insert failure
+/// there must roll the whole terminal commit back rather than be logged and
+/// silently dropped, per the "lifecycle state + event + Failed Job commit
+/// atomically" requirement (#127, matching #125's download precedent).
 pub fn mark_archive_succeeded(conn: &Connection, id: i64) -> Result<()> {
     conn.execute(
         "UPDATE concerts SET archived_at = datetime('now'), archive_started_at = NULL
@@ -198,10 +204,16 @@ pub fn mark_archive_succeeded(conn: &Connection, id: i64) -> Result<()> {
         params![id],
     )
     .context("Failed to mark archive succeeded")?;
-    events::record_now(conn, id, Event::Archived, None);
+    events::try_record_now(conn, id, Event::Archived, None)
+        .context("Failed to record archived event")?;
     Ok(())
 }
 
+/// Marks an archive's terminal failure (including cancellation and restart/
+/// shutdown recovery). See [`mark_archive_succeeded`] for why this uses the
+/// fallible event recorder: both the Job Run engine's terminal transaction and
+/// `jobs::run::recover_failed` wrap this in a transaction, so an event failure
+/// here must abort the transaction rather than be swallowed.
 pub fn mark_archive_failed(conn: &Connection, id: i64, error: &str) -> Result<()> {
     append_error(conn, id, "archive_errors_json", error)?;
     conn.execute(
@@ -210,7 +222,8 @@ pub fn mark_archive_failed(conn: &Connection, id: i64, error: &str) -> Result<()
     )
     .context("Failed to clear archive_started_at")?;
     let json = serde_json::json!({"error": error}).to_string();
-    events::record_now(conn, id, Event::ArchiveError, Some(&json));
+    events::try_record_now(conn, id, Event::ArchiveError, Some(&json))
+        .context("Failed to record archive_error event")?;
     Ok(())
 }
 
@@ -287,46 +300,6 @@ pub fn set_split_at_if_missing(conn: &Connection, id: i64, at: &str) -> Result<(
     )
     .context("Failed to set split_at")?;
     Ok(())
-}
-
-/// Mark any concert whose download or split was in progress as failed with
-/// the given error. Used at server startup to recover from an unclean
-/// shutdown — the previous process's in-flight job is no longer running, so
-/// the row must not stay pinned at Downloading / Splitting (which hides every
-/// retry button in the UI). Each orphaned row gets an `ErrorEntry` appended
-/// to its `*_errors_json`, leaving the concert in DownloadError / SplitError
-/// state where the slot UI already exposes a retry button.
-///
-/// Returns `(download_count, split_count, archive_count)` of rows touched.
-pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<(usize, usize, usize)> {
-    let dl_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM concerts WHERE download_started_at IS NOT NULL")?
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<_>>()
-        .context("Failed to read in-progress downloads")?;
-    for id in &dl_ids {
-        mark_download_failed(conn, *id, error)?;
-    }
-
-    let sp_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM concerts WHERE split_started_at IS NOT NULL")?
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<_>>()
-        .context("Failed to read in-progress splits")?;
-    for id in &sp_ids {
-        mark_split_failed(conn, *id, error)?;
-    }
-
-    let ar_ids: Vec<i64> = conn
-        .prepare("SELECT id FROM concerts WHERE archive_started_at IS NOT NULL")?
-        .query_map([], |row| row.get::<_, i64>(0))?
-        .collect::<rusqlite::Result<_>>()
-        .context("Failed to read in-progress archives")?;
-    for id in &ar_ids {
-        mark_archive_failed(conn, *id, error)?;
-    }
-
-    Ok((dl_ids.len(), sp_ids.len(), ar_ids.len()))
 }
 
 /// Clear all stale in-progress flags (e.g. after an unclean shutdown).
@@ -498,36 +471,6 @@ mod tests {
             .unwrap()
             .download_started_at
             .is_none());
-    }
-
-    #[test]
-    fn fail_in_progress_jobs_appends_error_and_clears_flags() {
-        let conn = open_in_memory().unwrap();
-        let id1 = seed(&conn);
-        let id2 = seed_url(&conn, "https://npr.org/c/2", "B");
-
-        // id1: split in progress; id2: download in progress.
-        try_mark_download_started(&conn, id1).unwrap();
-        mark_download_succeeded(&conn, id1, "mp4").unwrap();
-        try_mark_split_started(&conn, id1).unwrap();
-        try_mark_download_started(&conn, id2).unwrap();
-
-        let (dl, sp, ar) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
-        assert_eq!(dl, 1);
-        assert_eq!(sp, 1);
-        assert_eq!(ar, 0);
-
-        let c1 = get_concert(&conn, id1).unwrap();
-        assert!(c1.split_started_at.is_none());
-        assert_eq!(c1.split_errors.last().unwrap().error, "server restarted");
-
-        let c2 = get_concert(&conn, id2).unwrap();
-        assert!(c2.download_started_at.is_none());
-        assert_eq!(c2.download_errors.last().unwrap().error, "server restarted");
-
-        // Idempotent: a second call on the now-clean state touches nothing.
-        let (dl2, sp2, ar2) = fail_in_progress_jobs(&conn, "server restarted").unwrap();
-        assert_eq!((dl2, sp2, ar2), (0, 0, 0));
     }
 
     #[test]
@@ -876,22 +819,6 @@ mod tests {
             "in-flight archive's started_at must be preserved"
         );
         assert!(c.archived_at.is_none());
-    }
-
-    #[test]
-    fn fail_in_progress_catches_archive_jobs() {
-        let conn = open_in_memory().unwrap();
-        let id = seed(&conn);
-        try_mark_download_started(&conn, id).unwrap();
-        mark_download_succeeded(&conn, id, "mp4").unwrap();
-        try_mark_archive_started(&conn, id).unwrap();
-
-        let (dl, sp, ar) = fail_in_progress_jobs(&conn, "restart").unwrap();
-        assert_eq!((dl, sp, ar), (0, 0, 1));
-
-        let c = get_concert(&conn, id).unwrap();
-        assert!(c.archive_started_at.is_none());
-        assert_eq!(c.archive_errors[0].error, "restart");
     }
 
     #[test]

@@ -4,9 +4,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use crate::db;
-use crate::jobs::{JobKey, JobKind, JobRegistry};
+use crate::jobs::run::{self, Admission, JobCancellation, JobRequest};
+use crate::jobs::{JobKey, JobKind, JobRegistry, JobRunFuture, JobStepOutcome};
 use crate::model::{concert_dir, sanitize_album};
 
+#[derive(Clone)]
 pub struct ArchiveJob {
     pub concert_id: i64,
     pub source_dir: PathBuf,
@@ -19,6 +21,21 @@ pub enum StartOutcome {
     NothingToArchive,
 }
 
+#[derive(Debug)]
+struct ArchiveValidationError;
+
+impl std::fmt::Display for ArchiveValidationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Concert has neither a download nor a split to archive")
+    }
+}
+
+impl std::error::Error for ArchiveValidationError {}
+
+/// Start an archive job for the given concert. Goes through the Job Run engine
+/// (`jobs::run`): race-safe admission, exactly one terminal outcome, and
+/// Failed Job history on any unsuccessful outcome including cancellation. See
+/// `docs/jobs.md`.
 pub async fn start_archive(
     db: Arc<Mutex<Connection>>,
     registry: Arc<JobRegistry>,
@@ -26,78 +43,161 @@ pub async fn start_archive(
     archive_location: &str,
     concert_id: i64,
 ) -> Result<StartOutcome> {
-    let key = JobKey {
+    let request = ArchiveRequest::new(
         concert_id,
-        kind: JobKind::Archive,
-    };
-    if registry.is_running(&key) {
-        return Ok(StartOutcome::AlreadyRunning);
+        working_dir.to_path_buf(),
+        archive_location.to_string(),
+    );
+    match run::submit(db, registry, request).await {
+        Ok(Admission::Accepted) => Ok(StartOutcome::Spawned),
+        Ok(Admission::AlreadyRunning) => Ok(StartOutcome::AlreadyRunning),
+        Err(error) if error.downcast_ref::<ArchiveValidationError>().is_some() => {
+            Ok(StartOutcome::NothingToArchive)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// The archive [`JobRequest`]. `Setup` is the identity of `Input`
+/// (`ArchiveJob`) — archive has no separate post-acceptance preparation step,
+/// matching download.
+///
+/// `pub(crate)` so `crate::lifecycle::cancel_job` can build one to route a
+/// user-initiated cancellation through [`run::cancel`].
+pub(crate) struct ArchiveRequest {
+    concert_id: i64,
+    working_dir: PathBuf,
+    archive_location: String,
+}
+
+impl ArchiveRequest {
+    pub(crate) fn new(concert_id: i64, working_dir: PathBuf, archive_location: String) -> Self {
+        ArchiveRequest {
+            concert_id,
+            working_dir,
+            archive_location,
+        }
+    }
+}
+
+pub(crate) struct ArchiveCancellation {
+    concert_id: i64,
+}
+
+impl ArchiveCancellation {
+    pub(crate) fn new(concert_id: i64) -> Self {
+        Self { concert_id }
+    }
+}
+
+impl JobCancellation for ArchiveCancellation {
+    fn key(&self) -> JobKey {
+        JobKey {
+            concert_id: self.concert_id,
+            kind: JobKind::Archive,
+        }
     }
 
-    let (album, title) = {
-        let conn = db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, concert_id)?;
+    fn job_name(&self) -> &'static str {
+        "archive"
+    }
+
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+        db::lifecycle::mark_archive_failed(conn, self.concert_id, error)
+    }
+
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT archive_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+            [self.concert_id],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+impl JobCancellation for ArchiveRequest {
+    fn key(&self) -> JobKey {
+        JobKey {
+            concert_id: self.concert_id,
+            kind: JobKind::Archive,
+        }
+    }
+
+    fn job_name(&self) -> &'static str {
+        "archive"
+    }
+
+    fn record_failure(&self, conn: &Connection, error: &str) -> Result<()> {
+        db::lifecycle::mark_archive_failed(conn, self.concert_id, error)
+    }
+
+    fn has_stale_in_progress(&self, conn: &Connection) -> Result<bool> {
+        Ok(conn.query_row(
+            "SELECT archive_started_at IS NOT NULL FROM concerts WHERE id = ?1",
+            [self.concert_id],
+            |row| row.get(0),
+        )?)
+    }
+}
+
+impl JobRequest for ArchiveRequest {
+    type Input = ArchiveJob;
+    type Setup = ArchiveJob;
+    type Facts = ();
+
+    fn validate(&self, conn: &Connection) -> Result<ArchiveJob> {
+        let concert = db::concerts::get_concert(conn, self.concert_id)?;
         if concert.downloaded_at.is_none() && concert.split_at.is_none() {
-            return Ok(StartOutcome::NothingToArchive);
+            return Err(ArchiveValidationError.into());
         }
         let album = concert
             .album
-            .ok_or_else(|| anyhow::anyhow!("concert {} has no album", concert_id))?;
-        (album, concert.title)
-    };
-
-    {
-        let conn = db.lock().unwrap();
-        if !db::lifecycle::try_mark_archive_started(&conn, concert_id)? {
-            tracing::info!("archive already running for concert {}", concert_id);
-            return Ok(StartOutcome::AlreadyRunning);
-        }
+            .ok_or_else(|| anyhow::anyhow!("concert {} has no album", self.concert_id))?;
+        let source_dir = concert_dir(&self.working_dir, &album);
+        let dest_dir = Path::new(&self.archive_location).join(sanitize_album(&album));
+        Ok(ArchiveJob {
+            concert_id: self.concert_id,
+            source_dir,
+            dest_dir,
+        })
     }
 
-    let source_dir = concert_dir(working_dir, &album);
-    let dest_dir = Path::new(archive_location).join(sanitize_album(&album));
+    fn try_mark_started(&self, conn: &Connection) -> Result<bool> {
+        db::lifecycle::try_mark_archive_started(conn, self.concert_id)
+    }
 
-    tracing::info!(
-        "archive started for concert {} ({}) -> {}",
-        concert_id,
-        title,
-        dest_dir.display()
-    );
+    fn setup(&self, input: ArchiveJob) -> Result<ArchiveJob> {
+        Ok(input)
+    }
 
-    let job = ArchiveJob {
-        concert_id,
-        source_dir,
-        dest_dir,
-    };
+    fn execute<'a>(
+        &'a self,
+        setup: &'a ArchiveJob,
+        _log_file: Option<&'a Path>,
+    ) -> JobRunFuture<'a, JobStepOutcome> {
+        // do_archive is real (blocking) filesystem work: rename-or-copy plus a
+        // symlink. Run it on a blocking thread, same as the pre-#127 code, and
+        // keep that behavior — and its safety checks — owned entirely here.
+        let job = setup.clone();
+        Box::pin(async move {
+            match tokio::task::spawn_blocking(move || do_archive(&job)).await {
+                Ok(Ok(())) => JobStepOutcome::Succeeded,
+                Ok(Err(e)) => JobStepOutcome::Failed {
+                    message: format!("{:#}", e),
+                },
+                Err(e) => JobStepOutcome::Failed {
+                    message: format!("task panicked: {}", e),
+                },
+            }
+        })
+    }
 
-    let handle = tokio::task::spawn(run_archive(db.clone(), job));
-    registry.insert(key, handle);
+    fn gather_success_facts(&self, _setup: &ArchiveJob) -> Result<()> {
+        Ok(())
+    }
 
-    Ok(StartOutcome::Spawned)
-}
-
-async fn run_archive(db: Arc<Mutex<Connection>>, job: ArchiveJob) {
-    let concert_id = job.concert_id;
-    match tokio::task::spawn_blocking(move || do_archive(&job)).await {
-        Ok(Ok(())) => {
-            tracing::info!("archive completed for concert {}", concert_id);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_archive_succeeded(&conn, concert_id);
-        }
-        Ok(Err(e)) => {
-            let error = format!("{:#}", e);
-            tracing::warn!("archive failed for concert {}: {}", concert_id, error);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_archive_failed(&conn, concert_id, &error);
-            let _ = db::failed_jobs::insert_failed_job(&conn, concert_id, "archive", &error);
-        }
-        Err(e) => {
-            let error = format!("task panicked: {}", e);
-            tracing::warn!("archive failed for concert {}: {}", concert_id, error);
-            let conn = db.lock().unwrap();
-            let _ = db::lifecycle::mark_archive_failed(&conn, concert_id, &error);
-            let _ = db::failed_jobs::insert_failed_job(&conn, concert_id, "archive", &error);
-        }
+    fn commit_success(&self, conn: &Connection, _facts: ()) -> Result<()> {
+        db::lifecycle::mark_archive_succeeded(conn, self.concert_id)
     }
 }
 
@@ -226,6 +326,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::JobRegistry;
 
     #[test]
     fn do_archive_moves_and_symlinks() {
@@ -374,5 +475,237 @@ mod tests {
             std::fs::read_to_string(dst.join("sub").join("b.txt")).unwrap(),
             "world"
         );
+    }
+
+    // ── Job Run engine migration (#127) ─────────────────────────────────────
+
+    fn seeded_db(album: &str, downloaded: bool, split: bool) -> (Arc<Mutex<Connection>>, i64) {
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                source_url: Some(format!("https://npr.org/c/{}", album)),
+                title: Some(album.to_string()),
+                concert_date: None,
+                artist: Some("Test Artist".to_string()),
+                album: Some(album.to_string()),
+                set_list: Some(vec!["Song".to_string()]),
+            })
+            .unwrap()
+            .id;
+        if downloaded {
+            db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+            db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        }
+        if split {
+            db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+            db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
+        }
+        (Arc::new(Mutex::new(conn)), id)
+    }
+
+    async fn wait_until_finished(registry: &JobRegistry, concert_id: i64) {
+        let key = JobKey {
+            concert_id,
+            kind: JobKind::Archive,
+        };
+        for _ in 0..100 {
+            if !registry.is_running(&key) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        panic!("archive job did not finish");
+    }
+
+    fn failed_job_count(conn: &Connection, id: i64) -> usize {
+        db::failed_jobs::list_failed_jobs(conn, 100)
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.concert_id == id)
+            .count()
+    }
+
+    #[tokio::test]
+    async fn nothing_to_archive_is_rejected_without_archive_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (db, id) = seeded_db("Nothing To Archive", false, false);
+        let registry = Arc::new(JobRegistry::new());
+
+        let outcome = start_archive(db.clone(), registry.clone(), tmp.path(), "/archive", id)
+            .await
+            .unwrap();
+
+        assert!(matches!(outcome, StartOutcome::NothingToArchive));
+        let conn = db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.archive_started_at.is_none());
+        assert!(concert.archive_errors.is_empty());
+        assert_eq!(failed_job_count(&conn, id), 0);
+        assert!(!crate::events::list_for_concert(&conn, id)
+            .iter()
+            .any(|event| matches!(event.event.as_str(), "archive_started" | "archive_error")));
+    }
+
+    #[tokio::test]
+    async fn concurrent_start_archive_accepts_exactly_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Concurrent Archive";
+        let cd = concert_dir(tmp.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        let (db, id) = seeded_db(album, true, false);
+        let registry = Arc::new(JobRegistry::new());
+        let archive_dir = tmp.path().join("archive");
+
+        let first = start_archive(
+            db.clone(),
+            registry.clone(),
+            tmp.path(),
+            archive_dir.to_str().unwrap(),
+            id,
+        )
+        .await
+        .unwrap();
+        let second = start_archive(
+            db.clone(),
+            registry.clone(),
+            tmp.path(),
+            archive_dir.to_str().unwrap(),
+            id,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(first, StartOutcome::Spawned));
+        assert!(matches!(second, StartOutcome::AlreadyRunning));
+        wait_until_finished(&registry, id).await;
+        let conn = db.lock().unwrap();
+        let started_events = crate::events::list_for_concert(&conn, id)
+            .into_iter()
+            .filter(|e| e.event == "archive_started")
+            .count();
+        assert_eq!(started_events, 1, "exactly one started transition/event");
+    }
+
+    #[tokio::test]
+    async fn successful_archive_sets_archived_at_and_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Successful Archive";
+        let cd = concert_dir(tmp.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("track.m4a"), b"audio").unwrap();
+        let (db, id) = seeded_db(album, true, true);
+        let registry = Arc::new(JobRegistry::new());
+        let archive_dir = tmp.path().join("archive");
+
+        let outcome = start_archive(
+            db.clone(),
+            registry.clone(),
+            tmp.path(),
+            archive_dir.to_str().unwrap(),
+            id,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+        wait_until_finished(&registry, id).await;
+
+        let conn = db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.archived_at.is_some());
+        assert!(concert.archive_started_at.is_none());
+        assert!(concert.archive_errors.is_empty());
+        assert_eq!(failed_job_count(&conn, id), 0);
+        assert!(cd.is_symlink());
+        assert!(
+            archive_dir
+                .join(sanitize_album(album))
+                .join("track.m4a")
+                .exists(),
+            "archived file must exist at the destination"
+        );
+        assert_eq!(
+            crate::events::list_for_concert(&conn, id)
+                .last()
+                .unwrap()
+                .event,
+            "archived"
+        );
+    }
+
+    #[tokio::test]
+    async fn execution_failure_produces_failed_terminal_and_failed_job() {
+        // Album directory never created on disk — do_archive's source-missing
+        // check fails inside execute, after acceptance.
+        let (db, id) = seeded_db("Missing Source Dir", true, false);
+        let registry = Arc::new(JobRegistry::new());
+
+        let outcome = start_archive(
+            db.clone(),
+            registry.clone(),
+            Path::new("/nonexistent-working-dir-for-test"),
+            "/archive-dest-for-test",
+            id,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+        wait_until_finished(&registry, id).await;
+
+        let conn = db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.archived_at.is_none());
+        assert!(concert.archive_started_at.is_none());
+        assert!(!concert.archive_errors.is_empty());
+        assert!(concert
+            .archive_errors
+            .last()
+            .unwrap()
+            .error
+            .contains("source directory"));
+        assert_eq!(failed_job_count(&conn, id), 1);
+        assert_eq!(
+            db::failed_jobs::list_failed_jobs(&conn, 10).unwrap()[0].name,
+            "archive"
+        );
+    }
+
+    #[tokio::test]
+    async fn success_persistence_failure_produces_failed_terminal_not_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Persistence Failure";
+        let cd = concert_dir(tmp.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        let (db, id) = seeded_db(album, true, false);
+        {
+            let conn = db.lock().unwrap();
+            conn.execute_batch(
+                "CREATE TRIGGER reject_archived_event BEFORE INSERT ON events
+                 WHEN NEW.event = 'archived'
+                 BEGIN SELECT RAISE(ABORT, 'rejected terminal event'); END;",
+            )
+            .unwrap();
+        }
+        let registry = Arc::new(JobRegistry::new());
+        let archive_dir = tmp.path().join("archive");
+
+        let outcome = start_archive(
+            db.clone(),
+            registry.clone(),
+            tmp.path(),
+            archive_dir.to_str().unwrap(),
+            id,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+        wait_until_finished(&registry, id).await;
+
+        let conn = db.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(
+            concert.archived_at.is_none(),
+            "success must not be visible when persistence failed"
+        );
+        assert_eq!(failed_job_count(&conn, id), 1);
     }
 }
