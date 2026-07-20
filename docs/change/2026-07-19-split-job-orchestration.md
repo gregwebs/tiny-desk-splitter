@@ -311,8 +311,8 @@ independent verification surface.
 - [x] Update `docs/jobs.md` and finalize this change record.
 - [x] Run focused checks, full Rust/Hurl suites, lint, and live verification.
 - [x] Run adversarial code review and a follow-up review after fixes.
-- [ ] Commit, push, open a PR against `job-module` with `Resolves #126`, and
-      wait for the complete CI result.
+- [x] Commit, push, and open PR #133 against `job-module` with `Resolves #126`.
+- [ ] Wait for the complete post-fix CI result.
 
 ## Review and verification record
 
@@ -356,3 +356,14 @@ Verification performed after review fixes:
 No templates, CSS, or frontend interaction code changed. The isolated live Hurl
 server exercised the affected product routes directly, so Playwright would not
 add a visual/interaction assertion for this backend-only slice.
+
+The first PR CI run passed frontend, Rust, and ShellCheck, but its Linux
+Playwright job exposed an outdated E2E contract: `stub-splitter.js` exited
+successfully after creating track files without the `timestamps.json` artifact
+that a successful Analyze split is now required to produce. The two automated
+split-on-play cases consequently observed a failed split. The stub now writes a
+valid `ConcertInfo`-shaped automatic timestamp artifact in Analyze mode while
+leaving user-timestamp mode unchanged. A focused local Playwright attempt could
+not enter test logic because Chromium hit the repository's known macOS
+`SIGTRAP` launch failure; the replacement Linux CI run is the browser
+verification for this correction.
