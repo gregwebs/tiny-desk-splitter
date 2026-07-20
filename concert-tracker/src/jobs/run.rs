@@ -4,8 +4,9 @@
 //! cancellation), Failed Job history. See `docs/jobs.md` for the state
 //! diagram and the invariants this module upholds.
 //!
-//! Download and split route through this engine; archive keeps its hand-rolled
-//! admission/lifecycle code until it migrates in #127.
+//! Download, split, and archive all route through this engine.
+//! `recover_failed` (below) additionally lets restart/shutdown recovery reuse
+//! its terminal-commit behavior without an in-process registry reservation.
 
 use std::any::Any;
 use std::future::Future;
@@ -213,6 +214,31 @@ pub fn cancel<R: JobCancellation>(
         return Ok(CancelOutcome::MarkedStaleFailed);
     }
     Ok(CancelOutcome::NoSuchActiveJob)
+}
+
+/// Convert a stale accepted Job Run (found at process start or during
+/// graceful shutdown) into a Failed Job in one transaction — lifecycle
+/// failure columns, event, and Failed Job row — without an in-process
+/// registry reservation or terminal gate. Used by restart/shutdown recovery
+/// in `crate::lifecycle::fail_in_progress_jobs`.
+///
+/// Safe without a gate because of *where* it runs, not because contention is
+/// checked here: at startup it runs before the `JobRegistry` exists (so there
+/// is no run task to race), and at shutdown it runs after `JobRegistry::cancel_all`
+/// has already aborted and released every slot (so no gate remains to claim).
+/// `*_started_at` is therefore the sole recovery coordination signal — callers
+/// select only rows where it is still set — and `fail_in_progress_jobs` holds
+/// the db mutex across its whole select-and-commit loop so no run task can
+/// interleave within it. See `docs/jobs.md`'s Recovery section for the one
+/// pre-existing residual: an aborted archive run's detached `spawn_blocking`
+/// thread cannot itself be cancelled, so in principle it could still commit a
+/// success after this function's caller releases the mutex.
+pub fn recover_failed<R: JobCancellation>(
+    conn: &Connection,
+    request: &R,
+    reason: &str,
+) -> Result<()> {
+    commit_failure_tx(conn, request, &request.key(), reason).map(|_job_id| ())
 }
 
 async fn run<R: JobRequest>(

@@ -7,8 +7,7 @@ use rusqlite::Connection;
 use crate::concert_media::{find_downloaded_file, source_redundant};
 use crate::db;
 use crate::events::{self, Event};
-use crate::jobs::run::CANCELLED_BY_USER;
-use crate::jobs::{JobConfig, JobKey, JobKind, JobRegistry, RegistryCancelOutcome};
+use crate::jobs::{JobConfig, JobKind, JobRegistry};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DeleteDownloadOutcome {
@@ -200,10 +199,9 @@ pub fn delete_track(
 
 /// Cancel the running/queued/stale job named by `(id, job_kind)`.
 ///
-/// `Download` and `Split` route through the Job Run engine's [`crate::jobs::run::cancel`]:
-/// gate-arbitrated exactly-one-terminal-outcome, and a Failed Job row on a
-/// won cancellation (see `docs/jobs.md`). `Archive` keeps the legacy
-/// registry-only path until it migrates in #127.
+/// All three kinds route through the Job Run engine's
+/// [`crate::jobs::run::cancel`]: gate-arbitrated exactly-one-terminal-outcome,
+/// and a Failed Job row on a won cancellation (see `docs/jobs.md`).
 pub fn cancel_job(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
@@ -211,66 +209,62 @@ pub fn cancel_job(
     id: i64,
     job_kind: JobKind,
 ) -> Result<CancelJobOutcome> {
-    let engine_outcome = match job_kind {
-        JobKind::Download => Some(crate::jobs::run::cancel(
+    let outcome = match job_kind {
+        JobKind::Download => crate::jobs::run::cancel(
             conn,
             registry,
             &crate::jobs::download::DownloadCancellation::new(id),
-        )?),
-        JobKind::Split => Some(crate::jobs::run::cancel(
+        )?,
+        JobKind::Split => crate::jobs::run::cancel(
             conn,
             registry,
             &crate::jobs::split::SplitCancellation::new(id),
-        )?),
-        JobKind::Archive => None,
+        )?,
+        JobKind::Archive => crate::jobs::run::cancel(
+            conn,
+            registry,
+            &crate::jobs::archive::ArchiveCancellation::new(id),
+        )?,
     };
-    if let Some(outcome) = engine_outcome {
-        return Ok(match outcome {
-            crate::jobs::run::CancelOutcome::CancelledRunning => CancelJobOutcome::CancelledRunning,
-            crate::jobs::run::CancelOutcome::DroppedQueued => CancelJobOutcome::DroppedQueued,
-            crate::jobs::run::CancelOutcome::MarkedStaleFailed => {
-                CancelJobOutcome::MarkedStaleFailed
-            }
-            crate::jobs::run::CancelOutcome::NoSuchActiveJob => CancelJobOutcome::NoSuchActiveJob,
-        });
-    }
-
-    let key = JobKey {
-        concert_id: id,
-        kind: job_kind,
-    };
-
-    match registry.cancel_with_outcome(&key) {
-        RegistryCancelOutcome::CancelledRunning => {
-            mark_job_failed(conn, id, job_kind, CANCELLED_BY_USER)?;
-            Ok(CancelJobOutcome::CancelledRunning)
-        }
-        RegistryCancelOutcome::DroppedQueued => Ok(CancelJobOutcome::DroppedQueued),
-        RegistryCancelOutcome::NotFound => {
-            if has_stale_in_progress(conn, id, job_kind)? {
-                mark_job_failed(conn, id, job_kind, CANCELLED_BY_USER)?;
-                Ok(CancelJobOutcome::MarkedStaleFailed)
-            } else {
-                Ok(CancelJobOutcome::NoSuchActiveJob)
-            }
-        }
-    }
+    Ok(match outcome {
+        crate::jobs::run::CancelOutcome::CancelledRunning => CancelJobOutcome::CancelledRunning,
+        crate::jobs::run::CancelOutcome::DroppedQueued => CancelJobOutcome::DroppedQueued,
+        crate::jobs::run::CancelOutcome::MarkedStaleFailed => CancelJobOutcome::MarkedStaleFailed,
+        crate::jobs::run::CancelOutcome::NoSuchActiveJob => CancelJobOutcome::NoSuchActiveJob,
+    })
 }
 
+/// Convert every stale accepted Job Run (download, split, archive) into a
+/// transactional Failed Job via [`crate::jobs::run::recover_failed`]. Used at
+/// server startup (before the registry exists) and after graceful shutdown's
+/// `JobRegistry::cancel_all` (once every slot/gate is already gone) — see
+/// `recover_failed`'s doc comment for why no gate/reservation is needed here.
 pub fn fail_in_progress_jobs(conn: &Connection, error: &str) -> Result<InProgressFailureCount> {
     let download_ids = ids_with_column(conn, "download_started_at")?;
     for id in &download_ids {
-        db::lifecycle::mark_download_failed(conn, *id, error)?;
+        crate::jobs::run::recover_failed(
+            conn,
+            &crate::jobs::download::DownloadCancellation::new(*id),
+            error,
+        )?;
     }
 
     let split_ids = ids_with_column(conn, "split_started_at")?;
     for id in &split_ids {
-        db::lifecycle::mark_split_failed(conn, *id, error)?;
+        crate::jobs::run::recover_failed(
+            conn,
+            &crate::jobs::split::SplitCancellation::new(*id),
+            error,
+        )?;
     }
 
     let archive_ids = ids_with_column(conn, "archive_started_at")?;
     for id in &archive_ids {
-        db::lifecycle::mark_archive_failed(conn, *id, error)?;
+        crate::jobs::run::recover_failed(
+            conn,
+            &crate::jobs::archive::ArchiveCancellation::new(*id),
+            error,
+        )?;
     }
 
     Ok(InProgressFailureCount {
@@ -291,28 +285,6 @@ pub fn reset_in_progress(conn: &Connection) -> Result<usize> {
     Ok(rows)
 }
 
-fn mark_job_failed(conn: &Connection, id: i64, job_kind: JobKind, error: &str) -> Result<()> {
-    match job_kind {
-        JobKind::Download => db::lifecycle::mark_download_failed(conn, id, error),
-        JobKind::Split => db::lifecycle::mark_split_failed(conn, id, error),
-        JobKind::Archive => db::lifecycle::mark_archive_failed(conn, id, error),
-    }
-}
-
-fn has_stale_in_progress(conn: &Connection, id: i64, job_kind: JobKind) -> Result<bool> {
-    let column = match job_kind {
-        JobKind::Download => "download_started_at",
-        JobKind::Split => "split_started_at",
-        JobKind::Archive => "archive_started_at",
-    };
-    conn.query_row(
-        &format!("SELECT {column} IS NOT NULL FROM concerts WHERE id = ?1"),
-        [id],
-        |row| row.get(0),
-    )
-    .with_context(|| format!("Failed to check stale job state for concert {id}"))
-}
-
 fn ids_with_column(conn: &Connection, column: &str) -> Result<Vec<i64>> {
     conn.prepare(&format!(
         "SELECT id FROM concerts WHERE {column} IS NOT NULL ORDER BY id"
@@ -328,6 +300,8 @@ mod tests {
     use std::fs;
     use tokio::sync::oneshot;
 
+    use crate::jobs::run::CANCELLED_BY_USER;
+    use crate::jobs::JobKey;
     use crate::model::{concert_dir, sanitize_filename};
 
     fn insert_concert(conn: &Connection, album: &str, tracks: &[&str]) -> i64 {
@@ -649,6 +623,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn cancelling_a_running_archive_creates_failed_job_history() {
+        // #127 acceptance criterion: archive cancellation now goes through the
+        // same engine as download/split — one terminal outcome AND a Failed
+        // Job (the pre-#127 legacy path only cleared lifecycle columns).
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
+        let id = insert_concert(&conn, "Cancel Archive", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_archive_started(&conn, id).unwrap();
+        let (_tx, rx) = oneshot::channel::<()>();
+        registry.insert(
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Archive,
+            },
+            tokio::spawn(async move {
+                let _ = rx.await;
+            }),
+        );
+
+        assert_eq!(
+            cancel_job(&conn, &registry, &jobs, id, JobKind::Archive).unwrap(),
+            CancelJobOutcome::CancelledRunning
+        );
+
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.archive_started_at.is_none());
+        assert!(concert.archived_at.is_none());
+        assert_eq!(
+            concert.archive_errors.last().unwrap().error,
+            CANCELLED_BY_USER
+        );
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "archive");
+        assert_eq!(failed[0].failure_message, CANCELLED_BY_USER);
+    }
+
+    #[tokio::test]
     async fn split_cancellation_reports_terminal_persistence_failure() {
         let conn = db::connection::open_in_memory().unwrap();
         let registry = Arc::new(JobRegistry::new());
@@ -736,5 +750,125 @@ mod tests {
                 .error,
             "server restarted"
         );
+
+        // #127: recovery must also produce transactional Failed Job history,
+        // not just the lifecycle error column — one row per kind.
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 3);
+        for id in [download_id, split_id, archive_id] {
+            let matching: Vec<_> = failed.iter().filter(|j| j.concert_id == id).collect();
+            assert_eq!(matching.len(), 1, "exactly one Failed Job for concert {id}");
+            assert_eq!(matching[0].failure_message, "server restarted");
+        }
+        assert_eq!(
+            failed
+                .iter()
+                .find(|j| j.concert_id == download_id)
+                .unwrap()
+                .name,
+            "download"
+        );
+        assert_eq!(
+            failed
+                .iter()
+                .find(|j| j.concert_id == split_id)
+                .unwrap()
+                .name,
+            "split"
+        );
+        assert_eq!(
+            failed
+                .iter()
+                .find(|j| j.concert_id == archive_id)
+                .unwrap()
+                .name,
+            "archive"
+        );
+    }
+
+    #[test]
+    fn recovery_is_transactional_per_kind() {
+        // An event-insert failure for one stale kind rolls back that kind's
+        // lifecycle/Failed-Job writes without touching the others.
+        let conn = db::connection::open_in_memory().unwrap();
+        let download_id = insert_concert(&conn, "Download Tx", &["One"]);
+        let split_id = insert_concert(&conn, "Split Tx", &["One"]);
+
+        db::lifecycle::try_mark_download_started(&conn, download_id).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, split_id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, split_id).unwrap();
+
+        conn.execute_batch(
+            "CREATE TRIGGER reject_split_error_event_recovery
+             BEFORE INSERT ON events
+             WHEN NEW.event = 'split_error'
+             BEGIN SELECT RAISE(ABORT, 'reject split error event'); END;",
+        )
+        .unwrap();
+
+        let error = fail_in_progress_jobs(&conn, "server restarted").unwrap_err();
+        assert!(
+            error.to_string().contains("split_error"),
+            "expected the rejected split_error event in the error chain, got: {error:#}"
+        );
+
+        // The split row's terminal write must have rolled back entirely...
+        let split_concert = db::concerts::get_concert(&conn, split_id).unwrap();
+        assert!(
+            split_concert.split_started_at.is_some(),
+            "split_started_at must survive the rolled-back transaction"
+        );
+        assert!(split_concert.split_errors.is_empty());
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .iter()
+            .all(|j| j.concert_id != split_id));
+
+        // ...but this test only exercises the split failure path directly:
+        // recovery processes download before split, so the download row (which
+        // has no trigger) committed successfully before the split failure was
+        // hit.
+        let download_concert = db::concerts::get_concert(&conn, download_id).unwrap();
+        assert!(download_concert.download_started_at.is_none());
+        assert_eq!(download_concert.download_errors.len(), 1);
+        assert_eq!(
+            db::failed_jobs::list_failed_jobs(&conn, 10)
+                .unwrap()
+                .iter()
+                .filter(|j| j.concert_id == download_id)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn recovery_does_not_re_fail_an_already_committed_success() {
+        // *_started_at is the sole recovery coordination signal (see
+        // `run::recover_failed`'s doc comment): a row whose *_started_at is
+        // already cleared because the run committed success must not be
+        // touched, even if recovery runs concurrently with that commit.
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = insert_concert(&conn, "Already Archived", &["One"]);
+        db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_archive_started(&conn, id).unwrap();
+        db::lifecycle::mark_archive_succeeded(&conn, id).unwrap();
+
+        let counts = fail_in_progress_jobs(&conn, "server restarted").unwrap();
+
+        assert_eq!(
+            counts,
+            InProgressFailureCount {
+                downloads: 0,
+                splits: 0,
+                archives: 0
+            }
+        );
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.archived_at.is_some(), "success must be preserved");
+        assert!(concert.archive_errors.is_empty());
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
     }
 }

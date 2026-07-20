@@ -3,7 +3,7 @@
 `concert-tracker` runs download, split, archive, and opener work through the
 job modules under `concert-tracker/src/jobs/`.
 
-Download and split routes share the same lifecycle orchestration:
+Download, split, and archive routes share the same lifecycle orchestration:
 
 - the route or workflow validates the concert state,
 - `JobRegistry` prevents duplicate running jobs,
@@ -14,14 +14,14 @@ Download and split routes share the same lifecycle orchestration:
 
 ## Job Run orchestration
 
-Download and split use the `jobs::run` engine (issues
-[#125](https://github.com/gregwebs/tiny-desk-splitter/issues/125) and
-[#126](https://github.com/gregwebs/tiny-desk-splitter/issues/126), part of the
+Download, split, and archive all use the `jobs::run` engine (issues
+[#125](https://github.com/gregwebs/tiny-desk-splitter/issues/125),
+[#126](https://github.com/gregwebs/tiny-desk-splitter/issues/126), and
+[#127](https://github.com/gregwebs/tiny-desk-splitter/issues/127), part of the
 deepening tracked by [#124](https://github.com/gregwebs/tiny-desk-splitter/issues/124)).
-Archive keeps its hand-rolled admission/lifecycle code until #127; #128 then
-contracts the legacy protocol once all three share the engine. See
-`CONTEXT.md` for the **Job Request** / **Job Run** / **Failed Job** domain
-vocabulary this section assumes.
+#128 will contract the legacy protocol now that all three kinds share the
+engine. See `CONTEXT.md` for the **Job Request** / **Job Run** / **Failed
+Job** / **Job Run Recovery** domain vocabulary this section assumes.
 
 A **Job Request** (`jobs::run::JobRequest`) becomes a **Job Run** only after
 acceptance. Every accepted Job Run reaches exactly one terminal outcome —
@@ -90,12 +90,53 @@ Three invariants make this safe under `tokio::spawn`/abort and a shared
    commit. A losing side does nothing further — an in-flight `abort()` on
    an already-finished task is harmless.
 
-A `JobRequest` implementor (`jobs::download::DownloadRequest` or
-`jobs::split::SplitRequest`)
-supplies `validate` / `try_mark_started` / `setup` / `execute` /
-`gather_success_facts` / `commit_success` / `record_failure`, each mapping to
-one phase of the diagram above; `jobs::run::submit` and `jobs::run::cancel`
-are the only two engine entry points archive will adopt when it migrates.
+A `JobRequest` implementor (`jobs::download::DownloadRequest`,
+`jobs::split::SplitRequest`, or `jobs::archive::ArchiveRequest`) supplies
+`validate` / `try_mark_started` / `setup` / `execute` / `gather_success_facts`
+/ `commit_success` / `record_failure`, each mapping to one phase of the
+diagram above. Archive's `execute` runs its real filesystem rename-or-copy
+and symlink work (`do_archive`) on a blocking thread inside the engine
+future — archive-specific behavior and safety checks stay owned by archive
+execution, not by the engine.
+
+### Recovery: stale accepted Job Runs
+
+A Job Run's owning process can disappear without ever reaching a terminal
+outcome — an unclean restart, or graceful shutdown's `JobRegistry::cancel_all`
+aborting a still-running task. `jobs::run::recover_failed` converts such a
+stale accepted Job Run into a Failed Job through the same one-transaction
+terminal commit `run::cancel` and the run task itself use:
+
+```text
+stale *_started_at (owning process gone)
+              │
+    run::recover_failed(reason)
+              │
+   ONE TX: lifecycle failure cols +
+       event + Failed Job row
+```
+
+Unlike `submit`/`cancel`, `recover_failed` takes no `JobRegistry` reservation
+and claims no `TerminalGate` — it is safe without either only because of
+*where* `crate::lifecycle::fail_in_progress_jobs` (its only caller) runs:
+
+- **Startup** (`bin/concert_web.rs`): before the `JobRegistry` is constructed.
+  No Job Run task exists yet, so there is nothing to race.
+- **Graceful shutdown** (`bin/concert_web.rs`, after `cancel_all`): every slot
+  and its `TerminalGate` have already been aborted and released, so there is
+  no gate left to claim.
+
+`fail_in_progress_jobs` holds the db mutex across its whole select-then-commit
+loop, and `*_started_at` is the sole coordination signal: a row whose run
+already committed success has cleared that column and is left untouched (see
+`recovery_does_not_re_fail_an_already_committed_success` in `lifecycle.rs`).
+The one pre-existing residual gap this does not close: an aborted archive
+run's `do_archive` executes on a detached `spawn_blocking` thread that cannot
+itself be cancelled, so in principle its outer future could still reach
+`commit_success` after recovery's caller has released the db mutex. The window
+is narrow — abort lands at the `spawn_blocking` await almost immediately,
+long before a real directory move completes — and is identical to the
+pre-#127 archive code's behavior, not introduced by recovery.
 
 ### Split completion and dependency intent
 

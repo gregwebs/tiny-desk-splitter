@@ -16,6 +16,10 @@ _Avoid_: Job Request, subprocess
 A Job Run that ended in failure or user cancellation and is retained for inspection in failed-job history. A rejected Job Request is not a Failed Job because it never became a Job Run and its error is returned synchronously.
 _Avoid_: Rejected Job Request, validation error
 
+**Job Run Recovery**:
+Converting a stale accepted Job Run — one whose lifecycle `*_started_at` column is still set because the process that accepted it is gone (server restart) or was aborted (graceful shutdown) — into a Failed Job with a recovery reason, through the same transactional terminal commit any other unsuccessful outcome uses. Recovery takes no in-process registry reservation or terminal gate because it only ever runs where no Job Run task can be racing it: before the registry exists at startup, or after every registry slot has already been released at shutdown.
+_Avoid_: Startup cleanup, stale job reset
+
 **Test Control API**:
 A test-only HTTP control surface mounted inside the `concert-web` process so black-box HTTP tests can arrange fixture state and inspect necessary postconditions without linking to application internals. It is compiled only for non-release test-control builds and started only when explicitly requested.
 _Avoid_: Seed proxy, seed backdoor
