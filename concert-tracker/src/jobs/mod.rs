@@ -60,8 +60,7 @@ impl TerminalGate {
 struct JobSlot {
     /// `None` while the slot is Reserved (admission in progress, not yet an
     /// accepted Job Run); `Some` once the spawned run task's handle has been
-    /// attached via [`JobReservation::activate`]. Legacy `insert` (split /
-    /// archive during migration) always creates an already-`Some` slot.
+    /// attached via [`JobReservation::activate`].
     handle: Option<JoinHandle<()>>,
     terminal: Arc<TerminalGate>,
 }
@@ -133,13 +132,6 @@ pub struct JobRegistry {
     /// until its upstream succeeds. On upstream failure or cancellation the
     /// queued dependents are dropped (they never run).
     dependents: Mutex<HashMap<JobKey, Vec<JobKey>>>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RegistryCancelOutcome {
-    CancelledRunning,
-    DroppedQueued,
-    NotFound,
 }
 
 impl JobRegistry {
@@ -233,20 +225,6 @@ impl JobRegistry {
         Some(slot.terminal.clone())
     }
 
-    /// Legacy admission path for split/archive during migration: creates an
-    /// already-accepted slot (handle attached immediately) with a fresh,
-    /// winnable gate, so cancellation for these kinds keeps working via
-    /// [`cancel_with_outcome`] unchanged.
-    pub fn insert(&self, key: JobKey, handle: JoinHandle<()>) {
-        self.slots.lock().unwrap().insert(
-            key,
-            JobSlot {
-                handle: Some(handle),
-                terminal: Arc::new(TerminalGate::new()),
-            },
-        );
-    }
-
     /// Register `dependent` to start when `upstream` completes successfully.
     /// Deduplicated; returns `true` when newly added.
     pub fn add_dependent(&self, upstream: JobKey, dependent: JobKey) -> bool {
@@ -298,31 +276,6 @@ impl JobRegistry {
         }
         map.retain(|_, deps| !deps.is_empty());
         dropped_any
-    }
-
-    /// Abort the task for `key` if it exists and is still running, dropping
-    /// any dependency edges involving it. Returns `true` if a running task
-    /// was aborted.
-    pub fn cancel(&self, key: &JobKey) -> bool {
-        self.cancel_with_outcome(key) == RegistryCancelOutcome::CancelledRunning
-    }
-
-    pub fn cancel_with_outcome(&self, key: &JobKey) -> RegistryCancelOutcome {
-        let dropped_queued = self.drop_dependency_edges(key);
-        let mut slots = self.slots.lock().unwrap();
-        if let Some(slot) = slots.remove(key) {
-            if let Some(handle) = slot.handle {
-                if !handle.is_finished() {
-                    handle.abort();
-                    return RegistryCancelOutcome::CancelledRunning;
-                }
-            }
-        }
-        if dropped_queued {
-            RegistryCancelOutcome::DroppedQueued
-        } else {
-            RegistryCancelOutcome::NotFound
-        }
     }
 
     /// Abort all running tasks and drop all queued dependents. Returns the
@@ -865,31 +818,6 @@ pub async fn run_with_logging(
     Ok((status, tail_lines.join("\n")))
 }
 
-pub fn persist_job_log(
-    conn: &rusqlite::Connection,
-    concert_id: i64,
-    name: &str,
-    error: &str,
-    temp_file: Option<tempfile::NamedTempFile>,
-    log_dir: &Path,
-) {
-    match crate::db::failed_jobs::insert_failed_job(conn, concert_id, name, error) {
-        Ok(job_id) => {
-            if let Some(tf) = temp_file {
-                let final_path = log_dir.join(format!("{}.log", job_id));
-                if let Err(e) = tf.persist(&final_path) {
-                    tracing::warn!(
-                        "failed to persist job log to {}: {}",
-                        final_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => tracing::warn!("failed to insert failed job record: {}", e),
-    }
-}
-
 pub fn download_job_from_concert(
     concert: &Concert,
     working_dir: &Path,
@@ -907,6 +835,18 @@ pub fn download_job_from_concert(
 mod tests {
     use super::*;
     use std::fs::File;
+
+    /// Reserve `key` and immediately activate it with `handle`, producing an
+    /// accepted, cancellable slot equivalent to what production admission
+    /// (`jobs::run::submit`) creates, without driving the full async engine.
+    /// Stands in for the removed legacy `JobRegistry::insert` in tests that
+    /// only need a running slot to exist.
+    fn reserve_running(registry: &JobRegistry, key: JobKey, handle: JoinHandle<()>) {
+        let (reservation, _signal) = registry
+            .try_reserve(key)
+            .expect("key must not already be reserved/running");
+        reservation.activate(handle);
+    }
 
     #[tokio::test]
     async fn run_with_logging_captures_stderr_tail_and_exit_code() {
@@ -941,7 +881,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cancel_aborts_running_task() {
+    async fn abort_and_release_aborts_running_task_and_frees_the_slot() {
         let registry = JobRegistry::new();
         let key = JobKey {
             concert_id: 1,
@@ -950,10 +890,10 @@ mod tests {
         let handle = tokio::spawn(async {
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         });
-        registry.insert(key.clone(), handle);
+        reserve_running(&registry, key.clone(), handle);
         assert!(registry.is_running(&key));
 
-        assert!(registry.cancel(&key));
+        registry.abort_and_release(&key);
         assert!(!registry.is_running(&key));
     }
 
@@ -1080,18 +1020,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn insert_legacy_slot_has_a_winnable_terminal_gate() {
-        let registry = JobRegistry::new();
-        let key = dl_key_n(1);
-        let handle = tokio::spawn(async {});
-        registry.insert(key.clone(), handle);
-        let gate = registry
-            .terminal_gate(&key)
-            .expect("legacy insert must produce an accepted, cancellable slot");
-        assert!(gate.claim());
-    }
-
     fn dl_key(concert_id: i64) -> JobKey {
         JobKey {
             concert_id,
@@ -1130,25 +1058,21 @@ mod tests {
         assert!(registry.take_dependents(&dl_key(42)).is_empty());
     }
 
-    #[tokio::test]
-    async fn cancel_drops_queued_dependents_of_the_cancelled_job() {
+    #[test]
+    fn drop_dependency_edges_drops_queued_dependents_of_the_key() {
         let registry = JobRegistry::new();
         registry.add_dependent(dl_key(1), split_key(1));
-        let handle = tokio::spawn(async {
-            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-        });
-        registry.insert(dl_key(1), handle);
 
-        assert!(registry.cancel(&dl_key(1)));
+        assert!(registry.drop_dependency_edges(&dl_key(1)));
         assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
     }
 
     #[test]
-    fn cancel_removes_the_key_from_other_upstreams_queues() {
+    fn drop_dependency_edges_removes_the_key_from_other_upstreams_queues() {
         let registry = JobRegistry::new();
         registry.add_dependent(dl_key(1), split_key(1));
-        // Cancelling the queued (not yet running) split removes its edge.
-        registry.cancel(&split_key(1));
+        // Dropping edges for the queued (not yet running) split removes its edge.
+        registry.drop_dependency_edges(&split_key(1));
         assert!(!registry.has_dependent(&dl_key(1), &split_key(1)));
     }
 
@@ -1163,13 +1087,13 @@ mod tests {
     }
 
     #[test]
-    fn cancel_returns_false_for_unknown_key() {
+    fn drop_dependency_edges_returns_false_for_unknown_key() {
         let registry = JobRegistry::new();
         let key = JobKey {
             concert_id: 99,
             kind: JobKind::Split,
         };
-        assert!(!registry.cancel(&key));
+        assert!(!registry.drop_dependency_edges(&key));
     }
 
     #[tokio::test]
@@ -1183,7 +1107,7 @@ mod tests {
             let handle = tokio::spawn(async {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             });
-            registry.insert(key, handle);
+            reserve_running(&registry, key, handle);
         }
         assert_eq!(registry.cancel_all(), 3);
         assert_eq!(registry.cancel_all(), 0);

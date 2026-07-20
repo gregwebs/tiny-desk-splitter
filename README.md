@@ -22,6 +22,7 @@ Repository documentation:
 - [Architecture decisions](docs/adr/)
 - [Change Records](docs/change/)
 - [Job execution](docs/jobs.md): backend job execution and runner architecture
+- [Domain language](CONTEXT.md): canonical vocabulary, including Job Request, Job Run, and Failed Job
 - [Hurl tests](hurl/README.md): black-box HTTP tests and Test Control API
 - [Data model](docs/data.md)
 

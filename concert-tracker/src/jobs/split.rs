@@ -775,10 +775,8 @@ mod tests {
 
         assert!(matches!(first, StartOutcome::Spawned));
         assert!(matches!(second, StartOutcome::AlreadyRunning));
-        registry.cancel(&JobKey {
-            concert_id: id,
-            kind: JobKind::Split,
-        });
+        // Stop the background sleeper so the test exits promptly.
+        registry.cancel_all();
     }
 
     #[tokio::test]
@@ -826,10 +824,8 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(retry, StartOutcome::Spawned));
-        registry.cancel(&JobKey {
-            concert_id: id,
-            kind: JobKind::Split,
-        });
+        // Stop the background sleeper so the test exits promptly.
+        registry.cancel_all();
     }
 
     #[tokio::test]
@@ -861,10 +857,7 @@ mod tests {
             kind: JobKind::Split,
         }));
         // Stop the background sleeper so the test exits promptly.
-        registry.cancel(&JobKey {
-            concert_id: id,
-            kind: JobKind::Split,
-        });
+        registry.cancel_all();
     }
 
     /// Config whose splitter writes a fake timestamps.json into the output_dir on success.

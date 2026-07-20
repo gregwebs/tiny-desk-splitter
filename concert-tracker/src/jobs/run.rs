@@ -21,8 +21,8 @@ use rusqlite::Connection;
 use crate::db;
 use crate::jobs::{JobKey, JobRegistry, JobRunFuture, JobStepOutcome, TerminalGate};
 
-/// Shared with the legacy cancel path in `crate::lifecycle` so both record
-/// the same wording for a user-initiated cancellation.
+/// Shared with `crate::lifecycle::cancel_job` (which calls [`cancel`] below)
+/// so both record the same wording for a user-initiated cancellation.
 pub const CANCELLED_BY_USER: &str = "cancelled by user";
 
 /// The one small job-request interface every Job Run implementor provides.
@@ -83,8 +83,8 @@ pub trait JobRequest: JobCancellation + Send + Sync + 'static {
     /// DB-only success commit; runs inside the terminal transaction.
     fn commit_success(&self, conn: &Connection, facts: Self::Facts) -> Result<()>;
 
-    /// Directory for this Job Run's log file (mirrors the pre-#125
-    /// `persist_job_log` behavior). Default: no log file.
+    /// Directory for this Job Run's log file, used by `finish_as_failure` to
+    /// persist a failed run's captured output. Default: no log file.
     fn log_dir(&self) -> Option<PathBuf> {
         None
     }
