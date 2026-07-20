@@ -355,6 +355,7 @@ pub fn spawn_dependents(
 ) {
     for dep in registry.take_dependents(upstream) {
         tracing::info!(?upstream, ?dep, "starting dependent job");
+        let upstream = upstream.clone();
         let db = db.clone();
         let registry = registry.clone();
         let config = config.clone();
@@ -363,18 +364,42 @@ pub fn spawn_dependents(
                 JobKind::Download => download::start_download(db, registry, config, dep.concert_id)
                     .await
                     .map(|_| ()),
-                JobKind::Split => {
-                    split::start_split(db, registry, config, dep.concert_id, SplitMode::Analyze)
-                        .await
-                        .map(|_| ())
-                }
+                JobKind::Split => match split::start_split(
+                    db,
+                    registry,
+                    config,
+                    dep.concert_id,
+                    SplitMode::Analyze,
+                )
+                .await
+                {
+                    Ok(split::StartOutcome::Spawned | split::StartOutcome::AlreadyRunning) => {
+                        Ok(())
+                    }
+                    Ok(split::StartOutcome::NotDownloaded) => {
+                        tracing::warn!(
+                            ?upstream,
+                            ?dep,
+                            reason = "not_downloaded",
+                            "dependent split rejected after current-state validation"
+                        );
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                },
                 JobKind::Archive => {
                     tracing::warn!(?dep, "archive jobs cannot be chained; skipping");
                     Ok(())
                 }
             };
             if let Err(e) = result {
-                tracing::warn!(?dep, "dependent job failed to start: {}", e);
+                tracing::warn!(
+                    ?upstream,
+                    ?dep,
+                    reason = "submission_error",
+                    error = %e,
+                    "dependent job failed to start"
+                );
             }
         });
     }

@@ -493,10 +493,6 @@ fn main() -> Result<()> {
                                     "OK"
                                 }
                             }
-                            Ok(StartOutcome::AlreadySplit) => {
-                                succeeded += 1;
-                                "OK (recovered from disk)"
-                            }
                             Ok(StartOutcome::NotDownloaded) => {
                                 skipped_no_source += 1;
                                 "SKIPPED (source file missing)"

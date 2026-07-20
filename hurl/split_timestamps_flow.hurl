@@ -29,6 +29,85 @@ HTTP 200
 jsonpath "$.auto" count == 2
 jsonpath "$.auto[0].title" == "Old Song A"
 
+# ── cancel_running_split_creates_failed_job_history ────────────────────────
+# #126: a split accepted through the product route is cancelled through the
+# shared Job Run terminal gate and remains visible in Failed Job history.
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Split TS Flow Cancel Running",
+  "set_list": ["Cancel Song"],
+  "source_file": true,
+  "source_file_kind": "real_audio"
+}
+HTTP 200
+[Captures]
+cancel_split_id: jsonpath "$.result.id"
+
+POST {{test_control_url}}/test/job/set_plan
+Content-Type: application/json
+{
+  "concert_id": {{cancel_split_id}},
+  "split": "block"
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+POST {{base_url}}/concerts/{{cancel_split_id}}/split-timestamps
+Content-Type: application/json
+{
+  "songs": [
+    {"title": "Cancel Song", "start_time": 0.0, "end_time": 5.0}
+  ]
+}
+HTTP 202
+
+POST {{test_control_url}}/test/assert/job_observation
+Content-Type: application/json
+[Options]
+retry: 30
+retry-interval: 50ms
+{
+  "concert_id": {{cancel_split_id}},
+  "kind": "split",
+  "blocked": 1
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+POST {{base_url}}/jobs/{{cancel_split_id}}/cancel/split
+HTTP 200
+
+GET {{base_url}}/concerts/{{cancel_split_id}}/prepare-status
+HTTP 200
+[Asserts]
+jsonpath "$.split" == "split-error"
+
+GET {{base_url}}/jobs
+HTTP 200
+[Asserts]
+body contains "/concerts/{{cancel_split_id}}"
+body contains "cancelled by user"
+
+POST {{test_control_url}}/test/job/release
+Content-Type: application/json
+{
+  "concert_id": {{cancel_split_id}},
+  "kind": "split",
+  "outcome": "succeed"
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+GET {{base_url}}/concerts/{{cancel_split_id}}/prepare-status
+HTTP 200
+[Asserts]
+jsonpath "$.split" == "split-error"
+
 # ── set_split_timestamps_returns_422_on_count_mismatch ──────────────────────
 # The source file exists (so the request passes the earlier "source
 # present" check) but the submitted timestamp count doesn't match the set

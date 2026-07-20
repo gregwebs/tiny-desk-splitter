@@ -55,7 +55,8 @@ pub fn set_user_split_timestamps(
         params![json, id],
     )
     .context("Failed to set user_split_timestamps_json")?;
-    events::record_now(conn, id, Event::SplitTimestampsUser, Some(&json));
+    events::try_record_now(conn, id, Event::SplitTimestampsUser, Some(&json))
+        .context("Failed to record split_timestamps_user event")?;
     Ok(())
 }
 
@@ -75,7 +76,8 @@ pub fn clear_user_split_timestamps(conn: &Connection, id: i64) -> Result<()> {
     )
     .context("Failed to clear user_split_timestamps_json")?;
     if was_set {
-        events::record_now(conn, id, Event::SplitTimestampsReset, None);
+        events::try_record_now(conn, id, Event::SplitTimestampsReset, None)
+            .context("Failed to record split_timestamps_reset event")?;
     }
     Ok(())
 }

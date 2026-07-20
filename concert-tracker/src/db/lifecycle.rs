@@ -85,7 +85,8 @@ pub fn mark_split_succeeded(conn: &Connection, id: i64) -> Result<()> {
     )
     .context("Failed to mark split succeeded")?;
     let json = split_tracks_json(conn, id);
-    events::record_now(conn, id, Event::Split, json.as_deref());
+    events::try_record_now(conn, id, Event::Split, json.as_deref())
+        .context("Failed to record split event")?;
     Ok(())
 }
 
@@ -111,7 +112,8 @@ pub fn mark_split_failed(conn: &Connection, id: i64, error: &str) -> Result<()> 
     )
     .context("Failed to clear split_started_at")?;
     let json = serde_json::json!({"error": error}).to_string();
-    events::record_now(conn, id, Event::SplitError, Some(&json));
+    events::try_record_now(conn, id, Event::SplitError, Some(&json))
+        .context("Failed to record split_error event")?;
     Ok(())
 }
 

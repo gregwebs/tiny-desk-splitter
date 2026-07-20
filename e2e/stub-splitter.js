@@ -94,6 +94,30 @@ setTimeout(() => {
     console.log(`stub-splitter: wrote ${dest}`);
   }
 
+  // Analyze mode must produce the same durable timestamp artifact as the real
+  // splitter. The tracker treats a missing or malformed artifact as a failed
+  // analysis even when the child process exits successfully.
+  if (tsFilePath === null) {
+    const timestamps = (config.set_list || []).map((song, index) => ({
+      title: song.title,
+      start_time: index * 100,
+      end_time: index * 100 + 90,
+      duration: 90,
+    }));
+    const analysis = {
+      artist: config.artist || "",
+      source: config.source || "",
+      show: config.show || "",
+      album: config.album || "",
+      set_list: config.set_list || [],
+      musicians: config.musicians || [],
+      timestamps,
+    };
+    const timestampsPath = path.join(outputDir, "timestamps.json");
+    fs.writeFileSync(timestampsPath, JSON.stringify(analysis));
+    console.log(`stub-splitter: wrote ${timestampsPath}`);
+  }
+
   if (emitInterludes && mediaDuration !== null && tsFilePath !== null) {
     // Purge stale interlude files before re-emitting (mirrors splitter behaviour).
     const stalePattern = /^interlude_\d{2}\.(mp4|m4a)$/;
