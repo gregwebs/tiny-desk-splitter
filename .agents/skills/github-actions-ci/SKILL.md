@@ -26,6 +26,25 @@ The stable approval prefix is:
 ./scripts/check-ci-runs.sh
 ```
 
+## Rerun failed jobs
+
+After confirming a failure is transient or unrelated to the change, rerun the
+failed jobs for the workflow run with the GitHub App helper:
+
+```sh
+./scripts/github/gh-app-actions-rerun-failed.sh RUN_ID
+```
+
+The stable approval prefix is:
+
+```text
+./scripts/github/gh-app-actions-rerun-failed.sh
+```
+
+Use the workflow run ID from the failed job URL. This reruns only failed jobs;
+it does not create a new workflow run or rerun successful jobs. Monitor the
+replacement checks with `./scripts/check-ci-runs.sh --wait COMMIT`.
+
 GitHub requires network access. In a restricted Codex sandbox, request network
 escalation on the first call using that narrow prefix. Do not probe with raw
 `curl` or first run the helper without network access when DNS failure is
