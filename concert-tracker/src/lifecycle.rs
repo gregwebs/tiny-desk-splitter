@@ -200,22 +200,32 @@ pub fn delete_track(
 
 /// Cancel the running/queued/stale job named by `(id, job_kind)`.
 ///
-/// `Download` routes through the Job Run engine's [`crate::jobs::run::cancel`]:
+/// `Download` and `Split` route through the Job Run engine's [`crate::jobs::run::cancel`]:
 /// gate-arbitrated exactly-one-terminal-outcome, and a Failed Job row on a
-/// won cancellation (see `docs/jobs.md`). `Split` and `Archive` keep the
-/// legacy registry-only path until they migrate (#126/#127) — cancelling
-/// them still clears the lifecycle `*_started_at` flag but does not create
-/// Failed Job history.
+/// won cancellation (see `docs/jobs.md`). `Archive` keeps the legacy
+/// registry-only path until it migrates in #127.
 pub fn cancel_job(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
-    jobs: &JobConfig,
+    _jobs: &JobConfig,
     id: i64,
     job_kind: JobKind,
 ) -> Result<CancelJobOutcome> {
-    if job_kind == JobKind::Download {
-        let request = crate::jobs::download::DownloadRequest::new(id, jobs.clone());
-        return Ok(match crate::jobs::run::cancel(conn, registry, &request)? {
+    let engine_outcome = match job_kind {
+        JobKind::Download => Some(crate::jobs::run::cancel(
+            conn,
+            registry,
+            &crate::jobs::download::DownloadCancellation::new(id),
+        )?),
+        JobKind::Split => Some(crate::jobs::run::cancel(
+            conn,
+            registry,
+            &crate::jobs::split::SplitCancellation::new(id),
+        )?),
+        JobKind::Archive => None,
+    };
+    if let Some(outcome) = engine_outcome {
+        return Ok(match outcome {
             crate::jobs::run::CancelOutcome::CancelledRunning => CancelJobOutcome::CancelledRunning,
             crate::jobs::run::CancelOutcome::DroppedQueued => CancelJobOutcome::DroppedQueued,
             crate::jobs::run::CancelOutcome::MarkedStaleFailed => {
@@ -600,6 +610,87 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].concert_id, id);
         assert_eq!(failed[0].failure_message, CANCELLED_BY_USER);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_split_creates_failed_job_history() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
+        let id = insert_concert(&conn, "Cancel Split", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        let (_tx, rx) = oneshot::channel::<()>();
+        registry.insert(
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Split,
+            },
+            tokio::spawn(async move {
+                let _ = rx.await;
+            }),
+        );
+
+        assert_eq!(
+            cancel_job(&conn, &registry, &jobs, id, JobKind::Split).unwrap(),
+            CancelJobOutcome::CancelledRunning
+        );
+
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.split_started_at.is_none());
+        assert_eq!(
+            concert.split_errors.last().unwrap().error,
+            CANCELLED_BY_USER
+        );
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "split");
+        assert_eq!(failed[0].failure_message, CANCELLED_BY_USER);
+    }
+
+    #[tokio::test]
+    async fn split_cancellation_reports_terminal_persistence_failure() {
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let jobs = JobConfig::test(std::path::PathBuf::from("/tmp"));
+        let id = insert_concert(&conn, "Cancel Persistence Failure", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        let (_tx, rx) = oneshot::channel::<()>();
+        let key = JobKey {
+            concert_id: id,
+            kind: JobKind::Split,
+        };
+        registry.insert(
+            key.clone(),
+            tokio::spawn(async move {
+                let _ = rx.await;
+            }),
+        );
+        conn.execute_batch(
+            "CREATE TRIGGER reject_split_error_event
+             BEFORE INSERT ON events
+             WHEN NEW.event = 'split_error'
+             BEGIN SELECT RAISE(ABORT, 'reject split error event'); END;",
+        )
+        .unwrap();
+
+        let error = cancel_job(&conn, &registry, &jobs, id, JobKind::Split).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Failed to commit cancelled terminal"));
+        assert!(
+            !registry.is_running(&key),
+            "failed persistence must not leak the slot"
+        );
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert!(db::concerts::get_concert(&conn, id)
+            .unwrap()
+            .split_started_at
+            .is_some());
     }
 
     #[test]

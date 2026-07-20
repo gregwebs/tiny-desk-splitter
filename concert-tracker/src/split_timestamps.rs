@@ -388,9 +388,7 @@ async fn start_split_timestamp_job(
         .await
         .map_err(SplitTimestampWorkflowError::Internal)?
     {
-        jobs::split::StartOutcome::Spawned | jobs::split::StartOutcome::AlreadySplit => {
-            Ok(SplitStartOutcome::Splitting)
-        }
+        jobs::split::StartOutcome::Spawned => Ok(SplitStartOutcome::Splitting),
         jobs::split::StartOutcome::AlreadyRunning => Err(SplitTimestampWorkflowError::Conflict(
             "A split job is already running for this concert".to_string(),
         )),
