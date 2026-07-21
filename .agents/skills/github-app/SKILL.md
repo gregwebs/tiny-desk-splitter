@@ -30,7 +30,7 @@ Confirm the target (repo, branch, title) before running if there's any ambiguity
 | Action | Dispatcher command | Required args |
 |---|---|---|
 | Open a PR | `gh-app.sh pr-create` | `--base BASE --head HEAD --title TITLE` |
-| Read an issue | `gh-app.sh issue-get` | `--issue NUMBER` |
+| Read an issue | `gh-app.sh issue-get` | `--issue NUMBER` (add `--format md` for a concise title/metadata/body rendering instead of raw JSON) |
 | File an issue | `gh-app.sh issue-create` | `--title TITLE` |
 | Link sub-issue | `gh-app.sh issue-sub-add` | `--parent NUMBER --child NUMBER` |
 | Comment on issue/PR | `gh-app.sh issue-comment` | `--issue NUMBER` (PRs count as issues here) |
