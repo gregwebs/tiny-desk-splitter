@@ -254,6 +254,24 @@ test.describe("Player Queue", () => {
     await expect(page.locator("#player-title")).toHaveText("Limbo");
   });
 
+  test("track ending with nothing next stops cleanly without an error banner", async ({
+    page,
+  }) => {
+    // Regression: the next-media-info fetch 404s (its documented "no later
+    // playable track" signal) when the last track ends with an empty queue —
+    // that used to be misread as a failure and show "Couldn't load next
+    // track" even though reaching the end of the set list is normal.
+    await playTrack(page, AUDIO, 3); // last track, nothing after it
+    await page.evaluate(() => { document.getElementById("player-audio").loop = true; });
+
+    await simulateTrackEnd(page);
+
+    await expect(page.locator("#player-error")).toBeHidden();
+    await expect
+      .poll(() => page.evaluate(() => document.getElementById("player-audio").paused))
+      .toBe(true);
+  });
+
   test("when track ends, queued song plays instead of auto-advance", async ({
     page,
   }) => {

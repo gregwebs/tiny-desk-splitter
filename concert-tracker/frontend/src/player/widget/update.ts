@@ -106,6 +106,11 @@ export const update = (model: Model, message: Message): UpdateReturn =>
         });
       },
 
+      // The benign "no later playable track" outcome (404) — reaching the end
+      // of a set list/queue is normal, so no error status is shown.
+      // applyAdvanceFailure already sets isPlaying false on every branch.
+      NoNextTrack: ({ plan }) => applyAdvanceFailure(model, plan),
+
       FailedNextTrackInfo: ({ plan }) => {
         // "next-or-stop" calls stopPlaybackPure which clears status, so skip the error there.
         const model1 = plan === "next-or-stop"

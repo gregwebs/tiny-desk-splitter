@@ -101,11 +101,19 @@ export const DrainedQueue = m("DrainedQueue", {
   plan: AdvancePlan,
 });
 
-/** playNextTrack()/playPrevTrack() found nothing to advance to (no next/prev
- *  media-info, a fetch error, or an aborted auto-advance fetch). Always sets
- *  isPlaying false (mirrors `setPlayPauseIcon(false)` in both functions'
- *  catch blocks) before plan-specific fallback (next-or-stop /
- *  next-or-collapse / next-or-none). */
+/** The next-media-info fetch reported no later playable track (a 404 — the
+ *  normal way a set list/queue ends), as opposed to a genuine fetch failure.
+ *  Distinct from FailedNextTrackInfo so reaching the end of playback doesn't
+ *  surface an error banner. Always sets isPlaying false before plan-specific
+ *  fallback (next-or-stop / next-or-collapse / next-or-none), same as
+ *  FailedNextTrackInfo, just without the error status. */
+export const NoNextTrack = m("NoNextTrack", { plan: AdvancePlan });
+
+/** playNextTrack()/playPrevTrack() found nothing to advance to (a genuine
+ *  fetch error, or an aborted auto-advance fetch — NOT the benign "no next
+ *  track" 404, see NoNextTrack above). Always sets isPlaying false (mirrors
+ *  `setPlayPauseIcon(false)` in both functions' catch blocks) before
+ *  plan-specific fallback (next-or-stop / next-or-collapse / next-or-none). */
 export const FailedNextTrackInfo = m("FailedNextTrackInfo", { plan: AdvancePlan });
 export const FailedPrevTrackInfo = m("FailedPrevTrackInfo");
 
@@ -339,6 +347,7 @@ export const Message = S.Union([
   SucceededTrackInfoForEnqueue,
   ResolvedFirstAvailableTrack,
   DrainedQueue,
+  NoNextTrack,
   FailedNextTrackInfo,
   FailedPrevTrackInfo,
   SucceededPrepareStart,
