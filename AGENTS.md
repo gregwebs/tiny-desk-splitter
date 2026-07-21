@@ -14,6 +14,8 @@
 - Create throwaway test harnesses and diagnostic artifacts there without asking permission.
   Do not request escalation merely to read or write `/private/tmp`.
 - Prefer `mktemp -d /private/tmp/tiny-desk-splitter.XXXXXX` for isolated temporary work.
+- Use a direct-write repository script for temporary Markdown bodies.
+- Do not use `apply_patch` for temporary files; reserve it for repository edits.
 
 ## Shell command execution
 
