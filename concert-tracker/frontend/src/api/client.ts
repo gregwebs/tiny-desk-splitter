@@ -93,6 +93,20 @@ export async function getJsonOrNull<T>(url: string, init?: RequestInit): Promise
 }
 
 /**
+ * GET a JSON endpoint, returning null on a 404 (a documented "not there yet"
+ * signal, e.g. next/prev-media-info's "no such track") but still throwing
+ * ApiError on any other non-2xx — unlike getJsonOrNull, which swallows every
+ * non-2xx into null and would hide a genuine server failure as if it were the
+ * benign case.
+ */
+export async function getJsonNullOn404<T>(url: string, init?: RequestInit): Promise<T | null> {
+  const r = await fetch(url, init);
+  if (r.status === 404) return null; // deliberately benign: e.g. "no next track"
+  if (!r.ok) throw new ApiError(r.status); // genuine failure keeps its signal
+  return readJson<T>(r);
+}
+
+/**
  * GET an endpoint and return the raw Response, for callers that need to
  * branch on status code themselves before consuming the body (e.g. an HTML
  * response on success vs. a plain-text error message).
@@ -194,6 +208,18 @@ export async function getNextTrackMediaInfo(
   signal?: AbortSignal,
 ): Promise<MediaInfo> {
   return getJson<MediaInfo>(`/concerts/${concertId}/tracks/${trackIdx}/next-media-info`, {
+    signal: signal ?? null,
+  });
+}
+
+/** Like getNextTrackMediaInfo, but treats the "no later playable track" 404 as
+ *  a normal end-of-advance outcome (null) rather than an error to throw. */
+export async function getNextTrackMediaInfoOrNull(
+  concertId: number,
+  trackIdx: number,
+  signal?: AbortSignal,
+): Promise<MediaInfo | null> {
+  return getJsonNullOn404<MediaInfo>(`/concerts/${concertId}/tracks/${trackIdx}/next-media-info`, {
     signal: signal ?? null,
   });
 }

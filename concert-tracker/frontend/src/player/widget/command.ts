@@ -5,6 +5,7 @@ import {
   getConcertPlayback,
   getMediaInfo,
   getNextTrackMediaInfo,
+  getNextTrackMediaInfoOrNull,
   getPlaylist,
   getPrepareStatus,
   getPrevTrackMediaInfo,
@@ -46,6 +47,7 @@ import {
   SucceededPrepareStart,
   SucceededPrepareStatus,
   DrainedQueue,
+  NoNextTrack,
   SucceededTrackDetails,
   SucceededTrackInfoForEnqueue,
   ResolvedFirstAvailableTrack,
@@ -188,15 +190,18 @@ export const FetchNextTrackInfo = Command.define(
   "FetchNextTrackInfo",
   { concertId: S.Number, trackIdx: S.Number, plan: AdvancePlan },
   SucceededMediaInfo,
+  NoNextTrack,
   FailedNextTrackInfo,
 )(({ concertId, trackIdx, plan }) =>
-  Effect.tryPromise(() => getNextTrackMediaInfo(concertId, trackIdx)).pipe(
+  Effect.tryPromise(() => getNextTrackMediaInfoOrNull(concertId, trackIdx)).pipe(
     Effect.map((info) =>
-      SucceededMediaInfo({
-        source: PlaySourceValue.Track({ concertId, trackIdx: info.track_index ?? trackIdx }),
-        info,
-        opts: { recordListen: true, playlistName: null, openVideoPanel: false },
-      }),
+      info === null
+        ? NoNextTrack({ plan })
+        : SucceededMediaInfo({
+            source: PlaySourceValue.Track({ concertId, trackIdx: info.track_index ?? trackIdx }),
+            info,
+            opts: { recordListen: true, playlistName: null, openVideoPanel: false },
+          }),
     ),
     Effect.catch(() => Effect.succeed(FailedNextTrackInfo({ plan }))),
   ),

@@ -55,6 +55,7 @@ import {
   FailedPollPrepareStatus,
   FailedPrepareStart,
   FailedTrackDetails,
+  NoNextTrack,
   NotPlayable,
   PressedEscape,
   PressedSpace,
@@ -649,6 +650,77 @@ describe("player update — port-behavior fixes (#23)", () => {
       Story.message(CompletedDeleteTrack({ concertId: 42, trackIdx: 0, ok: true, source: "sidebar" })),
       Story.Command.expectHas(RefreshConcertItems),
       Story.Command.resolve(RefreshConcertItems, SucceededConcertItems({ concertId: 42, items: [interludeItem("/c/0.mp3", 0)], advanceAfter: false })),
+    );
+  });
+});
+
+describe("player update — end of playback (non-concert)", () => {
+  // Regression coverage for the "Couldn't load next track" banner appearing
+  // on every normal end-of-playback: FetchNextTrackInfo's next-media-info
+  // fetch 404s when there's no later playable track — a normal end, not a
+  // failure — and now resolves to NoNextTrack instead of FailedNextTrackInfo.
+
+  test("EndedAudio with an empty queue and no next track stops cleanly with no error status", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(EndedAudio()),
+      Story.Command.expectHas(DrainQueue),
+      Story.Command.resolve(
+        DrainQueue,
+        DrainedQueue({ played: Option.none(), skippedCount: 0, plan: "next-or-collapse" }),
+      ),
+      Story.Command.expectHas(FetchNextTrackInfo),
+      Story.Command.resolve(FetchNextTrackInfo, NoNextTrack({ plan: "next-or-collapse" })),
+      Story.model((m) => {
+        expect(m.status).toEqual(StatusValue.Idle());
+        expect(m.isPlaying).toBe(false);
+      }),
+    );
+  });
+
+  test("NoNextTrack with next-or-collapse also closes an open video panel, still with no error", () => {
+    const withVideoOpen: Model = { ...playingModel, video: { open: true } };
+    Story.story(
+      update,
+      Story.with(withVideoOpen),
+      Story.message(NoNextTrack({ plan: "next-or-collapse" })),
+      Story.model((m) => {
+        expect(m.status).toEqual(StatusValue.Idle());
+        expect(m.isPlaying).toBe(false);
+        expect(m.video.open).toBe(false);
+      }),
+      Story.Command.expectHas(HideVideoPanel),
+      Story.Command.resolve(HideVideoPanel, Acked()),
+    );
+  });
+
+  test("NoNextTrack with next-or-stop stops playback cleanly with no error", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(NoNextTrack({ plan: "next-or-stop" })),
+      Story.model((m) => {
+        expect(m.status).toEqual(StatusValue.Idle());
+        expect(m.isPlaying).toBe(false);
+      }),
+      Story.Command.expectHas(ClearAudioSrc),
+      Story.Command.resolve(ClearAudioSrc, Acked()),
+      Story.Command.resolve(SyncNowPlayingMirror, Acked()),
+    );
+  });
+
+  // Pins the regression: a genuine fetch failure (as opposed to the benign
+  // 404 covered above) must still surface the error banner.
+  test("FailedNextTrackInfo with next-or-collapse still surfaces the error banner", () => {
+    Story.story(
+      update,
+      Story.with(playingModel),
+      Story.message(FailedNextTrackInfo({ plan: "next-or-collapse" })),
+      Story.model((m) => {
+        expect(m.status).toEqual(StatusValue.Error({ message: "Couldn't load next track" }));
+        expect(m.isPlaying).toBe(false);
+      }),
     );
   });
 });
