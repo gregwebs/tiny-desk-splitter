@@ -71,3 +71,15 @@ _Avoid_: Handler shortcut, validation bypass
 **Typed Job Runner**:
 An internal job execution abstraction that represents download, split, and opener effects as typed domain operations instead of shell commands and process exit codes. Production implementations may still spawn subprocesses; test-control implementations can complete, fail, or block jobs deterministically.
 _Avoid_: Shell-string test driver, command-level fake
+
+**Concert Split**:
+A complete transformation of one concert's source media into its canonical tracks, interludes, and timestamps. A Concert Split becomes a Published Concert Split only when the complete result is moved from staging into its canonical location.
+_Avoid_: Partial split, per-track cut
+
+**Published Concert Split**:
+The complete canonical result of a successful Concert Split. A failed resplit never replaces an existing Published Concert Split.
+_Avoid_: Available track, partial output
+
+**Recoverable Partial Split**:
+The usable tracks salvaged from a failed Concert Split when no Published Concert Split already exists. Its tracks may be played individually, but it cannot provide whole-concert reconstruction or successful split state.
+_Avoid_: Published Concert Split, successful split

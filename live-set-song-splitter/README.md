@@ -58,6 +58,15 @@ cut on a keyframe by up to one GOP. See
 [docs/change/2026-06-06-video-audio-sync-fix.md](docs/change/2026-06-06-video-audio-sync-fix.md).
 
 
+## Library interface
+
+The CLI above is a thin adapter over `live_set_splitter::concert_split::run`, a
+synchronous library interface that owns the full workflow (validation,
+inspection, detection, recovery, refinement, cutting, and cleanup) and can be
+called in-process without shelling out to this binary. See
+[docs/concert-split.md](../docs/concert-split.md) for the interface, its state
+diagram, and the CLI's exit-code mapping.
+
 ## Bad data
 
 This concert is missing the overlays: Carminho
