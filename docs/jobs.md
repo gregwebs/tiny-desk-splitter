@@ -231,3 +231,9 @@ both compiled and enabled with `--test-control-port`, `concert-web` injects
 per-concert success/block plans and observations while exercising the same
 queue and pending-card behavior. The Scrape Driver's API and reset semantics
 are canonical in [`hurl/README.md`](../hurl/README.md#scrape-driver).
+
+Issue [#129](https://github.com/gregwebs/tiny-desk-splitter/issues/129)
+investigated folding this queue into `JobRegistry` after the #124 Job Run
+deepening and recommended against it — see
+[`docs/adr/0006-scrape-queue-separate-from-job-registry.md`](adr/0006-scrape-queue-separate-from-job-registry.md)
+for the full deletion-test and leverage analysis.
