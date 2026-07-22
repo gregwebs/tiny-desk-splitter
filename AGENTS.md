@@ -8,6 +8,12 @@
 
 /usr/bin/curl may have TLS issues. Use /opt/homebrew/opt/curl/bin/curl
 
+For manual GET requests to a locally running `concert-web` API, use
+`./scripts/local-api-get.sh PORT API_PATH` instead of invoking curl directly.
+The script fixes the host to `127.0.0.1` and accepts only `/api` paths, so its
+stable approval prefix (`./scripts/local-api-get.sh`) can be persisted safely.
+Run the repository script directly without a shell or environment prefix.
+
 ## Temporary file handling for Codex
 
 - `/private/tmp` is an approved writable location.
