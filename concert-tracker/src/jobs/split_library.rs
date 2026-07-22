@@ -119,6 +119,8 @@ fn render_progress_line(event: &ConcertSplitProgress) -> (&'static str, String) 
                 SplitPhase::RefineAudio => "Refining song boundaries using audio analysis...",
                 SplitPhase::WriteMetadata => "Writing timestamps metadata",
                 SplitPhase::Cut => "Cutting tracks",
+                SplitPhase::ValidateOutput => "Validating split output",
+                SplitPhase::Publish => "Publishing split output",
                 SplitPhase::Cleanup => "Cleaning up",
             };
             ("stdout", label.to_string())

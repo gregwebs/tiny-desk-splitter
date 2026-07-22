@@ -439,6 +439,20 @@ pub struct ConcertMediaInventory<'a> {
 }
 
 impl<'a> ConcertMediaInventory<'a> {
+    fn with_published_split<T>(&self, fallback: T, operation: impl FnOnce() -> T) -> T {
+        let Some(album) = self.album else {
+            return fallback;
+        };
+        let directory = concert_dir(self.working_dir, album);
+        match live_set_splitter::publication::with_shared_lock(&directory, || Ok(operation())) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(concert_id = self.concert_id, %error, "could not read Published Concert Split");
+                fallback
+            }
+        }
+    }
+
     /// Build an inventory from an existing `Concert`. `user_split_timestamps`
     /// is passed separately because it is not stored on `Concert` itself (it
     /// lives in the separate split-timestamps table/column).
@@ -474,13 +488,15 @@ impl<'a> ConcertMediaInventory<'a> {
     /// The split-track file for `title`, if any.
     pub fn find_track_file(&self, title: &str) -> Option<String> {
         let album = self.album?;
-        find_track_file(self.working_dir, album, title)
+        self.with_published_split(None, || find_track_file(self.working_dir, album, title))
     }
 
     /// The interlude file for `index`, if any.
     pub fn find_interlude_track_file(&self, index: usize) -> Option<String> {
         let album = self.album?;
-        find_interlude_track_file(self.working_dir, album, index)
+        self.with_published_split(None, || {
+            find_interlude_track_file(self.working_dir, album, index)
+        })
     }
 
     /// Whether the interlude file for `index` exists on disk.
@@ -493,7 +509,9 @@ impl<'a> ConcertMediaInventory<'a> {
         let Some(album) = self.album else {
             return vec![false; self.set_list.len()];
         };
-        tracks_present_on_disk(self.working_dir, album, self.set_list)
+        self.with_published_split(vec![false; self.set_list.len()], || {
+            tracks_present_on_disk(self.working_dir, album, self.set_list)
+        })
     }
 
     /// Whether every title in `set_list` currently has a file on disk.
@@ -501,7 +519,9 @@ impl<'a> ConcertMediaInventory<'a> {
         let Some(album) = self.album else {
             return self.set_list.is_empty();
         };
-        all_tracks_present_on_disk(self.working_dir, album, self.set_list)
+        self.with_published_split(false, || {
+            all_tracks_present_on_disk(self.working_dir, album, self.set_list)
+        })
     }
 
     /// Whether the source file is fully redundant (safe to delete) given
@@ -511,13 +531,15 @@ impl<'a> ConcertMediaInventory<'a> {
         let Some(album) = self.album else {
             return false;
         };
-        source_redundant(
-            self.working_dir,
-            album,
-            self.tracks_present,
-            self.user_split_timestamps,
-            self.media_duration,
-        )
+        self.with_published_split(false, || {
+            source_redundant(
+                self.working_dir,
+                album,
+                self.tracks_present,
+                self.user_split_timestamps,
+                self.media_duration,
+            )
+        })
     }
 
     /// The ordered reconstruction-playback sequence for whole-concert
@@ -526,15 +548,17 @@ impl<'a> ConcertMediaInventory<'a> {
         let Some(album) = self.album else {
             return Vec::new();
         };
-        build_reconstruction(
-            self.working_dir,
-            album,
-            self.set_list,
-            self.tracks_present,
-            self.tracks_liked,
-            self.user_split_timestamps,
-            self.media_duration,
-        )
+        self.with_published_split(Vec::new(), || {
+            build_reconstruction(
+                self.working_dir,
+                album,
+                self.set_list,
+                self.tracks_present,
+                self.tracks_liked,
+                self.user_split_timestamps,
+                self.media_duration,
+            )
+        })
     }
 
     /// Whether "Play concert" is meaningful: either the source file is present
@@ -560,13 +584,15 @@ impl<'a> ConcertMediaInventory<'a> {
         let Some(album) = self.album else {
             return Vec::new();
         };
-        list_all_track_details(
-            self.working_dir,
-            album,
-            self.set_list,
-            self.tracks_present,
-            self.tracks_liked,
-        )
+        self.with_published_split(Vec::new(), || {
+            list_all_track_details(
+                self.working_dir,
+                album,
+                self.set_list,
+                self.tracks_present,
+                self.tracks_liked,
+            )
+        })
     }
 }
 

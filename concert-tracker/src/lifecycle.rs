@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 
-use crate::concert_media::{find_downloaded_file, source_redundant};
+use crate::concert_media::find_downloaded_file;
 use crate::db;
 use crate::events::{self, Event};
 use crate::jobs::{JobKind, JobRegistry};
@@ -92,15 +92,13 @@ pub fn delete_redundant_source(
     id: i64,
 ) -> Result<DeleteRedundantSourceOutcome> {
     let concert = db::concerts::get_concert(conn, id)?;
-    let album = concert.album.as_deref().unwrap_or("");
     let stored_ts = db::split_timestamps::get_split_timestamps(conn, id)?.user;
-    let is_redundant = source_redundant(
+    let is_redundant = crate::concert_media::ConcertMediaInventory::for_concert(
         working_dir,
-        album,
-        &concert.tracks_present,
+        &concert,
         stored_ts.as_deref(),
-        concert.media_duration,
-    );
+    )
+    .source_redundant();
     if !is_redundant {
         return Ok(DeleteRedundantSourceOutcome::NotRedundant);
     }

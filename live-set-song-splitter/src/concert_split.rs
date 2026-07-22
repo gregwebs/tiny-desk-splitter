@@ -15,13 +15,15 @@
 use crate::detect::{self, Settings};
 use crate::ocr_backend::{default_ocr_choice, ensure_ocr_choice_available, OcrChoice};
 use crate::produce::{self, CutContext};
+use crate::publication::{self, PublicationRequest};
 use crate::recover::{self, RecoveryResult};
 use crate::refine;
 use crate::video::VideoInfo;
 use crate::{audio, cut::VideoCutMode, io};
-use concert_types::{ConcertInfo, Song, SongTimestamp};
+use concert_types::{derive_interludes, interlude_filename_stem, ConcertInfo, Song, SongTimestamp};
 
 use anyhow::{anyhow, Context, Result};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -103,6 +105,8 @@ pub enum SplitPhase {
     RefineAudio,
     WriteMetadata,
     Cut,
+    ValidateOutput,
+    Publish,
     Cleanup,
 }
 
@@ -201,10 +205,35 @@ fn validate_request(request: &ConcertSplitRequest) -> Result<()> {
     if request.concert.set_list.is_empty() {
         return Err(anyhow!("Concert set list is empty"));
     }
-    if let Some(ts) = &request.timestamps {
+    if let Some(ts) = request
+        .timestamps
+        .as_ref()
+        .or(request.concert.timestamps.as_ref())
+    {
         if ts.is_empty() {
             return Err(anyhow!("Timestamps file has no timestamps"));
         }
+        anyhow::ensure!(
+            ts.len() == request.concert.set_list.len()
+                && ts
+                    .iter()
+                    .zip(&request.concert.set_list)
+                    .all(|(timestamp, song)| timestamp.title == song.title),
+            "Concert Split timestamps do not match the concert set list"
+        );
+    }
+    let mut stems = BTreeSet::new();
+    for song in &request.concert.set_list {
+        let stem = io::sanitize_filename(&song.title);
+        anyhow::ensure!(
+            !stem.is_empty(),
+            "song title has an empty canonical filename"
+        );
+        anyhow::ensure!(
+            stems.insert(stem.clone()),
+            "song titles collide at canonical filename {:?}",
+            stem
+        );
     }
     if !request.input_file.exists() {
         return Err(anyhow!(
@@ -308,9 +337,23 @@ pub fn run(
         .to_str()
         .ok_or_else(|| anyhow!("input file path is not valid UTF-8"))?
         .to_string();
-    let output_dir_str = output_dir
+    let staging_parent = output_dir
+        .parent()
+        .ok_or_else(|| anyhow!("output directory has no parent: {}", output_dir.display()))?;
+    fs::create_dir_all(staging_parent).with_context(|| {
+        format!(
+            "Failed to create staging parent: {}",
+            staging_parent.display()
+        )
+    })?;
+    let staging = tempfile::Builder::new()
+        .prefix(".concert-split-staging-")
+        .tempdir_in(staging_parent)
+        .context("Failed to create Concert Split staging directory")?;
+    let staging_dir = staging.path().to_path_buf();
+    let output_dir_str = staging_dir
         .to_str()
-        .ok_or_else(|| anyhow!("output directory path is not valid UTF-8"))?
+        .ok_or_else(|| anyhow!("staging directory path is not valid UTF-8"))?
         .to_string();
 
     let num_songs = concert.set_list.len();
@@ -440,17 +483,12 @@ pub fn run(
         progress(ConcertSplitProgress::PhaseStarted(
             SplitPhase::WriteMetadata,
         ));
-        fs::create_dir_all(&output_dir_str)
-            .with_context(|| format!("Failed to create output directory: {}", output_dir_str))?;
         write_timestamps_json(&output_dir_str, &concert)?;
     }
 
     let mut tracks: Vec<ProducedTrack> = Vec::new();
     if !options.no_save_songs {
         progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Cut));
-        fs::create_dir_all(&output_dir_str)
-            .with_context(|| format!("Failed to create output directory: {}", output_dir_str))?;
-
         // Resolve the media duration needed for interlude derivation. Prefer the
         // explicit `media_duration` option (avoids a second ffprobe), fall back
         // to the duration already obtained above.
@@ -485,6 +523,86 @@ pub fn run(
         )?;
     }
 
+    let mut replacement_files = Vec::new();
+    if refine_now {
+        replacement_files.push(PathBuf::from("timestamps.json"));
+    }
+    for track in &tracks {
+        let stem = match track.kind {
+            TrackKind::Song => io::sanitize_filename(&track.title),
+            TrackKind::Interlude => track.title.clone(),
+        };
+        match options.output_format {
+            OutputFormat::Video => replacement_files.push(PathBuf::from(format!("{stem}.mp4"))),
+            OutputFormat::Audio => replacement_files.push(PathBuf::from(format!("{stem}.m4a"))),
+            OutputFormat::Both => {
+                replacement_files.push(PathBuf::from(format!("{stem}.mp4")));
+                replacement_files.push(PathBuf::from(format!("{stem}.m4a")));
+            }
+        }
+    }
+    if !replacement_files.is_empty() {
+        progress(ConcertSplitProgress::PhaseStarted(
+            SplitPhase::ValidateOutput,
+        ));
+        let produced_songs: Vec<&str> = tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Song)
+            .map(|track| track.title.as_str())
+            .collect();
+        let expected_songs: Vec<&str> = concert
+            .set_list
+            .iter()
+            .map(|song| song.title.as_str())
+            .collect();
+        if !options.no_save_songs {
+            anyhow::ensure!(
+                produced_songs == expected_songs,
+                "produced song set does not match the concert set list"
+            );
+        }
+        anyhow::ensure!(
+            outcome_timestamps.len() == concert.set_list.len()
+                && outcome_timestamps
+                    .iter()
+                    .zip(&concert.set_list)
+                    .all(|(timestamp, song)| timestamp.title == song.title),
+            "Concert Split timestamps do not match the concert set list"
+        );
+        let expected_interludes: Vec<String> = if options.emit_interludes {
+            derive_interludes(
+                &outcome_timestamps,
+                options.media_duration.unwrap_or(video_info.duration),
+            )
+            .iter()
+            .map(|interlude| interlude_filename_stem(interlude.index))
+            .collect()
+        } else {
+            Vec::new()
+        };
+        let produced_interludes: Vec<&str> = tracks
+            .iter()
+            .filter(|track| track.kind == TrackKind::Interlude)
+            .map(|track| track.title.as_str())
+            .collect();
+        if !options.no_save_songs {
+            anyhow::ensure!(
+                produced_interludes
+                    == expected_interludes
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>(),
+                "produced interlude set does not match the expected timeline gaps"
+            );
+        }
+        progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Publish));
+        publication::publish(&PublicationRequest {
+            canonical_dir: output_dir.clone(),
+            staging_dir: staging_dir.clone(),
+            replacement_files,
+        })?;
+    }
+
     progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Cleanup));
     cleanup_temp_dir(&temp_dir, options.keep_frames, progress);
 
@@ -496,7 +614,7 @@ pub fn run(
         ConcertSplitOutcome::Complete(ConcertSplitOutput {
             timestamps: outcome_timestamps,
             tracks,
-            output_dir: PathBuf::from(output_dir_str),
+            output_dir,
         })
     };
     Ok(outcome)
@@ -823,7 +941,7 @@ mod tests {
     // boundary (today's workflow never produces Partial; see the enum's doc). ---
 
     #[test]
-    fn head_missing_song_yields_no_output_nothing_detected_not_partial() {
+    fn incomplete_supplied_timestamps_are_rejected_before_cutting() {
         let dir = tempfile::tempdir().unwrap();
         let media = fixture(dir.path());
         let output_dir = dir.path().join("out");
@@ -845,14 +963,9 @@ mod tests {
             options: default_options(),
         };
 
-        let outcome = run(request, &mut no_progress).expect("run should succeed");
-        match outcome {
-            ConcertSplitOutcome::NoOutput {
-                reason: NoOutputReason::NothingDetected { missing },
-            } => {
-                assert_eq!(missing, vec!["Missing".to_string()]);
-            }
-            other => panic!("expected NoOutput{{NothingDetected}}, got {other:?}"),
-        }
+        let error = run(request, &mut no_progress).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("timestamps do not match the concert set list"));
     }
 }
