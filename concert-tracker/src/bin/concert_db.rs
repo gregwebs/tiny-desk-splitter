@@ -8,7 +8,8 @@ use concert_tracker::db;
 use concert_tracker::import::import_dir;
 use concert_tracker::jobs::split::{start_split, StartOutcome};
 use concert_tracker::jobs::{
-    check_dependencies, default_splitter_bin, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
+    check_dependencies, resolve_splitter_cli, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
+    SplitTarget,
 };
 use concert_tracker::model::{sanitize_album, Concert};
 use concert_tracker::scan::scan;
@@ -428,8 +429,13 @@ fn main() -> Result<()> {
                 return Ok(());
             }
 
-            let splitter_bin = default_splitter_bin();
-            for warning in check_dependencies(&splitter_bin) {
+            // concert-db always uses the CLI (subprocess) adapter — it's a
+            // batch/offline tool, not a long-running server, so the in-process
+            // library adapter's dev-convenience default doesn't apply here.
+            let splitter_cli = resolve_splitter_cli(None)
+                .map_err(|e| anyhow::anyhow!(e))
+                .context("resolving the splitter executable for resplit")?;
+            for warning in check_dependencies(Some(&splitter_cli)) {
                 eprintln!("WARNING: {}", warning);
             }
 
@@ -446,8 +452,11 @@ fn main() -> Result<()> {
             // open_cmd "true" is a no-op placeholder; splitting never invokes the open command.
             let db = Arc::new(Mutex::new(conn));
             let registry = Arc::new(JobRegistry::new());
-            let config =
-                JobConfig::production(cli.workdir.clone(), splitter_bin, "true".to_string());
+            let config = JobConfig::production(
+                cli.workdir.clone(),
+                SplitTarget::Cli(splitter_cli),
+                "true".to_string(),
+            );
 
             let rt = tokio::runtime::Runtime::new()?;
             let (succeeded, failed, skipped_no_source, skipped_in_progress, errored) =

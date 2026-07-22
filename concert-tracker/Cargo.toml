@@ -36,6 +36,11 @@ serde_json = "1"
 chrono = "0.4"
 tiny-desk-scraper = { path = "../scraper" }
 concert-types = { path = "../concert-types" }
+# In-process Concert Split library adapter (#141). Default features pull in the
+# paddle-ocr backend (native MNN via ocr_rs) so the library adapter's Analyze mode
+# has a working OCR backend without a separate build — see
+# docs/change/2026-07-21-library-splitter-default.md.
+live-set-splitter = { path = "../live-set-song-splitter" }
 which = "7"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 regex = "1"

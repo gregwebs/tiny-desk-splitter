@@ -561,6 +561,7 @@ dependencies = [
  "http-body-util",
  "image 0.25.10",
  "jsonrpsee",
+ "live-set-splitter",
  "regex",
  "rusqlite",
  "serde",

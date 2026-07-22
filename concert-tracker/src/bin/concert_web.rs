@@ -1,16 +1,50 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
-use concert_tracker::jobs::{check_dependencies, default_splitter_bin, JobConfig, JobRegistry};
+use concert_tracker::jobs::{
+    check_dependencies, resolve_splitter_cli, JobConfig, JobRegistry, SplitTarget, SplitterCli,
+};
 #[cfg(feature = "test-control")]
 use concert_tracker::test_control::job_driver::{JobDriver, TestControlJobRunner};
 #[cfg(feature = "test-control")]
 use concert_tracker::test_control::scrape_driver::{scrape_item_fn, ScrapeDriver};
 use concert_tracker::web::{router_with_opts, AppState, RouterOpts};
+
+/// Which Concert Split adapter to use. `Library` (default, #141) calls the
+/// splitter in-process — no separate `cargo build --bin live-set-splitter`
+/// needed for `cargo run --bin concert-web` to split. `Cli` shells out to the
+/// splitter binary, for process-level debugging and strict process-kill
+/// cancellation. See docs/concert-split.md.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[clap(rename_all = "lowercase")]
+enum SplitterMode {
+    #[default]
+    Library,
+    Cli,
+}
+
+/// Combine `--splitter`/`--splitter-bin` into a resolved `SplitTarget`,
+/// rejecting `--splitter-bin` outside CLI mode. `resolve` is injected (rather
+/// than calling `resolve_splitter_cli` directly) so this decision — including
+/// the rejection, which touches no filesystem/PATH state — is unit-testable
+/// without a real environment.
+fn build_split_target(
+    mode: SplitterMode,
+    splitter_bin: Option<PathBuf>,
+    resolve: impl FnOnce(Option<PathBuf>) -> Result<SplitterCli, String>,
+) -> Result<SplitTarget, String> {
+    if mode == SplitterMode::Library && splitter_bin.is_some() {
+        return Err("--splitter-bin requires --splitter cli".to_string());
+    }
+    match mode {
+        SplitterMode::Library => Ok(SplitTarget::Library),
+        SplitterMode::Cli => resolve(splitter_bin).map(SplitTarget::Cli),
+    }
+}
 
 #[derive(Parser)]
 #[command(name = "concert-web", about = "Tiny Desk concert web UI")]
@@ -32,8 +66,16 @@ struct Cli {
     #[arg(long, env = "HOST", default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
     host: IpAddr,
 
-    /// Path to the `live-set-splitter` binary. Defaults to a sibling of the
-    /// running executable, falling back to a PATH lookup of `live-set-splitter`.
+    /// Which Concert Split adapter to use: `library` (default, in-process, no
+    /// separate splitter build needed) or `cli` (subprocess, for debugging and
+    /// strict process-kill cancellation).
+    #[arg(long, value_enum, default_value_t = SplitterMode::default())]
+    splitter: SplitterMode,
+
+    /// Path to the `live-set-splitter` binary, used only with `--splitter cli`.
+    /// Defaults to a sibling of the running executable, falling back to PATH,
+    /// falling back (debug builds only) to `cargo run --bin live-set-splitter`.
+    /// Rejected (startup error) when `--splitter` is `library`.
     #[arg(long)]
     splitter_bin: Option<PathBuf>,
 
@@ -89,6 +131,15 @@ async fn main() -> Result<()> {
         cli.no_proxy,
         cli.proxy_from_env,
     ));
+
+    // Before any real work (no DB connection opened yet): resolve --splitter/
+    // --splitter-bin into a SplitTarget, rejecting --splitter-bin outside CLI
+    // mode rather than silently ignoring it under the default library adapter.
+    let split_target =
+        build_split_target(cli.splitter, cli.splitter_bin.clone(), resolve_splitter_cli)
+            .map_err(anyhow::Error::msg)
+            .context("resolving --splitter target")?;
+
     tracing::debug!("opening database: {:?}", cli.db);
     let conn = db::connection::open(&cli.db)?;
     tracing::debug!("database opened");
@@ -131,10 +182,13 @@ async fn main() -> Result<()> {
         }
     };
 
-    let splitter_bin = cli.splitter_bin.unwrap_or_else(default_splitter_bin);
+    let splitter_cli_for_deps: Option<&SplitterCli> = match &split_target {
+        SplitTarget::Library => None,
+        SplitTarget::Cli(resolved) => Some(resolved),
+    };
 
     tracing::debug!("checking dependencies");
-    for warning in check_dependencies(&splitter_bin) {
+    for warning in check_dependencies(splitter_cli_for_deps) {
         tracing::warn!("{}", warning);
     }
     tracing::debug!("dependency check done");
@@ -173,14 +227,14 @@ async fn main() -> Result<()> {
         }
         None => (
             concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone()),
-            JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone()),
+            JobConfig::production(workdir.clone(), split_target, cli.open_cmd.clone()),
             None,
         ),
     };
     #[cfg(not(feature = "test-control"))]
     let (scrape_queue, jobs) = (
         concert_tracker::jobs::scrape_queue::ScrapeQueue::start(db.clone(), workdir.clone()),
-        JobConfig::production(workdir.clone(), splitter_bin, cli.open_cmd.clone()),
+        JobConfig::production(workdir.clone(), split_target, cli.open_cmd.clone()),
     );
 
     let state = AppState {
@@ -262,4 +316,49 @@ async fn shutdown_signal() {
         .await
         .expect("failed to listen for Ctrl+C");
     tracing::info!("received Ctrl+C, shutting down");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_splitter_bin_under_library_mode() {
+        let result = build_split_target(SplitterMode::Library, Some(PathBuf::from("/x")), |_| {
+            panic!("resolve must not be called when rejecting up front")
+        });
+        assert_eq!(
+            result,
+            Err("--splitter-bin requires --splitter cli".to_string())
+        );
+    }
+
+    #[test]
+    fn library_mode_without_splitter_bin_is_library_target() {
+        let result = build_split_target(SplitterMode::Library, None, |_| {
+            panic!("resolve must not be called for library mode")
+        });
+        assert_eq!(result, Ok(SplitTarget::Library));
+    }
+
+    #[test]
+    fn cli_mode_delegates_resolution_and_wraps_the_result() {
+        let result = build_split_target(SplitterMode::Cli, Some(PathBuf::from("/x")), |bin| {
+            Ok(SplitterCli::Executable(bin.unwrap()))
+        });
+        assert_eq!(
+            result,
+            Ok(SplitTarget::Cli(SplitterCli::Executable(PathBuf::from(
+                "/x"
+            ))))
+        );
+    }
+
+    #[test]
+    fn cli_mode_propagates_a_resolution_error() {
+        let result = build_split_target(SplitterMode::Cli, None, |_| {
+            Err("no executable found".to_string())
+        });
+        assert_eq!(result, Err("no executable found".to_string()));
+    }
 }

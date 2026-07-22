@@ -1,7 +1,6 @@
 use anyhow::{Context, Result};
 use concert_types::ConcertInfo;
 use rusqlite::Connection;
-use serde::Serialize;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -47,7 +46,9 @@ pub(crate) struct SplitSetup {
 }
 
 enum SplitExecution {
-    Run(SplitJob),
+    // Boxed: `SplitJob` now carries a typed `ConcertInfo` (#141), which made
+    // this variant much larger than `ExistingTracksRecovery`.
+    Run(Box<SplitJob>),
     ExistingTracksRecovery { output_dir: PathBuf },
 }
 
@@ -70,59 +71,46 @@ pub(crate) enum SplitCompletionFacts {
     },
 }
 
-#[derive(Serialize)]
-struct SplitterInput {
-    artist: String,
-    source: String,
-    show: String,
-    date: Option<String>,
-    album: String,
-    description: Option<String>,
-    set_list: Vec<SplitterSong>,
-    musicians: Vec<SplitterMusician>,
-}
-
-#[derive(Serialize)]
-struct SplitterSong {
-    title: String,
-}
-
-#[derive(Serialize)]
-struct SplitterMusician {
-    name: String,
-    instruments: Vec<String>,
-}
-
-fn write_splitter_input(concert: &Concert) -> Result<NamedTempFile> {
-    let set_list: Vec<SplitterSong> = concert
-        .set_list
-        .iter()
-        .map(|title| SplitterSong {
-            title: title.clone(),
-        })
-        .collect();
-    let musicians: Vec<SplitterMusician> = concert
-        .musicians
-        .iter()
-        .map(|m: &Musician| SplitterMusician {
-            name: m.name.clone(),
-            instruments: m.instruments.clone(),
-        })
-        .collect();
-
-    let input = SplitterInput {
+/// Build the typed [`ConcertInfo`] the splitter consumes, from concert-web's
+/// own `Concert` domain model. Used by both adapters: the library adapter
+/// passes this directly to `ConcertSplitRequest` (`jobs::split_library`); the
+/// CLI adapter's subprocess reads the JSON `write_concert_info_json` below
+/// serializes to `SplitJob::json_path` (positionally, as its first argument —
+/// see `build_cli_split_command` in `jobs::mod`). `ConcertInfo` is a superset
+/// of the splitter's on-disk shape (extra fields default), so one typed value
+/// serves both without a separate transport DTO.
+fn build_concert_info(concert: &Concert) -> ConcertInfo {
+    ConcertInfo {
         artist: concert.artist.clone().unwrap_or_default(),
         source: concert.source_url.clone(),
         show: "Tiny Desk Concerts".to_string(),
         date: concert.concert_date.clone(),
         album: concert.album.clone().unwrap_or_default(),
         description: concert.description.clone(),
-        set_list,
-        musicians,
-    };
+        set_list: concert
+            .set_list
+            .iter()
+            .map(|title| concert_types::Song {
+                title: title.clone(),
+            })
+            .collect(),
+        musicians: concert
+            .musicians
+            .iter()
+            .map(|m: &Musician| concert_types::Musician {
+                name: m.name.clone(),
+                instruments: m.instruments.clone(),
+            })
+            .collect(),
+        preview_image_url: None,
+        teaser: None,
+        timestamps: None,
+    }
+}
 
+fn write_concert_info_json(info: &ConcertInfo) -> Result<NamedTempFile> {
     let mut file = NamedTempFile::new()?;
-    let json = serde_json::to_string(&input)?;
+    let json = serde_json::to_string(info)?;
     file.write_all(json.as_bytes())?;
     Ok(file)
 }
@@ -267,7 +255,8 @@ impl JobRequest for SplitRequest {
             if !matches!(input.mode, SplitMode::UserTimestamps { .. }) {
                 remove_stale_interlude_files(&output_dir)?;
             }
-            let temp_file = write_splitter_input(&input.concert)?;
+            let concert_info = build_concert_info(&input.concert);
+            let temp_file = write_concert_info_json(&concert_info)?;
             let (timestamps_temp_file, timestamps_path) = match &input.mode {
                 SplitMode::Analyze => (None, None),
                 SplitMode::UserTimestamps { ts, .. } | SplitMode::ResetToAuto(ts) => {
@@ -278,6 +267,7 @@ impl JobRequest for SplitRequest {
             };
             let job = SplitJob {
                 concert_id: input.concert.id,
+                concert: concert_info,
                 json_path: temp_file.path().to_path_buf(),
                 input_file,
                 output_dir,
@@ -288,7 +278,7 @@ impl JobRequest for SplitRequest {
             };
             return Ok(SplitSetup {
                 concert: input.concert,
-                execution: SplitExecution::Run(job),
+                execution: SplitExecution::Run(Box::new(job)),
             });
         }
         if matches!(input.mode, SplitMode::Analyze)
@@ -521,7 +511,8 @@ pub fn auto_timestamps_with_backfill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{DownloadJob, JobConfig, JobRegistry};
+    use crate::jobs::{DownloadJob, JobConfig, JobRegistry, SplitBackend};
+    use crate::split_timestamps::TimestampPayloadSong;
     use std::fs;
     use std::path::PathBuf;
     use tokio::process::Command;
@@ -777,6 +768,101 @@ mod tests {
         assert!(matches!(second, StartOutcome::AlreadyRunning));
         // Stop the background sleeper so the test exits promptly.
         registry.cancel_all();
+    }
+
+    /// End-to-end coverage of the in-process library adapter (#141), driven
+    /// through the same `start_split`/Job Run engine production uses — not
+    /// just `jobs::split_library`'s own pure-function unit tests. Uses
+    /// UserTimestamps (not Analyze) so no OCR backend/models are needed:
+    /// `concert_split::run`'s Detect (OCR) phase only runs when timestamps are
+    /// absent. A real `ffmpeg -f lavfi` fixture is still required — the
+    /// library's Inspect phase ffprobes the input file unconditionally, and
+    /// the Cut phase invokes real ffmpeg. See
+    /// `live-set-song-splitter/src/concert_split.rs`'s own `fixture` test
+    /// helper, which this mirrors.
+    #[tokio::test]
+    async fn library_backend_splits_user_timestamps_end_to_end() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Library Backend E2E";
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        let media_path = cd.join(format!("{}.mp4", album));
+        let status = std::process::Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=6:size=320x240:rate=25",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=6",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-shortest",
+                media_path.to_str().unwrap(),
+            ])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("failed to spawn ffmpeg to build the test fixture");
+        assert!(status.success(), "ffmpeg failed to build the test fixture");
+
+        let set_list = vec!["Song".to_string()];
+        let (db, id) = seeded_db(album, set_list.clone());
+        let payload = vec![TimestampPayloadSong {
+            title: "Song".to_string(),
+            start_time: 0.0,
+            end_time: 4.0,
+        }];
+        let ts = ValidatedTimestamps::validate(&set_list, Some(6.0), &payload).unwrap();
+
+        let registry = Arc::new(JobRegistry::new());
+        let config = JobConfig::with_split_backend(
+            tmp.path().to_path_buf(),
+            Arc::new(|_: &DownloadJob| Command::new("true")),
+            SplitBackend::Library,
+            Arc::new(|_| Command::new("true")),
+        );
+
+        let outcome = start_split(
+            db.clone(),
+            registry.clone(),
+            config,
+            id,
+            SplitMode::UserTimestamps {
+                ts,
+                media_duration: 6.0,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(outcome, StartOutcome::Spawned));
+        wait_until_finished(&registry, id).await;
+
+        let conn = db.lock().unwrap();
+        let c = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(
+            c.split_at.is_some(),
+            "split_at should be set; errors={:?}",
+            c.split_errors
+        );
+        assert_eq!(c.tracks_present, vec![true]);
+        assert!(
+            c.split_errors.is_empty(),
+            "no error should be recorded: {:?}",
+            c.split_errors
+        );
+        assert!(cd.join("Song.m4a").exists());
+        assert!(cd.join("Song.mp4").exists());
+        // UserTimestamps mode never writes concert.json (only Analyze does —
+        // see `jobs::split_library::write_concert_json_if_analyze`).
+        assert!(!cd.join("concert.json").exists());
     }
 
     #[tokio::test]
