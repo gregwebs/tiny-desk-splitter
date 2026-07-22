@@ -670,6 +670,13 @@ fn recovery_state_description(canonical_dir: &Path, journal: &PublicationJournal
 }
 
 pub fn recover_publication(canonical_dir: &Path) -> Result<RecoveryStatus> {
+    // A journal can only exist inside an existing canonical directory. Avoid
+    // creating that directory solely for the lock: analysis-only runs promise
+    // not to create output state. Existing directories are locked before the
+    // journal read below.
+    if !canonical_dir.exists() {
+        return Ok(RecoveryStatus::NoPendingPublication);
+    }
     let lock = lock_file(canonical_dir)?;
     acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
     let Some(mut journal) = read_journal(canonical_dir)? else {
