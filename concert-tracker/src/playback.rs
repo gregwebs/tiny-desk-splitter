@@ -307,7 +307,7 @@ mod tests {
             downloaded_extension: None,
             download_errors: vec![],
             split_started_at: None,
-            split_at: None,
+            split_at: Some("2026-07-07 00:00:00".to_string()),
             split_errors: vec![],
             archive_started_at: None,
             archived_at: None,

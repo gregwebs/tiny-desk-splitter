@@ -19,7 +19,9 @@ use anyhow::{Context as _, Result};
 use rusqlite::Connection;
 
 use crate::db;
-use crate::jobs::{JobKey, JobRegistry, JobRunFuture, JobStepOutcome, TerminalGate};
+use crate::jobs::{
+    JobKey, JobRegistry, JobRunFuture, JobStepFailure, JobStepOutcome, TerminalGate,
+};
 
 /// Shared with `crate::lifecycle::cancel_job` (which calls [`cancel`] below)
 /// so both record the same wording for a user-initiated cancellation.
@@ -82,6 +84,12 @@ pub trait JobRequest: JobCancellation + Send + Sync + 'static {
 
     /// DB-only success commit; runs inside the terminal transaction.
     fn commit_success(&self, conn: &Connection, facts: Self::Facts) -> Result<()>;
+
+    /// DB-only execution-failure commit. Recoverable Partial Split facts reach
+    /// this hook only after the executing Job Run wins the terminal gate.
+    fn record_step_failure(&self, conn: &Connection, failure: &JobStepFailure) -> Result<()> {
+        self.record_failure(conn, failure.message())
+    }
 
     /// Directory for this Job Run's log file, used by `finish_as_failure` to
     /// persist a failed run's captured output. Default: no log file.
@@ -266,12 +274,14 @@ async fn run<R: JobRequest>(
     // Success facts are FS-only and gathered before the DB mutex is taken
     // (and before claiming the gate) so a slow working dir can't freeze
     // every handler behind that mutex.
-    let facts_or_error: std::result::Result<R::Facts, String> = match outcome {
-        Ok((setup, JobStepOutcome::Succeeded)) => request
-            .gather_success_facts(&setup)
-            .map_err(|e| format!("{e:#}")),
-        Ok((_setup, JobStepOutcome::Failed { message })) => Err(message),
-        Err(message) => Err(message),
+    let facts_or_error: std::result::Result<R::Facts, JobStepOutcome> = match outcome {
+        Ok((setup, JobStepOutcome::Succeeded)) => {
+            request.gather_success_facts(&setup).map_err(|error| {
+                JobStepOutcome::Failed(JobStepFailure::ordinary(format!("{error:#}")))
+            })
+        }
+        Ok((_setup, failure @ JobStepOutcome::Failed(_))) => Err(failure),
+        Err(message) => Err(JobStepOutcome::Failed(JobStepFailure::ordinary(message))),
     };
 
     if !terminal.claim() {
@@ -313,19 +323,65 @@ async fn run<R: JobRequest>(
                 }
             }
         }
-        Err(message) => {
-            tracing::warn!(?key, "{} failed: {}", request.job_name(), message);
-            finish_as_failure(
+        Err(failure) => {
+            let failure = match failure {
+                JobStepOutcome::Failed(failure) => failure,
+                JobStepOutcome::Succeeded => unreachable!(),
+            };
+            tracing::warn!(?key, "{} failed: {}", request.job_name(), failure.message());
+            finish_step_failure(
                 &db,
                 &registry,
                 request.as_ref(),
                 &key,
-                &message,
+                failure,
                 temp_file,
                 log_dir.as_deref(),
             );
         }
     }
+}
+
+fn finish_step_failure<R: JobRequest>(
+    db: &Arc<Mutex<Connection>>,
+    registry: &Arc<JobRegistry>,
+    request: &R,
+    key: &JobKey,
+    failure: JobStepFailure,
+    temp_file: Option<tempfile::NamedTempFile>,
+    log_dir: Option<&Path>,
+) {
+    registry.drop_dependency_edges(key);
+    let job_id = {
+        let conn = db.lock().unwrap();
+        commit_step_failure_tx(&conn, request, key, &failure)
+    };
+    persist_failure_log(job_id, registry, key, temp_file, log_dir);
+}
+
+fn persist_failure_log(
+    job_id: Result<i64>,
+    registry: &Arc<JobRegistry>,
+    key: &JobKey,
+    temp_file: Option<tempfile::NamedTempFile>,
+    log_dir: Option<&Path>,
+) {
+    match job_id {
+        Ok(job_id) => {
+            if let (Some(tf), Some(dir)) = (temp_file, log_dir) {
+                let final_path = dir.join(format!("{job_id}.log"));
+                if let Err(error) = tf.persist(&final_path) {
+                    tracing::warn!(
+                        "failed to persist job log to {}: {}",
+                        final_path.display(),
+                        error
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::error!(?key, "failed to commit failure terminal: {:#}", error),
+    }
+    registry.release(key);
 }
 
 fn finish_as_failure<R: JobRequest>(
@@ -383,6 +439,23 @@ fn commit_failure_tx<R: JobCancellation>(
         .unchecked_transaction()
         .context("Failed to begin failure terminal transaction")?;
     request.record_failure(&tx, message)?;
+    let job_id =
+        db::failed_jobs::insert_failed_job(&tx, key.concert_id, request.job_name(), message)?;
+    tx.commit().context("Failed to commit failure terminal")?;
+    Ok(job_id)
+}
+
+fn commit_step_failure_tx<R: JobRequest>(
+    conn: &Connection,
+    request: &R,
+    key: &JobKey,
+    failure: &JobStepFailure,
+) -> Result<i64> {
+    let message = failure.message();
+    let tx = conn
+        .unchecked_transaction()
+        .context("Failed to begin failure terminal transaction")?;
+    request.record_step_failure(&tx, failure)?;
     let job_id =
         db::failed_jobs::insert_failed_job(&tx, key.concert_id, request.job_name(), message)?;
     tx.commit().context("Failed to commit failure terminal")?;
@@ -555,11 +628,11 @@ mod tests {
             Box::pin(async move {
                 match rx.await {
                     Ok(StepResult::Succeed) => JobStepOutcome::Succeeded,
-                    Ok(StepResult::Fail(message)) => JobStepOutcome::Failed { message },
+                    Ok(StepResult::Fail(message)) => {
+                        JobStepOutcome::Failed(JobStepFailure::ordinary(message))
+                    }
                     Ok(StepResult::Panic) => panic!("execute panic (test)"),
-                    Err(_) => JobStepOutcome::Failed {
-                        message: "sender dropped".to_string(),
-                    },
+                    Err(_) => JobStepOutcome::Failed(JobStepFailure::ordinary("sender dropped")),
                 }
             })
         }

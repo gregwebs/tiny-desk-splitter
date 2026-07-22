@@ -22,6 +22,14 @@ pub(crate) struct CutContext<'a> {
     pub concert: &'a ConcertInfo,
 }
 
+pub(crate) enum SegmentProduction {
+    Complete(Vec<ProducedTrack>),
+    Failed {
+        completed_tracks: Vec<ProducedTrack>,
+        error: anyhow::Error,
+    },
+}
+
 /// Cut a single track (song or interlude) using the shared [`CutContext`].
 ///
 /// `stem` is the filename without extension (already sanitized).
@@ -169,18 +177,21 @@ pub(crate) fn process_segments(
     emit_interludes: bool,
     media_duration: f64,
     progress: &mut dyn FnMut(ConcertSplitProgress),
-) -> Result<Vec<ProducedTrack>> {
+) -> SegmentProduction {
     let songs = &concert.set_list;
     progress(ConcertSplitProgress::Diagnostic(format!(
         "Processing {} segments...",
         segments.len()
     )));
     if segments.len() > songs.len() {
-        return Err(anyhow!(
-            "Too many segments detected. {} segments but only {} songs provided.",
-            segments.len(),
-            songs.len()
-        ));
+        return SegmentProduction::Failed {
+            completed_tracks: Vec::new(),
+            error: anyhow!(
+                "Too many segments detected. {} segments but only {} songs provided.",
+                segments.len(),
+                songs.len()
+            ),
+        };
     }
 
     // Computed upfront (same inputs, same logic as the caller's outcome
@@ -242,14 +253,19 @@ pub(crate) fn process_segments(
             segment.segment.end_time - segment.segment.start_time
         )));
 
-        extract_track(
+        if let Err(error) = extract_track(
             &ctx,
             &safe_title,
             segment.segment.start_time,
             segment.segment.end_time,
             song_title,
             Some(song_counter),
-        )?;
+        ) {
+            return SegmentProduction::Failed {
+                completed_tracks: tracks,
+                error,
+            };
+        }
 
         progress(ConcertSplitProgress::TrackCompleted {
             index: song_counter,
@@ -271,7 +287,12 @@ pub(crate) fn process_segments(
 
     // Emit interlude tracks for every uncovered span in [0, media_duration].
     if emit_interludes {
-        remove_stale_interlude_files(ctx.output_dir, progress)?;
+        if let Err(error) = remove_stale_interlude_files(ctx.output_dir, progress) {
+            return SegmentProduction::Failed {
+                completed_tracks: tracks,
+                error,
+            };
+        }
         progress(ConcertSplitProgress::Diagnostic(format!(
             "Emitting {} interlude track(s) to cover the full timeline",
             interludes.len()
@@ -285,14 +306,19 @@ pub(crate) fn process_segments(
                 interlude.end_time,
                 interlude.end_time - interlude.start_time,
             )));
-            extract_track(
+            if let Err(error) = extract_track(
                 &ctx,
                 &stem,
                 interlude.start_time,
                 interlude.end_time,
                 "interlude",
                 None, // no track number for interludes
-            )?;
+            ) {
+                return SegmentProduction::Failed {
+                    completed_tracks: tracks,
+                    error,
+                };
+            }
 
             progress(ConcertSplitProgress::TrackCompleted {
                 index: interlude.index,
@@ -308,5 +334,5 @@ pub(crate) fn process_segments(
         }
     }
 
-    Ok(tracks)
+    SegmentProduction::Complete(tracks)
 }

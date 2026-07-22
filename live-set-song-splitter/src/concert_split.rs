@@ -15,7 +15,10 @@
 use crate::detect::{self, Settings};
 use crate::ocr_backend::{default_ocr_choice, ensure_ocr_choice_available, OcrChoice};
 use crate::produce::{self, CutContext};
-use crate::publication::{self, PublicationRequest};
+use crate::publication::{
+    self, PartialExpectedTrack, PartialPublicationRequest, PartialTrackOutput, PublicationRequest,
+    PublishedSplitExists,
+};
 use crate::recover::{self, RecoveryResult};
 use crate::refine;
 use crate::video::VideoInfo;
@@ -155,7 +158,7 @@ pub struct ConcertSplitOutput {
 }
 
 /// Why a Concert Split produced no output.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
 pub enum NoOutputReason {
     /// `--no-save-songs`: analysis (and, when applicable, `timestamps.json`)
     /// ran, but no tracks were cut.
@@ -187,15 +190,42 @@ impl fmt::Display for NoOutputReason {
 pub enum ConcertSplitOutcome {
     /// Every expected set-list track was produced.
     Complete(ConcertSplitOutput),
-    /// RESERVED for a later ticket (Recoverable Partial Split publication).
-    /// This ticket's workflow is binary — the missing-songs gate in
-    /// [`run`] returns `NoOutput` before any cutting starts — so `run` never
-    /// constructs this variant today. Kept in the enum now so the seam is
-    /// stable for later tickets.
+    /// One or more songs were preserved at canonical filenames after the
+    /// complete split failed. This is still a failed split: it cannot be used
+    /// to reconstruct the concert and does not supersede a Published split.
     Partial(ConcertSplitOutput),
     NoOutput {
         reason: NoOutputReason,
     },
+}
+
+/// Stable, minimal process transport used by the CLI adapter. Filesystem paths
+/// and timing internals stay in the in-process outcome rather than becoming a
+/// subprocess compatibility contract.
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ConcertSplitReport {
+    Complete,
+    Partial { tracks: Vec<String> },
+    NoOutput { reason: NoOutputReason },
+}
+
+impl From<&ConcertSplitOutcome> for ConcertSplitReport {
+    fn from(outcome: &ConcertSplitOutcome) -> Self {
+        match outcome {
+            ConcertSplitOutcome::Complete(_) => Self::Complete,
+            ConcertSplitOutcome::Partial(output) => Self::Partial {
+                tracks: output
+                    .tracks
+                    .iter()
+                    .map(|track| track.title.clone())
+                    .collect(),
+            },
+            ConcertSplitOutcome::NoOutput { reason } => Self::NoOutput {
+                reason: reason.clone(),
+            },
+        }
+    }
 }
 
 fn validate_request(request: &ConcertSplitRequest) -> Result<()> {
@@ -260,6 +290,84 @@ fn segments_from_timestamps(timestamps: &[SongTimestamp]) -> Vec<SongSegment> {
             start_from_overlay: false,
         })
         .collect()
+}
+
+fn song_output_files(title: &str, format: OutputFormat) -> Vec<PathBuf> {
+    let stem = io::sanitize_filename(title);
+    match format {
+        OutputFormat::Video => vec![PathBuf::from(format!("{stem}.mp4"))],
+        OutputFormat::Audio => vec![PathBuf::from(format!("{stem}.m4a"))],
+        OutputFormat::Both => vec![
+            PathBuf::from(format!("{stem}.mp4")),
+            PathBuf::from(format!("{stem}.m4a")),
+        ],
+    }
+}
+
+fn salvage_or_error(
+    canonical_dir: &Path,
+    staging_dir: &Path,
+    set_list: &[Song],
+    format: OutputFormat,
+    timestamps: Vec<SongTimestamp>,
+    completed_tracks: Vec<ProducedTrack>,
+    original_error: anyhow::Error,
+) -> Result<ConcertSplitOutcome> {
+    let completed_tracks: Vec<ProducedTrack> = completed_tracks
+        .into_iter()
+        .filter(|track| track.kind == TrackKind::Song)
+        .collect();
+    if completed_tracks.is_empty() {
+        return Err(original_error);
+    }
+    let expected_tracks = set_list
+        .iter()
+        .map(|song| PartialExpectedTrack {
+            title: song.title.clone(),
+            files: song_output_files(&song.title, format),
+        })
+        .collect();
+    let partial_tracks = completed_tracks
+        .iter()
+        .map(|track| PartialTrackOutput {
+            title: track.title.clone(),
+            start_time: track.start_time,
+            end_time: track.end_time,
+            files: song_output_files(&track.title, format),
+        })
+        .collect();
+    let published = match publication::publish_partial(&PartialPublicationRequest {
+        canonical_dir: canonical_dir.to_path_buf(),
+        staging_dir: staging_dir.to_path_buf(),
+        expected_tracks,
+        completed_tracks: partial_tracks,
+    }) {
+        Ok(published) => published,
+        Err(error) if error.downcast_ref::<PublishedSplitExists>().is_some() => {
+            return Err(original_error);
+        }
+        Err(error) => {
+            return Err(error).with_context(|| {
+                format!(
+                    "Concert Split failed ({original_error:#}) and partial publication also failed"
+                )
+            });
+        }
+    };
+    let tracks = published
+        .into_iter()
+        .map(|track| ProducedTrack {
+            title: track.title,
+            kind: TrackKind::Song,
+            start_time: track.start_time,
+            end_time: track.end_time,
+        })
+        .collect();
+    Ok(ConcertSplitOutcome::Partial(ConcertSplitOutput {
+        timestamps,
+        tracks,
+        output_dir: canonical_dir.to_path_buf(),
+    }))
 }
 
 /// Sanitized directory-name stem derived from a concert's album (or artist, if
@@ -513,94 +621,124 @@ pub fn run(
             video_cut_mode: options.video_cut_mode,
             concert: &concert,
         };
-        tracks = produce::process_segments(
+        tracks = match produce::process_segments(
             &segments,
             &concert,
             ctx,
             options.emit_interludes,
             resolved_media_duration,
             progress,
-        )?;
+        ) {
+            produce::SegmentProduction::Complete(tracks) => tracks,
+            produce::SegmentProduction::Failed {
+                completed_tracks,
+                error,
+            } => {
+                return salvage_or_error(
+                    &output_dir,
+                    &staging_dir,
+                    &concert.set_list,
+                    options.output_format,
+                    outcome_timestamps,
+                    completed_tracks,
+                    error,
+                );
+            }
+        };
     }
 
-    let mut replacement_files = Vec::new();
-    if refine_now {
-        replacement_files.push(PathBuf::from("timestamps.json"));
-    }
-    for track in &tracks {
-        let stem = match track.kind {
-            TrackKind::Song => io::sanitize_filename(&track.title),
-            TrackKind::Interlude => track.title.clone(),
-        };
-        match options.output_format {
-            OutputFormat::Video => replacement_files.push(PathBuf::from(format!("{stem}.mp4"))),
-            OutputFormat::Audio => replacement_files.push(PathBuf::from(format!("{stem}.m4a"))),
-            OutputFormat::Both => {
-                replacement_files.push(PathBuf::from(format!("{stem}.mp4")));
-                replacement_files.push(PathBuf::from(format!("{stem}.m4a")));
+    let publication_result = (|| -> Result<()> {
+        let mut replacement_files = Vec::new();
+        if refine_now {
+            replacement_files.push(PathBuf::from("timestamps.json"));
+        }
+        for track in &tracks {
+            let stem = match track.kind {
+                TrackKind::Song => io::sanitize_filename(&track.title),
+                TrackKind::Interlude => track.title.clone(),
+            };
+            match options.output_format {
+                OutputFormat::Video => replacement_files.push(PathBuf::from(format!("{stem}.mp4"))),
+                OutputFormat::Audio => replacement_files.push(PathBuf::from(format!("{stem}.m4a"))),
+                OutputFormat::Both => {
+                    replacement_files.push(PathBuf::from(format!("{stem}.mp4")));
+                    replacement_files.push(PathBuf::from(format!("{stem}.m4a")));
+                }
             }
         }
-    }
-    if !replacement_files.is_empty() {
-        progress(ConcertSplitProgress::PhaseStarted(
-            SplitPhase::ValidateOutput,
-        ));
-        let produced_songs: Vec<&str> = tracks
-            .iter()
-            .filter(|track| track.kind == TrackKind::Song)
-            .map(|track| track.title.as_str())
-            .collect();
-        let expected_songs: Vec<&str> = concert
-            .set_list
-            .iter()
-            .map(|song| song.title.as_str())
-            .collect();
-        if !options.no_save_songs {
+        if !replacement_files.is_empty() {
+            progress(ConcertSplitProgress::PhaseStarted(
+                SplitPhase::ValidateOutput,
+            ));
+            let produced_songs: Vec<&str> = tracks
+                .iter()
+                .filter(|track| track.kind == TrackKind::Song)
+                .map(|track| track.title.as_str())
+                .collect();
+            let expected_songs: Vec<&str> = concert
+                .set_list
+                .iter()
+                .map(|song| song.title.as_str())
+                .collect();
+            if !options.no_save_songs {
+                anyhow::ensure!(
+                    produced_songs == expected_songs,
+                    "produced song set does not match the concert set list"
+                );
+            }
             anyhow::ensure!(
-                produced_songs == expected_songs,
-                "produced song set does not match the concert set list"
-            );
-        }
-        anyhow::ensure!(
-            outcome_timestamps.len() == concert.set_list.len()
-                && outcome_timestamps
-                    .iter()
-                    .zip(&concert.set_list)
-                    .all(|(timestamp, song)| timestamp.title == song.title),
-            "Concert Split timestamps do not match the concert set list"
-        );
-        let expected_interludes: Vec<String> = if options.emit_interludes {
-            derive_interludes(
-                &outcome_timestamps,
-                options.media_duration.unwrap_or(video_info.duration),
-            )
-            .iter()
-            .map(|interlude| interlude_filename_stem(interlude.index))
-            .collect()
-        } else {
-            Vec::new()
-        };
-        let produced_interludes: Vec<&str> = tracks
-            .iter()
-            .filter(|track| track.kind == TrackKind::Interlude)
-            .map(|track| track.title.as_str())
-            .collect();
-        if !options.no_save_songs {
-            anyhow::ensure!(
-                produced_interludes
-                    == expected_interludes
+                outcome_timestamps.len() == concert.set_list.len()
+                    && outcome_timestamps
                         .iter()
-                        .map(String::as_str)
-                        .collect::<Vec<_>>(),
-                "produced interlude set does not match the expected timeline gaps"
+                        .zip(&concert.set_list)
+                        .all(|(timestamp, song)| timestamp.title == song.title),
+                "Concert Split timestamps do not match the concert set list"
             );
+            let expected_interludes: Vec<String> = if options.emit_interludes {
+                derive_interludes(
+                    &outcome_timestamps,
+                    options.media_duration.unwrap_or(video_info.duration),
+                )
+                .iter()
+                .map(|interlude| interlude_filename_stem(interlude.index))
+                .collect()
+            } else {
+                Vec::new()
+            };
+            let produced_interludes: Vec<&str> = tracks
+                .iter()
+                .filter(|track| track.kind == TrackKind::Interlude)
+                .map(|track| track.title.as_str())
+                .collect();
+            if !options.no_save_songs {
+                anyhow::ensure!(
+                    produced_interludes
+                        == expected_interludes
+                            .iter()
+                            .map(String::as_str)
+                            .collect::<Vec<_>>(),
+                    "produced interlude set does not match the expected timeline gaps"
+                );
+            }
+            progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Publish));
+            publication::publish(&PublicationRequest {
+                canonical_dir: output_dir.clone(),
+                staging_dir: staging_dir.clone(),
+                replacement_files,
+            })?;
         }
-        progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Publish));
-        publication::publish(&PublicationRequest {
-            canonical_dir: output_dir.clone(),
-            staging_dir: staging_dir.clone(),
-            replacement_files,
-        })?;
+        Ok(())
+    })();
+    if let Err(error) = publication_result {
+        return salvage_or_error(
+            &output_dir,
+            &staging_dir,
+            &concert.set_list,
+            options.output_format,
+            outcome_timestamps,
+            tracks,
+            error,
+        );
     }
 
     progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Cleanup));
@@ -703,6 +841,113 @@ mod tests {
     }
 
     fn no_progress(_event: ConcertSplitProgress) {}
+
+    #[test]
+    fn failed_first_split_publishes_completed_tracks_as_partial() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fixture(dir.path());
+        let output = dir.path().join("out");
+        let request = ConcertSplitRequest {
+            concert: test_concert("PartialFirstSplit", &["First", "Second"]),
+            input_file: input,
+            output_dir: output.clone(),
+            timestamps: Some(vec![
+                SongTimestamp {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 2.0,
+                    duration: 2.0,
+                },
+                SongTimestamp {
+                    title: "Second".to_string(),
+                    start_time: 7.0,
+                    end_time: 6.0,
+                    duration: -1.0,
+                },
+            ]),
+            options: default_options(),
+        };
+
+        let outcome = run(request, &mut no_progress).unwrap();
+        let ConcertSplitOutcome::Partial(partial) = outcome else {
+            panic!("expected Recoverable Partial Split");
+        };
+        assert_eq!(
+            partial
+                .tracks
+                .iter()
+                .map(|track| track.title.as_str())
+                .collect::<Vec<_>>(),
+            vec!["First"]
+        );
+        assert!(output.join("First.m4a").is_file());
+        assert!(!output.join("Second.m4a").exists());
+        assert!(output.join(publication::PARTIAL_MANIFEST_NAME).is_file());
+        assert!(!output.join(publication::MANIFEST_NAME).exists());
+    }
+
+    #[test]
+    fn failed_resplit_preserves_previous_published_split() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = fixture(dir.path());
+        let output = dir.path().join("out");
+        let complete_request = ConcertSplitRequest {
+            concert: test_concert("FailedResplit", &["First", "Second"]),
+            input_file: input.clone(),
+            output_dir: output.clone(),
+            timestamps: Some(vec![
+                SongTimestamp {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 2.0,
+                    duration: 2.0,
+                },
+                SongTimestamp {
+                    title: "Second".to_string(),
+                    start_time: 2.0,
+                    end_time: 4.0,
+                    duration: 2.0,
+                },
+            ]),
+            options: default_options(),
+        };
+        assert!(matches!(
+            run(complete_request, &mut no_progress).unwrap(),
+            ConcertSplitOutcome::Complete(_)
+        ));
+        let first_before = fs::read(output.join("First.m4a")).unwrap();
+        let second_before = fs::read(output.join("Second.m4a")).unwrap();
+        let manifest_before = fs::read(output.join(publication::MANIFEST_NAME)).unwrap();
+        let failed_request = ConcertSplitRequest {
+            concert: test_concert("FailedResplit", &["First", "Second"]),
+            input_file: input,
+            output_dir: output.clone(),
+            timestamps: Some(vec![
+                SongTimestamp {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 3.0,
+                    duration: 3.0,
+                },
+                SongTimestamp {
+                    title: "Second".to_string(),
+                    start_time: 7.0,
+                    end_time: 6.0,
+                    duration: -1.0,
+                },
+            ]),
+            options: default_options(),
+        };
+
+        assert!(run(failed_request, &mut no_progress).is_err());
+        assert_eq!(fs::read(output.join("First.m4a")).unwrap(), first_before);
+        assert_eq!(fs::read(output.join("Second.m4a")).unwrap(), second_before);
+        assert_eq!(
+            fs::read(output.join(publication::MANIFEST_NAME)).unwrap(),
+            manifest_before
+        );
+        assert!(!output.join(publication::PARTIAL_MANIFEST_NAME).exists());
+    }
 
     // --- Validation (run()'s Validate phase; no ffmpeg/ffprobe needed) ---
 

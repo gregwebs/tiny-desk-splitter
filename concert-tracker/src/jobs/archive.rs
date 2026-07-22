@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::db;
 use crate::jobs::run::{self, Admission, JobCancellation, JobRequest};
-use crate::jobs::{JobKey, JobKind, JobRegistry, JobRunFuture, JobStepOutcome};
+use crate::jobs::{JobKey, JobKind, JobRegistry, JobRunFuture, JobStepFailure, JobStepOutcome};
 use crate::model::{concert_dir, sanitize_album};
 
 #[derive(Clone)]
@@ -182,12 +182,11 @@ impl JobRequest for ArchiveRequest {
         Box::pin(async move {
             match tokio::task::spawn_blocking(move || do_archive(&job)).await {
                 Ok(Ok(())) => JobStepOutcome::Succeeded,
-                Ok(Err(e)) => JobStepOutcome::Failed {
-                    message: format!("{:#}", e),
-                },
-                Err(e) => JobStepOutcome::Failed {
-                    message: format!("task panicked: {}", e),
-                },
+                Ok(Err(e)) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!("{:#}", e))),
+                Err(e) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+                    "task panicked: {}",
+                    e
+                ))),
             }
         })
     }
