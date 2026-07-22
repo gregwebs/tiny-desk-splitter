@@ -9,7 +9,7 @@ use anyhow::Result;
 use rusqlite::Connection;
 use std::sync::{Arc, Mutex};
 
-use crate::concert_media::{all_tracks_present_on_disk, find_downloaded_file};
+use crate::concert_media::find_downloaded_file;
 use crate::db;
 use crate::jobs::{download, split, JobConfig, JobKey, JobKind, JobRegistry, SplitMode};
 
@@ -69,7 +69,12 @@ pub async fn prepare(
     }
     let album = concert.album.as_deref().expect("checked above");
 
-    let all_present = all_tracks_present_on_disk(&config.working_dir, album, &concert.set_list);
+    let all_present = crate::concert_media::ConcertMediaInventory::for_concert(
+        &config.working_dir,
+        &concert,
+        None,
+    )
+    .all_tracks_present_on_disk();
     if all_present {
         tracing::debug!("prepare: concert {} already has all tracks", concert_id);
         return Ok(PrepareOutcome::Ready);

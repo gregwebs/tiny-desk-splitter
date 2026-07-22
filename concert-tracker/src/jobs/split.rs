@@ -252,9 +252,6 @@ impl JobRequest for SplitRequest {
         })?;
         let output_dir = concert_dir(&self.config.working_dir, album);
         if let Some(input_file) = find_downloaded_file(&self.config.working_dir, album) {
-            if !matches!(input.mode, SplitMode::UserTimestamps { .. }) {
-                remove_stale_interlude_files(&output_dir)?;
-            }
             let concert_info = build_concert_info(&input.concert);
             let temp_file = write_concert_info_json(&concert_info)?;
             let (timestamps_temp_file, timestamps_path) = match &input.mode {
@@ -318,6 +315,9 @@ impl JobRequest for SplitRequest {
                 self.concert_id
             )
         })?;
+        let output_dir = concert_dir(&self.config.working_dir, album);
+        let _published_split =
+            live_set_splitter::publication::SharedPublicationLock::acquire(&output_dir)?;
         let tracks_present =
             tracks_present_on_disk(&self.config.working_dir, album, &setup.concert.set_list);
         match &setup.execution {
@@ -414,40 +414,6 @@ impl JobRequest for SplitRequest {
     }
 }
 
-/// Remove any interlude files (`interlude_NN.mp4|.m4a`) from `output_dir`.
-/// Called before a split that will NOT emit interludes (Analyze / ResetToAuto)
-/// so stale files from a previous user-split do not mislead the coverage gate.
-fn remove_stale_interlude_files(output_dir: &std::path::Path) -> Result<()> {
-    let pattern =
-        regex::Regex::new(r"^interlude_\d{2}\.(mp4|m4a)$").expect("static regex is valid");
-    let dir = match std::fs::read_dir(output_dir) {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => {
-            return Err(e).with_context(|| {
-                format!(
-                    "could not inspect {} for stale interludes",
-                    output_dir.display()
-                )
-            })
-        }
-    };
-    for entry in dir {
-        let entry = entry.with_context(|| {
-            format!("could not read directory entry in {}", output_dir.display())
-        })?;
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if pattern.is_match(&name_str) {
-            let path = entry.path();
-            std::fs::remove_file(&path)
-                .with_context(|| format!("could not remove stale interlude {}", path.display()))?;
-            tracing::info!("removed stale interlude file: {}", path.display());
-        }
-    }
-    Ok(())
-}
-
 fn write_timestamps_file(ts: &ValidatedTimestamps) -> Result<NamedTempFile> {
     let file_data = ts.to_timestamps_file();
     let json = serde_json::to_string(&file_data)?;
@@ -487,9 +453,12 @@ pub fn auto_timestamps_with_backfill(
         None => return Ok(None),
     };
     let output_dir = concert_dir(working_dir, album);
-    match read_analysis_timestamps(&output_dir) {
+    match live_set_splitter::publication::with_shared_lock(&output_dir, || {
+        let timestamps = read_analysis_timestamps(&output_dir)?;
+        db::split_timestamps::set_auto_split_timestamps(conn, concert.id, &timestamps)?;
+        Ok(timestamps)
+    }) {
         Ok(ts) => {
-            db::split_timestamps::set_auto_split_timestamps(conn, concert.id, &ts)?;
             tracing::debug!(
                 "auto_timestamps_with_backfill: backfilled {} timestamps for concert {} from disk",
                 ts.len(),

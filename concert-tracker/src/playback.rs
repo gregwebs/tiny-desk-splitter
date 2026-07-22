@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use crate::concert_media::{
-    build_reconstruction, find_downloaded_file, find_track_file, is_video_extension,
-    list_all_track_details,
+    find_downloaded_file, is_video_extension, list_all_track_details, ConcertMediaInventory,
 };
 use crate::model::{self, Concert, PlaybackItem, TrackDetailItem};
 
@@ -84,15 +83,8 @@ pub fn concert_playback_plan(
         return source_media_from_path(concert, album, &path).map(PlaybackPlan::Source);
     }
 
-    let items = build_reconstruction(
-        working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-        user_timestamps,
-        concert.media_duration,
-    );
+    let items = ConcertMediaInventory::for_concert(working_dir, concert, user_timestamps)
+        .reconstruction_items();
     tracing::debug!(
         concert_id = concert.id,
         item_count = items.len(),
@@ -110,19 +102,11 @@ pub fn reconstruction_items(
     concert: &Concert,
     user_timestamps: Option<&[concert_types::SongTimestamp]>,
 ) -> Result<Vec<PlaybackItem>, PlaybackLookupError> {
-    let album = concert
-        .album
-        .as_deref()
-        .ok_or(PlaybackLookupError::NotPlayable)?;
-    let items = build_reconstruction(
-        working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-        user_timestamps,
-        concert.media_duration,
-    );
+    if concert.album.is_none() {
+        return Err(PlaybackLookupError::NotPlayable);
+    }
+    let items = ConcertMediaInventory::for_concert(working_dir, concert, user_timestamps)
+        .reconstruction_items();
     tracing::debug!(
         concert_id = concert.id,
         item_count = items.len(),
@@ -182,14 +166,16 @@ pub fn track_details(
     working_dir: &Path,
     concert: &Concert,
 ) -> Result<Vec<TrackDetailItem>, PlaybackLookupError> {
-    let album = concert.album.as_deref().unwrap_or_default();
-    Ok(list_all_track_details(
-        working_dir,
-        album,
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    ))
+    let Some(_album) = concert.album.as_deref() else {
+        return Ok(list_all_track_details(
+            working_dir,
+            "",
+            &concert.set_list,
+            &concert.tracks_present,
+            &concert.tracks_liked,
+        ));
+    };
+    Ok(ConcertMediaInventory::for_concert(working_dir, concert, None).track_details())
 }
 
 fn source_media_from_path(
@@ -218,17 +204,17 @@ fn track_media_inner(
     track_index: usize,
     require_browser_playable: bool,
 ) -> Result<TrackMedia, PlaybackLookupError> {
-    let album = concert
-        .album
-        .as_deref()
-        .ok_or(PlaybackLookupError::NotPlayable)?;
+    if concert.album.is_none() {
+        return Err(PlaybackLookupError::NotPlayable);
+    }
     let title = concert
         .set_list
         .get(track_index)
         .ok_or(PlaybackLookupError::NotPlayable)?
         .clone();
-    let filename =
-        find_track_file(working_dir, album, &title).ok_or(PlaybackLookupError::NotPlayable)?;
+    let filename = ConcertMediaInventory::for_concert(working_dir, concert, None)
+        .find_track_file(&title)
+        .ok_or(PlaybackLookupError::NotPlayable)?;
     let ext = filename.rsplit('.').next().unwrap_or("");
     let playable = model::is_browser_playable(ext);
     let is_video = is_video_extension(ext);
@@ -271,12 +257,14 @@ fn find_playable_track<I>(
 where
     I: IntoIterator<Item = usize>,
 {
-    let album = concert.album.as_deref()?;
+    concert.album.as_deref()?;
     for index in indices {
         let Some(title) = concert.set_list.get(index) else {
             continue;
         };
-        let Some(filename) = find_track_file(working_dir, album, title) else {
+        let Some(filename) =
+            ConcertMediaInventory::for_concert(working_dir, concert, None).find_track_file(title)
+        else {
             continue;
         };
         let ext = filename.rsplit('.').next().unwrap_or("");

@@ -11,7 +11,7 @@ use axum::{
 use rusqlite::Connection;
 use utoipa::ToSchema;
 
-use crate::concert_media::{find_downloaded_file, find_track_file, ConcertMediaInventory};
+use crate::concert_media::{find_downloaded_file, ConcertMediaInventory};
 use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::split::start_split;
@@ -1639,8 +1639,9 @@ pub async fn watch_track(
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?;
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let filename =
-        find_track_file(&state.jobs.working_dir, album, title).ok_or(AppError::NotFound)?;
+    let filename = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None)
+        .find_track_file(title)
+        .ok_or(AppError::NotFound)?;
     let path = concert_dir(&state.jobs.working_dir, album).join(&filename);
 
     tracing::info!(
@@ -1756,8 +1757,9 @@ pub async fn listen_track(
     };
 
     let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let file_exists = find_track_file(&state.jobs.working_dir, album, &title).is_some();
+    let file_exists = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None)
+        .find_track_file(&title)
+        .is_some();
 
     let render_state = if file_exists {
         tracing::info!(
