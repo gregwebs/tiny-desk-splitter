@@ -1,17 +1,17 @@
 ---
 name: github-app
-description: Read and update GitHub issues, push branches, and create or update pull requests, issues, and comments for this repo via the App-authenticated scripts in ./scripts/github/. Use for GitHub reads or writes, including "open a PR", "send a pull request", "file/read/update an issue", "comment on the PR/issue", or an App-authenticated push.
+description: Read and update GitHub issues, push branches, and create or update pull requests, issues, and comments for this repo via the App-authenticated scripts in ./scripts/github/. Use for GitHub reads or writes, including "open a PR", "send a pull request", "get/update an issue", "comment on the PR/issue", an App-authenticated push, or any App-authenticated Github interaction.
 user-invocable: true
 allowed-tools:
   - Read
-  - Write
+  - Bash(git push*)
+  - Bash(git commit*)
   - Bash(./scripts/github/*)
   - Bash(./scripts/github/gh-app.sh*)
-  - Bash(git push*)
   - Bash(git rev-parse*)
   - Bash(git branch*)
+  - Bash(git switch*)
   - Bash(git status*)
-  - Bash(git commit*)
 ---
 
 # /github-app — GitHub PR / issue / comment via the App scripts
