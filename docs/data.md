@@ -8,6 +8,7 @@ Each concert lives in `concerts/<album>/` with these metadata files:
 | `timestamps.json` | Splitter output with detected song timestamps |
 | `preview.jpg` | Thumbnail image from NPR |
 | `.concert-split-published.json` | Exact filenames owned by the current Published Concert Split |
+| `.concert-split-partial.json` | Exact titles, timing, and filenames owned by a Recoverable Partial Split |
 | `.concert-split-backup/` | One retained previous Published Concert Split used for ordinary publication rollback |
 
 The directory also contains the full concert video (`<album>.mp4`) and, after
@@ -82,6 +83,12 @@ assumes `set_list_json` is **append-only** after first scrape. If a re-scrape
 reorders or replaces titles, both arrays will mis-attribute against the new
 positions. The current scraper overwrites `set_list_json` wholesale, so this
 is a known limitation.
+
+A Recoverable Partial Split stores `tracks_present` for its exact salvaged
+songs while leaving `split_at` NULL and appending a split error. Individual
+tracks remain playable. Concert reconstruction and redundant-source deletion
+require `split_at IS NOT NULL`, so a partial set cannot be mistaken for a
+Published complete timeline.
 
 ### Lifecycle Transitions
 

@@ -16,7 +16,8 @@ use crate::db::seeds::{
     write_track_sentinels, SENTINEL_BYTES,
 };
 use crate::jobs::{
-    DownloadJob, JobRunFuture, JobRunner, JobStepOutcome, OpenMediaOutcome, SplitJob, SplitMode,
+    DownloadJob, JobRunFuture, JobRunner, JobStepFailure, JobStepOutcome, OpenMediaOutcome,
+    SplitJob, SplitMode,
 };
 use crate::model::{concert_dir, sanitize_album};
 
@@ -290,14 +291,14 @@ impl JobDriver {
                 }
                 Err(e) => {
                     self.bump(concert_id, kind, |o| o.failed += 1);
-                    JobStepOutcome::Failed {
-                        message: format!("test-control: fixture write failed: {e}"),
-                    }
+                    JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+                        "test-control: fixture write failed: {e}"
+                    )))
                 }
             },
             Err(message) => {
                 self.bump(concert_id, kind, |o| o.failed += 1);
-                JobStepOutcome::Failed { message }
+                JobStepOutcome::Failed(JobStepFailure::ordinary(message))
             }
         }
     }
@@ -360,7 +361,9 @@ impl JobRunner for TestControlJobRunner {
                 .await
             {
                 JobStepOutcome::Succeeded => OpenMediaOutcome::Succeeded,
-                JobStepOutcome::Failed { message } => OpenMediaOutcome::Failed { message },
+                JobStepOutcome::Failed(failure) => OpenMediaOutcome::Failed {
+                    message: failure.message().to_string(),
+                },
             }
         })
     }
@@ -470,6 +473,8 @@ mod tests {
         let json = serde_json::json!({ "set_list": titles.iter().map(|t| serde_json::json!({"title": t})).collect::<Vec<_>>() });
         let mut json_file = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut json_file, json.to_string().as_bytes()).unwrap();
+        let outcome_file = tempfile::NamedTempFile::new().unwrap();
+        let outcome_path = outcome_file.path().to_path_buf();
         SplitJob {
             concert_id,
             concert: test_concert_info(),
@@ -480,6 +485,8 @@ mod tests {
             _temp_file: json_file,
             _timestamps_temp_file: None,
             timestamps_path: None,
+            outcome_path,
+            _outcome_file: outcome_file,
         }
     }
 
@@ -491,6 +498,8 @@ mod tests {
         media_duration: f64,
     ) -> SplitJob {
         let ts = ValidatedTimestamps::validate(set_list, None, &payload).unwrap();
+        let outcome_file = tempfile::NamedTempFile::new().unwrap();
+        let outcome_path = outcome_file.path().to_path_buf();
         SplitJob {
             concert_id,
             concert: test_concert_info(),
@@ -501,6 +510,8 @@ mod tests {
             _temp_file: tempfile::NamedTempFile::new().unwrap(),
             _timestamps_temp_file: None,
             timestamps_path: None,
+            outcome_path,
+            _outcome_file: outcome_file,
         }
     }
 
@@ -627,7 +638,7 @@ mod tests {
             })
             .await;
 
-        assert!(matches!(outcome, JobStepOutcome::Failed { .. }));
+        assert!(matches!(outcome, JobStepOutcome::Failed(_)));
         assert!(!called.load(std::sync::atomic::Ordering::SeqCst));
         let obs = driver.observation(1, JobStepKind::Download);
         assert_eq!(obs.started, 1);
@@ -695,7 +706,7 @@ mod tests {
             .unwrap();
         let outcome = handle.await.unwrap();
 
-        assert!(matches!(outcome, JobStepOutcome::Failed { .. }));
+        assert!(matches!(outcome, JobStepOutcome::Failed(_)));
         let obs = driver.observation(1, JobStepKind::Split);
         assert_eq!(obs.released, 1);
         assert_eq!(obs.failed, 1);
@@ -745,7 +756,7 @@ mod tests {
             .expect("reset must unblock the parked step promptly, not hang")
             .unwrap();
 
-        assert!(matches!(outcome, JobStepOutcome::Failed { .. }));
+        assert!(matches!(outcome, JobStepOutcome::Failed(_)));
     }
 
     #[test]
@@ -792,7 +803,7 @@ mod tests {
 
         let outcome = runner.run_download(&job, None).await;
 
-        assert!(matches!(outcome, JobStepOutcome::Failed { .. }));
+        assert!(matches!(outcome, JobStepOutcome::Failed(_)));
         assert!(crate::concert_media::find_downloaded_file(tmp.path(), "No File Album").is_none());
     }
 
@@ -859,6 +870,8 @@ mod tests {
             end_time: 90.0,
         }];
         let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
+        let outcome_file = tempfile::NamedTempFile::new().unwrap();
+        let outcome_path = outcome_file.path().to_path_buf();
         let job = SplitJob {
             concert_id: 1,
             concert: test_concert_info(),
@@ -869,6 +882,8 @@ mod tests {
             _temp_file: tempfile::NamedTempFile::new().unwrap(),
             _timestamps_temp_file: None,
             timestamps_path: None,
+            outcome_path,
+            _outcome_file: outcome_file,
         };
 
         let outcome = runner.run_split(&job, None).await;

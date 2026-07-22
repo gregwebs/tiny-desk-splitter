@@ -17,7 +17,7 @@ use live_set_splitter::concert_split::{
 };
 use live_set_splitter::cut::VideoCutMode;
 
-use super::{JobStepOutcome, SplitJob, SplitMode};
+use super::{JobStepFailure, JobStepOutcome, SplitJob, SplitMode};
 
 /// The subset of [`SplitJob`]'s fields the library adapter needs, owned so it
 /// can cross into `spawn_blocking`'s `'static` closure without cloning
@@ -186,20 +186,21 @@ fn outcome_to_step(job: &Job, result: anyhow::Result<ConcertSplitOutcome>) -> Jo
             reason: NoOutputReason::AnalysisOnly,
         }) => match write_concert_json_if_analyze(job) {
             Ok(()) => JobStepOutcome::Succeeded,
-            Err(message) => JobStepOutcome::Failed { message },
+            Err(message) => JobStepOutcome::Failed(JobStepFailure::ordinary(message)),
         },
         Ok(ConcertSplitOutcome::NoOutput {
             reason: reason @ NoOutputReason::NothingDetected { .. },
-        }) => JobStepOutcome::Failed {
-            message: reason.to_string(),
-        },
-        Ok(ConcertSplitOutcome::Partial(_)) => JobStepOutcome::Failed {
-            message: "unexpected Partial outcome (reserved variant not produced by this build)"
-                .to_string(),
-        },
-        Err(err) => JobStepOutcome::Failed {
-            message: format!("{err:#}"),
-        },
+        }) => JobStepOutcome::Failed(JobStepFailure::ordinary(reason.to_string())),
+        Ok(ConcertSplitOutcome::Partial(output)) => {
+            JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit {
+                message: format!(
+                    "Recoverable Partial Split preserved {} completed track(s)",
+                    output.tracks.len()
+                ),
+                tracks: output.tracks.into_iter().map(|track| track.title).collect(),
+            })
+        }
+        Err(err) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!("{err:#}"))),
     }
 }
 
@@ -254,9 +255,9 @@ pub(super) async fn run(job: &SplitJob, log_file: Option<&Path>) -> JobStepOutco
         tokio::task::spawn_blocking(move || run_blocking(&owned_job, log_file.as_deref())).await;
     match outcome {
         Ok(step) => step,
-        Err(join_error) => JobStepOutcome::Failed {
-            message: format!("split job {concert_id} panicked or was aborted: {join_error}"),
-        },
+        Err(join_error) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+            "split job {concert_id} panicked or was aborted: {join_error}"
+        ))),
     }
 }
 
@@ -413,8 +414,13 @@ mod tests {
         });
         let step = outcome_to_step(&job, outcome);
         match step {
-            JobStepOutcome::Failed { message } => assert!(message.contains("Song")),
+            JobStepOutcome::Failed(JobStepFailure::Ordinary { message }) => {
+                assert!(message.contains("Song"))
+            }
             JobStepOutcome::Succeeded => panic!("expected Failed"),
+            JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit { .. }) => {
+                panic!("expected ordinary failure")
+            }
         }
     }
 
@@ -424,22 +430,44 @@ mod tests {
         let outcome = Err(anyhow::anyhow!("ffprobe exploded"));
         let step = outcome_to_step(&job, outcome);
         match step {
-            JobStepOutcome::Failed { message } => assert!(message.contains("ffprobe exploded")),
+            JobStepOutcome::Failed(JobStepFailure::Ordinary { message }) => {
+                assert!(message.contains("ffprobe exploded"))
+            }
             JobStepOutcome::Succeeded => panic!("expected Failed"),
+            JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit { .. }) => {
+                panic!("expected ordinary failure")
+            }
         }
     }
 
     #[test]
-    fn outcome_to_step_maps_partial_to_failed() {
+    fn outcome_to_step_maps_partial_to_typed_failure_with_exact_titles() {
         let job = test_job(SplitMode::Analyze);
         let outcome = Ok(ConcertSplitOutcome::Partial(
             live_set_splitter::concert_split::ConcertSplitOutput {
                 timestamps: vec![],
-                tracks: vec![],
+                tracks: vec![
+                    live_set_splitter::concert_split::ProducedTrack {
+                        title: "First".to_string(),
+                        kind: live_set_splitter::concert_split::TrackKind::Song,
+                        start_time: 0.0,
+                        end_time: 10.0,
+                    },
+                    live_set_splitter::concert_split::ProducedTrack {
+                        title: "Third".to_string(),
+                        kind: live_set_splitter::concert_split::TrackKind::Song,
+                        start_time: 20.0,
+                        end_time: 30.0,
+                    },
+                ],
                 output_dir: job.output_dir.clone(),
             },
         ));
         let step = outcome_to_step(&job, outcome);
-        assert!(matches!(step, JobStepOutcome::Failed { .. }));
+        assert!(matches!(
+            step,
+            JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit { tracks, .. })
+                if tracks == ["First", "Third"]
+        ));
     }
 }
