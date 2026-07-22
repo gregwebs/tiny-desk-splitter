@@ -52,17 +52,53 @@ fn maybe_fail(point: FailurePoint) -> Result<()> {
 pub const MANIFEST_NAME: &str = ".concert-split-published.json";
 pub const PARTIAL_MANIFEST_NAME: &str = ".concert-split-partial.json";
 pub const BACKUP_DIR_NAME: &str = ".concert-split-backup";
+pub const JOURNAL_NAME: &str = ".concert-split-publication.json";
 const BACKUP_CANDIDATE_NAME: &str = ".concert-split-backup-next";
 const BACKUP_OLD_NAME: &str = ".concert-split-backup-old";
 const LOCK_NAME: &str = ".concert-split-publication.lock";
 const MANIFEST_TEMP_NAME: &str = ".concert-split-published.json.next";
 const PARTIAL_MANIFEST_TEMP_NAME: &str = ".concert-split-partial.json.next";
+const JOURNAL_TEMP_NAME: &str = ".concert-split-publication.json.next";
+const PARTIAL_RECOVERY_NAME: &str = ".concert-split-partial-recovery";
+const MAX_RECOVERY_ATTEMPTS: u8 = 3;
 const LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct PublishedManifest {
     files: BTreeSet<PathBuf>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum PriorCanonicalState {
+    Empty,
+    Published {
+        files: BTreeSet<PathBuf>,
+        retained_backup_before: bool,
+    },
+    RecoverablePartial {
+        manifest: PartialManifest,
+        snapshot_dir: PathBuf,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct PublicationJournal {
+    version: u8,
+    staging_dir: PathBuf,
+    replacement_files: BTreeSet<PathBuf>,
+    obsolete_files: BTreeSet<PathBuf>,
+    prior: PriorCanonicalState,
+    recovery_attempts: u8,
+    #[serde(default)]
+    resolution: Option<RecoveryResolution>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecoveryStatus {
+    NoPendingPublication,
+    Recovered,
 }
 
 #[derive(Clone, Debug)]
@@ -186,7 +222,7 @@ fn partial_files(manifest: &PartialManifest) -> BTreeSet<PathBuf> {
 fn snapshot_partial(canonical_dir: &Path, manifest: &PartialManifest) -> Result<tempfile::TempDir> {
     let parent = canonical_dir.parent().unwrap_or(canonical_dir);
     let snapshot = tempfile::Builder::new()
-        .prefix(".concert-split-partial-rollback-")
+        .prefix(PARTIAL_RECOVERY_NAME)
         .tempdir_in(parent)?;
     for relative in partial_files(manifest) {
         copy_synced(
@@ -198,6 +234,8 @@ fn snapshot_partial(canonical_dir: &Path, manifest: &PartialManifest) -> Result<
         &canonical_dir.join(PARTIAL_MANIFEST_NAME),
         &snapshot.path().join(PARTIAL_MANIFEST_NAME),
     )?;
+    sync_directory(snapshot.path())?;
+    sync_directory(parent)?;
     Ok(snapshot)
 }
 
@@ -318,6 +356,427 @@ fn validate_relative_filename(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)
+        .with_context(|| format!("could not open directory {} for sync", path.display()))?
+        .sync_all()
+        .with_context(|| format!("could not sync directory {}", path.display()))
+}
+
+fn write_json_atomically<T: Serialize>(path: &Path, temporary: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    let mut file = File::create(temporary)?;
+    file.write_all(&serde_json::to_vec_pretty(value)?)?;
+    file.sync_all()?;
+    fs::rename(temporary, path)?;
+    sync_directory(parent)
+}
+
+fn validate_journal(
+    canonical_dir: &Path,
+    journal: &PublicationJournal,
+    require_owned_staging: bool,
+) -> Result<()> {
+    anyhow::ensure!(
+        journal.version == 1,
+        "unsupported publication journal version"
+    );
+    anyhow::ensure!(
+        journal.recovery_attempts <= MAX_RECOVERY_ATTEMPTS,
+        "invalid publication recovery-attempt count"
+    );
+    if require_owned_staging {
+        anyhow::ensure!(
+            journal.staging_dir.file_name().is_some_and(|name| name
+                .to_string_lossy()
+                .starts_with(".concert-split-staging-")),
+            "invalid publication staging directory"
+        );
+    }
+    anyhow::ensure!(
+        journal.staging_dir.parent() == canonical_dir.parent(),
+        "publication staging directory is not a canonical sibling"
+    );
+    anyhow::ensure!(
+        !journal.replacement_files.is_empty(),
+        "publication journal has no replacement files"
+    );
+    for relative in journal
+        .replacement_files
+        .iter()
+        .chain(&journal.obsolete_files)
+    {
+        validate_relative_filename(relative)?;
+    }
+    anyhow::ensure!(
+        journal
+            .replacement_files
+            .is_disjoint(&journal.obsolete_files),
+        "publication replacement and obsolete files overlap"
+    );
+    match &journal.prior {
+        PriorCanonicalState::Empty => {
+            anyhow::ensure!(
+                journal.obsolete_files.is_empty(),
+                "empty prior state cannot have obsolete files"
+            );
+        }
+        PriorCanonicalState::Published { files, .. } => {
+            anyhow::ensure!(!files.is_empty(), "published prior state has no files");
+            let expected_obsolete: BTreeSet<PathBuf> = files
+                .difference(&journal.replacement_files)
+                .cloned()
+                .collect();
+            anyhow::ensure!(
+                journal.obsolete_files == expected_obsolete,
+                "obsolete files do not exactly match the prior Published Concert Split"
+            );
+            let backup = canonical_dir.join(BACKUP_DIR_NAME);
+            for relative in files {
+                validate_relative_filename(relative)?;
+                if journal.resolution != Some(RecoveryResolution::RolledBack) {
+                    let metadata = fs::metadata(backup.join(relative)).with_context(|| {
+                        format!("Published backup file is missing: {}", relative.display())
+                    })?;
+                    anyhow::ensure!(
+                        metadata.is_file() && metadata.len() > 0,
+                        "Published backup file is missing or empty: {}",
+                        relative.display()
+                    );
+                }
+            }
+        }
+        PriorCanonicalState::RecoverablePartial {
+            manifest,
+            snapshot_dir,
+        } => {
+            anyhow::ensure!(
+                snapshot_dir.parent() == canonical_dir.parent()
+                    && snapshot_dir.file_name().is_some_and(|name| {
+                        name.to_string_lossy().starts_with(PARTIAL_RECOVERY_NAME)
+                    }),
+                "invalid partial recovery snapshot directory"
+            );
+            validate_partial_manifest(snapshot_dir, manifest, None)?;
+            let expected_obsolete: BTreeSet<PathBuf> = partial_files(manifest)
+                .difference(&journal.replacement_files)
+                .cloned()
+                .collect();
+            anyhow::ensure!(
+                journal.obsolete_files == expected_obsolete,
+                "obsolete files do not exactly match the prior Recoverable Partial Split"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn read_journal(canonical_dir: &Path) -> Result<Option<PublicationJournal>> {
+    let path = canonical_dir.join(JOURNAL_NAME);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()))
+        }
+    };
+    let journal: PublicationJournal = serde_json::from_slice(&bytes)
+        .with_context(|| format!("could not parse {}", path.display()))?;
+    validate_journal(canonical_dir, &journal, true)?;
+    Ok(Some(journal))
+}
+
+fn write_journal(canonical_dir: &Path, journal: &PublicationJournal) -> Result<()> {
+    write_json_atomically(
+        &canonical_dir.join(JOURNAL_NAME),
+        &canonical_dir.join(JOURNAL_TEMP_NAME),
+        journal,
+    )
+}
+
+fn finish_journaled_publication(canonical_dir: &Path, journal: &PublicationJournal) -> Result<()> {
+    for relative in &journal.replacement_files {
+        let temporary = canonical_dir.join(format!(
+            ".concert-split-copy-{}",
+            relative.to_string_lossy()
+        ));
+        copy_synced(&journal.staging_dir.join(relative), &temporary)?;
+        fs::rename(&temporary, canonical_dir.join(relative))?;
+        sync_directory(canonical_dir)?;
+    }
+    for relative in &journal.obsolete_files {
+        #[cfg(test)]
+        maybe_fail(FailurePoint::RemoveObsolete)?;
+        let path = canonical_dir.join(relative);
+        if path.exists() {
+            fs::remove_file(path)?;
+            sync_directory(canonical_dir)?;
+        }
+    }
+    let manifest = PublishedManifest {
+        files: journal.replacement_files.clone(),
+    };
+    #[cfg(test)]
+    maybe_fail(FailurePoint::ManifestInstall)?;
+    write_json_atomically(
+        &canonical_dir.join(MANIFEST_NAME),
+        &canonical_dir.join(MANIFEST_TEMP_NAME),
+        &manifest,
+    )?;
+    if matches!(
+        journal.prior,
+        PriorCanonicalState::RecoverablePartial { .. }
+    ) {
+        let partial = canonical_dir.join(PARTIAL_MANIFEST_NAME);
+        if partial.exists() {
+            fs::remove_file(partial)?;
+            sync_directory(canonical_dir)?;
+        }
+    }
+    Ok(())
+}
+
+fn restore_journaled_prior(canonical_dir: &Path, journal: &PublicationJournal) -> Result<()> {
+    #[cfg(test)]
+    maybe_fail(FailurePoint::Rollback)?;
+    let prior_files = match &journal.prior {
+        PriorCanonicalState::Empty => BTreeSet::new(),
+        PriorCanonicalState::Published { files, .. } => {
+            let backup = canonical_dir.join(BACKUP_DIR_NAME);
+            for relative in files {
+                copy_synced(&backup.join(relative), &canonical_dir.join(relative))?;
+            }
+            write_json_atomically(
+                &canonical_dir.join(MANIFEST_NAME),
+                &canonical_dir.join(MANIFEST_TEMP_NAME),
+                &PublishedManifest {
+                    files: files.clone(),
+                },
+            )?;
+            files.clone()
+        }
+        PriorCanonicalState::RecoverablePartial {
+            manifest,
+            snapshot_dir,
+        } => {
+            let files = partial_files(manifest);
+            for relative in &files {
+                copy_synced(&snapshot_dir.join(relative), &canonical_dir.join(relative))?;
+            }
+            write_json_atomically(
+                &canonical_dir.join(PARTIAL_MANIFEST_NAME),
+                &canonical_dir.join(PARTIAL_MANIFEST_TEMP_NAME),
+                manifest,
+            )?;
+            files
+        }
+    };
+    for relative in journal.replacement_files.difference(&prior_files) {
+        let path = canonical_dir.join(relative);
+        if path.exists() {
+            fs::remove_file(path)?;
+        }
+    }
+    if !matches!(journal.prior, PriorCanonicalState::Published { .. }) {
+        let manifest = canonical_dir.join(MANIFEST_NAME);
+        if manifest.exists() {
+            fs::remove_file(manifest)?;
+        }
+    }
+    sync_directory(canonical_dir)
+}
+
+fn cleanup_recovery_state(canonical_dir: &Path, journal: &PublicationJournal) -> Result<()> {
+    fs::remove_file(canonical_dir.join(JOURNAL_NAME))?;
+    sync_directory(canonical_dir)?;
+    if journal.staging_dir.exists() {
+        fs::remove_dir_all(&journal.staging_dir)?;
+    }
+    if let PriorCanonicalState::RecoverablePartial { snapshot_dir, .. } = &journal.prior {
+        if snapshot_dir.exists() {
+            fs::remove_dir_all(snapshot_dir)?;
+        }
+    }
+    if let Some(parent) = canonical_dir.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum RecoveryResolution {
+    Finished,
+    RolledBack,
+}
+
+fn finalize_recovery_backup(
+    canonical_dir: &Path,
+    journal: &PublicationJournal,
+    resolution: RecoveryResolution,
+) -> Result<()> {
+    let backup = canonical_dir.join(BACKUP_DIR_NAME);
+    let old_backup = canonical_dir.join(BACKUP_OLD_NAME);
+    let candidate = canonical_dir.join(BACKUP_CANDIDATE_NAME);
+    if candidate.exists() {
+        fs::remove_dir_all(candidate)?;
+    }
+    match resolution {
+        RecoveryResolution::Finished => {
+            if old_backup.exists() {
+                fs::remove_dir_all(old_backup)?;
+            }
+        }
+        RecoveryResolution::RolledBack => {
+            if old_backup.exists() {
+                if backup.exists() {
+                    fs::remove_dir_all(&backup)?;
+                }
+                fs::rename(old_backup, backup)?;
+            } else if matches!(
+                journal.prior,
+                PriorCanonicalState::Published {
+                    retained_backup_before: false,
+                    ..
+                }
+            ) && backup.exists()
+            {
+                // The interrupted replacement created the first backup. After
+                // rolling back to that same Published Split there was no older
+                // retained generation before the attempt, so remove the copy.
+                fs::remove_dir_all(backup)?;
+            }
+        }
+    }
+    sync_directory(canonical_dir)
+}
+
+fn recovery_state_description(canonical_dir: &Path, journal: &PublicationJournal) -> String {
+    let prior = match journal.prior {
+        PriorCanonicalState::Empty => "empty",
+        PriorCanonicalState::Published { .. } => "published",
+        PriorCanonicalState::RecoverablePartial { .. } => "recoverable-partial",
+    };
+    format!(
+        "canonical={}, staging={}, backup={}, prior={}, attempts={}",
+        canonical_dir.display(),
+        journal.staging_dir.display(),
+        canonical_dir.join(BACKUP_DIR_NAME).display(),
+        prior,
+        journal.recovery_attempts
+    )
+}
+
+pub fn recover_publication(canonical_dir: &Path) -> Result<RecoveryStatus> {
+    // A journal can only exist inside an existing canonical directory. Avoid
+    // creating that directory solely for the lock: analysis-only runs promise
+    // not to create output state. Existing directories are locked before the
+    // journal read below.
+    if !canonical_dir.exists() {
+        return Ok(RecoveryStatus::NoPendingPublication);
+    }
+    let lock = lock_file(canonical_dir)?;
+    acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
+    let Some(mut journal) = read_journal(canonical_dir)? else {
+        return Ok(RecoveryStatus::NoPendingPublication);
+    };
+    if let Some(resolution) = journal.resolution {
+        finalize_recovery_backup(canonical_dir, &journal, resolution)?;
+        cleanup_recovery_state(canonical_dir, &journal)?;
+        return Ok(RecoveryStatus::Recovered);
+    }
+    if journal.recovery_attempts < MAX_RECOVERY_ATTEMPTS {
+        journal.recovery_attempts += 1;
+        write_journal(canonical_dir, &journal)?;
+        match finish_journaled_publication(canonical_dir, &journal) {
+            Ok(()) => {
+                journal.resolution = Some(RecoveryResolution::Finished);
+                write_journal(canonical_dir, &journal)?;
+                finalize_recovery_backup(canonical_dir, &journal, RecoveryResolution::Finished)?;
+                cleanup_recovery_state(canonical_dir, &journal)?;
+                return Ok(RecoveryStatus::Recovered);
+            }
+            Err(finish_error) if journal.recovery_attempts < MAX_RECOVERY_ATTEMPTS => {
+                anyhow::bail!(
+                    "Concert Split publication remains pending after recovery attempt {} at {}: {finish_error:#}",
+                    journal.recovery_attempts,
+                    canonical_dir.display()
+                );
+            }
+            Err(finish_error) => {
+                if let Err(rollback_error) = restore_journaled_prior(canonical_dir, &journal) {
+                    return Err(rollback_error).with_context(|| format!(
+                        "unrecoverable Concert Split publication ({}); finish failed ({finish_error:#})",
+                        recovery_state_description(canonical_dir, &journal)
+                    ));
+                }
+                journal.resolution = Some(RecoveryResolution::RolledBack);
+                write_journal(canonical_dir, &journal)?;
+                finalize_recovery_backup(canonical_dir, &journal, RecoveryResolution::RolledBack)?;
+            }
+        }
+    } else {
+        restore_journaled_prior(canonical_dir, &journal).with_context(|| {
+            format!(
+                "unrecoverable Concert Split publication ({})",
+                recovery_state_description(canonical_dir, &journal)
+            )
+        })?;
+        journal.resolution = Some(RecoveryResolution::RolledBack);
+        write_journal(canonical_dir, &journal)?;
+        finalize_recovery_backup(canonical_dir, &journal, RecoveryResolution::RolledBack)?;
+    }
+    cleanup_recovery_state(canonical_dir, &journal)?;
+    Ok(RecoveryStatus::Recovered)
+}
+
+#[cfg(test)]
+fn prepare_recovery_journal_for_test(request: &PublicationRequest) -> Result<()> {
+    let replacement_files = validate_replacements(request)?;
+    fs::create_dir_all(&request.canonical_dir)?;
+    let prior = read_manifest(&request.canonical_dir, &replacement_files)?;
+    let prior_state = if prior.files.is_empty() {
+        PriorCanonicalState::Empty
+    } else {
+        let backup = request.canonical_dir.join(BACKUP_DIR_NAME);
+        let old_backup = request.canonical_dir.join(BACKUP_OLD_NAME);
+        if old_backup.exists() {
+            fs::remove_dir_all(&old_backup)?;
+        }
+        if backup.exists() {
+            fs::rename(&backup, &old_backup)?;
+        }
+        fs::create_dir(&backup)?;
+        for relative in &prior.files {
+            copy_synced(
+                &request.canonical_dir.join(relative),
+                &backup.join(relative),
+            )?;
+        }
+        PriorCanonicalState::Published {
+            files: prior.files.clone(),
+            retained_backup_before: old_backup.exists(),
+        }
+    };
+    let obsolete_files = prior
+        .files
+        .difference(&replacement_files)
+        .cloned()
+        .collect();
+    let journal = PublicationJournal {
+        version: 1,
+        staging_dir: request.staging_dir.clone(),
+        replacement_files,
+        obsolete_files,
+        prior: prior_state,
+        recovery_attempts: 0,
+        resolution: None,
+    };
+    write_journal(&request.canonical_dir, &journal)
+}
+
 fn acquire_with_timeout(
     mut try_lock: impl FnMut() -> std::io::Result<()>,
     mode: &'static str,
@@ -360,28 +819,12 @@ fn copy_synced(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-fn restore_prior(
-    canonical: &Path,
-    backup: &Path,
-    prior: &PublishedManifest,
-    replacement: &BTreeSet<PathBuf>,
-) -> Result<()> {
-    #[cfg(test)]
-    maybe_fail(FailurePoint::Rollback)?;
-    for relative in replacement.difference(&prior.files) {
-        let path = canonical.join(relative);
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-    }
-    for relative in &prior.files {
-        copy_synced(&backup.join(relative), &canonical.join(relative))?;
-    }
-    Ok(())
-}
-
 pub fn publish(request: &PublicationRequest) -> Result<()> {
     let replacement = validate_replacements(request)?;
+    for relative in &replacement {
+        File::open(request.staging_dir.join(relative))?.sync_all()?;
+    }
+    sync_directory(&request.staging_dir)?;
     fs::create_dir_all(&request.canonical_dir)?;
     let lock = lock_file(&request.canonical_dir)?;
     acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
@@ -422,6 +865,7 @@ pub fn publish(request: &PublicationRequest) -> Result<()> {
                 &backup_candidate.join(relative),
             )?;
         }
+        sync_directory(&backup_candidate)?;
         if old_backup.exists() {
             fs::remove_dir_all(&old_backup)?;
         }
@@ -436,50 +880,45 @@ pub fn publish(request: &PublicationRequest) -> Result<()> {
             }
             return Err(error).context("could not install Concert Split backup");
         }
+        sync_directory(&request.canonical_dir)?;
     }
 
-    let result = (|| -> Result<()> {
-        for relative in &replacement {
-            let temporary = request.canonical_dir.join(format!(
-                ".concert-split-copy-{}",
-                relative.to_string_lossy()
-            ));
-            copy_synced(&request.staging_dir.join(relative), &temporary)?;
-            fs::rename(&temporary, request.canonical_dir.join(relative))?;
+    let partial_owned = partial_prior
+        .as_ref()
+        .map(partial_files)
+        .unwrap_or_default();
+    let obsolete: BTreeSet<PathBuf> = prior
+        .files
+        .union(&partial_owned)
+        .filter(|relative| !replacement.contains(*relative))
+        .cloned()
+        .collect();
+    let prior_state = if let (Some(partial), Some(snapshot)) = (&partial_prior, &partial_snapshot) {
+        PriorCanonicalState::RecoverablePartial {
+            manifest: partial.clone(),
+            snapshot_dir: snapshot.path().to_path_buf(),
         }
-        let partial_owned = partial_prior
-            .as_ref()
-            .map(partial_files)
-            .unwrap_or_default();
-        let obsolete: BTreeSet<PathBuf> = prior
-            .files
-            .union(&partial_owned)
-            .filter(|relative| !replacement.contains(*relative))
-            .cloned()
-            .collect();
-        for relative in obsolete {
-            #[cfg(test)]
-            maybe_fail(FailurePoint::RemoveObsolete)?;
-            let path = request.canonical_dir.join(relative);
-            if path.exists() {
-                fs::remove_file(path)?;
-            }
+    } else if prior.files.is_empty() {
+        PriorCanonicalState::Empty
+    } else {
+        PriorCanonicalState::Published {
+            files: prior.files.clone(),
+            retained_backup_before: old_backup.exists(),
         }
-        let manifest = PublishedManifest {
-            files: replacement.clone(),
-        };
-        let manifest_temp = request.canonical_dir.join(MANIFEST_TEMP_NAME);
-        let mut file = File::create(&manifest_temp)?;
-        file.write_all(&serde_json::to_vec_pretty(&manifest)?)?;
-        file.sync_all()?;
-        if partial_prior.is_some() {
-            fs::remove_file(request.canonical_dir.join(PARTIAL_MANIFEST_NAME))?;
-        }
-        #[cfg(test)]
-        maybe_fail(FailurePoint::ManifestInstall)?;
-        fs::rename(manifest_temp, request.canonical_dir.join(MANIFEST_NAME))?;
-        Ok(())
-    })();
+    };
+    let journal = PublicationJournal {
+        version: 1,
+        staging_dir: request.staging_dir.clone(),
+        replacement_files: replacement.clone(),
+        obsolete_files: obsolete,
+        prior: prior_state,
+        recovery_attempts: 0,
+        resolution: None,
+    };
+    validate_journal(&request.canonical_dir, &journal, !cfg!(test))?;
+    write_journal(&request.canonical_dir, &journal)?;
+
+    let result = finish_journaled_publication(&request.canonical_dir, &journal);
 
     if let Err(publication_error) = result {
         let manifest_temp = request.canonical_dir.join(MANIFEST_TEMP_NAME);
@@ -488,9 +927,7 @@ pub fn publish(request: &PublicationRequest) -> Result<()> {
         } else {
             None
         };
-        if let Err(rollback_error) =
-            restore_prior(&request.canonical_dir, &backup, &prior, &replacement)
-        {
+        if let Err(rollback_error) = restore_journaled_prior(&request.canonical_dir, &journal) {
             if let Some(snapshot) = partial_snapshot {
                 let preserved = snapshot.keep();
                 return Err(rollback_error).with_context(|| {
@@ -510,26 +947,16 @@ pub fn publish(request: &PublicationRequest) -> Result<()> {
             }
             fs::rename(&old_backup, &backup)?;
         }
-        if let (Some(partial), Some(snapshot)) = (&partial_prior, &partial_snapshot) {
-            if let Err(rollback_error) =
-                restore_partial(&request.canonical_dir, snapshot, partial, &replacement)
-            {
-                let preserved = partial_snapshot.unwrap().keep();
-                return Err(rollback_error).with_context(|| {
-                    format!(
-                        "publication failed ({publication_error:#}); partial rollback failed; recovery snapshot preserved at {}",
-                        preserved.display()
-                    )
-                });
-            }
-        }
         if let Some(cleanup_error) = cleanup_error {
             return Err(cleanup_error).with_context(|| {
                 format!("publication failed ({publication_error:#}) and temporary cleanup failed")
             });
         }
+        fs::remove_file(request.canonical_dir.join(JOURNAL_NAME))?;
+        sync_directory(&request.canonical_dir)?;
         return Err(publication_error);
     }
+    cleanup_recovery_state(&request.canonical_dir, &journal)?;
     if old_backup.exists() {
         if let Err(error) = fs::remove_dir_all(&old_backup) {
             log::warn!(
@@ -1337,5 +1764,371 @@ mod tests {
         assert_eq!(fs::read(canonical.join("First.m4a")).unwrap(), b"partial");
         assert!(canonical.join(PARTIAL_MANIFEST_NAME).is_file());
         assert!(!canonical.join(MANIFEST_NAME).exists());
+    }
+
+    #[test]
+    fn interrupted_first_publication_finishes_from_durable_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join(".concert-split-staging-interrupted");
+        write(&staging.join("Song.m4a"), b"replacement");
+        write(&canonical.join("preview.jpg"), b"unrelated");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging.clone(),
+            replacement_files: vec![PathBuf::from("Song.m4a")],
+        })
+        .unwrap();
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(
+            fs::read(canonical.join("Song.m4a")).unwrap(),
+            b"replacement"
+        );
+        assert_eq!(
+            fs::read(canonical.join("preview.jpg")).unwrap(),
+            b"unrelated"
+        );
+        assert!(canonical.join(MANIFEST_NAME).is_file());
+        assert!(!canonical.join(JOURNAL_NAME).exists());
+        assert!(!staging.exists());
+    }
+
+    #[test]
+    fn interrupted_replacement_finishes_and_retains_known_good_backup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let first = tmp.path().join("first");
+        write(&first.join("Keep.m4a"), b"old");
+        write(&first.join("Obsolete.m4a"), b"obsolete");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: first,
+            replacement_files: vec!["Keep.m4a".into(), "Obsolete.m4a".into()],
+        })
+        .unwrap();
+        let staging = tmp.path().join(".concert-split-staging-replacement");
+        write(&staging.join("Keep.m4a"), b"new");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging,
+            replacement_files: vec!["Keep.m4a".into()],
+        })
+        .unwrap();
+        write(&canonical.join("Keep.m4a"), b"interrupted bytes");
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(fs::read(canonical.join("Keep.m4a")).unwrap(), b"new");
+        assert!(!canonical.join("Obsolete.m4a").exists());
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Keep.m4a")).unwrap(),
+            b"old"
+        );
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Obsolete.m4a")).unwrap(),
+            b"obsolete"
+        );
+    }
+
+    #[test]
+    fn recovered_third_generation_keeps_one_backup_and_cleans_rotation_state() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        for (name, bytes) in [("first", b"first" as &[u8]), ("second", b"second")] {
+            let staging = tmp.path().join(format!(".concert-split-staging-{name}"));
+            write(&staging.join("Song.m4a"), bytes);
+            publish(&PublicationRequest {
+                canonical_dir: canonical.clone(),
+                staging_dir: staging,
+                replacement_files: vec!["Song.m4a".into()],
+            })
+            .unwrap();
+        }
+        let staging = tmp.path().join(".concert-split-staging-third");
+        write(&staging.join("Song.m4a"), b"third");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging,
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        assert!(canonical.join(BACKUP_OLD_NAME).is_dir());
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(fs::read(canonical.join("Song.m4a")).unwrap(), b"third");
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Song.m4a")).unwrap(),
+            b"second"
+        );
+        assert!(!canonical.join(BACKUP_OLD_NAME).exists());
+        assert!(!canonical.join(BACKUP_CANDIDATE_NAME).exists());
+    }
+
+    #[test]
+    fn failed_recovery_is_counted_and_a_later_invocation_can_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join(".concert-split-staging-retry");
+        write(&staging.join("Song.m4a"), b"replacement");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging.clone(),
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        fs::remove_file(staging.join("Song.m4a")).unwrap();
+
+        let first_error = recover_publication(&canonical).unwrap_err();
+        assert!(first_error.to_string().contains("remains pending"));
+        assert_eq!(
+            read_journal(&canonical).unwrap().unwrap().recovery_attempts,
+            1
+        );
+        write(&staging.join("Song.m4a"), b"replacement");
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(
+            fs::read(canonical.join("Song.m4a")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn third_failed_finish_restores_previous_published_split() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let first = tmp.path().join("first");
+        write(&first.join("Song.m4a"), b"known-good");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: first,
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        let staging = tmp.path().join(".concert-split-staging-fallback");
+        write(&staging.join("Song.m4a"), b"replacement");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging.clone(),
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        fs::remove_file(staging.join("Song.m4a")).unwrap();
+        write(&canonical.join("Song.m4a"), b"inconsistent");
+
+        assert!(recover_publication(&canonical).is_err());
+        assert!(recover_publication(&canonical).is_err());
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(fs::read(canonical.join("Song.m4a")).unwrap(), b"known-good");
+        assert!(!canonical.join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn failed_finish_and_rollback_retains_unrecoverable_journal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let first = tmp.path().join("first");
+        write(&first.join("Song.m4a"), b"known-good");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: first,
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        let staging = tmp.path().join(".concert-split-staging-unrecoverable");
+        write(&staging.join("Song.m4a"), b"replacement");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging.clone(),
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        fs::remove_file(staging.join("Song.m4a")).unwrap();
+        assert!(recover_publication(&canonical).is_err());
+        assert!(recover_publication(&canonical).is_err());
+        fail_at(FailurePoint::Rollback);
+
+        let error = recover_publication(&canonical).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unrecoverable Concert Split publication"));
+        assert!(canonical.join(JOURNAL_NAME).is_file());
+        assert_eq!(
+            read_journal(&canonical).unwrap().unwrap().recovery_attempts,
+            3
+        );
+    }
+
+    #[test]
+    fn recovery_rejects_a_non_owned_staging_directory() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join("not-owned-staging");
+        write(&staging.join("Song.m4a"), b"replacement");
+        fs::create_dir_all(&canonical).unwrap();
+        write_journal(
+            &canonical,
+            &PublicationJournal {
+                version: 1,
+                staging_dir: staging,
+                replacement_files: BTreeSet::from([PathBuf::from("Song.m4a")]),
+                obsolete_files: BTreeSet::new(),
+                prior: PriorCanonicalState::Empty,
+                recovery_attempts: 0,
+                resolution: None,
+            },
+        )
+        .unwrap();
+
+        let error = recover_publication(&canonical).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("invalid publication staging directory"));
+        assert!(canonical.join(JOURNAL_NAME).is_file());
+    }
+
+    #[test]
+    fn third_failed_finish_restores_recoverable_partial_split() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let partial_staging = tmp.path().join("partial");
+        write(&partial_staging.join("First.m4a"), b"partial-known-good");
+        publish_partial(&PartialPublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: partial_staging,
+            expected_tracks: expected(&[("First", &["First.m4a"])]),
+            completed_tracks: vec![PartialTrackOutput {
+                title: "First".to_string(),
+                start_time: 0.0,
+                end_time: 10.0,
+                files: vec!["First.m4a".into()],
+            }],
+        })
+        .unwrap();
+        let partial = read_partial_manifest(&canonical).unwrap().unwrap();
+        let snapshot = snapshot_partial(&canonical, &partial).unwrap();
+        let staging = tmp.path().join(".concert-split-staging-partial-fallback");
+        write(&staging.join("First.m4a"), b"complete");
+        write_journal(
+            &canonical,
+            &PublicationJournal {
+                version: 1,
+                staging_dir: staging.clone(),
+                replacement_files: BTreeSet::from(["First.m4a".into()]),
+                obsolete_files: BTreeSet::new(),
+                prior: PriorCanonicalState::RecoverablePartial {
+                    manifest: partial,
+                    snapshot_dir: snapshot.path().to_path_buf(),
+                },
+                recovery_attempts: 0,
+                resolution: None,
+            },
+        )
+        .unwrap();
+        fs::remove_file(staging.join("First.m4a")).unwrap();
+        write(&canonical.join("First.m4a"), b"inconsistent");
+
+        assert!(recover_publication(&canonical).is_err());
+        assert!(recover_publication(&canonical).is_err());
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(
+            fs::read(canonical.join("First.m4a")).unwrap(),
+            b"partial-known-good"
+        );
+        assert!(canonical.join(PARTIAL_MANIFEST_NAME).is_file());
+        assert!(!canonical.join(MANIFEST_NAME).exists());
+    }
+
+    #[test]
+    fn journal_already_at_three_attempts_rolls_back_without_finishing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join(".concert-split-staging-at-limit");
+        write(&staging.join("Song.m4a"), b"would-finish");
+        fs::create_dir_all(&canonical).unwrap();
+        write(&canonical.join("Song.m4a"), b"inconsistent");
+        write_journal(
+            &canonical,
+            &PublicationJournal {
+                version: 1,
+                staging_dir: staging,
+                replacement_files: BTreeSet::from(["Song.m4a".into()]),
+                obsolete_files: BTreeSet::new(),
+                prior: PriorCanonicalState::Empty,
+                recovery_attempts: MAX_RECOVERY_ATTEMPTS,
+                resolution: None,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert!(!canonical.join("Song.m4a").exists());
+        assert!(!canonical.join(JOURNAL_NAME).exists());
+    }
+
+    #[test]
+    fn rollback_backup_finalization_is_replay_safe_before_journal_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        for (name, bytes) in [("first", b"first" as &[u8]), ("second", b"second")] {
+            let staging = tmp.path().join(format!(".concert-split-staging-{name}"));
+            write(&staging.join("Song.m4a"), bytes);
+            publish(&PublicationRequest {
+                canonical_dir: canonical.clone(),
+                staging_dir: staging,
+                replacement_files: vec!["Song.m4a".into()],
+            })
+            .unwrap();
+        }
+        let staging = tmp.path().join(".concert-split-staging-replay-rollback");
+        write(&staging.join("Song.m4a"), b"third");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging,
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        let mut journal = read_journal(&canonical).unwrap().unwrap();
+        restore_journaled_prior(&canonical, &journal).unwrap();
+        journal.resolution = Some(RecoveryResolution::RolledBack);
+        write_journal(&canonical, &journal).unwrap();
+        finalize_recovery_backup(&canonical, &journal, RecoveryResolution::RolledBack).unwrap();
+        assert!(canonical.join(JOURNAL_NAME).is_file());
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Song.m4a")).unwrap(),
+            b"first"
+        );
+
+        assert_eq!(
+            recover_publication(&canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+        assert_eq!(fs::read(canonical.join("Song.m4a")).unwrap(), b"second");
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Song.m4a")).unwrap(),
+            b"first"
+        );
+        assert!(!canonical.join(JOURNAL_NAME).exists());
     }
 }

@@ -62,4 +62,5 @@ Commands and final results are recorded here after final verification:
 The implementation-plan review required exact rollback snapshots, typed Job
 failure data, complete-over-partial semantics, and a reconstruction success
 gate; those findings are incorporated. Crash-interrupted publication and its
-durable recovery journal remain intentionally scoped to #144.
+durable recovery journal were subsequently implemented by #144; see
+`2026-07-22-concert-split-recovery.md`.

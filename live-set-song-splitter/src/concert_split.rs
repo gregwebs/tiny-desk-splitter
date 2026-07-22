@@ -15,6 +15,7 @@
 use crate::detect::{self, Settings};
 use crate::ocr_backend::{default_ocr_choice, ensure_ocr_choice_available, OcrChoice};
 use crate::produce::{self, CutContext};
+pub use crate::publication::RecoveryStatus;
 use crate::publication::{
     self, PartialExpectedTrack, PartialPublicationRequest, PartialTrackOutput, PublicationRequest,
     PublishedSplitExists,
@@ -430,6 +431,12 @@ pub fn run(
     request: ConcertSplitRequest,
     progress: &mut dyn FnMut(ConcertSplitProgress),
 ) -> Result<ConcertSplitOutcome> {
+    recover_publication(&request.output_dir).with_context(|| {
+        format!(
+            "could not resolve pending Concert Split publication at {}",
+            request.output_dir.display()
+        )
+    })?;
     progress(ConcertSplitProgress::PhaseStarted(SplitPhase::Validate));
     validate_request(&request)?;
 
@@ -758,6 +765,36 @@ pub fn run(
     Ok(outcome)
 }
 
+/// Resolve one interrupted complete publication before the directory is read
+/// or used for another Concert Split.
+pub fn recover_publication(output_dir: &Path) -> Result<RecoveryStatus> {
+    publication::recover_publication(output_dir)
+}
+
+/// Resolve interrupted publications in direct concert directories below the
+/// application's `workdir/concerts` root. A pending or unrecoverable directory
+/// stops the scan so callers cannot serve a mixture as authoritative.
+pub fn recover_publications(concerts_dir: &Path) -> Result<usize> {
+    let entries = match fs::read_dir(concerts_dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not scan {}", concerts_dir.display()))
+        }
+    };
+    let mut recovered = 0;
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        if recover_publication(&entry.path())? == RecoveryStatus::Recovered {
+            recovered += 1;
+        }
+    }
+    Ok(recovered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -841,6 +878,47 @@ mod tests {
     }
 
     fn no_progress(_event: ConcertSplitProgress) {}
+
+    #[test]
+    fn new_split_rejects_pending_invalid_publication_before_media_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let output = dir.path().join("out");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(
+            output.join(crate::publication::JOURNAL_NAME),
+            b"not valid json",
+        )
+        .unwrap();
+        let request = ConcertSplitRequest {
+            concert: test_concert("RecoveryGate", &["Song"]),
+            input_file: dir.path().join("missing.mp4"),
+            output_dir: output,
+            timestamps: None,
+            options: default_options(),
+        };
+
+        let error = run(request, &mut no_progress).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("pending Concert Split publication"));
+        assert!(format!("{error:#}").contains("could not parse"));
+    }
+
+    #[test]
+    fn publication_scan_fails_closed_on_an_invalid_concert_journal() {
+        let dir = tempfile::tempdir().unwrap();
+        let concerts = dir.path().join("concerts");
+        let output = concerts.join("Album");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(
+            output.join(crate::publication::JOURNAL_NAME),
+            b"not valid json",
+        )
+        .unwrap();
+
+        let error = recover_publications(&concerts).unwrap_err();
+        assert!(format!("{error:#}").contains("could not parse"));
+    }
 
     #[test]
     fn failed_first_split_publishes_completed_tracks_as_partial() {
