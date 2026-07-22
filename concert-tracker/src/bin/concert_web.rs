@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use concert_tracker::db;
@@ -139,6 +139,15 @@ async fn main() -> Result<()> {
         build_split_target(cli.splitter, cli.splitter_bin.clone(), resolve_splitter_cli)
             .map_err(anyhow::Error::msg)
             .context("resolving --splitter target")?;
+
+    tracing::debug!("recovering interrupted Concert Split publications");
+    let recovered = recover_split_publications_before_startup(&cli.workdir)?;
+    if recovered > 0 {
+        tracing::info!(
+            "recovered {} interrupted Concert Split publication(s) before startup",
+            recovered
+        );
+    }
 
     tracing::debug!("opening database: {:?}", cli.db);
     let conn = db::connection::open(&cli.db)?;
@@ -318,9 +327,23 @@ async fn shutdown_signal() {
     tracing::info!("received Ctrl+C, shutting down");
 }
 
+fn recover_split_publications_before_startup(workdir: &Path) -> Result<usize> {
+    live_set_splitter::concert_split::recover_publications(&workdir.join("concerts"))
+        .context("recovering interrupted Concert Split publications before startup")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_recovery_accepts_a_workdir_without_concerts() {
+        let workdir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            recover_split_publications_before_startup(workdir.path()).unwrap(),
+            0
+        );
+    }
 
     #[test]
     fn rejects_splitter_bin_under_library_mode() {
