@@ -4,6 +4,7 @@ pub mod prepare;
 pub mod run;
 pub mod scrape_queue;
 pub mod split;
+mod split_library;
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -17,6 +18,8 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
+
+use concert_types::ConcertInfo;
 
 pub use crate::concert_media::find_downloaded_file;
 use crate::model::concert_dir;
@@ -399,6 +402,12 @@ impl SplitMode {
 
 pub struct SplitJob {
     pub concert_id: i64,
+    /// Typed concert metadata, consumed directly by the library adapter's
+    /// `ConcertSplitRequest`. `json_path` below is the *same data* serialized
+    /// to a temp file — written unconditionally (regardless of adapter) so the
+    /// CLI adapter's subprocess and the library adapter's `concert.json` parity
+    /// copy (see `jobs::split_library`) both have a byte-identical source.
+    pub concert: ConcertInfo,
     pub json_path: PathBuf,
     pub input_file: PathBuf,
     /// Directory the splitter writes per-song files into. With the
@@ -451,27 +460,39 @@ pub type DownloadCommandFn = Arc<dyn Fn(&DownloadJob) -> Command + Send + Sync>;
 pub type SplitCommandFn = Arc<dyn Fn(&SplitJob) -> Command + Send + Sync>;
 pub type OpenCommandFn = Arc<dyn Fn(&Path) -> Command + Send + Sync>;
 
-pub struct CommandJobRunner {
+/// How the split step is executed. `Command` covers both production's CLI
+/// (subprocess) adapter and every test's arbitrary shell-script seam (see
+/// `JobConfig::from_commands`); `Library` calls
+/// `live_set_splitter::concert_split::run` in-process (see
+/// `jobs::split_library`) — #141's in-process default. Kept as a runner-level
+/// choice (not a `setup`-time branch) so `SplitRequest::setup` stays adapter-
+/// agnostic; see docs/concert-split.md.
+pub enum SplitBackend {
+    Command(SplitCommandFn),
+    Library,
+}
+
+pub struct ProductionJobRunner {
     download_cmd: DownloadCommandFn,
-    split_cmd: SplitCommandFn,
+    split: SplitBackend,
     open_cmd: OpenCommandFn,
 }
 
-impl CommandJobRunner {
+impl ProductionJobRunner {
     pub fn new(
         download_cmd: DownloadCommandFn,
-        split_cmd: SplitCommandFn,
+        split: SplitBackend,
         open_cmd: OpenCommandFn,
     ) -> Self {
         Self {
             download_cmd,
-            split_cmd,
+            split,
             open_cmd,
         }
     }
 }
 
-impl JobRunner for CommandJobRunner {
+impl JobRunner for ProductionJobRunner {
     fn run_download<'a>(
         &'a self,
         job: &'a DownloadJob,
@@ -495,17 +516,22 @@ impl JobRunner for CommandJobRunner {
         job: &'a SplitJob,
         log_file: Option<&'a Path>,
     ) -> JobRunFuture<'a, JobStepOutcome> {
-        Box::pin(async move {
-            let cmd = (self.split_cmd)(job);
-            command_job_outcome(
-                cmd,
-                "split",
-                job.concert_id,
-                log_file,
-                ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter",
-            )
-            .await
-        })
+        match &self.split {
+            SplitBackend::Command(split_cmd) => {
+                let cmd = split_cmd(job);
+                Box::pin(async move {
+                    command_job_outcome(
+                        cmd,
+                        "split",
+                        job.concert_id,
+                        log_file,
+                        ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter",
+                    )
+                    .await
+                })
+            }
+            SplitBackend::Library => Box::pin(split_library::run(job, log_file)),
+        }
     }
 
     fn open_media<'a>(
@@ -559,19 +585,134 @@ pub struct JobConfig {
     runner: Arc<dyn JobRunner>,
 }
 
-/// Default location of the splitter binary. Looks for `live-set-splitter`
-/// as a sibling of the currently running executable, so `cargo run` and
-/// `cargo install` both place it correctly. Falls back to PATH lookup.
-pub fn default_splitter_bin() -> PathBuf {
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(parent) = exe.parent() {
-            let sibling = parent.join("live-set-splitter");
-            if sibling.exists() {
-                return sibling;
-            }
+/// How to invoke the CLI (subprocess) splitter adapter, resolved by
+/// [`resolve_splitter_cli`] in priority order. `Executable` covers both an
+/// explicit `--splitter-bin` override and a resolved sibling-of-current-exe or
+/// PATH executable; `CargoRun` is the debug-build-only fallback anchored to the
+/// workspace manifest, used when no executable resolved at all.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SplitterCli {
+    Executable(PathBuf),
+    CargoRun { workspace_manifest: PathBuf },
+}
+
+/// Which Concert Split adapter `concert-web`/`concert-db` use: the in-process
+/// library (default, #141) or the CLI subprocess (debugging, strict
+/// process-kill cancellation). See docs/concert-split.md.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SplitTarget {
+    Library,
+    Cli(SplitterCli),
+}
+
+/// Resolve how the CLI adapter's splitter executable should be invoked, in
+/// priority order: an explicit override, a `live-set-splitter` executable
+/// sibling of the currently running executable, a `live-set-splitter` on PATH,
+/// and — **only in debug builds** — a `cargo run` fallback anchored to the
+/// workspace manifest (so `cargo run --bin concert-web -- --splitter cli` works
+/// without a separate `cargo build --bin live-set-splitter` first). Release
+/// builds return a clear error instead of the `cargo run` fallback, since a
+/// release binary should never shell out to `cargo`.
+///
+/// `exists`/`on_path` are injected so this is unit-testable without touching
+/// the real filesystem or PATH — see `resolve_splitter_cli` for the production
+/// entry point that supplies them for real.
+fn resolve_splitter_cli_with(
+    override_bin: Option<PathBuf>,
+    sibling: Option<PathBuf>,
+    workspace_manifest: PathBuf,
+    exists: impl Fn(&Path) -> bool,
+    on_path: impl Fn(&Path) -> bool,
+    debug_build: bool,
+) -> Result<SplitterCli, String> {
+    if let Some(bin) = override_bin {
+        return Ok(SplitterCli::Executable(bin));
+    }
+    if let Some(sibling) = sibling {
+        if exists(&sibling) {
+            return Ok(SplitterCli::Executable(sibling));
         }
     }
-    PathBuf::from("live-set-splitter")
+    let path_name = Path::new("live-set-splitter");
+    if on_path(path_name) {
+        return Ok(SplitterCli::Executable(path_name.to_path_buf()));
+    }
+    if debug_build {
+        return Ok(SplitterCli::CargoRun { workspace_manifest });
+    }
+    Err(
+        "no live-set-splitter executable found (checked a sibling of the running \
+         executable and PATH), and this is a release build so no `cargo run` \
+         fallback is available. Build it with: cargo build --release --bin \
+         live-set-splitter, or pass --splitter-bin <path>"
+            .to_string(),
+    )
+}
+
+/// Production entry point for [`resolve_splitter_cli_with`]: resolves the
+/// sibling-of-current-exe and PATH candidates for real, and anchors the
+/// `cargo run` fallback to this crate's workspace manifest
+/// (`env!("CARGO_MANIFEST_DIR")` is `concert-tracker`'s own directory at
+/// compile time, so `/../Cargo.toml` is the workspace root regardless of where
+/// the built binary later runs from).
+pub fn resolve_splitter_cli(override_bin: Option<PathBuf>) -> Result<SplitterCli, String> {
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|parent| parent.join("live-set-splitter")));
+    let workspace_manifest = PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml"));
+    resolve_splitter_cli_with(
+        override_bin,
+        sibling,
+        workspace_manifest,
+        |p| p.exists(),
+        |p| which::which(p).is_ok(),
+        cfg!(debug_assertions),
+    )
+}
+
+/// Build the CLI adapter's subprocess `Command` for a given job — the same
+/// argument translation regardless of whether `resolved` is a direct
+/// executable or the debug `cargo run` fallback (in the latter case, every
+/// arg appended after `cargo run`'s own `--` is forwarded to the splitter
+/// binary unchanged).
+fn build_cli_split_command(resolved: &SplitterCli, job: &SplitJob) -> Command {
+    let mut cmd = match resolved {
+        SplitterCli::Executable(path) => Command::new(path),
+        SplitterCli::CargoRun { workspace_manifest } => {
+            let mut cmd = Command::new("cargo");
+            cmd.arg("run")
+                .arg("--bin")
+                .arg("live-set-splitter")
+                .arg("--manifest-path")
+                .arg(workspace_manifest)
+                .arg("--");
+            cmd
+        }
+    };
+    cmd.arg(&job.json_path)
+        .arg("--input-file")
+        .arg(&job.input_file)
+        .arg("--output-dir")
+        .arg(&job.output_dir)
+        // Silence Leptonica's stderr chatter (e.g. "boxClipToRectangle:
+        // box outside rectangle") emitted during OCR refinement on
+        // near-empty frames. 4 == L_SEVERITY_NONE. Subprocess-only: the
+        // library adapter's default paddle-ocr backend doesn't use leptonica.
+        .env("LEPT_MSG_SEVERITY", "4");
+    // User/reset modes: skip analysis and cut at the provided boundaries.
+    // Deliberately no --refine-timestamps so the splitter doesn't
+    // rewrite timestamps.json, preserving the automated record.
+    if let Some(ts_path) = &job.timestamps_path {
+        cmd.arg("--timestamps-file").arg(ts_path);
+    }
+    // For user-timestamps splits, also cut interlude files so the
+    // full [0, media_duration] timeline is covered on disk.
+    if let SplitMode::UserTimestamps { media_duration, .. } = &job.mode {
+        cmd.arg("--emit-interludes")
+            .arg("--media-duration")
+            .arg(media_duration.to_string());
+    }
+    cmd
 }
 
 fn binary_exists(path: &Path) -> bool {
@@ -582,17 +723,21 @@ fn binary_exists(path: &Path) -> bool {
     }
 }
 
-/// Check that required external binaries are available. Returns a list of
-/// human-readable warnings for any that are missing.
-pub fn check_dependencies(splitter_bin: &Path) -> Vec<String> {
+/// Check that required external binaries are available. `splitter` is the CLI
+/// adapter's resolved executable (`None` for the library adapter, which needs
+/// no separate splitter executable — only the shared media tools below).
+/// Returns human-readable warnings for anything missing.
+pub fn check_dependencies(splitter: Option<&SplitterCli>) -> Vec<String> {
     let mut warnings = Vec::new();
 
-    if !binary_exists(splitter_bin) {
-        warnings.push(format!(
-            "splitter binary not found at '{}'. Splitting will fail. \
-             Build it with: cargo build --bin live-set-splitter",
-            splitter_bin.display()
-        ));
+    if let Some(SplitterCli::Executable(path)) = splitter {
+        if !binary_exists(path) {
+            warnings.push(format!(
+                "splitter binary not found at '{}'. Splitting will fail. \
+                 Build it with: cargo build --bin live-set-splitter",
+                path.display()
+            ));
+        }
     }
 
     if which::which("yt-dlp").is_err() {
@@ -626,15 +771,33 @@ impl JobConfig {
         }
     }
 
+    /// Low-level constructor exposing the full [`SplitBackend`] choice
+    /// (`Command` or `Library`). `from_commands` below is the common case
+    /// (always `Command`); this is for the library backend's own tests and for
+    /// `JobConfig::production`.
+    pub fn with_split_backend(
+        working_dir: PathBuf,
+        download_cmd: DownloadCommandFn,
+        split: SplitBackend,
+        open_cmd: OpenCommandFn,
+    ) -> Self {
+        Self::with_runner(
+            working_dir,
+            Arc::new(ProductionJobRunner::new(download_cmd, split, open_cmd)),
+        )
+    }
+
     pub fn from_commands(
         working_dir: PathBuf,
         download_cmd: DownloadCommandFn,
         split_cmd: SplitCommandFn,
         open_cmd: OpenCommandFn,
     ) -> Self {
-        Self::with_runner(
+        Self::with_split_backend(
             working_dir,
-            Arc::new(CommandJobRunner::new(download_cmd, split_cmd, open_cmd)),
+            download_cmd,
+            SplitBackend::Command(split_cmd),
+            open_cmd,
         )
     }
 
@@ -661,9 +824,19 @@ impl JobConfig {
         )
     }
 
-    pub fn production(working_dir: PathBuf, splitter_bin: PathBuf, open_program: String) -> Self {
+    pub fn production(
+        working_dir: PathBuf,
+        split_target: SplitTarget,
+        open_program: String,
+    ) -> Self {
         let wd = working_dir.clone();
-        Self::from_commands(
+        let split = match split_target {
+            SplitTarget::Library => SplitBackend::Library,
+            SplitTarget::Cli(resolved) => SplitBackend::Command(Arc::new(move |job: &SplitJob| {
+                build_cli_split_command(&resolved, job)
+            })),
+        };
+        Self::with_split_backend(
             working_dir,
             Arc::new(move |job: &DownloadJob| {
                 let cd = concert_dir(&wd, &job.album);
@@ -676,32 +849,7 @@ impl JobConfig {
                 cmd.arg("-o").arg(out).arg(&job.source_url);
                 cmd
             }),
-            Arc::new(move |job: &SplitJob| {
-                let mut cmd = Command::new(&splitter_bin);
-                cmd.arg(&job.json_path)
-                    .arg("--input-file")
-                    .arg(&job.input_file)
-                    .arg("--output-dir")
-                    .arg(&job.output_dir)
-                    // Silence Leptonica's stderr chatter (e.g. "boxClipToRectangle:
-                    // box outside rectangle") emitted during OCR refinement on
-                    // near-empty frames. 4 == L_SEVERITY_NONE.
-                    .env("LEPT_MSG_SEVERITY", "4");
-                // User/reset modes: skip analysis and cut at the provided boundaries.
-                // Deliberately no --refine-timestamps so the splitter doesn't
-                // rewrite timestamps.json, preserving the automated record.
-                if let Some(ts_path) = &job.timestamps_path {
-                    cmd.arg("--timestamps-file").arg(ts_path);
-                }
-                // For user-timestamps splits, also cut interlude files so the
-                // full [0, media_duration] timeline is covered on disk.
-                if let SplitMode::UserTimestamps { media_duration, .. } = &job.mode {
-                    cmd.arg("--emit-interludes")
-                        .arg("--media-duration")
-                        .arg(media_duration.to_string());
-                }
-                cmd
-            }),
+            split,
             Arc::new(move |path: &Path| {
                 let mut cmd = Command::new(&open_program);
                 cmd.arg(path);
@@ -1165,7 +1313,8 @@ mod tests {
 
     #[test]
     fn check_dependencies_warns_for_missing_splitter() {
-        let warnings = check_dependencies(Path::new("/nonexistent/live-set-splitter"));
+        let cli = SplitterCli::Executable(PathBuf::from("/nonexistent/live-set-splitter"));
+        let warnings = check_dependencies(Some(&cli));
         assert!(warnings
             .iter()
             .any(|w| w.contains("splitter binary not found")));
@@ -1176,7 +1325,222 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("live-set-splitter");
         File::create(&bin).unwrap();
-        let warnings = check_dependencies(&bin);
+        let cli = SplitterCli::Executable(bin);
+        let warnings = check_dependencies(Some(&cli));
         assert!(!warnings.iter().any(|w| w.contains("splitter")));
+    }
+
+    #[test]
+    fn check_dependencies_skips_splitter_check_for_library_adapter() {
+        // `None` (library adapter) must never emit a splitter-binary warning,
+        // regardless of what's on disk/PATH — the library adapter needs no
+        // separate executable.
+        let warnings = check_dependencies(None);
+        assert!(!warnings.iter().any(|w| w.contains("splitter binary")));
+    }
+
+    #[test]
+    fn check_dependencies_skips_splitter_check_for_cargo_run_fallback() {
+        // `CargoRun` has no single executable path to check for existence —
+        // cargo resolving/building the binary is not this function's concern.
+        let cli = SplitterCli::CargoRun {
+            workspace_manifest: PathBuf::from("/nonexistent/Cargo.toml"),
+        };
+        let warnings = check_dependencies(Some(&cli));
+        assert!(!warnings.iter().any(|w| w.contains("splitter binary")));
+    }
+
+    #[test]
+    fn resolve_splitter_cli_prefers_override_over_everything() {
+        let result = resolve_splitter_cli_with(
+            Some(PathBuf::from("/override/bin")),
+            Some(PathBuf::from("/sibling/bin")),
+            PathBuf::from("/workspace/Cargo.toml"),
+            |_| true,
+            |_| true,
+            true,
+        );
+        assert_eq!(
+            result,
+            Ok(SplitterCli::Executable(PathBuf::from("/override/bin")))
+        );
+    }
+
+    #[test]
+    fn resolve_splitter_cli_prefers_sibling_over_path() {
+        let result = resolve_splitter_cli_with(
+            None,
+            Some(PathBuf::from("/sibling/live-set-splitter")),
+            PathBuf::from("/workspace/Cargo.toml"),
+            |p| p == Path::new("/sibling/live-set-splitter"),
+            |_| true,
+            true,
+        );
+        assert_eq!(
+            result,
+            Ok(SplitterCli::Executable(PathBuf::from(
+                "/sibling/live-set-splitter"
+            )))
+        );
+    }
+
+    #[test]
+    fn resolve_splitter_cli_falls_back_to_path_when_sibling_missing() {
+        let result = resolve_splitter_cli_with(
+            None,
+            Some(PathBuf::from("/sibling/live-set-splitter")),
+            PathBuf::from("/workspace/Cargo.toml"),
+            |_| false,
+            |_| true,
+            true,
+        );
+        assert_eq!(
+            result,
+            Ok(SplitterCli::Executable(PathBuf::from("live-set-splitter")))
+        );
+    }
+
+    #[test]
+    fn resolve_splitter_cli_falls_back_to_cargo_run_in_debug_when_nothing_resolves() {
+        let result = resolve_splitter_cli_with(
+            None,
+            None,
+            PathBuf::from("/workspace/Cargo.toml"),
+            |_| false,
+            |_| false,
+            true,
+        );
+        assert_eq!(
+            result,
+            Ok(SplitterCli::CargoRun {
+                workspace_manifest: PathBuf::from("/workspace/Cargo.toml")
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_splitter_cli_errors_in_release_when_nothing_resolves() {
+        let result = resolve_splitter_cli_with(
+            None,
+            None,
+            PathBuf::from("/workspace/Cargo.toml"),
+            |_| false,
+            |_| false,
+            false,
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("release build"));
+    }
+
+    #[test]
+    fn build_cli_split_command_for_executable_uses_it_directly() {
+        let job = test_split_job(SplitMode::Analyze);
+        let resolved = SplitterCli::Executable(PathBuf::from("/bin/live-set-splitter"));
+        let cmd = build_cli_split_command(&resolved, &job);
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), "/bin/live-set-splitter");
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            vec![
+                job.json_path.to_string_lossy().into_owned(),
+                "--input-file".to_string(),
+                job.input_file.to_string_lossy().into_owned(),
+                "--output-dir".to_string(),
+                job.output_dir.to_string_lossy().into_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_cli_split_command_for_cargo_run_forwards_args_after_double_dash() {
+        let job = test_split_job(SplitMode::Analyze);
+        let resolved = SplitterCli::CargoRun {
+            workspace_manifest: PathBuf::from("/workspace/Cargo.toml"),
+        };
+        let cmd = build_cli_split_command(&resolved, &job);
+        let std_cmd = cmd.as_std();
+        assert_eq!(std_cmd.get_program(), "cargo");
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args[..6],
+            [
+                "run",
+                "--bin",
+                "live-set-splitter",
+                "--manifest-path",
+                "/workspace/Cargo.toml",
+                "--",
+            ]
+        );
+        assert_eq!(args[6], job.json_path.to_string_lossy());
+    }
+
+    /// A single-song [`ValidatedTimestamps`](crate::split_timestamps::ValidatedTimestamps),
+    /// for tests that only need `UserTimestamps`/`ResetToAuto` to hold *some*
+    /// valid value — the content doesn't matter to command/request translation.
+    fn test_validated_timestamps() -> crate::split_timestamps::ValidatedTimestamps {
+        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        let set_list = vec!["Song".to_string()];
+        let songs = vec![TimestampPayloadSong {
+            title: "Song".to_string(),
+            start_time: 0.0,
+            end_time: 100.0,
+        }];
+        ValidatedTimestamps::validate(&set_list, None, &songs).unwrap()
+    }
+
+    #[test]
+    fn build_cli_split_command_includes_emit_interludes_for_user_timestamps() {
+        let job = test_split_job(SplitMode::UserTimestamps {
+            ts: test_validated_timestamps(),
+            media_duration: 123.5,
+        });
+        let resolved = SplitterCli::Executable(PathBuf::from("/bin/live-set-splitter"));
+        let cmd = build_cli_split_command(&resolved, &job);
+        let std_cmd = cmd.as_std();
+        let args: Vec<String> = std_cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"--emit-interludes".into()));
+        assert!(args.contains(&"123.5".into()));
+    }
+
+    /// Minimal [`SplitJob`] for pure command/request-translation tests — no temp
+    /// files are read by the code under test here, so the `_temp_file` fields
+    /// just need to exist and stay alive for the job's lifetime.
+    fn test_split_job(mode: SplitMode) -> SplitJob {
+        let temp_file = tempfile::NamedTempFile::new().unwrap();
+        let json_path = temp_file.path().to_path_buf();
+        SplitJob {
+            concert_id: 1,
+            concert: ConcertInfo {
+                artist: "Artist".to_string(),
+                source: String::new(),
+                show: String::new(),
+                date: None,
+                album: "Album".to_string(),
+                description: None,
+                set_list: vec![],
+                musicians: vec![],
+                preview_image_url: None,
+                teaser: None,
+                timestamps: None,
+            },
+            json_path,
+            input_file: PathBuf::from("/media/input.mp4"),
+            output_dir: PathBuf::from("/media/output"),
+            mode,
+            _temp_file: temp_file,
+            _timestamps_temp_file: None,
+            timestamps_path: None,
+        }
     }
 }

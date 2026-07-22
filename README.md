@@ -22,7 +22,7 @@ Repository documentation:
 - [Architecture decisions](docs/adr/)
 - [Change Records](docs/change/)
 - [Job execution](docs/jobs.md): backend job execution and runner architecture
-- [Concert Split interface](docs/concert-split.md): the synchronous `live-set-splitter` library interface and its CLI adapter
+- [Concert Split interface](docs/concert-split.md): the synchronous `live-set-splitter` library interface, and `concert-web`'s in-process (default) vs. CLI subprocess adapter selection
 - [Domain language](CONTEXT.md): canonical vocabulary, including Job Request, Job Run, and Failed Job
 - [Hurl tests](hurl/README.md): black-box HTTP tests and Test Control API
 - [Data model](docs/data.md)

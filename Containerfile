@@ -128,8 +128,11 @@ RUN cargo build --release
 #     1. $PADDLE_OCR_MODEL_DIR  (env var, set below)
 #     2. models/ beside current_exe()
 #     3. CARGO_MANIFEST_DIR/models (source-tree fallback, not present here)
-#   OCR inference runs inside the *spawned* live-set-splitter subprocess, not
-#   inside concert-web.  All binaries and models must therefore be co-located
+#   Since #141, concert-web's default splitter adapter runs OCR in-process
+#   (library mode) rather than only inside a spawned live-set-splitter
+#   subprocess — --splitter cli still shells out for debugging. $PADDLE_OCR_MODEL_DIR
+#   is a container-wide env var, so it resolves for either adapter regardless of
+#   which binary performs OCR. All binaries and models are still co-located
 #   under /app so that candidate #2 also works as belt-and-suspenders.
 #
 #   Entrypoint defaults:

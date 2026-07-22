@@ -304,7 +304,7 @@ impl JobDriver {
 }
 
 /// [`JobRunner`] implementation backed by a [`JobDriver`]. Test-control's
-/// stand-in for `CommandJobRunner`'s real subprocesses: on a `Succeed`
+/// stand-in for `ProductionJobRunner`'s real subprocesses/library calls: on a `Succeed`
 /// outcome it writes the same sentinel files the real download/split
 /// commands would have produced, since the existing job lifecycle code in
 /// `jobs/download.rs`/`jobs/split.rs` reads the filesystem immediately after
@@ -447,12 +447,32 @@ mod tests {
         }
     }
 
+    /// Placeholder `ConcertInfo` for `SplitJob` fixtures below. `write_split_output`
+    /// (the fake splitter these tests drive) reads `job.json_path`/`job.mode`, not
+    /// `job.concert` — this field only needs to type-check here, not match content.
+    fn test_concert_info() -> concert_types::ConcertInfo {
+        concert_types::ConcertInfo {
+            artist: "Test Artist".to_string(),
+            source: String::new(),
+            show: String::new(),
+            date: None,
+            album: "Test Album".to_string(),
+            description: None,
+            set_list: vec![],
+            musicians: vec![],
+            preview_image_url: None,
+            teaser: None,
+            timestamps: None,
+        }
+    }
+
     fn analyze_split_job(concert_id: i64, output_dir: &Path, titles: &[&str]) -> SplitJob {
         let json = serde_json::json!({ "set_list": titles.iter().map(|t| serde_json::json!({"title": t})).collect::<Vec<_>>() });
         let mut json_file = tempfile::NamedTempFile::new().unwrap();
         std::io::Write::write_all(&mut json_file, json.to_string().as_bytes()).unwrap();
         SplitJob {
             concert_id,
+            concert: test_concert_info(),
             json_path: json_file.path().to_path_buf(),
             input_file: PathBuf::from("/nonexistent/source.mp4"),
             output_dir: output_dir.to_path_buf(),
@@ -473,6 +493,7 @@ mod tests {
         let ts = ValidatedTimestamps::validate(set_list, None, &payload).unwrap();
         SplitJob {
             concert_id,
+            concert: test_concert_info(),
             json_path: PathBuf::from("/unused"),
             input_file: PathBuf::from("/nonexistent/source.mp4"),
             output_dir: output_dir.to_path_buf(),
@@ -840,6 +861,7 @@ mod tests {
         let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
         let job = SplitJob {
             concert_id: 1,
+            concert: test_concert_info(),
             json_path: PathBuf::from("/unused"),
             input_file: PathBuf::from("/nonexistent/source.mp4"),
             output_dir: output_dir.clone(),

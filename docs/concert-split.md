@@ -4,16 +4,19 @@
 that owns the full transformation from source media + concert metadata to cut
 tracks, interludes, and timestamps. It replaces the previous design where this
 whole workflow lived only inside the `live-set-splitter` CLI binary; the CLI
-(`live-set-song-splitter/src/main.rs`) is now a thin adapter over this library
-function, and a future in-process caller (`concert-web`, see
-[#141](https://github.com/gregwebs/tiny-desk-splitter/issues/141)) can call the
-same `run` function directly, without shelling out to a subprocess or
-round-tripping through temporary JSON transport files.
+(`live-set-song-splitter/src/main.rs`) is a thin adapter over this library
+function, and `concert-web` (see
+[#141](https://github.com/gregwebs/tiny-desk-splitter/issues/141) and
+["concert-web adapter selection"](#concert-web-adapter-selection) below) calls
+the same `run` function directly by default, without shelling out to a
+subprocess or round-tripping through temporary JSON transport files.
 
 See [#138](https://github.com/gregwebs/tiny-desk-splitter/issues/138) for the
 full Deep Concert Split specification this interface is the first slice of,
-and [#140](https://github.com/gregwebs/tiny-desk-splitter/issues/140) for this
-slice's ticket.
+[#140](https://github.com/gregwebs/tiny-desk-splitter/issues/140) for this
+interface's own extraction ticket, and
+[#141](https://github.com/gregwebs/tiny-desk-splitter/issues/141) for wiring
+`concert-web` to call it in-process by default.
 
 ## The interface
 
@@ -106,9 +109,13 @@ file was written, so an in-process caller never needs to read it back off
 disk.
 
 `concert.json` (a byte-for-byte copy of the original input concert metadata)
-is written by the **CLI adapter**, not the library — only the CLI has the
-original file path to copy from; the library only produces its own computed
-`timestamps.json` artifact.
+is written by the **adapter**, not the library — the library only produces its
+own computed `timestamps.json` artifact. The CLI adapter's own `main()` copies
+it from the concert JSON file path it parsed (`copy_concert_json`).
+`concert-web`'s in-process library adapter has no such file path to copy from
+directly, so it instead copies from the same typed `ConcertInfo` it also
+serializes as the CLI-adapter subprocess's transport JSON — see
+[`jobs::split_library`](#concert-web-adapter-selection) below.
 
 ## CLI adapter
 
@@ -148,3 +155,80 @@ top-level library modules, grouped by the algorithm phase each owns:
 
 `audio`, `video`, `io`, `cut`, `ffmpeg`, `image`, `ocr`, and `ocr_backend`
 remain the lower-level library modules these phase modules build on.
+
+## concert-web adapter selection
+
+`concert-web`'s `--splitter` flag (`concert-tracker/src/bin/concert_web.rs`)
+picks how it executes a Concert Split, and `concert-db`'s `resplit` command
+always uses the CLI adapter (it's a batch/offline tool, not a long-running
+server, so the library adapter's dev-convenience default doesn't apply there):
+
+- **`library`** (default) — calls `concert_split::run` in-process, on a
+  `tokio::task::spawn_blocking` thread (`concert-tracker/src/jobs/split_library.rs`).
+  No separate `cargo build --bin live-set-splitter` is needed for
+  `cargo run --bin concert-web` to split.
+- **`cli`** — shells out to the `live-set-splitter` binary as a subprocess
+  (`build_cli_split_command` in `concert-tracker/src/jobs/mod.rs`), for
+  process-level debugging and strict process-kill cancellation (see
+  "Cancellation semantics" below). `--splitter-bin <path>` is accepted only in
+  this mode (rejected at startup otherwise) and, together with automatic
+  resolution, follows this priority order (`resolve_splitter_cli`):
+
+  ```
+  --splitter-bin override
+          │ absent
+          ▼
+  sibling of the running executable (`<exe-dir>/live-set-splitter`)
+          │ not found
+          ▼
+  `live-set-splitter` on PATH
+          │ not found
+          ▼
+  debug build? ──yes──► `cargo run --bin live-set-splitter
+  │no                     --manifest-path <workspace>/Cargo.toml --`
+  ▼
+  startup error (release builds never shell out to cargo)
+  ```
+
+Both adapters share the same `SplitJob`/`SplitMode` (Analyze,
+UserTimestamps, ResetToAuto) built once in `jobs::split::setup` — the library
+adapter translates it to a `ConcertSplitRequest` field-for-field the same way
+the CLI adapter translates it to subprocess arguments (`jobs::split_library`'s
+`request_for`/`options_for` mirror `build_cli_split_command`), including
+setting `ConcertSplitOptions::output_format`/`video_cut_mode` explicitly to
+`Both`/`Smart` — the values the CLI subprocess gets for free from clap's
+defaults but the library adapter, with no clap layer of its own, must set
+itself.
+
+### Cancellation semantics
+
+The two adapters diverge on what happens to in-flight work when a split is
+cancelled. The CLI adapter's subprocess is spawned with `kill_on_drop`, so
+cancelling the tokio task promptly `SIGKILL`s the splitter, and no more writes
+into the concert's output directory happen after that. The library adapter's
+`concert_split::run` executes on a `spawn_blocking` thread, which tokio cannot
+cancel: the job is marked Failed immediately (no double-commit — this matches
+the pre-existing archive-job cancellation residual documented in
+`jobs/run.rs`), but the detached blocking thread keeps running ffmpeg/OCR and
+writing output files to completion in the background.
+
+**Concrete risk this creates, beyond wasted background work:** because the
+job's registry slot and DB `split_started_at` state are freed immediately on
+cancel, a new split for the *same* concert is accepted right away — while the
+orphaned thread from the cancelled split may still be mid-write into the same
+`concert_dir(workdir, album)`. The two writers are not coordinated, so track
+files, `timestamps.json`, or `concert.json` from the two runs can interleave
+or leave the directory inconsistent with either run's own manifest. The CLI
+adapter does not have this risk (the killed subprocess writes nothing further
+before a retry can start).
+
+This asymmetry is accepted for #141 — a cooperative-cancellation seam would
+change #140's fixed `concert_split::run` signature, and the general
+same-directory-write-safety problem (this race is one instance of it) is
+squarely #142's ("Publish complete Concert Splits through staging and
+backup") territory: staged, validated output copied into place under a lock
+closes this gap for every adapter and every retry path, not just this one.
+Until then this is consistent with spec #139's framing of the CLI adapter as
+the one that offers "strict process-kill cancellation" — an operator who
+needs that guarantee during active development/debugging should use
+`--splitter cli`.

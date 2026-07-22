@@ -89,7 +89,12 @@ async function startServer() {
       "true",
       // Stub splitter (real executable, no mock): "splits" by copying the
       // full-concert file to one playable file per set-list song, so the
-      // automated split-on-play flow is testable end to end.
+      // automated split-on-play flow is testable end to end. Requires
+      // --splitter cli (#141 made the in-process library adapter the
+      // default, which has no --splitter-bin seam) so the subprocess is the
+      // stub rather than the real splitter.
+      "--splitter",
+      "cli",
       "--splitter-bin",
       path.join(__dirname, "stub-splitter.js"),
     ],
