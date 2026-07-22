@@ -12,6 +12,7 @@ pub mod ocr_leptess;
 #[cfg(feature = "paddle-ocr")]
 pub mod ocr_paddle;
 mod produce;
+pub mod publication;
 mod recover;
 mod refine;
 pub mod video;

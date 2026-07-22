@@ -207,6 +207,8 @@ fn render_progress(event: ConcertSplitProgress) {
                 SplitPhase::RefineAudio => "Refining song boundaries using audio analysis...",
                 SplitPhase::WriteMetadata => "Writing timestamps metadata",
                 SplitPhase::Cut => "Cutting tracks",
+                SplitPhase::ValidateOutput => "Validating split output",
+                SplitPhase::Publish => "Publishing split output",
                 SplitPhase::Cleanup => "Cleaning up",
             };
             println!("{}", label);

@@ -156,6 +156,52 @@ top-level library modules, grouped by the algorithm phase each owns:
 `audio`, `video`, `io`, `cut`, `ffmpeg`, `image`, `ocr`, and `ocr_backend`
 remain the lower-level library modules these phase modules build on.
 
+## Published output
+
+A Concert Split writes timestamps, song tracks, and interludes into a hidden
+per-run staging directory beside the concert directory. The canonical concert
+directory is not mutated during detection, refinement, or cutting. After the
+workflow has produced its full expected set, the publication module verifies
+that every expected output is a non-empty regular file and copies each file to
+a sibling temporary path before renaming it to its canonical filename.
+
+```text
+analyze / cut ──> .concert-split-staging-* ──> validate
+                                                    │
+                                  invalid ──────────┴──── valid
+                                     │                      │
+                              discard staging       exclusive file lock
+                                                            │
+                                  current canonical ──copy──> backup candidate
+                                                            │
+                                                      rotate one backup
+                                                            │
+                                                    rename replacements
+                                                            │
+                                                   remove obsolete owned files
+                                                            │
+                                                   install exact manifest
+```
+
+`.concert-split-published.json` is the source of truth for which canonical
+files belong to the Published Concert Split. Obsolete cleanup uses this exact
+set rather than treating every media extension as splitter-owned, so source
+media, `concert.json`, previews, and unrelated files are preserved. The
+previous exact set is retained under `.concert-split-backup`; a later
+successful publication replaces that one backup rather than accumulating
+generations.
+
+If an ordinary copy, removal, or manifest-install operation fails, publication
+restores the preceding exact set from backup and returns an infrastructure
+error. Process and host crashes are different: their journaled recovery is
+owned by #144. Recoverable Partial Split publication is likewise deferred to
+#143; this slice never promotes a failed first attempt.
+
+The publication lock is advisory and shared by both the library and CLI
+adapters because both call this same module. Canonical replacements use rename
+rather than truncating an existing file in place, so a reader that already
+opened a track continues reading a stable inode.
+
 ## concert-web adapter selection
 
 `concert-web`'s `--splitter` flag (`concert-tracker/src/bin/concert_web.rs`)

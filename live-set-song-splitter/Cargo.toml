@@ -44,6 +44,7 @@ anyhow = "1.0.97"
 concert-types = { path = "../concert-types" }
 regex = "1"
 unidecode = "0.3.0"
+fs2 = "0.4"
 leptess = { version = "0.14", optional = true }
 
 # PaddleOCR engine (optional). Vendored fork of `ocr-rs` (upstream:

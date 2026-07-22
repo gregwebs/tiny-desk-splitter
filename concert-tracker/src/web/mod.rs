@@ -4,9 +4,10 @@ pub mod openapi;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::Request,
+    extract::{Request, State},
+    http::StatusCode,
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
     routing::{get, post},
     Router,
 };
@@ -53,6 +54,12 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
     let concerts_dir = state.jobs.working_dir.join("concerts");
     let thumbnails_dir = state.jobs.working_dir.join("thumbnails");
     let (router, api) = api_router();
+    let concert_files = Router::new()
+        .fallback_service(ServeDir::new(concerts_dir.clone()))
+        .layer(middleware::from_fn_with_state(
+            concerts_dir,
+            lock_concert_media,
+        ));
 
     let router = router
         .merge(static_js_router(opts.dev))
@@ -62,7 +69,7 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         // the trace/error-logging layers so Swagger UI's own requests are traced
         // like everything else.
         .merge(SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", api))
-        .nest_service("/concert-files", ServeDir::new(concerts_dir))
+        .nest("/concert-files", concert_files)
         .nest_service("/thumbnails", ServeDir::new(thumbnails_dir))
         .layer(middleware::from_fn(log_error_responses))
         .layer(TraceLayer::new_for_http());
@@ -72,6 +79,42 @@ pub fn router_with_opts(state: AppState, opts: RouterOpts) -> Router {
         router
     };
     router.with_state(state)
+}
+
+async fn lock_concert_media(
+    State(concerts_dir): State<std::path::PathBuf>,
+    req: Request,
+    next: Next,
+) -> Response {
+    let Some(encoded_album_dir) = req.uri().path().trim_start_matches('/').split('/').next() else {
+        return next.run(req).await;
+    };
+    let album_dir = match percent_encoding::percent_decode_str(encoded_album_dir).decode_utf8() {
+        Ok(album_dir) if !album_dir.is_empty() && !album_dir.contains(['/', '\\']) => album_dir,
+        _ => return (StatusCode::BAD_REQUEST, "Invalid concert media path").into_response(),
+    };
+    if album_dir == "." || album_dir == ".." {
+        return next.run(req).await;
+    }
+    let canonical_dir = concerts_dir.join(album_dir.as_ref());
+    let lock = match tokio::task::spawn_blocking(move || {
+        live_set_splitter::publication::SharedPublicationLock::acquire(&canonical_dir)
+    })
+    .await
+    {
+        Ok(Ok(lock)) => lock,
+        Ok(Err(error)) => {
+            tracing::error!(%error, "could not acquire Concert Split media read lock");
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+        Err(error) => {
+            tracing::error!(%error, "Concert Split media read-lock task failed");
+            return (StatusCode::INTERNAL_SERVER_ERROR, error.to_string()).into_response();
+        }
+    };
+    let response = next.run(req).await;
+    drop(lock);
+    response
 }
 
 /// Builds the full route table (HTML/htmx pages + JSON API) and the OpenAPI

@@ -3,7 +3,6 @@ use chrono::{DateTime, Utc};
 use rusqlite::Connection;
 use std::path::Path;
 
-use crate::concert_media::tracks_present_on_disk;
 use crate::db;
 use crate::model::{
     concert_dir, decide_backfill_duration, sanitize_album, DurationSource, SourceState,
@@ -53,7 +52,10 @@ pub fn scan(conn: &Connection, dir: &Path) -> Result<ScanReport> {
                 Ok(at) => {
                     db::lifecycle::set_split_at_if_missing(conn, concert.id, &at)?;
                     if concert.tracks_present.is_empty() && !concert.set_list.is_empty() {
-                        let present = tracks_present_on_disk(dir, &album, &concert.set_list);
+                        let present = crate::concert_media::ConcertMediaInventory::for_concert(
+                            dir, concert, None,
+                        )
+                        .tracks_present_on_disk();
                         db::split_timestamps::set_tracks_present(conn, concert.id, &present)?;
                     }
                     report.splits_found += 1;
@@ -111,8 +113,10 @@ pub fn backfill_tracks_present(conn: &Connection, working_dir: &Path) -> usize {
     };
     let mut count = 0;
     for c in &concerts {
-        if let Some(album) = c.album.as_deref() {
-            let present = tracks_present_on_disk(working_dir, album, &c.set_list);
+        if c.album.is_some() {
+            let present =
+                crate::concert_media::ConcertMediaInventory::for_concert(working_dir, c, None)
+                    .tracks_present_on_disk();
             if db::split_timestamps::set_tracks_present(conn, c.id, &present).is_ok() {
                 count += 1;
             }
@@ -158,6 +162,9 @@ pub fn backfill_media_duration(
             report.skipped.push((c.id, c.title.clone(), "no album"));
             continue;
         };
+        let _published_split = live_set_splitter::publication::SharedPublicationLock::acquire(
+            &concert_dir(working_dir, album),
+        )?;
 
         let downloaded = crate::concert_media::find_downloaded_file(working_dir, album);
         let source_present = downloaded.is_some();

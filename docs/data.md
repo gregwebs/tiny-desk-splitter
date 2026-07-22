@@ -7,6 +7,8 @@ Each concert lives in `concerts/<album>/` with these metadata files:
 | `concert.json` | Scraped metadata (artist, set list, musicians, source URL) |
 | `timestamps.json` | Splitter output with detected song timestamps |
 | `preview.jpg` | Thumbnail image from NPR |
+| `.concert-split-published.json` | Exact filenames owned by the current Published Concert Split |
+| `.concert-split-backup/` | One retained previous Published Concert Split used for ordinary publication rollback |
 
 The directory also contains the full concert video (`<album>.mp4`) and, after
 splitting, per-song tracks (`<Song Title>.mp4` / `.m4a`).

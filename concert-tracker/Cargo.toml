@@ -44,6 +44,7 @@ live-set-splitter = { path = "../live-set-song-splitter" }
 which = "7"
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
 regex = "1"
+percent-encoding = "2"
 # Pinned exactly: 0.1.4+ require axum ^0.8, but this crate is on axum 0.7.
 # Revisit this pin together with any future axum 0.8 migration.
 utoipa = { version = "5", features = ["axum_extras", "chrono"] }
