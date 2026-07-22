@@ -202,8 +202,8 @@ generations.
 
 If an ordinary copy, removal, or manifest-install operation fails, publication
 restores the preceding exact set from backup and returns an infrastructure
-error. Process and host crashes are different: their journaled recovery is
-owned by #144.
+error. Process and host crashes are recovered from the durable journal
+described below.
 
 When no Published manifest exists and a later cut, validation, or complete
 publication step fails, completed song files are copied out of staging under
@@ -223,6 +223,54 @@ Empty ──failed after tracks──▶ Partial ──failed retry──▶ Par
 Published ──failed resplit──▶ Published (unchanged)
 Published ──complete resplit▶ Published (new; previous retained in backup)
 ```
+
+### Interrupted-publication recovery
+
+Before complete publication changes a canonical filename it atomically installs
+`.concert-split-publication.json`. The journal identifies the sibling staging
+directory, exact intended Published manifest, obsolete filenames, prior
+canonical state, backup/snapshot, and recovery-attempt count. Journal filenames
+are validated single path components; staging and partial-snapshot directories
+must be library-owned siblings.
+
+The prior state is Empty, Published with its exact retained backup manifest, or
+Recoverable Partial with its exact Partial manifest and durable snapshot. This
+makes rollback exact: recovery never scans media extensions or deletes unrelated
+concert files, and a failed complete retry does not destroy playable partial
+work.
+
+```text
+journal attempts 0
+      │ recovery invocation (persist count before copying)
+      ▼
+ try finish publication ──success──> install manifest → remove journal/staging
+      │ failure
+      ├─ attempts 1 or 2 ──────────> keep journal; caller must stop
+      └─ attempt 3 ────────────────> restore exact prior state
+                                           │ success → remove journal/staging
+                                           └ failure → explicit unrecoverable
+                                                       error; retain evidence
+```
+
+The initial publication attempt consumes no recovery attempt, leaving three
+later invocations. `concert_split::run` resolves its directory before media
+validation. `concert_split::recover_publications(workdir/concerts)` scans direct
+concert directories; `concert-web` calls it before opening the database,
+creating queues or the Job Registry, binding, or serving. A failed attempt one
+or two is still a startup error, so inconsistent output is never served.
+
+After finish or rollback has restored its canonical state, recovery durably
+records that resolution in the journal before rotating backup generations and
+removing recovery state. The resolution plus the journal's record of whether a
+backup predated the interrupted attempt makes that finalization idempotent if a
+second crash lands between backup rotation and journal removal.
+
+File contents are synced before namespace changes, and containing directories
+are synced after backup/snapshot and journal installation, canonical
+renames/removals, manifest installation, journal removal, and staging cleanup.
+Publication remains availability-first rather than filesystem-atomic: a crash
+may expose mixed bytes temporarily, but the journal makes that state explicit
+and recoverable.
 
 The publication lock is advisory and shared by both the library and CLI
 adapters because both call this same module. Canonical replacements use rename

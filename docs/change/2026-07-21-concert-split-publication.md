@@ -38,8 +38,9 @@ Backup A      Staging B ──validate──> Replacement B
   Split behavior remains #143.
 - The manifest owns only generated split output; source media, scraped metadata,
   previews, and unrelated files are never inferred from extensions and deleted.
-- Process/host-crash recovery remains #144. This change handles errors returned
-  during the live publication operation.
+- Process/host-crash recovery was subsequently implemented by #144; see
+  `2026-07-22-concert-split-recovery.md`. This historical change handled errors
+  returned during the live publication operation.
 - `concert.json` remains adapter-owned scraped metadata outside the Published
   Concert Split manifest.
 
