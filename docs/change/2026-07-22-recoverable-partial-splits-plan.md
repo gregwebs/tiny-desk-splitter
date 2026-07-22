@@ -329,6 +329,7 @@ directory, separate database/workdir, and a separate port:
 - [x] Lasting technical documentation and Change Record updated.
 - [x] Two-axis code review passes.
 - [x] Automated and scratch live verification pass.
-- [ ] Commit points to the Change Record and #143.
-- [ ] PR targets `concert-split-publication` and resolves #143.
+- [x] Commit points to the Change Record and #143.
+- [x] PR targets the surviving parent branch `concert-split-interface` after
+  #142 merged there and its source branch was deleted; it resolves #143.
 - [ ] GitHub Actions CI passes.
