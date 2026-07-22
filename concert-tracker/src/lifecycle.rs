@@ -383,6 +383,7 @@ mod tests {
         let id = insert_concert(&conn, "Album", &["One"]);
         let source = downloaded_file(dir.path(), "Album");
         db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
         db::split_timestamps::set_tracks_present(&conn, id, &[true]).unwrap();
         db::split_timestamps::set_media_duration(&conn, id, 10.0).unwrap();
 
@@ -422,6 +423,7 @@ mod tests {
         let id = insert_concert(&conn, "Album", &["One"]);
         downloaded_file(dir.path(), "Album");
         db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::mark_split_succeeded(&conn, id).unwrap();
         db::split_timestamps::set_tracks_present(&conn, id, &[true]).unwrap();
         db::split_timestamps::set_media_duration(&conn, id, 10.0).unwrap();
         let timestamps = serde_json::to_string(&vec![concert_types::SongTimestamp {

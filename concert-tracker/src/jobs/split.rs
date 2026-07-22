@@ -10,7 +10,8 @@ use crate::concert_media::{find_downloaded_file, tracks_present_on_disk};
 use crate::db;
 use crate::jobs::run::{self, Admission, JobCancellation, JobRequest};
 use crate::jobs::{
-    JobConfig, JobKey, JobKind, JobRegistry, JobRunFuture, JobStepOutcome, SplitJob, SplitMode,
+    JobConfig, JobKey, JobKind, JobRegistry, JobRunFuture, JobStepFailure, JobStepOutcome,
+    SplitJob, SplitMode,
 };
 use crate::model::{concert_dir, Concert, Musician};
 use crate::split_timestamps::ValidatedTimestamps;
@@ -262,6 +263,8 @@ impl JobRequest for SplitRequest {
                     (Some(file), Some(path))
                 }
             };
+            let outcome_file = NamedTempFile::new()?;
+            let outcome_path = outcome_file.path().to_path_buf();
             let job = SplitJob {
                 concert_id: input.concert.id,
                 concert: concert_info,
@@ -272,6 +275,8 @@ impl JobRequest for SplitRequest {
                 _temp_file: temp_file,
                 _timestamps_temp_file: timestamps_temp_file,
                 timestamps_path,
+                outcome_path,
+                _outcome_file: outcome_file,
             };
             return Ok(SplitSetup {
                 concert: input.concert,
@@ -405,6 +410,34 @@ impl JobRequest for SplitRequest {
         db::lifecycle::mark_split_succeeded(conn, self.concert_id)
     }
 
+    fn record_step_failure(&self, conn: &Connection, failure: &JobStepFailure) -> Result<()> {
+        match failure {
+            JobStepFailure::RecoverablePartialSplit { message, tracks } => {
+                let concert = db::concerts::get_concert(conn, self.concert_id)?;
+                anyhow::ensure!(
+                    concert.split_at.is_none(),
+                    "Recoverable Partial Split cannot replace successful split state"
+                );
+                let mut seen = std::collections::BTreeSet::new();
+                let mut tracks_present = vec![false; concert.set_list.len()];
+                for title in tracks {
+                    anyhow::ensure!(seen.insert(title), "duplicate partial track title");
+                    let index = concert
+                        .set_list
+                        .iter()
+                        .position(|candidate| candidate == title)
+                        .ok_or_else(|| anyhow::anyhow!("unknown partial track title {title:?}"))?;
+                    tracks_present[index] = true;
+                }
+                db::split_timestamps::set_tracks_present(conn, self.concert_id, &tracks_present)?;
+                db::lifecycle::mark_split_failed(conn, self.concert_id, message)
+            }
+            JobStepFailure::Ordinary { message } => {
+                db::lifecycle::mark_split_failed(conn, self.concert_id, message)
+            }
+        }
+    }
+
     fn log_dir(&self) -> Option<PathBuf> {
         Some(self.config.log_dir())
     }
@@ -480,7 +513,10 @@ pub fn auto_timestamps_with_backfill(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::jobs::{DownloadJob, JobConfig, JobRegistry, SplitBackend};
+    use crate::jobs::{
+        DownloadJob, JobConfig, JobRegistry, JobRunFuture, JobRunner, JobStepOutcome,
+        OpenMediaOutcome, SplitBackend,
+    };
     use crate::split_timestamps::TimestampPayloadSong;
     use std::fs;
     use std::path::PathBuf;
@@ -500,6 +536,39 @@ mod tests {
             }),
             Arc::new(|_| Command::new("true")),
         )
+    }
+
+    struct PartialRunner;
+
+    impl JobRunner for PartialRunner {
+        fn run_download<'a>(
+            &'a self,
+            _job: &'a DownloadJob,
+            _log_file: Option<&'a Path>,
+        ) -> JobRunFuture<'a, JobStepOutcome> {
+            Box::pin(async { JobStepOutcome::Succeeded })
+        }
+
+        fn run_split<'a>(
+            &'a self,
+            _job: &'a SplitJob,
+            _log_file: Option<&'a Path>,
+        ) -> JobRunFuture<'a, JobStepOutcome> {
+            Box::pin(async {
+                JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit {
+                    message: "second track cut failed".to_string(),
+                    tracks: vec!["First".to_string()],
+                })
+            })
+        }
+
+        fn open_media<'a>(
+            &'a self,
+            _concert_id: i64,
+            _path: &'a Path,
+        ) -> JobRunFuture<'a, OpenMediaOutcome> {
+            Box::pin(async { OpenMediaOutcome::Succeeded })
+        }
     }
 
     /// Delegates the scraped-concert arrangement to `SeedContext`, then keeps
@@ -535,6 +604,43 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         panic!("split job did not finish");
+    }
+
+    #[tokio::test]
+    async fn recoverable_partial_availability_commits_with_job_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let album = "Partial Job Album";
+        let set_list = vec!["First".to_string(), "Second".to_string()];
+        let cd = concert_dir(tmp.path(), album);
+        fs::create_dir_all(&cd).unwrap();
+        fs::write(cd.join(format!("{album}.m4a")), b"source").unwrap();
+        let (database, id) = seeded_db(album, set_list);
+        let registry = Arc::new(JobRegistry::new());
+        let config = JobConfig::with_runner(tmp.path().to_path_buf(), Arc::new(PartialRunner));
+
+        let started = start_split(
+            database.clone(),
+            registry.clone(),
+            config,
+            id,
+            SplitMode::Analyze,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(started, StartOutcome::Spawned));
+        wait_until_finished(&registry, id).await;
+
+        let conn = database.lock().unwrap();
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert_eq!(concert.tracks_present, vec![true, false]);
+        assert!(concert.split_at.is_none());
+        assert!(concert.split_started_at.is_none());
+        assert_eq!(concert.split_errors.len(), 1);
+        assert_eq!(concert.split_errors[0].error, "second track cut failed");
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].concert_id, id);
+        assert_eq!(failed[0].failure_message, "second track cut failed");
     }
 
     #[tokio::test]

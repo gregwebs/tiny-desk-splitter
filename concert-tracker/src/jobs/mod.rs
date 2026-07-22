@@ -419,13 +419,40 @@ pub struct SplitJob {
     /// Timestamps temp file for user/reset modes; kept alive alongside _temp_file.
     pub _timestamps_temp_file: Option<tempfile::NamedTempFile>,
     pub timestamps_path: Option<PathBuf>,
+    /// Structured result transport used only by the CLI adapter.
+    pub outcome_path: PathBuf,
+    pub _outcome_file: tempfile::NamedTempFile,
 }
 
 pub type JobRunFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 pub enum JobStepOutcome {
     Succeeded,
-    Failed { message: String },
+    Failed(JobStepFailure),
+}
+
+pub enum JobStepFailure {
+    Ordinary {
+        message: String,
+    },
+    RecoverablePartialSplit {
+        message: String,
+        tracks: Vec<String>,
+    },
+}
+
+impl JobStepFailure {
+    pub fn ordinary(message: impl Into<String>) -> Self {
+        Self::Ordinary {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Ordinary { message } | Self::RecoverablePartialSplit { message, .. } => message,
+        }
+    }
 }
 
 pub enum OpenMediaOutcome {
@@ -520,14 +547,7 @@ impl JobRunner for ProductionJobRunner {
             SplitBackend::Command(split_cmd) => {
                 let cmd = split_cmd(job);
                 Box::pin(async move {
-                    command_job_outcome(
-                        cmd,
-                        "split",
-                        job.concert_id,
-                        log_file,
-                        ". Is live-set-splitter built? Run: cargo build --bin live-set-splitter",
-                    )
-                    .await
+                    split_command_outcome(cmd, job.concert_id, log_file, &job.outcome_path).await
                 })
             }
             SplitBackend::Library => Box::pin(split_library::run(job, log_file)),
@@ -554,6 +574,62 @@ impl JobRunner for ProductionJobRunner {
     }
 }
 
+async fn split_command_outcome(
+    cmd: Command,
+    concert_id: i64,
+    log_file: Option<&Path>,
+    outcome_path: &Path,
+) -> JobStepOutcome {
+    let command = run_with_logging(cmd, "split", concert_id, log_file).await;
+    let report = std::fs::File::open(outcome_path).ok().and_then(|file| {
+        serde_json::from_reader::<_, live_set_splitter::concert_split::ConcertSplitReport>(file)
+            .ok()
+    });
+    match (command, report) {
+        (Ok((status, _)), Some(live_set_splitter::concert_split::ConcertSplitReport::Complete))
+            if status.success() => JobStepOutcome::Succeeded,
+        (
+            Ok((status, _)),
+            Some(live_set_splitter::concert_split::ConcertSplitReport::NoOutput {
+                reason: live_set_splitter::concert_split::NoOutputReason::AnalysisOnly,
+            }),
+        ) if status.success() => JobStepOutcome::Succeeded,
+        (
+            Ok((status, _)),
+            Some(live_set_splitter::concert_split::ConcertSplitReport::Partial { tracks }),
+        ) if !status.success() => JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit {
+            message: format!(
+                "Recoverable Partial Split preserved {} completed track(s)",
+                tracks.len()
+            ),
+            tracks,
+        }),
+        (
+            Ok((status, _)),
+            Some(live_set_splitter::concert_split::ConcertSplitReport::NoOutput { reason }),
+        ) if !status.success() => JobStepOutcome::Failed(JobStepFailure::ordinary(
+            reason.to_string(),
+        )),
+        (Ok((status, _)), Some(outcome)) => JobStepOutcome::Failed(JobStepFailure::ordinary(
+            format!(
+                "splitter returned contradictory exit {:?} and outcome {outcome:?}",
+                status.code()
+            ),
+        )),
+        // Preserve the generic command-runner contract used by injected test
+        // runners and older splitter binaries. The production CLI writes its
+        // report before returning success, while a non-zero Partial still
+        // requires a valid report above.
+        (Ok((status, _)), _) if status.success() => JobStepOutcome::Succeeded,
+        (Ok((status, stderr_tail)), _) => JobStepOutcome::Failed(JobStepFailure::ordinary(
+            format!("exit {:?}: {}", status.code(), stderr_tail.trim()),
+        )),
+        (Err(error), _) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+                "spawn error: {error}. Is live-set-splitter built? Run: cargo build --bin live-set-splitter"
+            ))),
+    }
+}
+
 async fn command_job_outcome(
     cmd: Command,
     kind: &'static str,
@@ -563,18 +639,20 @@ async fn command_job_outcome(
 ) -> JobStepOutcome {
     match run_with_logging(cmd, kind, concert_id, log_file).await {
         Ok((status, _)) if status.success() => JobStepOutcome::Succeeded,
-        Ok((status, stderr_tail)) => JobStepOutcome::Failed {
-            message: format!("exit {:?}: {}", status.code(), stderr_tail.trim()),
-        },
+        Ok((status, stderr_tail)) => JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+            "exit {:?}: {}",
+            status.code(),
+            stderr_tail.trim()
+        ))),
         Err(err) => {
             let hint = if err.kind() == std::io::ErrorKind::NotFound {
                 not_found_hint
             } else {
                 ""
             };
-            JobStepOutcome::Failed {
-                message: format!("spawn error: {err}{hint}"),
-            }
+            JobStepOutcome::Failed(JobStepFailure::ordinary(format!(
+                "spawn error: {err}{hint}"
+            )))
         }
     }
 }
@@ -712,6 +790,7 @@ fn build_cli_split_command(resolved: &SplitterCli, job: &SplitJob) -> Command {
             .arg("--media-duration")
             .arg(media_duration.to_string());
     }
+    cmd.arg("--outcome-file").arg(&job.outcome_path);
     cmd
 }
 
@@ -1006,6 +1085,100 @@ mod tests {
         let (status, stderr_tail) = run_with_logging(cmd, "test", 42, None).await.unwrap();
         assert_eq!(status.code(), Some(5));
         assert_eq!(stderr_tail, "err1\nerr2");
+    }
+
+    #[tokio::test]
+    async fn command_split_reads_recoverable_partial_report_despite_failure_exit() {
+        use live_set_splitter::concert_split::ConcertSplitReport;
+
+        let report = tempfile::NamedTempFile::new().unwrap();
+        serde_json::to_writer(
+            report.as_file(),
+            &ConcertSplitReport::Partial {
+                tracks: vec!["First".to_string()],
+            },
+        )
+        .unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
+
+        let outcome = split_command_outcome(cmd, 1, None, report.path()).await;
+
+        assert!(matches!(
+            outcome,
+            JobStepOutcome::Failed(JobStepFailure::RecoverablePartialSplit { tracks, .. })
+                if tracks == ["First"]
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_split_rejects_partial_report_with_success_exit() {
+        use live_set_splitter::concert_split::ConcertSplitReport;
+
+        let report = tempfile::NamedTempFile::new().unwrap();
+        serde_json::to_writer(
+            report.as_file(),
+            &ConcertSplitReport::Partial {
+                tracks: vec!["First".to_string()],
+            },
+        )
+        .unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+
+        let outcome = split_command_outcome(cmd, 1, None, report.path()).await;
+
+        assert!(matches!(
+            outcome,
+            JobStepOutcome::Failed(JobStepFailure::Ordinary { message })
+                if message.contains("contradictory")
+        ));
+    }
+
+    #[tokio::test]
+    async fn command_split_maps_analysis_only_report_to_success() {
+        use live_set_splitter::concert_split::{ConcertSplitReport, NoOutputReason};
+
+        let report = tempfile::NamedTempFile::new().unwrap();
+        serde_json::to_writer(
+            report.as_file(),
+            &ConcertSplitReport::NoOutput {
+                reason: NoOutputReason::AnalysisOnly,
+            },
+        )
+        .unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+
+        let outcome = split_command_outcome(cmd, 1, None, report.path()).await;
+
+        assert!(matches!(outcome, JobStepOutcome::Succeeded));
+    }
+
+    #[tokio::test]
+    async fn command_split_maps_nothing_detected_report_to_ordinary_failure() {
+        use live_set_splitter::concert_split::{ConcertSplitReport, NoOutputReason};
+
+        let report = tempfile::NamedTempFile::new().unwrap();
+        serde_json::to_writer(
+            report.as_file(),
+            &ConcertSplitReport::NoOutput {
+                reason: NoOutputReason::NothingDetected {
+                    missing: vec!["Second".to_string()],
+                },
+            },
+        )
+        .unwrap();
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 1"]);
+
+        let outcome = split_command_outcome(cmd, 1, None, report.path()).await;
+
+        assert!(matches!(
+            outcome,
+            JobStepOutcome::Failed(JobStepFailure::Ordinary { message })
+                if message.contains("Second")
+        ));
     }
 
     #[tokio::test]
@@ -1451,6 +1624,8 @@ mod tests {
                 job.input_file.to_string_lossy().into_owned(),
                 "--output-dir".to_string(),
                 job.output_dir.to_string_lossy().into_owned(),
+                "--outcome-file".to_string(),
+                job.outcome_path.to_string_lossy().into_owned(),
             ]
         );
     }
@@ -1519,6 +1694,8 @@ mod tests {
     fn test_split_job(mode: SplitMode) -> SplitJob {
         let temp_file = tempfile::NamedTempFile::new().unwrap();
         let json_path = temp_file.path().to_path_buf();
+        let outcome_file = tempfile::NamedTempFile::new().unwrap();
+        let outcome_path = outcome_file.path().to_path_buf();
         SplitJob {
             concert_id: 1,
             concert: ConcertInfo {
@@ -1541,6 +1718,8 @@ mod tests {
             _temp_file: temp_file,
             _timestamps_temp_file: None,
             timestamps_path: None,
+            outcome_path,
+            _outcome_file: outcome_file,
         }
     }
 }

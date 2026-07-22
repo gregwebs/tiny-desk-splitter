@@ -54,7 +54,7 @@ inspection on the `/jobs` page. A rejected Job Request is never a Failed Job
               │                       │
            execute ──────── panic ────┤        ┌──────────────────────────┐
               │                       ├───────▶│ Failed terminal          │
-              ├─ Failed{msg} ─────────┤        │ ONE TX: lifecycle cols + │
+              ├─ Failed{typed} ───────┤        │ ONE TX: lifecycle cols + │
               │                       │        │ event + Failed Job row   │
         commit_success (ONE TX) ─ Err ┘        └──────────────────────────┘
               │                                        ▲
@@ -160,6 +160,22 @@ as repairable: it preserves stored timestamp columns and logs a warning.
 Required lifecycle, track-presence, timestamp, and event writes commit in the
 same transaction before the Job Run is visible as successful.
 
+A split execution failure is `JobStepFailure::Ordinary` or
+`RecoverablePartialSplit { message, tracks }`. For a recoverable partial, the
+failed terminal transaction validates the unique titles against the set list,
+writes their exact `tracks_present` vector, appends the split-error event, and
+inserts the Failed Job row together. It never sets `split_at` or starts success
+dependents. Any validation or database error rolls back all of those facts.
+
+```text
+Partial outcome → win terminal gate → ONE DB transaction
+                                      ├─ exact tracks_present
+                                      ├─ split_started_at = NULL
+                                      ├─ split_at remains NULL
+                                      ├─ split_error event
+                                      └─ Failed Job row
+```
+
 The automatic download-to-split edge stores only a `JobKey` identifying split
 intent:
 
@@ -195,9 +211,10 @@ The production runner still builds the existing subprocess commands:
 - `live-set-splitter` for splits,
 - the configured opener command for media files.
 
-The command runner converts subprocess success, non-zero exit, and spawn
-failure into typed outcomes before the lifecycle code handles success or
-failure. This keeps production behavior unchanged.
+The split command runner also reads the CLI's structured outcome file. A
+non-zero process exit plus `Partial` becomes the same typed failure as the
+in-process library adapter; stderr is only a fallback for missing or malformed
+reports. This keeps both adapters on the same terminal transaction path.
 
 ## Test-control runner
 

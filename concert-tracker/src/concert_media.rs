@@ -431,6 +431,7 @@ pub struct ConcertMediaInventory<'a> {
     album: Option<&'a str>,
     artist: Option<&'a str>,
     downloaded_at: Option<&'a str>,
+    split_succeeded: bool,
     set_list: &'a [String],
     tracks_present: &'a [bool],
     tracks_liked: &'a [bool],
@@ -467,6 +468,7 @@ impl<'a> ConcertMediaInventory<'a> {
             album: concert.album.as_deref(),
             artist: concert.artist.as_deref(),
             downloaded_at: concert.downloaded_at.as_deref(),
+            split_succeeded: concert.split_at.is_some(),
             set_list: &concert.set_list,
             tracks_present: &concert.tracks_present,
             tracks_liked: &concert.tracks_liked,
@@ -528,6 +530,9 @@ impl<'a> ConcertMediaInventory<'a> {
     /// `tracks_present`, user split timestamps, and `media_duration`. See
     /// [`source_redundant`] for the exact fail-closed rules.
     pub fn source_redundant(&self) -> bool {
+        if !self.split_succeeded {
+            return false;
+        }
         let Some(album) = self.album else {
             return false;
         };
@@ -545,6 +550,9 @@ impl<'a> ConcertMediaInventory<'a> {
     /// The ordered reconstruction-playback sequence for whole-concert
     /// playback once the source file is gone. See [`build_reconstruction`].
     pub fn reconstruction_items(&self) -> Vec<PlaybackItem> {
+        if !self.split_succeeded {
+            return Vec::new();
+        }
         let Some(album) = self.album else {
             return Vec::new();
         };
@@ -1619,6 +1627,7 @@ mod tests {
         std::fs::write(cd.join("Song A.m4a"), b"data").unwrap();
         let mut concert = bare_concert(Some(album), vec!["Song A".to_string()]);
         concert.tracks_present = vec![true];
+        concert.split_at = Some("2026-07-22T00:00:00Z".to_string());
         let inv = ConcertMediaInventory::for_concert(dir.path(), &concert, None);
         assert!(inv.can_play_concert());
     }
@@ -1638,6 +1647,7 @@ mod tests {
         write_source_file(dir.path(), album);
         let mut concert = bare_concert(Some(album), vec!["Song A".to_string()]);
         concert.tracks_present = vec![true];
+        concert.split_at = Some("2026-07-22T00:00:00Z".to_string());
         concert.media_duration = Some(100.0);
         let songs = vec![make_song(0.0, 100.0)];
         let inv = ConcertMediaInventory::for_concert(dir.path(), &concert, Some(&songs));
@@ -1658,5 +1668,29 @@ mod tests {
         assert_eq!(details.len(), 1);
         assert!(details[0].available);
         assert!(details[0].is_video);
+    }
+
+    #[test]
+    fn recoverable_partial_track_is_available_but_cannot_reconstruct_concert() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Partial Album";
+        let cd = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&cd).unwrap();
+        std::fs::write(cd.join("Song A.m4a"), b"partial").unwrap();
+        let mut concert = bare_concert(
+            Some(album),
+            vec!["Song A".to_string(), "Song B".to_string()],
+        );
+        concert.tracks_present = vec![true, false];
+        concert.media_duration = Some(100.0);
+        let songs = vec![make_song(0.0, 50.0), make_song(50.0, 100.0)];
+        let inventory = ConcertMediaInventory::for_concert(dir.path(), &concert, Some(&songs));
+
+        assert_eq!(
+            inventory.find_track_file("Song A"),
+            Some("Song A.m4a".to_string())
+        );
+        assert!(inventory.reconstruction_items().is_empty());
+        assert!(!inventory.source_redundant());
     }
 }

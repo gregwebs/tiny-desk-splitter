@@ -4,8 +4,8 @@
 //! See `docs/concert-split.md` for the interface and state diagram.
 
 use live_set_splitter::concert_split::{
-    self, ConcertSplitOptions, ConcertSplitOutcome, ConcertSplitProgress, ConcertSplitRequest,
-    NoOutputReason, OutputFormat, SplitPhase, TrackKind,
+    self, ConcertSplitOptions, ConcertSplitOutcome, ConcertSplitProgress, ConcertSplitReport,
+    ConcertSplitRequest, NoOutputReason, OutputFormat, SplitPhase, TrackKind,
 };
 use live_set_splitter::cut::VideoCutMode;
 use live_set_splitter::ocr_backend::OcrChoice;
@@ -88,6 +88,10 @@ struct Cli {
     /// is set. When omitted, the splitter ffprobes the input file.
     #[arg(long)]
     media_duration: Option<f64>,
+
+    /// Structured result transport for subprocess adapters.
+    #[arg(long, hide = true)]
+    outcome_file: Option<PathBuf>,
 }
 
 /// Translate CLI arguments into a typed [`ConcertSplitRequest`]: parse the
@@ -227,8 +231,8 @@ fn render_progress(event: ConcertSplitProgress) {
 
 /// Preserves the CLI's historical exit-code behavior: `Complete` and
 /// `NoOutput::AnalysisOnly` mirror past success (exit 0); `NoOutput::NothingDetected`
-/// mirrors the past hard error (exit 1). `Partial` is reserved for a later ticket
-/// and never produced by `run` today.
+/// mirrors the past hard error (exit 1). A Recoverable Partial Split is also a
+/// failed complete split and exits 1 after writing its structured outcome.
 fn exit_code_for(outcome: &ConcertSplitOutcome) -> i32 {
     match outcome {
         ConcertSplitOutcome::Complete(_) => 0,
@@ -240,6 +244,15 @@ fn exit_code_for(outcome: &ConcertSplitOutcome) -> i32 {
         } => 1,
         ConcertSplitOutcome::Partial(_) => 1,
     }
+}
+
+fn write_outcome(path: &Path, outcome: &ConcertSplitOutcome) -> Result<()> {
+    let temporary = path.with_extension("json.next");
+    let mut file = File::create(&temporary)?;
+    serde_json::to_writer_pretty(&mut file, &ConcertSplitReport::from(outcome))?;
+    file.sync_all()?;
+    std::fs::rename(temporary, path)?;
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -263,6 +276,9 @@ fn main() -> Result<()> {
 
     let mut sink = render_progress;
     let outcome = concert_split::run(request, &mut sink)?;
+    if let Some(path) = &cli.outcome_file {
+        write_outcome(path, &outcome)?;
+    }
 
     let wrote_metadata = refine_now
         && !matches!(
@@ -287,9 +303,10 @@ fn main() -> Result<()> {
         ConcertSplitOutcome::NoOutput { reason } => {
             eprintln!("Error: {}", reason);
         }
-        ConcertSplitOutcome::Partial(_) => {
+        ConcertSplitOutcome::Partial(output) => {
             eprintln!(
-                "Error: unexpected Partial outcome (reserved variant not produced by this build)"
+                "Error: Recoverable Partial Split preserved {} completed track(s)",
+                output.tracks.len()
             );
         }
     }

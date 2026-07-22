@@ -46,11 +46,10 @@ pub fn run(
     when applicable, `timestamps.json`) ran, but no tracks were cut) or
     `NothingDetected { missing }` (detection and silence-based recovery could
     not find all expected songs).
-  - `Partial(ConcertSplitOutput)` — **reserved** for a later ticket
-    (Recoverable Partial Split publication, #142+). This slice's workflow is
-    binary: the missing-songs gate returns `NoOutput` before any cutting
-    starts, so `run` never constructs `Partial` today. The variant exists now
-    so the outcome seam doesn't need to change shape later.
+  - `Partial(ConcertSplitOutput)` — the complete split failed after one or more
+    song tracks finished, and those non-empty tracks were safely published at
+    canonical filenames. This remains a failed split, not reconstruction-ready
+    Published output.
 
 ## State diagram
 
@@ -75,11 +74,14 @@ pub fn run(
    │                        │no                                     │
    │                        ▼                                       │
    │          Cut (emit CutPlanned{total}) → TrackCompleted* →      │
-   │                        Cleanup → Complete                      │
+   │                  ValidateOutput → Publish → Complete           │
+   │                         │ failure after ≥1 song                │
+   │                         ▼                                      │
+   │                publish completed songs → Partial               │
    └──────────────────────────────────────────────────────────────┘
                               │
-             ┌────────────────┼──────────────────┬───────────────┐
-             ▼                ▼                   ▼               ▼
+             ┌──────────┬─────┴────────────┬──────┴────────┬──────┐
+             ▼          ▼                  ▼               ▼      ▼
         Complete       NoOutput{Analysis-   NoOutput{Nothing-  Err(anyhow)
      (all tracks)        Only}               Detected}         (infra fault:
                                                                ffprobe/ffmpeg/IO)
@@ -87,7 +89,7 @@ pub fn run(
              ▼(CLI)           ▼                   ▼               ▼
           exit 0           exit 0        stderr msg + exit 1   Error: + exit 1
 
-   Partial: reserved enum variant, NOT constructed by this slice.
+   Partial (canonical subset, failed split) ──CLI──► report + exit 1
 ```
 
 `RefineAudio` and `WriteMetadata` are skipped when explicit timestamps were
@@ -129,7 +131,14 @@ events to stdout/stderr, and maps the outcome to a process exit code
 | `Complete` | 0 |
 | `NoOutput { AnalysisOnly }` | 0 |
 | `NoOutput { NothingDetected }` | 1 (message on stderr, mirroring the CLI's former hard error) |
+| `Partial` | 1 after atomically writing `--outcome-file` when requested |
 | `Err(_)` (infrastructure fault) | 1 |
+
+`--outcome-file PATH` is the subprocess adapter's machine-readable contract.
+Its stable tagged report contains only outcome kind, partial track titles, or
+`NoOutputReason`; internal paths and timestamps are not part of the process
+contract. `concert-web` never infers a partial result from stderr or scans
+filenames. Infrastructure errors do not write a report.
 
 The three workflows the CLI has always supported map onto `ConcertSplitRequest`
 fields without any new mode enum:
@@ -156,7 +165,7 @@ top-level library modules, grouped by the algorithm phase each owns:
 `audio`, `video`, `io`, `cut`, `ffmpeg`, `image`, `ocr`, and `ocr_backend`
 remain the lower-level library modules these phase modules build on.
 
-## Published output
+## Published and Recoverable Partial output
 
 A Concert Split writes timestamps, song tracks, and interludes into a hidden
 per-run staging directory beside the concert directory. The canonical concert
@@ -194,8 +203,26 @@ generations.
 If an ordinary copy, removal, or manifest-install operation fails, publication
 restores the preceding exact set from backup and returns an infrastructure
 error. Process and host crashes are different: their journaled recovery is
-owned by #144. Recoverable Partial Split publication is likewise deferred to
-#143; this slice never promotes a failed first attempt.
+owned by #144.
+
+When no Published manifest exists and a later cut, validation, or complete
+publication step fails, completed song files are copied out of staging under
+the same lock. `.concert-split-partial.json` records exact titles, timing, and
+filenames. Partial retries merge validated tracks by title. A complete retry
+overwrites them, removes partial-only files and the partial marker, and installs
+the Published manifest without treating partial bytes as a known-good backup.
+If a Published manifest already exists, a failed resplit never publishes a
+partial replacement and the previous files, manifest, backup, and database
+availability remain unchanged.
+
+```text
+Empty ──failed after tracks──▶ Partial ──failed retry──▶ Partial (merged)
+  │                              │
+  └────complete split────────────┴────complete retry──▶ Published
+
+Published ──failed resplit──▶ Published (unchanged)
+Published ──complete resplit▶ Published (new; previous retained in backup)
+```
 
 The publication lock is advisory and shared by both the library and CLI
 adapters because both call this same module. Canonical replacements use rename
@@ -258,23 +285,10 @@ the pre-existing archive-job cancellation residual documented in
 `jobs/run.rs`), but the detached blocking thread keeps running ffmpeg/OCR and
 writing output files to completion in the background.
 
-**Concrete risk this creates, beyond wasted background work:** because the
-job's registry slot and DB `split_started_at` state are freed immediately on
-cancel, a new split for the *same* concert is accepted right away — while the
-orphaned thread from the cancelled split may still be mid-write into the same
-`concert_dir(workdir, album)`. The two writers are not coordinated, so track
-files, `timestamps.json`, or `concert.json` from the two runs can interleave
-or leave the directory inconsistent with either run's own manifest. The CLI
-adapter does not have this risk (the killed subprocess writes nothing further
-before a retry can start).
-
-This asymmetry is accepted for #141 — a cooperative-cancellation seam would
-change #140's fixed `concert_split::run` signature, and the general
-same-directory-write-safety problem (this race is one instance of it) is
-squarely #142's ("Publish complete Concert Splits through staging and
-backup") territory: staged, validated output copied into place under a lock
-closes this gap for every adapter and every retry path, not just this one.
-Until then this is consistent with spec #139's framing of the CLI adapter as
-the one that offers "strict process-kill cancellation" — an operator who
-needs that guarantee during active development/debugging should use
-`--splitter cli`.
+Staging and locked publication ensure readers never observe a half-written
+track. They do not make a detached blocking thread cancellable: after the Job
+Run is marked failed, that thread may still finish and publish a complete or
+partial filesystem result without a matching terminal DB transaction. The
+guarantee “a Job Run never publishes a partially completed Concert Split”
+therefore requires `--splitter cli` when cancellation is possible; killing the
+child prevents further publication before the registry admits a retry.
