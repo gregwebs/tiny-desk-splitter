@@ -65,6 +65,35 @@ Exit status means:
 
 Always relay the job URL printed by the helper.
 
+## Inspect runs and failed-job logs
+
+Read workflow-run metadata using the run ID from a check URL:
+
+```sh
+./scripts/github/gh-app-actions-run-view.sh RUN_ID
+./scripts/github/gh-app-actions-run-view.sh RUN_ID --format json
+```
+
+Read a job's complete log using the job ID from that URL. Print it to stdout by
+default, or save a large log under `/private/tmp`:
+
+```sh
+./scripts/github/gh-app-actions-job-log.sh JOB_ID
+./scripts/github/gh-app-actions-job-log.sh JOB_ID --output /private/tmp/actions-job.log
+```
+
+Stable approval prefixes:
+
+```text
+./scripts/github/gh-app-actions-run-view.sh
+./scripts/github/gh-app-actions-job-log.sh
+```
+
+Use these helpers instead of raw `curl`, direct GitHub API calls, the `gh` CLI,
+or shell-level token handling. They mint and contain the short-lived App token,
+select the compatible curl binary, and support `--repo OWNER/REPO` when the
+current checkout is not the target repository.
+
 ## Handle results
 
 On success, run the unfiltered helper once to report the complete final CI
@@ -72,8 +101,8 @@ state when the repository workflow requires all jobs to pass.
 
 On failure:
 
-1. Open the printed job URL or use the GitHub App read helpers where they cover
-   the needed metadata.
+1. Read the failed job log with `gh-app-actions-job-log.sh`; use
+   `gh-app-actions-run-view.sh` when run-level metadata is also relevant.
 2. Identify the first substantive failing step; ignore teardown noise caused by
    the failure.
 3. Reproduce with the repository's documented local command when the host
