@@ -97,6 +97,28 @@ gh_app_api_get() {
   printf '%s' "$body"
 }
 
+# Download a raw API response, following GitHub's redirect to the short-lived
+# signed download URL. Authentication is scoped to the api.github.com request;
+# curl does not forward the Authorization header to a different redirect host.
+gh_app_api_download() {
+  local path="$1" output="${2:-}" token
+  token=$(gh_app_token)
+  if [ -n "$output" ]; then
+    gh_app_curl -fsSL \
+      -H "Authorization: token $token" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
+      "https://api.github.com/${path}" \
+      -o "$output"
+  else
+    gh_app_curl -fsSL \
+      -H "Authorization: token $token" \
+      -H "Accept: application/vnd.github+json" \
+      -H "X-GitHub-Api-Version: ${GH_APP_API_VERSION}" \
+      "https://api.github.com/${path}"
+  fi
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   case "${1:-}" in
     --help|-h)
