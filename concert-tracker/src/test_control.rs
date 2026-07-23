@@ -945,14 +945,24 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
     use std::sync::{Arc, Mutex};
 
     tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
+    let db = Arc::new(Mutex::new(conn));
+    let registry = Arc::new(JobRegistry::new());
+    let scrape_queue = ScrapeQueue::start(
+        Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
+        workdir.clone(),
+    );
+    let jobs = JobConfig::test(workdir);
     AppState {
-        db: Arc::new(Mutex::new(conn)),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: ScrapeQueue::start(
-            Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
-            workdir.clone(),
+        concerts: crate::concerts::Concerts::new(
+            db.clone(),
+            jobs.working_dir.clone(),
+            registry.clone(),
+            scrape_queue.clone(),
         ),
-        jobs: JobConfig::test(workdir),
+        db,
+        registry,
+        scrape_queue,
+        jobs,
     }
 }
 

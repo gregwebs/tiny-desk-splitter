@@ -30,6 +30,7 @@ pub struct AppState {
     /// Serial background metadata-scrape worker. `Sync` enqueues unscraped
     /// concerts here; listing cards poll until their thumbnail is ready.
     pub scrape_queue: ScrapeQueue,
+    pub concerts: crate::concerts::Concerts,
 }
 
 /// Options controlling dev-only wiring. See [`router_with_opts`].

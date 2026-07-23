@@ -15,6 +15,7 @@
 //! `sanitize_filename`, `is_browser_playable`) used by unrelated concerns
 //! (scraping, archiving, downloading).
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use crate::model::{
@@ -26,12 +27,14 @@ pub fn is_video_extension(ext: &str) -> bool {
     matches!(ext.to_lowercase().as_str(), "mp4" | "webm")
 }
 
+const TRACK_MEDIA_EXTENSIONS: &[&str] = &[
+    "mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac", "mkv",
+];
+
 pub fn find_track_file(working_dir: &Path, album: &str, title: &str) -> Option<String> {
     let stem = sanitize_filename(title);
     let dir = concert_dir(working_dir, album);
-    for ext in &[
-        "mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac", "mkv",
-    ] {
+    for ext in TRACK_MEDIA_EXTENSIONS {
         let filename = format!("{stem}.{ext}");
         if dir.join(&filename).exists() {
             return Some(filename);
@@ -102,6 +105,43 @@ pub fn find_downloaded_file(working_dir: &Path, album: &str) -> Option<PathBuf> 
     None
 }
 
+/// Fallible source lookup for callers that must distinguish absent media from
+/// an observation failure. A missing concert directory is a known absence;
+/// failures reading the directory, an entry, or its file type are propagated.
+pub fn try_find_downloaded_file(
+    working_dir: &Path,
+    album: &str,
+) -> std::io::Result<Option<PathBuf>> {
+    let expected_stem = crate::model::sanitize_album(album);
+    let cd = concert_dir(working_dir, album);
+    let entries = match std::fs::read_dir(&cd) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    for entry in entries {
+        let entry = entry?;
+        if !entry.file_type()?.is_file() {
+            continue;
+        }
+        let path = entry.path();
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if stem != expected_stem {
+            continue;
+        }
+        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("");
+        if DOWNLOADED_MEDIA_EXTENSIONS
+            .iter()
+            .any(|candidate| candidate.eq_ignore_ascii_case(ext))
+        {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
 /// Determine whether the original source file is **fully redundant** — every
 /// second of `[0, media_duration]` is covered by a present song track or an
 /// interlude file on disk, so the source can be safely deleted.
@@ -164,16 +204,36 @@ pub fn build_reconstruction(
     user_timestamps: Option<&[concert_types::SongTimestamp]>,
     media_duration: Option<f64>,
 ) -> Vec<PlaybackItem> {
+    build_reconstruction_with_lookup(
+        set_list,
+        tracks_present,
+        tracks_liked,
+        user_timestamps,
+        media_duration,
+        |title| find_track_file(working_dir, album, title),
+        |index| find_interlude_track_file(working_dir, album, index),
+    )
+}
+
+fn build_reconstruction_with_lookup(
+    set_list: &[String],
+    tracks_present: &[bool],
+    tracks_liked: &[bool],
+    user_timestamps: Option<&[concert_types::SongTimestamp]>,
+    media_duration: Option<f64>,
+    find_track: impl Fn(&str) -> Option<String>,
+    find_interlude: impl Fn(usize) -> Option<String>,
+) -> Vec<PlaybackItem> {
     // No-user-ts fallback: songs only, no interludes.
     let Some(songs) = user_timestamps else {
-        return songs_only(working_dir, album, set_list, tracks_present, tracks_liked);
+        return songs_only_with_lookup(set_list, tracks_present, tracks_liked, &find_track);
     };
 
     let duration = match media_duration {
         Some(d) if d > 0.0 => d,
         _ => {
             // Can't derive interludes without a known duration; fall back to songs only.
-            return songs_only(working_dir, album, set_list, tracks_present, tracks_liked);
+            return songs_only_with_lookup(set_list, tracks_present, tracks_liked, &find_track);
         }
     };
 
@@ -203,7 +263,7 @@ pub fn build_reconstruction(
             if !present {
                 return false;
             }
-            match find_track_file(working_dir, album, title) {
+            match find_track(title) {
                 Some(f) => {
                     let ext = f.rsplit('.').next().unwrap_or("");
                     is_browser_playable(ext)
@@ -222,7 +282,7 @@ pub fn build_reconstruction(
                     continue;
                 }
                 let title = &set_list[*i];
-                let Some(filename) = find_track_file(working_dir, album, title) else {
+                let Some(filename) = find_track(title) else {
                     continue;
                 };
                 let is_video = {
@@ -253,7 +313,7 @@ pub fn build_reconstruction(
                 if next_song_deleted {
                     continue;
                 }
-                let Some(filename) = find_interlude_track_file(working_dir, album, *idx) else {
+                let Some(filename) = find_interlude(*idx) else {
                     continue;
                 };
                 let is_video = {
@@ -275,13 +335,11 @@ pub fn build_reconstruction(
     result
 }
 
-/// Fallback: songs-only sequence when no user timestamps are available.
-fn songs_only(
-    working_dir: &Path,
-    album: &str,
+fn songs_only_with_lookup(
     set_list: &[String],
     tracks_present: &[bool],
     tracks_liked: &[bool],
+    find_track: impl Fn(&str) -> Option<String>,
 ) -> Vec<PlaybackItem> {
     set_list
         .iter()
@@ -291,7 +349,7 @@ fn songs_only(
             if !present {
                 return None;
             }
-            let filename = find_track_file(working_dir, album, title)?;
+            let filename = find_track(title)?;
             let is_video = {
                 let ext = filename.rsplit('.').next().unwrap_or("");
                 if !is_browser_playable(ext) {
@@ -317,14 +375,46 @@ fn songs_only(
 
 fn track_file_extension(dir: &Path, title: &str) -> Option<&'static str> {
     let stem = sanitize_filename(title);
-    for ext in &[
-        "mp4", "m4a", "webm", "mp3", "ogg", "opus", "wav", "flac", "mkv",
-    ] {
+    for ext in TRACK_MEDIA_EXTENSIONS {
         if dir.join(format!("{stem}.{ext}")).exists() {
             return Some(ext);
         }
     }
     None
+}
+
+fn captured_track_file(files: &BTreeSet<String>, title: &str) -> Option<String> {
+    let stem = sanitize_filename(title);
+    TRACK_MEDIA_EXTENSIONS
+        .iter()
+        .map(|extension| format!("{stem}.{extension}"))
+        .find(|filename| files.contains(filename))
+}
+
+fn captured_interlude_file(files: &BTreeSet<String>, index: usize) -> Option<String> {
+    let stem = concert_types::interlude_filename_stem(index);
+    INTERLUDE_EXTENSIONS
+        .iter()
+        .map(|extension| format!("{stem}.{extension}"))
+        .find(|filename| files.contains(filename))
+}
+
+fn captured_source_present(files: &BTreeSet<String>, album: &str) -> bool {
+    let stem = crate::model::sanitize_album(album);
+    files.iter().any(|filename| {
+        Path::new(filename)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .is_some_and(|candidate| candidate == stem)
+            && Path::new(filename)
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|extension| {
+                    DOWNLOADED_MEDIA_EXTENSIONS
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(extension))
+                })
+    })
 }
 
 pub fn list_tracks(working_dir: &Path, album: &str, set_list: &[String]) -> Vec<TrackInfo> {
@@ -439,6 +529,13 @@ pub struct ConcertMediaInventory<'a> {
     media_duration: Option<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PublishedMediaSnapshot {
+    pub tracks_present_on_disk: Vec<bool>,
+    pub reconstruction_items: Vec<PlaybackItem>,
+    pub source_redundant: bool,
+}
+
 impl<'a> ConcertMediaInventory<'a> {
     fn with_published_split<T>(&self, fallback: T, operation: impl FnOnce() -> T) -> T {
         let Some(album) = self.album else {
@@ -485,6 +582,88 @@ impl<'a> ConcertMediaInventory<'a> {
     pub fn find_downloaded_file(&self) -> Option<PathBuf> {
         let album = self.album?;
         find_downloaded_file(self.working_dir, album)
+    }
+
+    /// Observe the downloaded source without converting filesystem failures
+    /// into absence.
+    pub fn try_find_downloaded_file(&self) -> std::io::Result<Option<PathBuf>> {
+        let Some(album) = self.album else {
+            return Ok(None);
+        };
+        try_find_downloaded_file(self.working_dir, album)
+    }
+
+    /// Observe all Published Concert Split facts under one shared publication
+    /// lock. The preliminary full directory scan makes unreadable entries an
+    /// error instead of letting the legacy convenience helpers silently treat
+    /// them as absent.
+    pub fn try_published_snapshot(&self) -> anyhow::Result<PublishedMediaSnapshot> {
+        let Some(album) = self.album else {
+            return Ok(PublishedMediaSnapshot {
+                tracks_present_on_disk: vec![false; self.set_list.len()],
+                reconstruction_items: Vec::new(),
+                source_redundant: false,
+            });
+        };
+        let directory = concert_dir(self.working_dir, album);
+        match directory.try_exists() {
+            Ok(false) => {
+                return Ok(PublishedMediaSnapshot {
+                    tracks_present_on_disk: vec![false; self.set_list.len()],
+                    reconstruction_items: Vec::new(),
+                    source_redundant: false,
+                });
+            }
+            Ok(true) => {}
+            Err(error) => return Err(error.into()),
+        }
+        live_set_splitter::publication::with_shared_lock(&directory, || {
+            let mut files = BTreeSet::new();
+            for entry in std::fs::read_dir(&directory)? {
+                let entry = entry?;
+                if entry.file_type()?.is_file() {
+                    if let Some(filename) = entry.file_name().to_str() {
+                        files.insert(filename.to_string());
+                    }
+                }
+            }
+            let find_track = |title: &str| captured_track_file(&files, title);
+            let find_interlude = |index| captured_interlude_file(&files, index);
+            let tracks_present_on_disk = self
+                .set_list
+                .iter()
+                .map(|title| find_track(title).is_some())
+                .collect();
+            let reconstruction_items = if self.split_succeeded {
+                build_reconstruction_with_lookup(
+                    self.set_list,
+                    self.tracks_present,
+                    self.tracks_liked,
+                    self.user_split_timestamps,
+                    self.media_duration,
+                    find_track,
+                    find_interlude,
+                )
+            } else {
+                Vec::new()
+            };
+            let source_redundant = self.split_succeeded
+                && captured_source_present(&files, album)
+                && self.media_duration.is_some()
+                && self.user_split_timestamps.is_some()
+                && self.tracks_present.iter().all(|present| *present)
+                && concert_types::derive_interludes(
+                    self.user_split_timestamps.unwrap_or_default(),
+                    self.media_duration.unwrap_or_default(),
+                )
+                .iter()
+                .all(|interlude| captured_interlude_file(&files, interlude.index).is_some());
+            Ok(PublishedMediaSnapshot {
+                tracks_present_on_disk,
+                reconstruction_items,
+                source_redundant,
+            })
+        })
     }
 
     /// The split-track file for `title`, if any.

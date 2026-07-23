@@ -23,10 +23,14 @@ pub fn get_split_timestamps(conn: &Connection, id: i64) -> Result<StoredSplitTim
 
     let auto = auto_json
         .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
+        .map(serde_json::from_str)
+        .transpose()
+        .context("Failed to decode automatic split timestamps")?;
     let user = user_json
         .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
+        .map(serde_json::from_str)
+        .transpose()
+        .context("Failed to decode user split timestamps")?;
     Ok(StoredSplitTimestamps { auto, user })
 }
 

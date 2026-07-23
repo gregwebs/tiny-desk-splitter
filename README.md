@@ -22,6 +22,8 @@ Repository documentation:
 - [Architecture decisions](docs/adr/)
 - [Change Records](docs/change/)
 - [Job execution](docs/jobs.md): backend job execution and runner architecture
+- [Concert application interface](docs/concerts.md): canonical Concert State,
+  observation semantics, action policy, and the `Concerts` test seam
 - [Concert Split interface](docs/concert-split.md): the synchronous `live-set-splitter` library interface, and `concert-web`'s in-process (default) vs. CLI subprocess adapter selection
   - [Publication and Recoverable Partial Split state diagram](docs/concert-split.md#published-and-recoverable-partial-output)
   - [Interrupted-publication recovery state diagram](docs/concert-split.md#interrupted-publication-recovery)

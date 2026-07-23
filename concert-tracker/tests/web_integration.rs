@@ -30,11 +30,21 @@ fn idle_scrape_queue() -> ScrapeQueue {
 
 fn test_state(conn: rusqlite::Connection) -> AppState {
     disable_system_proxy_for_tests();
+    let db = Arc::new(Mutex::new(conn));
+    let registry = Arc::new(JobRegistry::new());
+    let scrape_queue = idle_scrape_queue();
+    let jobs = JobConfig::test(PathBuf::from("/tmp"));
     AppState {
-        db: Arc::new(Mutex::new(conn)),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig::test(PathBuf::from("/tmp")),
+        concerts: concert_tracker::concerts::Concerts::new(
+            db.clone(),
+            jobs.working_dir.clone(),
+            registry.clone(),
+            scrape_queue.clone(),
+        ),
+        db,
+        registry,
+        scrape_queue,
+        jobs,
     }
 }
 
@@ -74,11 +84,21 @@ async fn detail_page_auto_scrape_failure_still_renders() {
         "Unreachable Concert",
     );
     let db_arc = Arc::new(Mutex::new(conn));
+    let registry = Arc::new(JobRegistry::new());
+    let scrape_queue = idle_scrape_queue();
+    let workdir = tempfile::tempdir().unwrap();
+    let jobs = JobConfig::test(workdir.path().to_path_buf());
     let state = AppState {
+        concerts: concert_tracker::concerts::Concerts::new(
+            db_arc.clone(),
+            jobs.working_dir.clone(),
+            registry.clone(),
+            scrape_queue.clone(),
+        ),
         db: db_arc.clone(),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: idle_scrape_queue(),
-        jobs: JobConfig::test(PathBuf::from("/tmp")),
+        registry,
+        scrape_queue,
+        jobs,
     };
     let app = router(state);
 
