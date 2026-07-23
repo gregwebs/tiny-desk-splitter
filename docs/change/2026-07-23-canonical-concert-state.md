@@ -98,4 +98,7 @@ history, notes, and unchanged HTMX actions. `GET /concerts/999999` returned
 404. The isolated server shut down cleanly; no user database or media was read
 or changed.
 
-GitHub Actions CI status will be appended after the pull request is opened.
+GitHub Actions run
+[30018565944](https://github.com/gregwebs/tiny-desk-splitter/actions/runs/30018565944)
+passed its frontend, Playwright, Rust, and shellcheck jobs for implementation
+commit `24a31422`.
