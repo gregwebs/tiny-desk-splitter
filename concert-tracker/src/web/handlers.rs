@@ -578,6 +578,135 @@ fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -
     crate::model::list_tracks_from_events(set_list, &deleted_indices)
 }
 
+// ── Health / identity ────────────────────────────────────────────────────────
+
+/// This service's self-declared identity string. Returned by [`health`] and
+/// compared (exact match, not a substring) by `scripts/local-api-request.sh`
+/// before it issues a caller's actual request. This is a **misdirection
+/// guardrail, not authentication** — any process on loopback could return
+/// this same string, so it only confines the allow-listed script to
+/// concert-web instances rather than proving a hostile process isn't lying.
+/// Kept in sync by hand with the literal the shell script compares against
+/// (no shared symbol is possible across the language boundary) — see the
+/// comment above the probe in `local-api-request.sh`.
+pub const SERVICE_IDENTITY: &str = "concert-web";
+
+/// JSON identity payload for `Accept: application/json` requests to
+/// [`health`]. The plain-text variant (the *default* response — see the
+/// handler doc) is intentionally not modeled in OpenAPI; only this JSON shape
+/// is documented, per `docs/adr/0008-health-endpoint-content-negotiation.md`.
+#[derive(serde::Serialize, ToSchema)]
+pub struct HealthIdentity {
+    service: String,
+}
+
+/// The two response shapes [`health`] can negotiate to. Kept as a case
+/// analysis (rather than the overlapping booleans an ad hoc `.contains()`
+/// chain would produce) so a media range can only ever resolve to exactly
+/// one outcome.
+enum HealthFormat {
+    Text,
+    Json,
+}
+
+/// Exact media ranges named by an `Accept` header — the part of each
+/// comma-separated entry before any `;q=...`/`;charset=...` parameter,
+/// trimmed and case-folded per RFC 7231 (media types are case-insensitive).
+/// Deliberately exact-match, not substring: a naive `.contains("application/
+/// json")` would spuriously accept `application/jsonlines` or
+/// `application/json-patch+json`.
+fn accept_media_ranges(accept: &str) -> impl Iterator<Item = String> + '_ {
+    accept
+        .split(',')
+        .map(|entry| {
+            entry
+                .split(';')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_ascii_lowercase()
+        })
+        .filter(|range| !range.is_empty())
+}
+
+/// Resolves an `Accept` header to one of [`HealthFormat`]'s two shapes, or
+/// `None` for 406. No q-value parsing; text wins ties/wildcards. See
+/// [`health`]'s doc comment for the full ladder this implements.
+fn negotiate_health_format(accept: &str) -> Option<HealthFormat> {
+    if accept.trim().is_empty() {
+        return Some(HealthFormat::Text);
+    }
+    let ranges: Vec<String> = accept_media_ranges(accept).collect();
+    if ranges.iter().any(|r| r == "*/*") {
+        return Some(HealthFormat::Text);
+    }
+    if ranges.iter().any(|r| r == "text/plain" || r == "text/*") {
+        return Some(HealthFormat::Text);
+    }
+    if ranges
+        .iter()
+        .any(|r| r == "application/json" || r == "application/*")
+    {
+        return Some(HealthFormat::Json);
+    }
+    None
+}
+
+/// Self-identification endpoint, content-negotiated on `Accept`. Exists so
+/// `scripts/local-api-request.sh`'s allow-listed prefix can confirm it's
+/// talking to concert-web before issuing a caller's real request, rather than
+/// silently sending it to whatever else happens to be listening on that
+/// loopback port.
+///
+/// Negotiation (no q-values; text wins ties/wildcards):
+/// 1. `Accept` absent or contains `*/*` → text/plain (the default)
+/// 2. else accepts `text/plain` / `text/*` → text/plain
+/// 3. else accepts `application/json` / `application/*` → JSON
+/// 4. else → 406 Not Acceptable
+///
+/// The text body is line-oriented: line 1 is the identity token alone.
+/// Future lines (version, health detail) are reserved but not implemented.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "meta",
+    responses(
+        (status = 200, description = "Service identity (JSON shown; the default response for an absent/`*/*` Accept is actually text/plain — see handler doc)", body = HealthIdentity),
+        (status = 406, description = "Accept header names a concrete type this endpoint does not serve"),
+    )
+)]
+pub async fn health(headers: HeaderMap) -> Response {
+    let accept = headers
+        .get(axum::http::header::ACCEPT)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+
+    match negotiate_health_format(accept) {
+        Some(HealthFormat::Text) => {
+            tracing::debug!(%accept, "GET /health negotiated text/plain");
+            (
+                [(
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                )],
+                format!("{SERVICE_IDENTITY}\n"),
+            )
+                .into_response()
+        }
+        Some(HealthFormat::Json) => {
+            tracing::debug!(%accept, "GET /health negotiated application/json");
+            Json(HealthIdentity {
+                service: SERVICE_IDENTITY.to_string(),
+            })
+            .into_response()
+        }
+        None => {
+            tracing::debug!(%accept, "GET /health rejected unsupported Accept header");
+            StatusCode::NOT_ACCEPTABLE.into_response()
+        }
+    }
+}
+
 // ── Handlers ─────────────────────────────────────────────────────────────────
 
 pub async fn list(
@@ -3044,6 +3173,65 @@ mod tests {
     use crate::db::{self, concerts::MetadataUpdate};
     use crate::model::Musician;
     use std::cell::Cell;
+
+    // `/health` negotiation's full matrix (absent/`*/*`/`text/*`/`application/*`
+    // /406) is black-box-tested in `hurl/health.hurl`, matching this repo's
+    // convention of putting Accept-header/status-code HTTP behavior there
+    // (see `hurl/README.md`). These stay minimal: one direct call per branch
+    // to pin the handler's in-process behavior.
+    async fn health_body(accept: Option<&str>) -> (StatusCode, String, String) {
+        let mut headers = HeaderMap::new();
+        if let Some(accept) = accept {
+            headers.insert(axum::http::header::ACCEPT, accept.parse().unwrap());
+        }
+        let response = health(headers).await;
+        let status = response.status();
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .map(|v| v.to_str().unwrap().to_string())
+            .unwrap_or_default();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        (
+            status,
+            content_type,
+            String::from_utf8(bytes.to_vec()).unwrap(),
+        )
+    }
+
+    #[tokio::test]
+    async fn health_defaults_to_text_identity_first_line() {
+        let (status, content_type, body) = health_body(None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(content_type.starts_with("text/plain"), "{content_type}");
+        assert_eq!(body.lines().next(), Some(SERVICE_IDENTITY));
+    }
+
+    #[tokio::test]
+    async fn health_returns_json_for_accept_application_json() {
+        let (status, content_type, body) = health_body(Some("application/json")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(content_type, "application/json");
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(json["service"], SERVICE_IDENTITY);
+    }
+
+    #[tokio::test]
+    async fn health_rejects_unsupported_accept() {
+        let (status, _, _) = health_body(Some("application/xml")).await;
+        assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+    }
+
+    /// A superstring of a supported media type must not match — negotiation
+    /// compares exact media ranges, not substrings, so `application/
+    /// jsonlines` is rejected even though it contains "application/json".
+    #[tokio::test]
+    async fn health_rejects_type_that_merely_contains_a_supported_one() {
+        let (status, _, _) = health_body(Some("application/jsonlines")).await;
+        assert_eq!(status, StatusCode::NOT_ACCEPTABLE);
+    }
 
     fn seed_listing(conn: &Connection, url: &str) -> i64 {
         db::seeds::SeedContext::new(conn)

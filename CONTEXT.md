@@ -83,3 +83,7 @@ _Avoid_: Available track, partial output
 **Recoverable Partial Split**:
 The usable tracks salvaged from a failed Concert Split when no Published Concert Split already exists. Its tracks may be played individually, but it cannot provide whole-concert reconstruction or successful split state.
 _Avoid_: Published Concert Split, successful split
+
+**Service Identity Handshake**:
+A self-declared identifier a service returns (the `/health` endpoint's `concert-web` string) so a caller can confirm which service is listening on a loopback port before proceeding. It confines a caller to the intended service by misdirection, not by proving the responder is trustworthy — any process could return the same identifier.
+_Avoid_: Authentication, trust boundary

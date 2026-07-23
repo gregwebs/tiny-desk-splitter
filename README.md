@@ -28,6 +28,8 @@ Repository documentation:
   - [ADR: availability-first publication with a durable recovery journal](docs/adr/0007-availability-first-concert-split-publication.md)
 - [Domain language](CONTEXT.md): canonical vocabulary, including Job Request, Job Run, and Failed Job
 - [Hurl tests](hurl/README.md): black-box HTTP tests and Test Control API
+- `/health` self-identification endpoint (see `handlers::health` doc comment)
+  - [ADR: text and JSON negotiation, why only JSON is in the OpenAPI schema](docs/adr/0008-health-endpoint-content-negotiation.md)
 - [Data model](docs/data.md)
 
 ### Workspace crates
