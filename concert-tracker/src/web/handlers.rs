@@ -12,6 +12,7 @@ use rusqlite::Connection;
 use utoipa::ToSchema;
 
 use crate::concert_media::{find_downloaded_file, ConcertMediaInventory};
+use crate::concerts::{ConcertQueryError, ConcertState, PermittedActions};
 use crate::db;
 use crate::jobs::download::start_download;
 use crate::jobs::split::start_split;
@@ -453,27 +454,24 @@ fn render_row(
 /// hover-reveal CSS is scoped to the listing): the detail page shows picture
 /// and tracks together. The detail page isn't part of the background scrape
 /// queue, so it never shows the "loading…" placeholder.
-fn render_detail_card(
-    c: &Concert,
-    has_archive_location: bool,
-    split_queued: bool,
-    stored_user_ts: Option<&[concert_types::SongTimestamp]>,
-    working_dir: &std::path::Path,
-) -> Result<String, askama::Error> {
-    let tracks =
-        crate::model::list_all_tracks_from_db(&c.set_list, &c.tracks_present, &c.tracks_liked);
-    let inventory = ConcertMediaInventory::for_concert(working_dir, c, stored_user_ts);
-    let source_redundant = inventory.source_redundant();
-    let can_play_concert = inventory.can_play_concert();
-    render_row_inner(
-        c,
-        has_archive_location,
-        c.preview_image_url_from_db(),
+fn render_detail_card(state: &ConcertState) -> Result<String, askama::Error> {
+    let tracks = state
+        .tracks
+        .iter()
+        .map(|track| TrackInfo {
+            index: track.index,
+            title: track.title.clone(),
+            available: track.persisted_available,
+            is_video: false,
+            liked: track.liked,
+        })
+        .collect();
+    render_row_with_actions(
+        &state.concert,
+        state.concert.preview_image_url_from_db(),
         false,
-        split_queued,
         tracks,
-        source_redundant,
-        can_play_concert,
+        &state.permitted_actions,
     )
 }
 
@@ -489,16 +487,12 @@ fn render_row_inner(
     can_play_concert: bool,
 ) -> Result<String, askama::Error> {
     let ds = c.download_status();
-    let ss = c.split_status();
     let archive_s = c.archive_status();
     let can_download = matches!(
         &ds,
         DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
     );
     let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
-    let track_count = c.track_count();
-    let track_total = c.track_total();
-    let has_set_list = track_total > 0;
     let tracks_busy = tracks_busy(c, split_queued);
     let can_archive = has_archive_location
         && (c.downloaded_at.is_some() || c.split_at.is_some())
@@ -507,6 +501,45 @@ fn render_row_inner(
             ArchiveStatus::NotArchived | ArchiveStatus::ArchiveError
         );
     let can_unarchive = matches!(&archive_s, ArchiveStatus::Archived);
+    render_row_template(
+        c,
+        card_image_url,
+        scrape_pending,
+        tracks,
+        PermittedActions {
+            can_download,
+            can_delete_download,
+            can_archive,
+            can_unarchive,
+            can_play_concert,
+            can_delete_redundant_source: source_redundant,
+            tracks_busy,
+        },
+    )
+}
+
+fn render_row_with_actions(
+    c: &Concert,
+    card_image_url: Option<String>,
+    scrape_pending: bool,
+    tracks: Vec<TrackInfo>,
+    actions: &PermittedActions,
+) -> Result<String, askama::Error> {
+    render_row_template(c, card_image_url, scrape_pending, tracks, actions.clone())
+}
+
+fn render_row_template(
+    c: &Concert,
+    card_image_url: Option<String>,
+    scrape_pending: bool,
+    tracks: Vec<TrackInfo>,
+    actions: PermittedActions,
+) -> Result<String, askama::Error> {
+    let ds = c.download_status();
+    let ss = c.split_status();
+    let archive_s = c.archive_status();
+    let track_count = c.track_count();
+    let track_total = c.track_total();
     let show_download_badge = !matches!(&ds, DownloadStatus::NotDownloaded);
     let show_archive_badge = !matches!(&archive_s, ArchiveStatus::NotArchived);
     let is_in_progress = matches!(&ds, DownloadStatus::Downloading)
@@ -522,7 +555,6 @@ fn render_row_inner(
         ""
     };
     let is_available = !c.ignored && !c.wanted;
-
     RowTemplate {
         id: c.id,
         title: c.title.trim_end_matches(": Tiny Desk Concert").to_string(),
@@ -535,14 +567,14 @@ fn render_row_inner(
         is_available,
         ignored: c.ignored,
         wanted: c.wanted,
-        can_download,
-        can_delete_download,
-        has_set_list,
-        tracks_busy,
+        can_download: actions.can_download,
+        can_delete_download: actions.can_delete_download,
+        has_set_list: track_total > 0,
+        tracks_busy: actions.tracks_busy,
         track_count,
         track_total,
-        can_archive,
-        can_unarchive,
+        can_archive: actions.can_archive,
+        can_unarchive: actions.can_unarchive,
         show_download_badge,
         show_archive_badge,
         archive_status: archive_s.slug().to_string(),
@@ -551,8 +583,8 @@ fn render_row_inner(
         card_image_url,
         scrape_pending,
         tracks,
-        source_redundant,
-        can_play_concert,
+        source_redundant: actions.can_delete_redundant_source,
+        can_play_concert: actions.can_play_concert,
     }
     .render()
 }
@@ -658,14 +690,11 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let initial = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
+    let initial = state.concerts.get(id).map_err(concert_query_error)?.concert;
 
     // Auto-scrape on first view. The scrape itself is blocking (reqwest::blocking
     // can't run inside the tokio runtime), so wrap the whole step in spawn_blocking.
-    let concert = if initial.metadata_scraped_at.is_none() {
+    let _concert_after_scrape = if initial.metadata_scraped_at.is_none() {
         let db = state.db.clone();
         let initial_for_task = initial.clone();
         let working_dir = state.jobs.working_dir.clone();
@@ -687,38 +716,31 @@ pub async fn detail(
         initial
     };
 
-    let has_al = has_archive_location(&state);
-    let queued = split_queued(&state, id);
-    // Fetch user split timestamps for the source-redundant gate.
-    let stored_user_ts = {
-        let conn = state.db.lock().unwrap();
-        db::split_timestamps::get_split_timestamps(&conn, id)
-            .map(|s| s.user)
-            .unwrap_or(None)
-    };
+    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
     // The card embeds the track list (always visible on the detail page), so
     // there is no separate tracks section to populate.
-    let card_html = render_detail_card(
-        &concert,
-        has_al,
-        queued,
-        stored_user_ts.as_deref(),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-    let notes_value = concert.notes.clone().unwrap_or_default();
-    let events = {
-        let conn = state.db.lock().unwrap();
-        crate::events::list_for_concert(&conn, id)
-    };
+    let card_html = render_detail_card(&concert_state)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let notes_value = concert_state.concert.notes.clone().unwrap_or_default();
+    let events = state
+        .concerts
+        .event_history(id)
+        .map_err(concert_query_error)?;
 
     Ok(DetailTemplate {
         chrome: Chrome::from_state(&state),
         card_html,
         notes_value,
         events,
-        concert,
+        concert: concert_state.concert,
     })
+}
+
+fn concert_query_error(error: ConcertQueryError) -> AppError {
+    match error {
+        ConcertQueryError::NotFound { .. } => AppError::NotFound,
+        ConcertQueryError::Operational(error) => AppError::Internal(error),
+    }
 }
 
 pub async fn ignore(
@@ -3082,8 +3104,22 @@ mod tests {
         assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
 
         // Detail-page card uses the full-size preview image instead.
-        let detail_html =
-            render_detail_card(&concert, false, false, None, std::path::Path::new("/tmp")).unwrap();
+        let detail_html = render_row_with_actions(
+            &concert,
+            concert.preview_image_url_from_db(),
+            false,
+            vec![],
+            &PermittedActions {
+                can_download: false,
+                can_delete_download: false,
+                can_archive: false,
+                can_unarchive: false,
+                can_play_concert: false,
+                can_delete_redundant_source: false,
+                tracks_busy: false,
+            },
+        )
+        .unwrap();
         assert!(
             detail_html.contains("class=\"card-thumb\""),
             "html: {detail_html}"

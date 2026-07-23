@@ -31,6 +31,12 @@ dependency rules, and the invariants that hold across all of them.
 `db::lifecycle` queries) lives in `crate::model`, not in `db` — it's a
 cross-cutting domain type, not owned by any one persistence module.
 
+The presentation-neutral `crate::concerts::Concerts` application module sits
+above this persistence layer. It composes persistence with filesystem and
+in-memory work observations into canonical Concert State; it does not change
+the table ownership or dependency rules documented here. See
+[Concert application interface](concerts.md).
+
 ## Dependency direction
 
 Domain modules depend on `crate::events`, not the other way around, with one
