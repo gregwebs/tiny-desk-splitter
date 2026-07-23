@@ -23,6 +23,9 @@ Repository documentation:
 - [Change Records](docs/change/)
 - [Job execution](docs/jobs.md): backend job execution and runner architecture
 - [Concert Split interface](docs/concert-split.md): the synchronous `live-set-splitter` library interface, and `concert-web`'s in-process (default) vs. CLI subprocess adapter selection
+  - [Publication and Recoverable Partial Split state diagram](docs/concert-split.md#published-and-recoverable-partial-output)
+  - [Interrupted-publication recovery state diagram](docs/concert-split.md#interrupted-publication-recovery)
+  - [ADR: availability-first publication with a durable recovery journal](docs/adr/0007-availability-first-concert-split-publication.md)
 - [Domain language](CONTEXT.md): canonical vocabulary, including Job Request, Job Run, and Failed Job
 - [Hurl tests](hurl/README.md): black-box HTTP tests and Test Control API
 - [Data model](docs/data.md)

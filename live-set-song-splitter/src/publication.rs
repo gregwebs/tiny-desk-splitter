@@ -1905,6 +1905,19 @@ mod tests {
         );
     }
 
+    /// Drives recovery through two failed finish attempts (journal retained,
+    /// caller must stop) and a third that falls back to rollback. Shared by
+    /// the three "third failed finish restores ..." tests below, one per
+    /// `PriorCanonicalState` variant.
+    fn drive_recovery_to_third_attempt_rollback(canonical: &Path) {
+        assert!(recover_publication(canonical).is_err());
+        assert!(recover_publication(canonical).is_err());
+        assert_eq!(
+            recover_publication(canonical).unwrap(),
+            RecoveryStatus::Recovered
+        );
+    }
+
     #[test]
     fn third_failed_finish_restores_previous_published_split() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1928,12 +1941,7 @@ mod tests {
         fs::remove_file(staging.join("Song.m4a")).unwrap();
         write(&canonical.join("Song.m4a"), b"inconsistent");
 
-        assert!(recover_publication(&canonical).is_err());
-        assert!(recover_publication(&canonical).is_err());
-        assert_eq!(
-            recover_publication(&canonical).unwrap(),
-            RecoveryStatus::Recovered
-        );
+        drive_recovery_to_third_attempt_rollback(&canonical);
         assert_eq!(fs::read(canonical.join("Song.m4a")).unwrap(), b"known-good");
         assert!(!canonical.join(JOURNAL_NAME).exists());
     }
@@ -2043,12 +2051,7 @@ mod tests {
         fs::remove_file(staging.join("First.m4a")).unwrap();
         write(&canonical.join("First.m4a"), b"inconsistent");
 
-        assert!(recover_publication(&canonical).is_err());
-        assert!(recover_publication(&canonical).is_err());
-        assert_eq!(
-            recover_publication(&canonical).unwrap(),
-            RecoveryStatus::Recovered
-        );
+        drive_recovery_to_third_attempt_rollback(&canonical);
         assert_eq!(
             fs::read(canonical.join("First.m4a")).unwrap(),
             b"partial-known-good"
@@ -2085,6 +2088,43 @@ mod tests {
         );
         assert!(!canonical.join("Song.m4a").exists());
         assert!(!canonical.join(JOURNAL_NAME).exists());
+    }
+
+    /// Mirrors `third_failed_finish_restores_previous_published_split` and
+    /// `third_failed_finish_restores_recoverable_partial_split`, but for the
+    /// no-prior-Published-split case: an interrupted *first-ever* publication.
+    /// Rollback for `PriorCanonicalState::Empty` has no backup to restore from,
+    /// so it must remove only the journal-owned replacement files and leave
+    /// everything else in the canonical directory untouched.
+    #[test]
+    fn third_failed_finish_restores_empty_prior_by_removing_only_replacement_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        fs::create_dir_all(&canonical).unwrap();
+        // Pre-existing, journal-unrelated file (e.g. source media/concert.json)
+        // that rollback must not touch.
+        write(&canonical.join("concert.json"), b"unrelated-metadata");
+
+        let staging = tmp.path().join(".concert-split-staging-first-attempt");
+        write(&staging.join("Song.m4a"), b"never-finished");
+        prepare_recovery_journal_for_test(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging.clone(),
+            replacement_files: vec!["Song.m4a".into()],
+        })
+        .unwrap();
+        fs::remove_file(staging.join("Song.m4a")).unwrap();
+        write(&canonical.join("Song.m4a"), b"inconsistent");
+
+        drive_recovery_to_third_attempt_rollback(&canonical);
+
+        assert!(!canonical.join("Song.m4a").exists());
+        assert!(!canonical.join(JOURNAL_NAME).exists());
+        assert!(!canonical.join(MANIFEST_NAME).exists());
+        assert_eq!(
+            fs::read(canonical.join("concert.json")).unwrap(),
+            b"unrelated-metadata"
+        );
     }
 
     #[test]
