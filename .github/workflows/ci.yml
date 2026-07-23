@@ -198,7 +198,11 @@ jobs:
       - name: Install ffmpeg
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg
+          sudo apt-get install -y --no-install-recommends \
+              build-essential pkg-config clang libclang-dev ffmpeg \
+              libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
+              libavutil-dev libswscale-dev libswresample-dev \
+              libfontconfig-dev
 
       # Install only the browser used by playwright.config.js. --with-deps
       # provisions the Linux libraries required by Chromium on a clean runner.

@@ -157,3 +157,18 @@ Use a scratch `--db`/`--workdir` (never the real `concerts.db`) — copy data
 from `concerts.db` into the test db first if you need real data to work
 against. Without `--dev`, `concert-web` behaves exactly as before: JS is
 compiled in and no livereload script is injected.
+
+## Manual API verification
+
+Use the repository helper for GET requests to a locally running `concert-web`
+API:
+
+```sh
+./scripts/local-api-get.sh 43144 /api/playlists
+```
+
+The helper always connects to `127.0.0.1`, accepts only `/api` paths, and uses
+the host-compatible curl binary with `-fsS`. Its stable executable prefix can
+therefore receive a narrow persistent approval even when verification uses a
+different port or endpoint. It deliberately does not support non-GET requests;
+use a purpose-specific test or helper when verification must mutate state.

@@ -313,3 +313,49 @@ fn main() -> Result<()> {
 
     std::process::exit(exit_code_for(&outcome));
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use live_set_splitter::concert_split::ConcertSplitOutput;
+
+    fn empty_output() -> ConcertSplitOutput {
+        ConcertSplitOutput {
+            timestamps: Vec::new(),
+            tracks: Vec::new(),
+            output_dir: PathBuf::new(),
+        }
+    }
+
+    /// Every row of the documented exit-code contract table
+    /// (`docs/concert-split.md` "CLI adapter"): `Complete` and
+    /// `NoOutput::AnalysisOnly` preserve the CLI's historical success exit code,
+    /// `NoOutput::NothingDetected` preserves its historical hard-error exit
+    /// code, and a Recoverable Partial Split — still a failed split — also
+    /// exits non-zero.
+    #[test]
+    fn exit_code_for_matches_the_documented_contract_table() {
+        assert_eq!(
+            exit_code_for(&ConcertSplitOutcome::Complete(empty_output())),
+            0
+        );
+        assert_eq!(
+            exit_code_for(&ConcertSplitOutcome::NoOutput {
+                reason: NoOutputReason::AnalysisOnly,
+            }),
+            0
+        );
+        assert_eq!(
+            exit_code_for(&ConcertSplitOutcome::NoOutput {
+                reason: NoOutputReason::NothingDetected {
+                    missing: vec!["Song A".to_string()],
+                },
+            }),
+            1
+        );
+        assert_eq!(
+            exit_code_for(&ConcertSplitOutcome::Partial(empty_output())),
+            1
+        );
+    }
+}
