@@ -128,6 +128,10 @@ async fn lock_concert_media(
 /// Plain HTML/htmx handlers (no utoipa annotation) keep using `.route(...)`.
 pub(crate) fn api_router() -> (Router<AppState>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
+        // Identity guardrail for `scripts/local-api-request.sh` — see
+        // `handlers::health` doc comment. No `AppState` dependency, so it
+        // stays available even if the database can't be reached.
+        .routes(routes!(handlers::health))
         .route("/", get(handlers::list))
         .route("/concerts/:id", get(handlers::detail))
         .route("/concerts/:id/ignore", post(handlers::ignore))

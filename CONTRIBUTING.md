@@ -175,3 +175,10 @@ the host-compatible curl binary with `-fsS`. Its stable executable prefix can
 therefore receive a narrow persistent approval even when verification uses a
 different port, endpoint, or method. Use isolated application data and follow
 the repository’s backup rules before making mutating verification requests.
+
+Before every request, the helper first probes `GET /health` on the same port
+and requires the response to self-identify as `concert-web` — a narrow
+approval on this stable prefix must not let a caller send requests to
+whatever else happens to be listening on that loopback port. A target that
+doesn't identify as `concert-web` fails the helper closed with exit code
+`100`, distinct from curl's own exit codes.
