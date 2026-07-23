@@ -100,7 +100,7 @@ Two fresh scratch `concert-web` processes were started on ports 43201
 - Library mode: startup log showed the recovery scan ("backfill: generated 0
   events for 0 concerts") completing before `Listening on
   http://127.0.0.1:43201`; `GET /api/playlists` (via
-  `./scripts/local-api-get.sh`) returned `[]` from the scratch database.
+  `./scripts/local-api-request.sh`) returned `[]` from the scratch database.
 - CLI mode: startup resolved the sibling `target/release/live-set-splitter`
   binary (the CLI resolution priority order's second step, previously
   untested manually) and bound `http://127.0.0.1:43202`; `GET /api/playlists`

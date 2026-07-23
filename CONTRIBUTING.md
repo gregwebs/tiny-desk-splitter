@@ -158,17 +158,20 @@ from `concerts.db` into the test db first if you need real data to work
 against. Without `--dev`, `concert-web` behaves exactly as before: JS is
 compiled in and no livereload script is injected.
 
-## Manual API verification
+## Manual local HTTP verification
 
-Use the repository helper for GET requests to a locally running `concert-web`
-API:
+Use the repository helper for HTTP requests to a locally running `concert-web`.
+The two-argument form remains a GET:
 
 ```sh
-./scripts/local-api-get.sh 43144 /api/playlists
+./scripts/local-api-request.sh 43144 /api/playlists
+./scripts/local-api-request.sh 43144 /concerts/1
+./scripts/local-api-request.sh 43144 /concerts/1/notes POST /tmp/notes.json
 ```
 
-The helper always connects to `127.0.0.1`, accepts only `/api` paths, and uses
+The helper always connects to `127.0.0.1`, accepts any absolute request path,
+defaults to GET, supports an optional HTTP method and JSON body file, and uses
 the host-compatible curl binary with `-fsS`. Its stable executable prefix can
 therefore receive a narrow persistent approval even when verification uses a
-different port or endpoint. It deliberately does not support non-GET requests;
-use a purpose-specific test or helper when verification must mutate state.
+different port, endpoint, or method. Use isolated application data and follow
+the repository’s backup rules before making mutating verification requests.
