@@ -7,12 +7,13 @@ Interview the user relentlessly until you reach a shared understanding. Map this
 
 Every question should also provide your recommended answer. End questions with: "Do you agree with the recommendation?"
 
-Ask the questions one at a time. Asking multiple questions at once is bewildering.
-However, we do want to ask the next question as quickly as possible after receiving a response.
-Do this by preparing a round of questions.
-Each next question in the round can be emitted quickly if the user answers with "yes".
-Also prepare a next question if the answer in "no". The next question after a "no" answer ends the round.
-When you come to the last question of the round, formulate additional questions for the next round while waiting for the user's input- this may require using a sub agent.
+Work the tree in **rounds**. The **frontier** is every decision whose prerequisites are already settled or will be settled by a simple "yes" answer. The questions you can ask _now_ without guessing at answers you haven't heard yet other than "yes".
+
+Ask the questions in the round one at a time. Asking multiple questions at once is bewildering.
+Each next question in the round should be asked immediately.
+If the user answers a question with "yes" or if the next question has absolutely no dependency on prior round responses, the round continues. Otherwise the round ends early so you can take time to understand the user's response.
+
+Each round the user answers reshapes the tree — settled decisions push the frontier outward and unblock questions that depended on them. Recompute the frontier and ask the next round. A question whose answer depends on another question (other than a simple "yes") still open in this round belongs to a _later_ round, not this one.
 
 Finding facts is your job, never the user's. When a frontier question needs a fact from the environment (filesystem, tools, etc.), dispatch a sub-agent to find it — don't ask the user for anything you could look up yourself. Don't block on it: a running exploration is an unsettled prerequisite, so only the questions downstream of it wait for the sub-agent to report — ask the rest of the frontier now. The decisions are the user's — put each to them and wait.
 
