@@ -246,11 +246,19 @@ async fn main() -> Result<()> {
         JobConfig::production(workdir.clone(), split_target, cli.open_cmd.clone()),
     );
 
+    let registry = Arc::new(JobRegistry::new());
+    let concerts = concert_tracker::concerts::Concerts::new(
+        db.clone(),
+        jobs.working_dir.clone(),
+        registry.clone(),
+        scrape_queue.clone(),
+    );
     let state = AppState {
         db,
-        registry: Arc::new(JobRegistry::new()),
+        registry,
         jobs,
         scrape_queue,
+        concerts,
     };
 
     // Bound to a top-level `main` local (not `_ = ...`) so the handle outlives
