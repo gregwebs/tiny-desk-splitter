@@ -4,6 +4,18 @@ Tiny Desk Splitter tracks the lifecycle of Tiny Desk concerts from discovery thr
 
 ## Language
 
+**Concert State**:
+The canonical point-in-time description of one concert, including its metadata, lifecycle, media availability, active work, and currently permitted actions. The same Concert State is used regardless of how a client presents or interacts with the concert. A command returns the resulting Concert State so the client does not need a second query to learn the immediate outcome. A fact that cannot be observed is explicitly Unknown rather than being treated as false or absent; actions that depend on that fact are not permitted until it is known.
+_Avoid_: Concert card, HTML view model, API response
+
+**Concert Catalog**:
+The searchable, filterable, ordered collection of concerts available for browsing. A Concert Catalog returns Concert States and owns the meaning of combining discovery criteria; it does not own commands that change an individual concert.
+_Avoid_: Concert list, card grid, search page
+
+**Concert Status**:
+The mutually exclusive browsing disposition of a concert: Available, Wanted, or Ignored. Setting a Concert Status expresses the desired disposition directly; a concert cannot be both Wanted and Ignored.
+_Avoid_: Wanted flag, Ignored flag, toggle state
+
 **Job Request**:
 A request to begin download, split, or archive work for a concert. A Job Request may be rejected before work is accepted, in which case it does not create lifecycle history or a failed job. Opening media is not a Job Request because it has no persistent job lifecycle.
 _Avoid_: Job failure, Job Run
