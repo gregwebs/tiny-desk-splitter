@@ -97,6 +97,52 @@ Three invariants make this safe under `tokio::spawn`/abort and a shared
    commit. A losing side does nothing further — an in-flight `abort()` on
    an already-finished task is harmless.
 
+### Unit-test slot-release observation
+
+Co-located Job Run tests can await the current `JobRegistry` slot's release
+instead of estimating how long asynchronous work should take. This support is
+compiled only for unit tests: production callers continue to observe persisted
+lifecycle state, and integration tests exercise public HTTP behavior.
+
+The observer registers a Tokio notification while holding the same slot mutex
+used by removal. This prevents a terminal release between the initial lookup
+and waiter registration from becoming a lost wakeup. The notification belongs
+to one slot generation: if a second Job Run for the same `JobKey` starts
+immediately after the first completes, an observer of the first run does not
+silently follow the second.
+
+Every operation that removes a slot signals that generation before removal:
+ordinary terminal release, reservation rollback, cancellation, bulk
+cancellation, and replacement of an already-finished slot.
+
+Slot release is deliberately narrower than task or operating-system process
+completion. On the ordinary success and failure paths used by these tests,
+release happens after terminal persistence and after synchronous/blocking work
+has returned. Cancellation may abort the async task while an underlying
+`spawn_blocking` operation finishes independently, so callers must not use the
+slot-release observer as a general guarantee that detached blocking work has
+stopped.
+
+```text
+unit-test observer                       Job Registry
+        │                                     │
+        ├── lock slot map                     │
+        ├── bind generation A notification ──▶│ Run A
+        ├── register waiter                   │
+        └── unlock slot map                   │
+                                              ├── terminal state committed
+                                              ├── notify generation A release
+        ◀──────────── wake ───────────────────┤
+                                              └── remove generation A slot
+        │
+        └── return (even if generation B now occupies the same JobKey)
+```
+
+Individual tests retain a generous outer timeout as a deadlock detector. That
+timeout is not an expected job duration; timeout messages should include both
+the registry state and the last persisted lifecycle state so a genuinely stuck
+Job Run is diagnosable.
+
 A `JobRequest` implementor (`jobs::download::DownloadRequest`,
 `jobs::split::SplitRequest`, or `jobs::archive::ArchiveRequest`) supplies
 `validate` / `try_mark_started` / `setup` / `execute` / `gather_success_facts`
