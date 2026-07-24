@@ -1309,10 +1309,15 @@ test.describe("Starred tracks hide the delete button", () => {
       return liked === hidden; // starred iff delete hidden
     };
 
-    await trackListLikeButton(page, AUDIO, 0).click();
+    // Use evaluate to avoid real pointer events being intercepted by the fixed
+    // player bar on top of the card list, and to avoid racing the htmx
+    // outerHTML swap of this very button (see issue #135: a real .click() can
+    // hit-test onto the parent li, or land after the swap has detached the
+    // node it resolved against).
+    await trackListLikeButton(page, AUDIO, 0).evaluate((el) => el.click());
     await expect.poll(relationHolds).toBe(true);
 
-    await trackListLikeButton(page, AUDIO, 0).click();
+    await trackListLikeButton(page, AUDIO, 0).evaluate((el) => el.click());
     await expect.poll(relationHolds).toBe(true);
   });
 });
