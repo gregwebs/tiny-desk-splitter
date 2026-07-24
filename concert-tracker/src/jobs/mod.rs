@@ -17,6 +17,8 @@ use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::oneshot;
+#[cfg(test)]
+use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use concert_types::ConcertInfo;
@@ -66,9 +68,25 @@ struct JobSlot {
     /// attached via [`JobReservation::activate`].
     handle: Option<JoinHandle<()>>,
     terminal: Arc<TerminalGate>,
+    #[cfg(test)]
+    completion: Arc<Notify>,
+}
+
+impl JobSlot {
+    fn notify_completion(&self) {
+        #[cfg(test)]
+        self.completion.notify_waiters();
+    }
 }
 
 type SlotsMap = Arc<Mutex<HashMap<JobKey, JobSlot>>>;
+
+fn remove_job_slot(slots: &mut HashMap<JobKey, JobSlot>, key: &JobKey) -> Option<JobSlot> {
+    if let Some(slot) = slots.get(key) {
+        slot.notify_completion();
+    }
+    slots.remove(key)
+}
 
 /// A reservation for a not-yet-accepted Job Run. Dropping it without calling
 /// [`activate`](Self::activate) rolls the reservation back (removes the
@@ -110,7 +128,7 @@ impl JobReservation {
 impl Drop for JobReservation {
     fn drop(&mut self) {
         if !self.activated {
-            self.slots.lock().unwrap().remove(&self.key);
+            remove_job_slot(&mut self.slots.lock().unwrap(), &self.key);
         }
     }
 }
@@ -159,6 +177,69 @@ impl JobRegistry {
         }
     }
 
+    /// Wait for the currently occupied slot named by `key` to be released.
+    ///
+    /// Test-only because production callers react to lifecycle state rather
+    /// than awaiting in-process tasks. The notification is registered while
+    /// holding the slot lock and remains bound to this slot generation, so a
+    /// release cannot be lost and a rapid re-run with the same key cannot
+    /// extend the wait.
+    #[cfg(test)]
+    pub(crate) async fn wait_until_released(&self, key: &JobKey) {
+        self.wait_until_released_with_ready(key, None).await;
+    }
+
+    #[cfg(test)]
+    async fn wait_until_released_with_ready(
+        &self,
+        key: &JobKey,
+        ready: Option<oneshot::Sender<()>>,
+    ) {
+        let (mut notified, running) = {
+            let slots = self.slots.lock().unwrap();
+            let Some(slot) = slots.get(key) else {
+                if let Some(ready) = ready {
+                    let _ = ready.send(());
+                }
+                return;
+            };
+            let mut notified = Box::pin(slot.completion.clone().notified_owned());
+            notified.as_mut().enable();
+            let running = match &slot.handle {
+                None => true,
+                Some(handle) => !handle.is_finished(),
+            };
+            (notified, running)
+        };
+        if let Some(ready) = ready {
+            let _ = ready.send(());
+        }
+        if running {
+            notified.as_mut().await;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostic_state(&self, key: &JobKey) -> String {
+        let slots = match self.slots.try_lock() {
+            Ok(slots) => slots,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return "registry mutex currently held".to_string();
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return format!("registry mutex poisoned: {error}");
+            }
+        };
+        let running = match slots.get(key) {
+            None => false,
+            Some(slot) => match &slot.handle {
+                None => true,
+                Some(handle) => !handle.is_finished(),
+            },
+        };
+        format!("registry_running={running}")
+    }
+
     /// Reserve `key` for a new Job Run before any DB acceptance work runs.
     /// `None` means `key` is already reserved or running. A slot left by a
     /// finished handle is treated as free and replaced. Returns the
@@ -176,11 +257,16 @@ impl JobRegistry {
         }
         let terminal = Arc::new(TerminalGate::new());
         let (tx, rx) = oneshot::channel();
+        if slots.contains_key(&key) {
+            remove_job_slot(&mut slots, &key);
+        }
         slots.insert(
             key.clone(),
             JobSlot {
                 handle: None,
                 terminal: terminal.clone(),
+                #[cfg(test)]
+                completion: Arc::new(Notify::new()),
             },
         );
         Some((
@@ -200,7 +286,7 @@ impl JobRegistry {
     /// won cancel), after the terminal transaction commits and dependency
     /// handling completes.
     pub fn release(&self, key: &JobKey) {
-        self.slots.lock().unwrap().remove(key);
+        remove_job_slot(&mut self.slots.lock().unwrap(), key);
     }
 
     /// Abort `key`'s handle if it is still running, then remove the slot.
@@ -208,7 +294,7 @@ impl JobRegistry {
     /// `key` — the abort is a courtesy to stop wasted work, not what makes
     /// the terminal outcome exclusive (the gate does that).
     pub fn abort_and_release(&self, key: &JobKey) {
-        if let Some(slot) = self.slots.lock().unwrap().remove(key) {
+        if let Some(slot) = remove_job_slot(&mut self.slots.lock().unwrap(), key) {
             if let Some(handle) = slot.handle {
                 if !handle.is_finished() {
                     handle.abort();
@@ -288,6 +374,7 @@ impl JobRegistry {
         let mut slots = self.slots.lock().unwrap();
         let mut count = 0;
         for (_, slot) in slots.drain() {
+            slot.notify_completion();
             if let Some(handle) = slot.handle {
                 if !handle.is_finished() {
                     handle.abort();
@@ -1216,6 +1303,209 @@ mod tests {
 
         registry.abort_and_release(&key);
         assert!(!registry.is_running(&key));
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_observes_normal_release() {
+        let registry = Arc::new(JobRegistry::new());
+        let key = dl_key_n(1);
+        let handle = tokio::spawn(std::future::pending());
+        reserve_running(&registry, key.clone(), handle);
+
+        let observer_registry = registry.clone();
+        let observer_key = key.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let observer = tokio::spawn(async move {
+            observer_registry
+                .wait_until_released_with_ready(&observer_key, Some(ready_tx))
+                .await
+        });
+        ready_rx.await.unwrap();
+
+        registry.release(&key);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), observer)
+            .await
+            .expect("normal release must notify its observer")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_observes_reservation_rollback() {
+        let registry = Arc::new(JobRegistry::new());
+        let key = dl_key_n(1);
+        let (reservation, _signal) = registry.try_reserve(key.clone()).unwrap();
+
+        let observer_registry = registry.clone();
+        let observer_key = key.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let observer = tokio::spawn(async move {
+            observer_registry
+                .wait_until_released_with_ready(&observer_key, Some(ready_tx))
+                .await
+        });
+        ready_rx.await.unwrap();
+
+        drop(reservation);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), observer)
+            .await
+            .expect("reservation rollback must notify its observer")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_observes_abort_and_release() {
+        let registry = Arc::new(JobRegistry::new());
+        let key = dl_key_n(1);
+        let handle = tokio::spawn(std::future::pending());
+        reserve_running(&registry, key.clone(), handle);
+
+        let observer_registry = registry.clone();
+        let observer_key = key.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let observer = tokio::spawn(async move {
+            observer_registry
+                .wait_until_released_with_ready(&observer_key, Some(ready_tx))
+                .await
+        });
+        ready_rx.await.unwrap();
+
+        registry.abort_and_release(&key);
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), observer)
+            .await
+            .expect("abort and release must notify its observer")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_observes_cancel_all() {
+        let registry = Arc::new(JobRegistry::new());
+        let mut observers = Vec::new();
+        let mut ready_receivers = Vec::new();
+        for id in 1..=3 {
+            let key = dl_key_n(id);
+            let handle = tokio::spawn(std::future::pending());
+            reserve_running(&registry, key.clone(), handle);
+            let observer_registry = registry.clone();
+            let (ready_tx, ready_rx) = oneshot::channel();
+            ready_receivers.push(ready_rx);
+            observers.push(tokio::spawn(async move {
+                observer_registry
+                    .wait_until_released_with_ready(&key, Some(ready_tx))
+                    .await;
+            }));
+        }
+        for ready in ready_receivers {
+            ready.await.unwrap();
+        }
+
+        registry.cancel_all();
+
+        for observer in observers {
+            tokio::time::timeout(std::time::Duration::from_secs(1), observer)
+                .await
+                .expect("bulk cancellation must notify every observer")
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_stays_bound_to_replaced_generation() {
+        let registry = Arc::new(JobRegistry::new());
+        let key = dl_key_n(1);
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let old_handle = tokio::spawn(async move {
+            let _ = finish_rx.await;
+        });
+        reserve_running(&registry, key.clone(), old_handle);
+
+        let observer_registry = registry.clone();
+        let observer_key = key.clone();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let observer = tokio::spawn(async move {
+            observer_registry
+                .wait_until_released_with_ready(&observer_key, Some(ready_tx))
+                .await
+        });
+        ready_rx.await.unwrap();
+        let _ = finish_tx.send(());
+        for _ in 0..100 {
+            if !registry.is_running(&key) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!registry.is_running(&key), "old task must be finished");
+
+        let new_handle = tokio::spawn(std::future::pending());
+        reserve_running(&registry, key.clone(), new_handle);
+        assert!(registry.is_running(&key), "replacement must remain running");
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), observer)
+            .await
+            .expect("observer must finish with the replaced generation")
+            .unwrap();
+        registry.abort_and_release(&key);
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_returns_when_no_slot_exists() {
+        let registry = JobRegistry::new();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_until_released(&dl_key_n(1)),
+        )
+        .await
+        .expect("an already-finished key must return immediately");
+    }
+
+    #[tokio::test]
+    async fn wait_until_released_returns_for_finished_handle_still_in_slot() {
+        let registry = JobRegistry::new();
+        let key = dl_key_n(1);
+        let (finish_tx, finish_rx) = oneshot::channel();
+        let handle = tokio::spawn(async move {
+            let _ = finish_rx.await;
+        });
+        reserve_running(&registry, key.clone(), handle);
+        let _ = finish_tx.send(());
+        for _ in 0..100 {
+            if !registry.is_running(&key) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(!registry.is_running(&key), "task handle must be finished");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            registry.wait_until_released(&key),
+        )
+        .await
+        .expect("a finished occupied slot must return immediately");
+
+        assert!(
+            registry.slots.lock().unwrap().contains_key(&key),
+            "the test must exercise a finished handle before slot replacement"
+        );
+    }
+
+    #[test]
+    fn diagnostic_state_reports_poisoned_registry_without_panicking() {
+        let registry = Arc::new(JobRegistry::new());
+        let poison_registry = registry.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = poison_registry.slots.lock().unwrap();
+            panic!("poison registry for diagnostic test");
+        })
+        .join();
+
+        assert!(registry
+            .diagnostic_state(&dl_key_n(1))
+            .contains("registry mutex poisoned"));
     }
 
     // ── TerminalGate / JobReservation ───────────────────────────────────────

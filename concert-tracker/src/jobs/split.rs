@@ -592,18 +592,69 @@ mod tests {
         (Arc::new(Mutex::new(conn)), id)
     }
 
-    async fn wait_until_finished(registry: &JobRegistry, concert_id: i64) {
+    const TEST_JOB_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+    fn split_timeout_snapshot(database: &Arc<Mutex<Connection>>, concert_id: i64) -> String {
+        let conn = match database.try_lock() {
+            Ok(conn) => conn,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return "database mutex currently held".to_string();
+            }
+            Err(std::sync::TryLockError::Poisoned(error)) => {
+                return format!("database mutex poisoned: {error}");
+            }
+        };
+        match db::concerts::get_concert(&conn, concert_id) {
+            Ok(concert) => format!(
+                "split_started_at={:?}, split_at={:?}, split_errors={:?}",
+                concert.split_started_at, concert.split_at, concert.split_errors
+            ),
+            Err(error) => format!("failed to read persisted concert state: {error:#}"),
+        }
+    }
+
+    #[test]
+    fn split_timeout_snapshot_reports_lifecycle_without_blocking_on_database() {
+        let (database, concert_id) = seeded_db("Timeout snapshot", vec!["Song".to_string()]);
+        {
+            let conn = database.lock().unwrap();
+            db::lifecycle::try_mark_split_started(&conn, concert_id).unwrap();
+        }
+        let snapshot = split_timeout_snapshot(&database, concert_id);
+        assert!(snapshot.contains("split_started_at=Some"));
+        assert!(snapshot.contains("split_at=None"));
+        assert!(snapshot.contains("split_errors=[]"));
+
+        let _held = database.lock().unwrap();
+        assert_eq!(
+            split_timeout_snapshot(&database, concert_id),
+            "database mutex currently held"
+        );
+    }
+
+    async fn wait_until_finished(
+        database: &Arc<Mutex<Connection>>,
+        registry: &JobRegistry,
+        concert_id: i64,
+    ) {
         let key = JobKey {
             concert_id,
             kind: JobKind::Split,
         };
-        for _ in 0..100 {
-            if !registry.is_running(&key) {
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        if tokio::time::timeout(
+            TEST_JOB_COMPLETION_TIMEOUT,
+            registry.wait_until_released(&key),
+        )
+        .await
+        .is_err()
+        {
+            panic!(
+                "split job did not finish within {TEST_JOB_COMPLETION_TIMEOUT:?}: \
+                 key={key:?}, {}, {}",
+                registry.diagnostic_state(&key),
+                split_timeout_snapshot(database, concert_id)
+            );
         }
-        panic!("split job did not finish");
     }
 
     #[tokio::test]
@@ -628,7 +679,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(started, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&database, &registry, id).await;
 
         let conn = database.lock().unwrap();
         let concert = db::concerts::get_concert(&conn, id).unwrap();
@@ -682,7 +733,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
         let conn = db.lock().unwrap();
         let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_some(), "split_at should be set");
@@ -729,7 +780,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
         let conn = db.lock().unwrap();
         let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_some());
@@ -759,7 +810,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
         let conn = db.lock().unwrap();
         let c = db::concerts::get_concert(&conn, id).unwrap();
         assert!(c.split_at.is_none());
@@ -918,7 +969,7 @@ mod tests {
         .await
         .unwrap();
         assert!(matches!(outcome, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
 
         let conn = db.lock().unwrap();
         let c = db::concerts::get_concert(&conn, id).unwrap();
@@ -965,7 +1016,7 @@ mod tests {
         )
         .await
         .unwrap();
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
 
         {
             let conn = db.lock().unwrap();
@@ -1149,7 +1200,7 @@ mod tests {
         )
         .await
         .unwrap();
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
 
         let conn = db.lock().unwrap();
         let concert = db::concerts::get_concert(&conn, id).unwrap();
@@ -1264,7 +1315,7 @@ mod tests {
         )
         .await
         .unwrap();
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
 
         let conn = db.lock().unwrap();
         let concert = db::concerts::get_concert(&conn, id).unwrap();
@@ -1317,7 +1368,7 @@ mod tests {
         )
         .await
         .unwrap();
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
 
         let conn = db.lock().unwrap();
         assert!(db::concerts::get_concert(&conn, id)
@@ -1371,7 +1422,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(outcome, StartOutcome::Spawned));
-        wait_until_finished(&registry, id).await;
+        wait_until_finished(&db, &registry, id).await;
         let conn = db.lock().unwrap();
         let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
         assert_eq!(failed.len(), 1);
