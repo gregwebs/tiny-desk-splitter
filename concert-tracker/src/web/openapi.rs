@@ -31,6 +31,7 @@ use crate::web::handlers;
                         not represented here."
     ),
     components(schemas(
+        handlers::HealthIdentity,
         handlers::PrepareStatus,
         handlers::MediaInfo,
         handlers::PlaybackItemJson,
@@ -58,6 +59,7 @@ use crate::web::handlers;
         concert_types::SongTimestamp,
     )),
     tags(
+        (name = "meta", description = "Service identity/health"),
         (name = "playlists", description = "Playlist CRUD and membership"),
         (name = "playback", description = "Concert/track media and playback info"),
         (name = "splitting", description = "Split timestamps and split-job status"),
@@ -76,6 +78,7 @@ mod tests {
     /// docs. One-directional: adding a new JSON route also requires adding a
     /// line here.
     const EXPECTED_PATHS: &[&str] = &[
+        "/health",
         "/concerts/{id}/prepare-status",
         "/concerts/{id}/prepare",
         "/concerts/{id}/concert-playback",
@@ -121,7 +124,7 @@ mod tests {
     fn documents_representative_schemas() {
         let doc = ApiDoc::openapi();
         let components = doc.components.expect("components should be present");
-        for name in ["PlaylistDetailJson", "MediaInfo"] {
+        for name in ["PlaylistDetailJson", "MediaInfo", "HealthIdentity"] {
             assert!(
                 components.schemas.contains_key(name),
                 "expected schema {name:?} missing from ApiDoc components"
