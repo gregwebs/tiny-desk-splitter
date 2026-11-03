@@ -13,7 +13,7 @@ development commands.
 ## Prerequisites
 
 - **Rust** — the workspace uses `rust-toolchain.toml` to pin the toolchain to
-  Rust **1.92**, which matches the `Containerfile`. `rustup` installs it
+  Rust **1.98.1**, which matches the `Containerfile`. `rustup` installs it
   automatically on first use.
 - **yt-dlp** — download concert videos.
 - **ffmpeg** — frame analysis and cutting tracks; also required to run the

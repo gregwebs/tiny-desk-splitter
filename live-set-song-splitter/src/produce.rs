@@ -245,7 +245,7 @@ pub(crate) fn process_segments(
 
         progress(ConcertSplitProgress::Diagnostic(format!(
             "Extracting {:#?} for song {}: \"{}\" - {:.2}s to {:.2}s (duration: {:.2}s)",
-            &ctx.output_format,
+            ctx.output_format,
             song_counter,
             song_title,
             segment.segment.start_time,

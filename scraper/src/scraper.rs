@@ -413,7 +413,7 @@ pub fn scrape_data(url: &str) -> Result<()> {
     let concert_info = parse_concert_info(&html, url)?;
 
     println!("Artist: {}", concert_info.artist);
-    println!("Story Title: {}", &concert_info.album);
+    println!("Story Title: {}", concert_info.album);
 
     if let Some(date_str) = &concert_info.date {
         println!("Date: {}", date_str);

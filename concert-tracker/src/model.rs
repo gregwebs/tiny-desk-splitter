@@ -108,12 +108,12 @@ pub fn decide_backfill_duration(
             let from_timestamps = timestamps
                 .filter(|ts| !ts.is_empty())
                 .map(|ts| ts.iter().map(|t| t.end_time).fold(f64::MIN, f64::max));
-            if let Some(max_end) = from_timestamps {
-                (max_end, DurationSource::Timestamps)
-            } else if let Some(durations) = track_durations {
-                (durations.iter().sum(), DurationSource::TrackSum)
-            } else {
-                return None;
+            match from_timestamps {
+                Some(max_end) => (max_end, DurationSource::Timestamps),
+                None => {
+                    let durations = track_durations?;
+                    (durations.iter().sum(), DurationSource::TrackSum)
+                }
             }
         }
     };
