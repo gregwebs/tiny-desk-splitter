@@ -98,7 +98,7 @@ impl VideoInfo {
     }
 
     pub fn from_ffprobe_file(input_file: &str) -> Result<VideoInfo> {
-        println!("Analyzing video file metadata for {}", &input_file);
+        println!("Analyzing video file metadata for {}", input_file);
 
         // Get basic video information in one call
         let basic_info_output = create_ffprobe_command()

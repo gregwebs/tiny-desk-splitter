@@ -31,8 +31,10 @@ pub struct SilenceSpan {
 /// to [-1.0, 1.0]. A trailing odd byte (truncated sample) is ignored.
 fn pcm_s16le_to_samples(pcm_data: &[u8]) -> Vec<f32> {
     pcm_data
-        .chunks_exact(2)
-        .map(|pair| i16::from_le_bytes([pair[0], pair[1]]) as f32 / 32768.0)
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| i16::from_le_bytes(*pair) as f32 / 32768.0)
         .collect()
 }
 

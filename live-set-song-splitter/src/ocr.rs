@@ -50,7 +50,7 @@ pub fn run_tesseract_ocr(image_path: &str, psm: Option<&str>) -> Result<String> 
         return Err(anyhow::anyhow!("Tesseract OCR failed: {}", error_message));
     }
 
-    let out_txt_path = format!("{}.txt", &output_path);
+    let out_txt_path = format!("{}.txt", output_path);
     let text = fs::read_to_string(&out_txt_path)
         .with_context(|| format!("Failed to read OCR output file: {}", out_txt_path))?;
 
@@ -478,7 +478,7 @@ pub fn matches_song_title_weighted(
             return Some(result);
         }
         if let Some(stripped_song) = strip_movement_prefix(song_title) {
-            log::debug!("movement stripped: {}", &stripped_song);
+            log::debug!("movement stripped: {}", stripped_song);
             if let Some(result) = check_line_match(line, &stripped_song, is_overlay, weights) {
                 return Some(result);
             }
