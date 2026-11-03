@@ -1,0 +1,43 @@
+# TEMPORARY diagnostic workflow (do not merge): surfaces 1.98.1 clippy
+# diagnostics as check-run annotations so they can be read without job logs.
+name: Clippy diagnostics
+on:
+  push:
+    branches: [diag/clippy-1.98.1]
+permissions:
+  contents: read
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config clang libclang-dev ffmpeg \
+            libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libavutil-dev libswscale-dev libswresample-dev \
+            libfontconfig-dev
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache downloaded OCR models and prebuilt MNN
+        uses: actions/cache@v6
+        with:
+          path: |
+            live-set-song-splitter/models
+            live-set-song-splitter/vendor/ocr-rs/3rd_party
+          key: ocr-assets-${{ runner.os }}-${{ hashFiles('live-set-song-splitter/build.rs', 'live-set-song-splitter/vendor/ocr-rs/build.rs') }}
+      - name: Clippy -> annotations
+        run: |
+          set -o pipefail
+          cargo clippy --workspace --all-targets --message-format=json > /tmp/clippy.json 2>/tmp/clippy.stderr || true
+          echo "diagnostic count: $(jq -s '[.[] | select(.reason=="compiler-message")] | length' /tmp/clippy.json)"
+          jq -sr '
+            [ .[] | select(.reason == "compiler-message") | .message
+              | select(.level == "warning" or .level == "error") ]
+            | .[:45][]
+            | (.spans[]? | select(.is_primary)) as $s
+            | "::error file=\($s.file_name),line=\($s.line_start),col=\($s.column_start),title=\(.code.code // "lint")::\(.message | gsub("\n"; " "))"
+          ' /tmp/clippy.json | sort -u
+          echo "--- stderr tail ---"
+          tail -20 /tmp/clippy.stderr
