@@ -1,0 +1,108 @@
+# Dockerfile.dev — the system libraries the workspace needs to build
+#
+# `agent-vm-rust:dev` already carries the Rust toolchain (1.98.1, per
+# rust-toolchain.toml), Node/npm, gcc/g++/make, pkg-config, git, curl, tar, and
+# unzip. What it does NOT carry is the -dev half of four native dependency
+# chains, so `cargo build`/`test`/`clippy` fail before compiling a single line of
+# this workspace:
+#
+#   openssl-sys        ← reqwest's default TLS            needs libssl-dev
+#   ffmpeg-sys-next    ← live-set-song-splitter           needs the libav*/libsw* -dev packages
+#   ocr-rs (bindgen)   ← live-set-song-splitter's default  needs clang + libclang-dev
+#                        paddle-ocr feature
+#   fontconfig-sys     ← plotters                          needs libfontconfig-dev
+#
+# This stage installs exactly the packages CI installs
+# (.github/workflows/ci.yml, job `rust`), plus libssl-dev, which GitHub's
+# ubuntu-latest runner happens to ship preinstalled. On top of that it adds the
+# `ffmpeg` binary itself: the runtime tools are needed by the splitter and by
+# the Playwright e2e fixtures, and by the one library test that shells out to
+# ffmpeg to build its media fixture.
+#
+# Build:
+#   docker build -f Dockerfile.dev -t agent-vm-rust:deps .
+#   # or override the base, e.g. for a pinned image:
+#   docker build -f Dockerfile.dev --build-arg BASE_IMAGE=agent-vm-rust:dev -t agent-vm-rust:deps .
+#
+# Build-time network (same as the Containerfile's `builder` stage): ocr-rs's
+# build script downloads a prebuilt MNN library, and live-set-song-splitter's
+# downloads three PaddleOCR model files. Those downloads do not happen while
+# building THIS image — they happen on the first `cargo build` inside it — so a
+# container that runs with `--network=none` cannot build the workspace.
+#
+# Not installed here, on purpose:
+#   cmake          — ocr-rs only invokes it for its MNN source-build fallback,
+#                    which linux/{x86_64,aarch64} never takes (see Containerfile)
+#   tesseract      — only for the opt-in `leptess-ocr` feature
+#   playwright     — browsers are per-project, installed with `npx playwright install`
+#
+# Tip for agent sandboxes: the base image's ~/.cargo/config.toml points the
+# rustc wrapper at `kache`. If kache's cache directory sits on a network mount,
+# compiles crawl; `CARGO_BUILD_RUSTC_WRAPPER=""` bypasses it for a given build.
+
+ARG BASE_IMAGE=agent-vm-rust:dev
+FROM ${BASE_IMAGE}
+
+# apt-get needs root, and the base image may drop privileges.
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── Core build dependencies ──────────────────────────────────────────────────
+# build-essential/g++/pkg-config are usually already present; repeating them is
+# free and keeps this image buildable if the base image is ever slimmed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        ca-certificates \
+        curl \
+        git \
+        tar \
+        unzip \
+        clang \
+        libclang-dev \
+        libssl-dev \
+        ffmpeg \
+        libavcodec-dev \
+        libavformat-dev \
+        libavfilter-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── fontconfig ───────────────────────────────────────────────────────────────
+# Debian renamed libfontconfig1-dev to libfontconfig-dev during the trixie
+# cycle; try the new name, fall back to the old one so this builds on either.
+RUN apt-get update \
+    && { apt-get install -y --no-install-recommends libfontconfig-dev \
+         || apt-get install -y --no-install-recommends libfontconfig1-dev; } \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Fail here, not 20 minutes into a cargo build ─────────────────────────────
+# Each pkg-config check is the same probe the corresponding *-sys build script
+# runs — ffmpeg-sys-next/main.rs probes exactly this list — so a missing library
+# (or a missing -dev package, which looks identical from the outside) stops the
+# image build instead of the workspace build 20 minutes later.
+RUN set -eux; \
+    for lib in openssl fontconfig \
+               libavutil libavcodec libavformat libavfilter libavdevice \
+               libswscale libswresample; do \
+        pkg-config --exists "$lib"; \
+        printf '%-14s %s\n' "$lib" "$(pkg-config --modversion "$lib")"; \
+    done; \
+    command -v ffmpeg; \
+    ffmpeg -version | head -1; \
+    cargo --version; \
+    cargo clippy --version; \
+    cargo fmt --version; \
+    node --version
+
+# Compilation inside the image is the job; keep the workspace out of the
+# image's layers and leave the mount point ready for a bind mount.
+WORKDIR /work
+
+# `docker run -it --rm -v "$PWD:/work" agent-vm-rust:deps bash`
+CMD ["bash"]

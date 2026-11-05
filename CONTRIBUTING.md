@@ -27,6 +27,27 @@ development commands.
 - **Node.js / npm** — needed for `concert-tracker/frontend` (TypeScript
   build/lint) and the Playwright e2e suite.
 
+### Build-time system libraries
+
+`cargo build` needs four native dependency chains, not just a C/C++ toolchain:
+
+| Probe | Needed by | Debian package |
+| --- | --- | --- |
+| `openssl` | `reqwest`'s default TLS (`openssl-sys`) | `libssl-dev` |
+| `libav*`, `libsw*` | `ffmpeg-sys-next` | `libavcodec-dev libavformat-dev libavfilter-dev libavdevice-dev libavutil-dev libswscale-dev libswresample-dev` |
+| `clang` | `bindgen` in the vendored `ocr-rs` | `clang libclang-dev` |
+| `fontconfig` | `plotters` (`yeslogic-fontconfig-sys`) | `libfontconfig-dev` |
+
+Plus the `ffmpeg` binary itself, which the splitter and the e2e fixtures run.
+`.github/workflows/ci.yml` installs this list on every run. For a sandbox or
+container that starts from the Rust dev image but lacks these, `Dockerfile.dev`
+adds them and verifies each `pkg-config` probe at build time:
+
+```sh
+docker build -f Dockerfile.dev -t agent-vm-rust:deps .
+docker run -it --rm -v "$PWD:/work" agent-vm-rust:deps
+```
+
 ## Setup (one-time per clone)
 
 ```sh
