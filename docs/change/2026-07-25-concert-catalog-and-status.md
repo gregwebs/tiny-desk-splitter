@@ -93,5 +93,6 @@ The destructive "source is redundant" button stays off listing cards, as before.
   does not know — still lists every concert with Ignored ones included, and
   that Wanted, Available, and Ignored keep their meanings. The web adapter's
   half of that criterion stays with the hurl suites: `listing_status` pins the
-  Ignored and Downloaded filter URLs and the listing's Ignored markup, while the
-  remaining filter meanings are asserted once, against the catalog.
+  Ignored, Wanted, Available, Downloaded, and Tracks (`split`) filter URLs and
+  the listing's Ignored and Wanted markup, while the filter meanings themselves
+  are asserted once, against the catalog.
