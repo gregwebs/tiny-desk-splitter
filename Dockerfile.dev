@@ -1,0 +1,284 @@
+# Dockerfile.dev — everything the workspace's gates need on top of the Rust dev image
+#
+# `agent-vm-rust:dev` already carries the Rust toolchain (1.98.1, per
+# rust-toolchain.toml), Node/npm, gcc/g++/make, pkg-config, git, curl, tar, and
+# unzip. Three things are still missing, and all of them are added here.
+#
+# ── 1. Native build libraries ────────────────────────────────────────────────
+# Without these, `cargo build`/`test`/`clippy` fail before compiling a single line
+# of this workspace:
+#
+#   openssl-sys        ← reqwest's default TLS            needs libssl-dev
+#   ffmpeg-sys-next    ← live-set-song-splitter           needs the libav*/libsw* -dev packages
+#   ocr-rs (bindgen)   ← live-set-song-splitter's default  needs clang + libclang-dev
+#                        paddle-ocr feature
+#   fontconfig-sys     ← plotters                          needs libfontconfig-dev
+#
+# This is exactly the package list CI installs (.github/workflows/ci.yml, job
+# `rust`), plus libssl-dev, which GitHub's ubuntu-latest runner happens to ship
+# preinstalled. It also adds the `ffmpeg` binary itself: the runtime tools are
+# needed by the splitter, by the Playwright e2e fixtures, and by the one library
+# test that shells out to ffmpeg to build its media fixture.
+#
+# ── 2. The CLIs the repo's gates invoke ──────────────────────────────────────
+# These are not build dependencies of the crates, but `just lint`, `just
+# test-rs`, `just test-hurl` and `npx playwright test` each need one, and none of
+# them is in the base image:
+#
+#   just             — the repo's task runner (justfile)
+#   hurl 8.0.1       — black-box HTTP suite in hurl/ (`just test-hurl`); the same
+#                      pinned .deb release artifact CI installs
+#   cargo-nextest    — `just test-rs` (prebuilt release binary)
+#   Chromium + libs  — Playwright e2e (`npx playwright test`), pinned to the
+#                      @playwright/test version in package-lock.json
+#
+# Build:
+#   docker build -f Dockerfile.dev -t agent-vm-rust:deps .
+#   # or override the base / pins:
+#   docker build -f Dockerfile.dev \
+#     --build-arg BASE_IMAGE=agent-vm-rust:dev \
+#     --build-arg HURL_VERSION=8.0.1 \
+#     --build-arg PLAYWRIGHT_VERSION=1.60.0 \
+#     --build-arg MNN_RELEASE=dev \
+#     -t agent-vm-rust:deps .
+#
+# The build context must be the repo root (it reads package.json,
+# package-lock.json and the frontend equivalents to fill the npm cache).
+#
+# ── 3. The assets those builds download ─────────────────────────────────────
+# Two build steps and one test step fetch things over the network at run time,
+# which is what breaks a no-egress container: ocr-rs's build script downloads a
+# prebuilt MNN library, live-set-song-splitter's downloads three PaddleOCR model
+# files, and the gates need `npm ci` for the JS dependencies. All three are
+# fetched here at image build time and cached:
+#
+#   /opt/ocr-cache/mnn/     MNN tarball under the exact name ocr-rs looks for
+#   /opt/ocr-cache/models/  the PaddleOCR model files
+#   /opt/npm-cache/         npm cache with every tarball `npm ci` needs
+#
+# They cannot sit in their final paths at image build, because the workspace is a
+# bind mount that shadows the image's /work. docker/entrypoint.sh seeds them into
+# the checkout on start — symlinks for the OCR assets (both build scripts only
+# test `Path::exists()` before downloading), `npm ci --offline` for node_modules.
+# Only gitignored paths are touched, and DEV_ENTRYPOINT_SEED=0 turns it off.
+#
+# The MNN version, model revision and file list are mirrored from the two
+# build.rs files; bump MNN_RELEASE / PADDLE_MODELS_REV here when they move. A
+# mismatch is harmless — the build scripts just download as they normally would.
+#
+# Not installed here, on purpose:
+#   cmake          — ocr-rs only invokes it for its MNN source-build fallback,
+#                    which linux/{x86_64,aarch64} never takes (see Containerfile)
+#   tesseract      — only for the opt-in `leptess-ocr` feature
+#
+# Tips for small or sandboxed machines:
+#   * `cargo test -p concert-tracker --features test-control` needs more than
+#     ~1.5 GiB; on a 2 GiB box the rustc invocation is OOM-killed at default
+#     parallelism. `-j1` (or CARGO_BUILD_JOBS=1) makes it fit.
+#   * Debug binaries for this workspace run to tens of GB. With a small target
+#     volume, build into a scratch target dir with
+#     CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td.
+#   * The base image's ~/.cargo/config.toml points the rustc wrapper at `kache`.
+#     If kache's cache directory sits on a network mount, compiles crawl;
+#     `CARGO_BUILD_RUSTC_WRAPPER=""` bypasses it for a given build.
+
+ARG BASE_IMAGE=agent-vm-rust:dev
+FROM ${BASE_IMAGE}
+
+# apt-get needs root, and the base image may drop privileges.
+USER root
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── 1. Core build dependencies ──────────────────────────────────────────────
+# build-essential/g++/pkg-config are usually already present; repeating them is
+# free and keeps this image buildable if the base image is ever slimmed.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        pkg-config \
+        ca-certificates \
+        curl \
+        git \
+        tar \
+        unzip \
+        clang \
+        libclang-dev \
+        libssl-dev \
+        ffmpeg \
+        libavcodec-dev \
+        libavformat-dev \
+        libavfilter-dev \
+        libavdevice-dev \
+        libavutil-dev \
+        libswscale-dev \
+        libswresample-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── fontconfig ───────────────────────────────────────────────────────────────
+# Debian renamed libfontconfig1-dev to libfontconfig-dev during the trixie
+# cycle; try the new name, fall back to the old one so this builds on either.
+RUN apt-get update \
+    && { apt-get install -y --no-install-recommends libfontconfig-dev \
+         || apt-get install -y --no-install-recommends libfontconfig1-dev; } \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── just ─────────────────────────────────────────────────────────────────────
+# The repo's task runner. Prefer the distro package; fall back to a cargo install
+# for bases whose apt does not carry it yet.
+RUN apt-get update \
+    && { apt-get install -y --no-install-recommends just \
+         || cargo install just --locked --root /usr/local; } \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── hurl ─────────────────────────────────────────────────────────────────────
+# Same pinned release artifact CI installs (a .deb, so no build toolchain or
+# libcurl-dev is involved). hurl 8.0.1 is the version CI pins; newer releases
+# require a newer rustc than rust-toolchain.toml fixes, which only matters if you
+# ever build hurl from source instead.
+ARG HURL_VERSION=8.0.1
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+        x86_64)  hurl_deb_arch="amd64" ;; \
+        aarch64) hurl_deb_arch="arm64" ;; \
+        *) echo "Unsupported arch for hurl: $arch" >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
+    && curl -fsSL -o /tmp/hurl.deb \
+        "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl_${HURL_VERSION}_${hurl_deb_arch}.deb" \
+    && apt-get install -y --no-install-recommends /tmp/hurl.deb \
+    && rm -f /tmp/hurl.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── cargo-nextest ────────────────────────────────────────────────────────────
+# `just test-rs` runs nextest. Take the release tarball directly rather than the
+# get.nexte.st redirect, so the asset name (which carries the target triple) is
+# explicit and the download can be checksum-verified. Bump NEXTEST_VERSION
+# deliberately; the tag and both filenames carry it.
+ARG NEXTEST_VERSION=0.9.151
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  nextest_triple="x86_64-unknown-linux-gnu" ;; \
+        aarch64) nextest_triple="aarch64-unknown-linux-gnu" ;; \
+        *) echo "Unsupported arch for nextest: $arch" >&2; exit 1 ;; \
+    esac; \
+    asset="cargo-nextest-${NEXTEST_VERSION}-${nextest_triple}"; \
+    base="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}"; \
+    curl -fsSL -o /tmp/nextest.tar.gz "${base}/${asset}.tar.gz"; \
+    curl -fsSL -o /tmp/nextest.sha256 "${base}/${asset}.sha256"; \
+    echo "$(awk '{print $1}' /tmp/nextest.sha256)  /tmp/nextest.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/nextest.tar.gz -C /usr/local/bin; \
+    rm -f /tmp/nextest.tar.gz /tmp/nextest.sha256; \
+    cargo-nextest nextest --version
+
+# ── Playwright / Chromium ────────────────────────────────────────────────────
+# `npx playwright test` needs a Chromium build whose revision matches
+# @playwright/test, so install exactly the version package-lock.json resolves
+# (bump this ARG when the lockfile moves). `--with-deps` provisions the apt
+# libraries Chromium needs on a clean image. PLAYWRIGHT_BROWSERS_PATH puts the
+# browser somewhere shared rather than root's home, since the container is not
+# necessarily run as root.
+ARG PLAYWRIGHT_VERSION=1.60.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN apt-get update \
+    && npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
+    && npx playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── PaddleOCR assets: prebuilt MNN + model files ─────────────────────────────
+# Mirrors `MNN_PREBUILT_REPO` / `MNN_PREBUILT_VERSION` in
+# live-set-song-splitter/vendor/ocr-rs/build.rs and `MODELS_BASE_URL` /
+# `MODEL_FILES` in live-set-song-splitter/build.rs. The `en_*` override models are
+# deliberately not auto-provisioned there, so they are not fetched here either.
+ARG MNN_REPO=zibo-chen/MNN-Prebuilds
+ARG MNN_RELEASE=dev
+ARG PADDLE_MODELS_REV=b7141e7
+ENV OCR_CACHE=/opt/ocr-cache
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  mnn_suffix="linux-x86_64" ;; \
+        aarch64) mnn_suffix="linux-aarch64" ;; \
+        *) echo "Unsupported arch for the MNN prebuilt: $arch" >&2; exit 1 ;; \
+    esac; \
+    mnn_asset="mnn-${MNN_RELEASE}-${mnn_suffix}"; \
+    mkdir -p "${OCR_CACHE}/mnn" "${OCR_CACHE}/models"; \
+    curl -fsSL -o "${OCR_CACHE}/mnn/${mnn_asset}.tar.gz" \
+        "https://github.com/${MNN_REPO}/releases/download/${MNN_RELEASE}/${mnn_asset}.tar.gz"; \
+    tar -tzf "${OCR_CACHE}/mnn/${mnn_asset}.tar.gz" >/dev/null; \
+    for model in PP-OCRv5_mobile_det.mnn PP-OCRv5_mobile_rec.mnn ppocr_keys_v5.txt; do \
+        curl -fsSL -o "${OCR_CACHE}/models/${model}" \
+            "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/${PADDLE_MODELS_REV}/models/${model}"; \
+        test -s "${OCR_CACHE}/models/${model}"; \
+    done; \
+    chmod -R a+rX "${OCR_CACHE}"; \
+    ls -l "${OCR_CACHE}/mnn" "${OCR_CACHE}/models"
+
+# ── JS dependencies, as an offline npm cache ─────────────────────────────────
+# `npm ci` writes node_modules into the checkout, so it cannot be baked directly
+# either; instead fill npm's cache with exactly the tarballs the two lockfiles
+# resolve, including the platform-specific esbuild/oxlint binaries (the reason a
+# macOS-installed node_modules fails here). The check afterwards proves the cache
+# is self-sufficient: `npm ci --offline` refuses the network outright.
+ENV npm_config_cache=/opt/npm-cache
+COPY package.json package-lock.json /tmp/npm-seed/
+COPY concert-tracker/frontend/package.json concert-tracker/frontend/package-lock.json /tmp/npm-seed/frontend/
+RUN set -eux; \
+    cd /tmp/npm-seed/frontend; \
+    npm ci --no-audit --no-fund; \
+    rm -rf node_modules; \
+    npm ci --offline --no-audit --no-fund >/dev/null; \
+    ls -d node_modules/@oxlint/*linux* node_modules/@esbuild/*linux*; \
+    rm -rf node_modules; \
+    cd /tmp/npm-seed; \
+    npm ci --no-audit --no-fund; \
+    rm -rf node_modules; \
+    npm ci --offline --no-audit --no-fund >/dev/null; \
+    ls -d node_modules/@playwright/test node_modules/tsx node_modules/typescript; \
+    rm -rf node_modules; \
+    cd /tmp; \
+    rm -rf /tmp/npm-seed; \
+    chmod -R a+rwX "${npm_config_cache}"
+
+# ── Fail here, not 20 minutes into a cargo build ─────────────────────────────
+# Each pkg-config check is the same probe the corresponding *-sys build script
+# runs — ffmpeg-sys-next/main.rs probes exactly this list — so a missing library
+# (or a missing -dev package, which looks identical from the outside) stops the
+# image build instead of the workspace build 20 minutes later. The CLI checks do
+# the same for the gates that invoke them.
+RUN set -eux; \
+    for lib in openssl fontconfig \
+               libavutil libavcodec libavformat libavfilter libavdevice \
+               libswscale libswresample; do \
+        pkg-config --exists "$lib"; \
+        printf '%-14s %s\n' "$lib" "$(pkg-config --modversion "$lib")"; \
+    done; \
+    command -v ffmpeg; \
+    ffmpeg -version | head -1; \
+    cargo --version; \
+    cargo clippy --version; \
+    cargo fmt --version; \
+    cargo nextest --version; \
+    just --version; \
+    hurl --version; \
+    node --version; \
+    npx playwright --version; \
+    ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" | tee /dev/stderr | grep -q '^chromium-'; \
+    test -n "$(ls -1 "${OCR_CACHE}"/mnn/*.tar.gz)"; \
+    test -n "$(ls -1 "${OCR_CACHE}"/models/*)"; \
+    test -d "${npm_config_cache}/_cacache"
+
+# Seeds a bind-mounted checkout with the cached OCR assets and JS dependencies
+# (see docker/entrypoint.sh), then runs the command it was given.
+COPY docker/entrypoint.sh /usr/local/bin/dev-entrypoint
+RUN chmod +x /usr/local/bin/dev-entrypoint
+
+# Compilation inside the image is the job; keep the workspace out of the
+# image's layers and leave the mount point ready for a bind mount.
+WORKDIR /work
+
+# `docker run -it --rm -v "$PWD:/work" agent-vm-rust:deps bash`
+ENTRYPOINT ["/usr/local/bin/dev-entrypoint"]
+CMD ["bash"]
