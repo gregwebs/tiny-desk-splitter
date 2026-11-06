@@ -12,8 +12,10 @@ const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
+const { debugBin } = require("./cargo-target");
+
 const REPO = path.resolve(__dirname, "..");
-const BIN = path.join(REPO, "target", "debug", "concert-web");
+const BIN = debugBin("concert-web");
 const SERVER_START_TIMEOUT_MS = 20_000;
 // How long to wait for a graceful SIGTERM exit before escalating to SIGKILL.
 // concert-web's own graceful-shutdown drain is capped at 2s (SHUTDOWN_GRACE
@@ -50,6 +52,13 @@ function buildBinary() {
   );
   if (result.status !== 0) {
     throw new Error(`cargo build failed (exit ${result.status})`);
+  }
+  // `BIN` follows CARGO_TARGET_DIR / CARGO_BUILD_TARGET (scripts/cargo-target.js).
+  // Say so explicitly rather than failing later with a bare ENOENT from spawn.
+  if (!fs.existsSync(BIN)) {
+    throw new Error(
+      `cargo build succeeded but ${BIN} does not exist — check CARGO_TARGET_DIR and CARGO_BUILD_TARGET`
+    );
   }
 }
 

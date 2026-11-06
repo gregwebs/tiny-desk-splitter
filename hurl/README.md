@@ -396,6 +396,11 @@ node scripts/hurl-test.js --glob 'hurl/scrape_pending.hurl'
 just test-hurl
 cargo nextest run -p concert-tracker --test web_integration
 just lint
+
+# Small or sandboxed machine (see the tips in Dockerfile.dev): build into a
+# scratch target dir. The suite follows, because it resolves the binary through
+# scripts/cargo-target.js rather than assuming <repo>/target.
+CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td just test-hurl
 ```
 
 Release-guard check (expected to **fail to compile**, confirming the

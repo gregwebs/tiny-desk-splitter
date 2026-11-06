@@ -12,10 +12,11 @@ const os = require("os");
 const path = require("path");
 
 const { browserArgs: BROWSER_ARGS } = require("./sandbox");
+const { debugBin } = require("../scripts/cargo-target");
 
 const REPO = path.resolve(__dirname, "..");
 const FIXTURE = path.join(__dirname, ".fixture");
-const BIN = path.join(REPO, "target", "debug", "concert-web");
+const BIN = debugBin("concert-web");
 const SERVER_START_TIMEOUT_MS = 20_000;
 const READINESS_ATTEMPTS = 50;
 const READINESS_DELAY_MS = 100;
