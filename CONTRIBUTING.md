@@ -41,7 +41,9 @@ development commands.
 Plus the `ffmpeg` binary itself, which the splitter and the e2e fixtures run.
 `.github/workflows/ci.yml` installs this list on every run. For a sandbox or
 container that starts from the Rust dev image but lacks these, `Dockerfile.dev`
-adds them and verifies each `pkg-config` probe at build time:
+adds them and verifies each `pkg-config` probe at build time. It also installs
+the CLIs the gates invoke (`just`, `hurl`, `cargo-nextest`, and a Chromium build
+matching the lockfile's `@playwright/test`), so the whole suite runs in it:
 
 ```sh
 docker build -f Dockerfile.dev -t agent-vm-rust:deps .

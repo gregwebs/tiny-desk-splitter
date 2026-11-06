@@ -1,10 +1,12 @@
-# Dockerfile.dev — the system libraries the workspace needs to build
+# Dockerfile.dev — everything the workspace's gates need on top of the Rust dev image
 #
 # `agent-vm-rust:dev` already carries the Rust toolchain (1.98.1, per
 # rust-toolchain.toml), Node/npm, gcc/g++/make, pkg-config, git, curl, tar, and
-# unzip. What it does NOT carry is the -dev half of four native dependency
-# chains, so `cargo build`/`test`/`clippy` fail before compiling a single line of
-# this workspace:
+# unzip. Two kinds of dependency are still missing, and both are added here.
+#
+# ── 1. Native build libraries ────────────────────────────────────────────────
+# Without these, `cargo build`/`test`/`clippy` fail before compiling a single line
+# of this workspace:
 #
 #   openssl-sys        ← reqwest's default TLS            needs libssl-dev
 #   ffmpeg-sys-next    ← live-set-song-splitter           needs the libav*/libsw* -dev packages
@@ -12,33 +14,55 @@
 #                        paddle-ocr feature
 #   fontconfig-sys     ← plotters                          needs libfontconfig-dev
 #
-# This stage installs exactly the packages CI installs
-# (.github/workflows/ci.yml, job `rust`), plus libssl-dev, which GitHub's
-# ubuntu-latest runner happens to ship preinstalled. On top of that it adds the
-# `ffmpeg` binary itself: the runtime tools are needed by the splitter and by
-# the Playwright e2e fixtures, and by the one library test that shells out to
-# ffmpeg to build its media fixture.
+# This is exactly the package list CI installs (.github/workflows/ci.yml, job
+# `rust`), plus libssl-dev, which GitHub's ubuntu-latest runner happens to ship
+# preinstalled. It also adds the `ffmpeg` binary itself: the runtime tools are
+# needed by the splitter, by the Playwright e2e fixtures, and by the one library
+# test that shells out to ffmpeg to build its media fixture.
+#
+# ── 2. The CLIs the repo's gates invoke ──────────────────────────────────────
+# These are not build dependencies of the crates, but `just lint`, `just
+# test-rs`, `just test-hurl` and `npx playwright test` each need one, and none of
+# them is in the base image:
+#
+#   just             — the repo's task runner (justfile)
+#   hurl 8.0.1       — black-box HTTP suite in hurl/ (`just test-hurl`); the same
+#                      pinned .deb release artifact CI installs
+#   cargo-nextest    — `just test-rs` (prebuilt release binary)
+#   Chromium + libs  — Playwright e2e (`npx playwright test`), pinned to the
+#                      @playwright/test version in package-lock.json
 #
 # Build:
 #   docker build -f Dockerfile.dev -t agent-vm-rust:deps .
-#   # or override the base, e.g. for a pinned image:
-#   docker build -f Dockerfile.dev --build-arg BASE_IMAGE=agent-vm-rust:dev -t agent-vm-rust:deps .
+#   # or override the base / pins:
+#   docker build -f Dockerfile.dev \
+#     --build-arg BASE_IMAGE=agent-vm-rust:dev \
+#     --build-arg HURL_VERSION=8.0.1 \
+#     --build-arg PLAYWRIGHT_VERSION=1.60.0 \
+#     -t agent-vm-rust:deps .
 #
 # Build-time network (same as the Containerfile's `builder` stage): ocr-rs's
 # build script downloads a prebuilt MNN library, and live-set-song-splitter's
 # downloads three PaddleOCR model files. Those downloads do not happen while
 # building THIS image — they happen on the first `cargo build` inside it — so a
-# container that runs with `--network=none` cannot build the workspace.
+# container that runs with `--network=none` cannot build the workspace. The same
+# goes for `npm ci` (JS dependencies are per-checkout, not baked into the image).
 #
 # Not installed here, on purpose:
 #   cmake          — ocr-rs only invokes it for its MNN source-build fallback,
 #                    which linux/{x86_64,aarch64} never takes (see Containerfile)
 #   tesseract      — only for the opt-in `leptess-ocr` feature
-#   playwright     — browsers are per-project, installed with `npx playwright install`
 #
-# Tip for agent sandboxes: the base image's ~/.cargo/config.toml points the
-# rustc wrapper at `kache`. If kache's cache directory sits on a network mount,
-# compiles crawl; `CARGO_BUILD_RUSTC_WRAPPER=""` bypasses it for a given build.
+# Tips for small or sandboxed machines:
+#   * `cargo test -p concert-tracker --features test-control` needs more than
+#     ~1.5 GiB; on a 2 GiB box the rustc invocation is OOM-killed at default
+#     parallelism. `-j1` (or CARGO_BUILD_JOBS=1) makes it fit.
+#   * Debug binaries for this workspace run to tens of GB. With a small target
+#     volume, build into a scratch target dir with
+#     CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td.
+#   * The base image's ~/.cargo/config.toml points the rustc wrapper at `kache`.
+#     If kache's cache directory sits on a network mount, compiles crawl;
+#     `CARGO_BUILD_RUSTC_WRAPPER=""` bypasses it for a given build.
 
 ARG BASE_IMAGE=agent-vm-rust:dev
 FROM ${BASE_IMAGE}
@@ -48,7 +72,7 @@ USER root
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# ── Core build dependencies ──────────────────────────────────────────────────
+# ── 1. Core build dependencies ──────────────────────────────────────────────
 # build-essential/g++/pkg-config are usually already present; repeating them is
 # free and keeps this image buildable if the base image is ever slimmed.
 RUN apt-get update \
@@ -81,11 +105,69 @@ RUN apt-get update \
          || apt-get install -y --no-install-recommends libfontconfig1-dev; } \
     && rm -rf /var/lib/apt/lists/*
 
+# ── just ─────────────────────────────────────────────────────────────────────
+# The repo's task runner. Prefer the distro package; fall back to a cargo install
+# for bases whose apt does not carry it yet.
+RUN apt-get update \
+    && { apt-get install -y --no-install-recommends just \
+         || cargo install just --locked --root /usr/local; } \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── hurl ─────────────────────────────────────────────────────────────────────
+# Same pinned release artifact CI installs (a .deb, so no build toolchain or
+# libcurl-dev is involved). hurl 8.0.1 is the version CI pins; newer releases
+# require a newer rustc than rust-toolchain.toml fixes, which only matters if you
+# ever build hurl from source instead.
+ARG HURL_VERSION=8.0.1
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+        x86_64)  hurl_deb_arch="amd64" ;; \
+        aarch64) hurl_deb_arch="arm64" ;; \
+        *) echo "Unsupported arch for hurl: $arch" >&2; exit 1 ;; \
+    esac \
+    && apt-get update \
+    && curl -fsSL -o /tmp/hurl.deb \
+        "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl_${HURL_VERSION}_${hurl_deb_arch}.deb" \
+    && apt-get install -y --no-install-recommends /tmp/hurl.deb \
+    && rm -f /tmp/hurl.deb \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── cargo-nextest ────────────────────────────────────────────────────────────
+# `just test-rs` runs nextest. get.nexte.st serves a prebuilt tarball per
+# platform; NEXTEST_VERSION is a path segment, so it stays a moving "latest"
+# unless pinned, exactly like the Containerfile's MNN download.
+ARG NEXTEST_VERSION=latest
+RUN arch="$(uname -m)" \
+    && case "$arch" in \
+        x86_64)  nextest_arch="x86_64" ;; \
+        aarch64) nextest_arch="arm64" ;; \
+        *) echo "Unsupported arch for nextest: $arch" >&2; exit 1 ;; \
+    esac \
+    && curl -fsSL "https://get.nexte.st/${NEXTEST_VERSION}/linux-${nextest_arch}" \
+        | tar -xz -C /usr/local/bin \
+    && cargo-nextest nextest --version
+
+# ── Playwright / Chromium ────────────────────────────────────────────────────
+# `npx playwright test` needs a Chromium build whose revision matches
+# @playwright/test, so install exactly the version package-lock.json resolves
+# (bump this ARG when the lockfile moves). `--with-deps` provisions the apt
+# libraries Chromium needs on a clean image. PLAYWRIGHT_BROWSERS_PATH puts the
+# browser somewhere shared rather than root's home, since the container is not
+# necessarily run as root.
+ARG PLAYWRIGHT_VERSION=1.60.0
+ENV PLAYWRIGHT_BROWSERS_PATH=/opt/ms-playwright
+RUN apt-get update \
+    && npm install -g @playwright/test@${PLAYWRIGHT_VERSION} \
+    && npx playwright install --with-deps chromium \
+    && chmod -R a+rX /opt/ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
+
 # ── Fail here, not 20 minutes into a cargo build ─────────────────────────────
 # Each pkg-config check is the same probe the corresponding *-sys build script
 # runs — ffmpeg-sys-next/main.rs probes exactly this list — so a missing library
 # (or a missing -dev package, which looks identical from the outside) stops the
-# image build instead of the workspace build 20 minutes later.
+# image build instead of the workspace build 20 minutes later. The CLI checks do
+# the same for the gates that invoke them.
 RUN set -eux; \
     for lib in openssl fontconfig \
                libavutil libavcodec libavformat libavfilter libavdevice \
@@ -98,7 +180,12 @@ RUN set -eux; \
     cargo --version; \
     cargo clippy --version; \
     cargo fmt --version; \
-    node --version
+    cargo nextest --version; \
+    just --version; \
+    hurl --version; \
+    node --version; \
+    npx playwright --version; \
+    ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" | tee /dev/stderr | grep -q '^chromium-' 
 
 # Compilation inside the image is the job; keep the workspace out of the
 # image's layers and leave the mount point ready for a bind mount.
