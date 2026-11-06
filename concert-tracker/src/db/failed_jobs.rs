@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
+#[derive(Debug, Clone)]
 pub struct FailedJob {
     pub id: i64,
     pub concert_id: i64,
@@ -9,6 +10,33 @@ pub struct FailedJob {
     pub failure_message: String,
     pub title: String,
     pub artist: String,
+}
+
+pub fn list_for_concert(conn: &Connection, concert_id: i64) -> Result<Vec<FailedJob>> {
+    let mut stmt = conn.prepare(
+        "SELECT j.id, j.concert_id, j.name, j.failed_at, j.failure_message,
+                COALESCE(c.title, 'Unknown'), COALESCE(c.artist, '')
+         FROM jobs j
+         LEFT JOIN concerts c ON j.concert_id = c.id
+         WHERE j.concert_id = ?1
+         ORDER BY j.failed_at ASC, j.id ASC",
+    )?;
+    let jobs = stmt
+        .query_map(params![concert_id], |row| {
+            Ok(FailedJob {
+                id: row.get(0)?,
+                concert_id: row.get(1)?,
+                name: row.get(2)?,
+                failed_at: row.get(3)?,
+                failure_message: row.get(4)?,
+                title: row.get(5)?,
+                artist: row.get(6)?,
+            })
+        })
+        .context("Failed to query Failed Jobs for concert")?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .context("Failed to list Failed Jobs for concert")?;
+    Ok(jobs)
 }
 
 pub fn insert_failed_job(

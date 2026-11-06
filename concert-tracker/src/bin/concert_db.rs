@@ -4,14 +4,14 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use concert_tracker::concerts::{ConcertFilter, Concerts, JobAdmission};
 use concert_tracker::db;
 use concert_tracker::import::import_dir;
-use concert_tracker::jobs::split::{start_split, StartOutcome};
+use concert_tracker::jobs::scrape_queue::ScrapeQueue;
 use concert_tracker::jobs::{
-    check_dependencies, resolve_splitter_cli, JobConfig, JobKey, JobKind, JobRegistry, SplitMode,
-    SplitTarget,
+    check_dependencies, resolve_splitter_cli, JobConfig, JobKey, JobKind, JobRegistry, SplitTarget,
 };
-use concert_tracker::model::{sanitize_album, Concert};
+use concert_tracker::model::{sanitize_album, Concert, ConcertStatus};
 use concert_tracker::scan::scan;
 use concert_tracker::scrape::{ensure_thumbnail, scrape_url, ThumbOutcome};
 use concert_tracker::sync::{sync_months, YearMonth};
@@ -183,17 +183,10 @@ fn main() -> Result<()> {
         }
 
         Command::List { filter } => {
-            let concerts = db::concerts::list_concerts(&conn)?;
-            let filtered: Vec<&Concert> = concerts
-                .iter()
-                .filter(|c| match filter.as_str() {
-                    "wanted" => !c.ignored && c.wanted,
-                    "ignored" => c.ignored,
-                    "available" => !c.ignored && !c.wanted,
-                    _ => true,
-                })
-                .collect();
-            for c in filtered {
+            // Same catalog the web listing uses, so filter meanings cannot drift.
+            let catalog = one_shot_concerts(conn, &cli.workdir).catalog();
+            for concert_state in catalog.browse(cli_filter(&filter))? {
+                let c = &concert_state.concert;
                 println!(
                     "[{}] {} | {} | {}+{}",
                     c.id,
@@ -206,12 +199,12 @@ fn main() -> Result<()> {
         }
 
         Command::Ignore { id } => {
-            db::concerts::toggle_ignored(&conn, id)?;
+            toggle_concert_status(conn, &cli.workdir, id, ConcertStatus::Ignored)?;
             println!("Toggled ignored for concert {}", id);
         }
 
         Command::Want { id } => {
-            db::concerts::toggle_wanted(&conn, id)?;
+            toggle_concert_status(conn, &cli.workdir, id, ConcertStatus::Wanted)?;
             println!("Toggled wanted for concert {}", id);
         }
 
@@ -457,6 +450,15 @@ fn main() -> Result<()> {
                 SplitTarget::Cli(splitter_cli),
                 "true".to_string(),
             );
+            // This is the one CLI path that runs Job Runs, so it uses a `Concerts`
+            // that can admit them (a one-shot listing cannot).
+            let concerts = Concerts::new(
+                db.clone(),
+                cli.workdir.clone(),
+                registry.clone(),
+                ScrapeQueue::detached(),
+                config.clone(),
+            );
 
             let rt = tokio::runtime::Runtime::new()?;
             let (succeeded, failed, skipped_no_source, skipped_in_progress, errored) =
@@ -472,16 +474,8 @@ fn main() -> Result<()> {
                         let initial_errors = *initial_errors;
                         let key = JobKey { concert_id: id, kind: JobKind::Split };
 
-                        let label = match start_split(
-                            db.clone(),
-                            registry.clone(),
-                            config.clone(),
-                            id,
-                            SplitMode::Analyze,
-                        )
-                        .await
-                        {
-                            Ok(StartOutcome::Spawned) => {
+                        let label = match concerts.request_split(id).await.map(|r| r.admission) {
+                            Ok(JobAdmission::Admitted) => {
                                 // Poll until the async split job finishes.
                                 while registry.is_running(&key) {
                                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -502,11 +496,11 @@ fn main() -> Result<()> {
                                     "OK"
                                 }
                             }
-                            Ok(StartOutcome::NotDownloaded) => {
+                            Ok(JobAdmission::NothingToDo) => {
                                 skipped_no_source += 1;
                                 "SKIPPED (source file missing)"
                             }
-                            Ok(StartOutcome::AlreadyRunning) => {
+                            Ok(JobAdmission::AlreadyRunning) => {
                                 skipped_in_progress += 1;
                                 "SKIPPED (in progress — run `concert-db reset-in-progress` to clear)"
                             }
@@ -594,6 +588,46 @@ fn main() -> Result<()> {
 
 /// Path for a pre-backfill database backup: alongside the original, suffixed
 /// with `.bak-<UTC timestamp>` so repeated runs never collide or overwrite.
+/// Translate the CLI's `--filter` vocabulary. `wanted`, `available`, and
+/// `ignored` mean what they mean on the web; anything else — including the
+/// default `all` — lists every concert, ignored ones included, which is what
+/// `concert-db list` has always done.
+fn cli_filter(filter: &str) -> ConcertFilter {
+    match filter {
+        "wanted" => ConcertFilter::Wanted,
+        "available" => ConcertFilter::Available,
+        "ignored" => ConcertFilter::Ignored,
+        _ => ConcertFilter::Everything,
+    }
+}
+
+/// The concert interface for a one-shot CLI process: no Job Registry and no
+/// scrape worker run here, so it observes only what persistence records.
+fn one_shot_concerts(conn: rusqlite::Connection, workdir: &std::path::Path) -> Concerts {
+    Concerts::without_workers(Arc::new(Mutex::new(conn)), workdir.to_path_buf())
+}
+
+/// Toggle a concert's status the way the CLI verbs have always behaved: set
+/// `requested` when it is not already set, otherwise return to Available. The
+/// interface itself takes a desired status, so a retried toggle cannot produce
+/// a status the user did not ask for.
+fn toggle_concert_status(
+    conn: rusqlite::Connection,
+    workdir: &std::path::Path,
+    id: i64,
+    requested: ConcertStatus,
+) -> Result<()> {
+    let concerts = one_shot_concerts(conn, workdir);
+    let current = concerts.get(id)?.concert.concert_status();
+    let desired = if current == requested {
+        ConcertStatus::Available
+    } else {
+        requested
+    };
+    concerts.set_status(id, desired)?;
+    Ok(())
+}
+
 fn backup_db_path(db_path: &std::path::Path) -> std::path::PathBuf {
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     let file_name = db_path

@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::concert_media::{
     find_downloaded_file, is_video_extension, list_all_track_details, ConcertMediaInventory,
@@ -40,10 +40,10 @@ pub enum PlaybackLookupError {
     InvalidFilename,
 }
 
-pub fn source_media(
-    working_dir: &Path,
-    concert: &Concert,
-) -> Result<SourceMedia, PlaybackLookupError> {
+/// The concert's source file. This is the single place that decides between
+/// "never downloaded" and "recorded as downloaded but the file is gone", so
+/// every caller reports the same thing.
+pub fn source_file(working_dir: &Path, concert: &Concert) -> Result<PathBuf, PlaybackLookupError> {
     let album = concert
         .album
         .as_deref()
@@ -62,6 +62,38 @@ pub fn source_media(
         tracing::debug!(concert_id = concert.id, album, "playback source not found");
         return Err(PlaybackLookupError::NotPlayable);
     };
+    Ok(path)
+}
+
+/// The file for one set-list track, if it exists on disk.
+pub fn track_file(
+    working_dir: &Path,
+    concert: &Concert,
+    track_index: usize,
+) -> Result<PathBuf, PlaybackLookupError> {
+    let album = concert
+        .album
+        .as_deref()
+        .ok_or(PlaybackLookupError::NotPlayable)?;
+    let title = concert
+        .set_list
+        .get(track_index)
+        .ok_or(PlaybackLookupError::NotPlayable)?;
+    let filename = ConcertMediaInventory::for_concert(working_dir, concert, None)
+        .find_track_file(title)
+        .ok_or(PlaybackLookupError::NotPlayable)?;
+    Ok(model::concert_dir(working_dir, album).join(filename))
+}
+
+pub fn source_media(
+    working_dir: &Path,
+    concert: &Concert,
+) -> Result<SourceMedia, PlaybackLookupError> {
+    let album = concert
+        .album
+        .as_deref()
+        .ok_or(PlaybackLookupError::NotPlayable)?;
+    let path = source_file(working_dir, concert)?;
     tracing::debug!(
         concert_id = concert.id,
         path = %path.display(),

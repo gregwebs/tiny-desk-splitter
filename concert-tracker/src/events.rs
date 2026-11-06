@@ -383,6 +383,7 @@ pub fn backfill_split_tracks(conn: &Connection) -> anyhow::Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::ConcertStatus;
 
     fn setup() -> Connection {
         crate::db::connection::open_in_memory().unwrap()
@@ -631,35 +632,31 @@ mod tests {
     }
 
     #[test]
-    fn toggle_ignored_emits_correct_events() {
+    fn setting_ignored_emits_correct_events() {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        let is_ignored = crate::db::concerts::toggle_ignored(&conn, id).unwrap();
-        assert!(is_ignored);
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Ignored).unwrap();
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "ignored");
 
-        let is_ignored = crate::db::concerts::toggle_ignored(&conn, id).unwrap();
-        assert!(!is_ignored);
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Available).unwrap();
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "ignored_delete");
     }
 
     #[test]
-    fn toggle_wanted_emits_correct_events() {
+    fn setting_wanted_emits_correct_events() {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
 
-        let is_wanted = crate::db::concerts::toggle_wanted(&conn, id).unwrap();
-        assert!(is_wanted);
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "wanted");
 
-        let is_wanted = crate::db::concerts::toggle_wanted(&conn, id).unwrap();
-        assert!(!is_wanted);
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Available).unwrap();
         let events = events_for(&conn, id);
         assert_eq!(events.last().unwrap().0, "wanted_delete");
     }
@@ -780,7 +777,7 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
-        crate::db::concerts::toggle_wanted(&conn, id).unwrap();
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         let count1 = backfill(&conn).unwrap();
@@ -832,7 +829,7 @@ mod tests {
         let conn = setup();
         let id = seed(&conn);
         conn.execute("DELETE FROM events", []).unwrap();
-        crate::db::concerts::toggle_wanted(&conn, id).unwrap();
+        crate::db::concerts::set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
         conn.execute("DELETE FROM events", []).unwrap();
 
         backfill(&conn).unwrap();

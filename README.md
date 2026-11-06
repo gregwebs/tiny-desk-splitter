@@ -22,6 +22,11 @@ Repository documentation:
 - [Architecture decisions](docs/adr/)
 - [Change Records](docs/change/)
 - [Job execution](docs/jobs.md): backend job execution and runner architecture
+- [Concert application interface](docs/concerts.md): canonical Concert State,
+  observation semantics, action policy, and the `Concerts` test seam
+  - [State-change diagram](docs/concerts.md#state-changes): the transitions a user can cause, and the two retry invariants behind them
+  - [Concert Catalog](docs/concerts.md#concert-catalog): why collection browsing is a separate module from single-concert commands
+  - [Adapter boundary](docs/concerts.md#adapter-boundary): what adapters may translate, and the three things that stay outside the interface
 - [Concert Split interface](docs/concert-split.md): the synchronous `live-set-splitter` library interface, and `concert-web`'s in-process (default) vs. CLI subprocess adapter selection
   - [Publication and Recoverable Partial Split state diagram](docs/concert-split.md#published-and-recoverable-partial-output)
   - [Interrupted-publication recovery state diagram](docs/concert-split.md#interrupted-publication-recovery)

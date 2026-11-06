@@ -8,27 +8,24 @@ use axum::{
     response::Response,
     Json,
 };
-use rusqlite::Connection;
 use utoipa::ToSchema;
 
-use crate::concert_media::{find_downloaded_file, ConcertMediaInventory};
-use crate::db;
-use crate::jobs::download::start_download;
-use crate::jobs::split::start_split;
-use crate::jobs::OpenMediaOutcome;
-use crate::jobs::{JobKey, JobKind, SplitMode};
-use crate::lifecycle::{
-    CancelJobOutcome, DeleteDownloadOutcome, DeleteRedundantSourceOutcome, DeleteSplitOutcome,
+use crate::concerts::{
+    CommandRejection, ConcertCommandError, ConcertFilter, ConcertPlaybackError, ConcertQueryError,
+    ConcertState, DeletionConfirmation, DeletionOutcome, ListenTarget, Observation,
+    ScrapeAdmission,
 };
+use crate::db;
+use crate::jobs::JobKind;
+use crate::jobs::OpenMediaOutcome;
 use crate::model::{
-    concert_dir, ArchiveStatus, Concert, DownloadStatus, PlaybackItemKind, SplitStatus, TrackInfo,
+    ArchiveStatus, Concert, ConcertStatus, DownloadStatus, PlaybackItemKind, SplitStatus, TrackInfo,
 };
 use crate::playback::{PlaybackLookupError, PlaybackPlan, SourceMedia, TrackMedia};
 use crate::split_timestamps::{
-    SplitStartOutcome, SplitStartResponse, SplitTimestampWorkflowError, SplitTimestampsResponse,
-    TimestampPayload,
+    SplitStartOutcome, SplitStartResponse, SplitTimestampsResponse, TimestampPayload,
 };
-use crate::sync::{concerts_needing_scrape, sync_month, synced_months_set, YearMonth};
+use crate::sync::{sync_month, YearMonth};
 use crate::web::AppState;
 
 // ── Templates ────────────────────────────────────────────────────────────────
@@ -237,6 +234,9 @@ pub enum AppError {
     /// A well-formed request that fails validation (bad reference, cycle, empty
     /// name, …). Surfaced as 422 with the message so the client can show it.
     BadRequest(String),
+    /// A well-formed request that conflicts with the concert's current state.
+    /// Surfaced as 409 with an explanation.
+    Conflict(String),
     Internal(anyhow::Error),
 }
 
@@ -266,6 +266,7 @@ impl IntoResponse for AppError {
         match self {
             AppError::NotFound => (StatusCode::NOT_FOUND, "Not found").into_response(),
             AppError::BadRequest(msg) => (StatusCode::UNPROCESSABLE_ENTITY, msg).into_response(),
+            AppError::Conflict(msg) => (StatusCode::CONFLICT, msg).into_response(),
             AppError::Internal(e) => {
                 tracing::error!("{e:#}");
                 (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
@@ -285,228 +286,57 @@ const FILTERS: &[(&str, &str)] = &[
     ("archived", "Archived"),
 ];
 
-fn matches_filter(c: &Concert, slug: &str, has_archive_location: bool) -> bool {
-    match slug {
-        "wanted" => !c.ignored && c.wanted,
-        "ignored" => c.ignored,
-        "available" => !c.ignored && !c.wanted,
-        "downloaded" => matches!(c.download_status(), DownloadStatus::Downloaded),
-        "split" => matches!(c.split_status(), SplitStatus::Split),
-        "archived" if has_archive_location => matches!(c.archive_status(), ArchiveStatus::Archived),
-        _ => !c.ignored, // default / unknown / gated-off slug: everything except ignored
-    }
+/// Which card an adapter is rendering. Everything else a card shows comes from
+/// canonical Concert State, so no variant can offer an action the interface
+/// would reject; the variant only decides presentation.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CardVariant {
+    /// A listing card: the small thumbnail, no embedded track list (the listing
+    /// fetches it on first hover, which renders collapsed), and the
+    /// background-scrape placeholder while the concert waits its turn.
+    Listing,
+    /// A single card swapped in place after a command: the small thumbnail and
+    /// an embedded track list, so a hover-visible list survives the swap.
+    Swap,
+    /// The card at the top of the detail page: the full-size preview and an
+    /// always-visible track list (the hover-reveal CSS is scoped to the
+    /// listing). The detail page is not part of the background scrape queue, so
+    /// it never shows the placeholder.
+    Detail,
 }
 
-/// If `concert` has not yet been fully scraped, run `fetch_and_apply` to fetch
-/// the per-concert page and write metadata, then reload the row. Failures are
-/// logged and tolerated — the original `concert` is returned and the page
-/// renders with listing-only data.
-fn ensure_scraped<F>(conn: &Connection, concert: Concert, fetch_and_apply: F) -> Concert
-where
-    F: FnOnce(&Connection, &str) -> anyhow::Result<()>,
-{
-    if concert.metadata_scraped_at.is_some() {
-        return concert;
-    }
-    tracing::info!(
-        "auto-scrape started for concert {} ({})",
-        concert.id,
-        concert.title
-    );
-    match fetch_and_apply(conn, &concert.source_url) {
-        Ok(()) => {
-            tracing::info!("auto-scrape completed for concert {}", concert.id);
-            db::concerts::get_concert(conn, concert.id).unwrap_or(concert)
-        }
-        Err(e) => {
-            tracing::warn!("auto-scrape failed for concert {}: {}", concert.id, e);
-            concert
+impl CardVariant {
+    fn image_url(self, state: &ConcertState) -> Option<String> {
+        match self {
+            Self::Detail => state.concert.preview_image_url_from_db(),
+            Self::Listing | Self::Swap => state.concert.thumbnail_url_from_db(),
         }
     }
-}
 
-/// Locate the full-concert media file. Returns 500 when the concert is
-/// marked as downloaded but the file is missing on disk (data-integrity
-/// issue — the DB and filesystem disagree), and 404 when the concert
-/// genuinely has no download yet.
-fn locate_full_concert_file(
-    working_dir: &std::path::Path,
-    concert_id: i64,
-    album: Option<&str>,
-    downloaded_at: Option<&str>,
-) -> Result<std::path::PathBuf, AppError> {
-    if let Some(a) = album {
-        if let Some(p) = find_downloaded_file(working_dir, a) {
-            return Ok(p);
-        }
+    fn embeds_track_list(self) -> bool {
+        matches!(self, Self::Swap | Self::Detail)
     }
-    if downloaded_at.is_some() {
-        Err(AppError::Internal(anyhow::anyhow!(
-            "Concert {} is marked downloaded but the media file is missing on disk",
-            concert_id
-        )))
-    } else {
-        Err(AppError::NotFound)
+
+    fn shows_scrape_placeholder(self) -> bool {
+        matches!(self, Self::Listing | Self::Swap)
+    }
+
+    /// Only a card the user is looking at directly offers the destructive
+    /// "source is redundant" action; the listing keeps its original controls.
+    fn shows_redundant_source_action(self) -> bool {
+        matches!(self, Self::Swap | Self::Detail)
     }
 }
 
-fn has_archive_location(state: &AppState) -> bool {
-    let conn = state.db.lock().unwrap();
-    db::settings::get_settings(&conn)
-        .map(|s| s.archive_location.is_some())
-        .unwrap_or(false)
-}
-
-/// True while a split is running or queued behind an in-flight download: the
-/// tracks button and individual track buttons render disabled until it ends.
-fn tracks_busy(c: &Concert, split_queued: bool) -> bool {
-    matches!(c.split_status(), SplitStatus::Splitting)
-        || (matches!(c.download_status(), DownloadStatus::Downloading) && split_queued)
-}
-
-/// Whether a split job is queued to start when this concert's download
-/// finishes (the in-memory dependency edge created by `prepare`).
-fn split_queued(state: &AppState, id: i64) -> bool {
-    state.registry.has_dependent(
-        &JobKey {
-            concert_id: id,
-            kind: JobKind::Download,
-        },
-        &JobKey {
-            concert_id: id,
-            kind: JobKind::Split,
-        },
-    )
-}
-
-/// Re-render a single concert card (its `<div class="card" id="concert-{id}">`)
-/// with its full track list embedded. Used by handlers that mutate a concert
-/// and want to swap just that card in place — instead of `HX-Refresh: true`,
-/// which would reload the whole page and tear down the persistent
-/// (hx-preserve'd) JS player. Embedding the tracks keeps a hover-visible track
-/// list populated across the swap. Mirrors `status_row`.
-fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
-    let (concert, stored_ts) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
-            .map(|s| s.user)
-            .unwrap_or(None);
-        (concert, stored_ts)
-    };
-    let tracks = crate::model::list_all_tracks_from_db(
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
-    let inventory =
-        ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, stored_ts.as_deref());
-    let source_redundant = inventory.source_redundant();
-    let can_play_concert = inventory.can_play_concert();
-    render_row_inner(
-        &concert,
-        has_archive_location(state),
-        concert.thumbnail_url_from_db(),
-        scrape_pending(state, id),
-        split_queued(state, id),
-        tracks,
-        source_redundant,
-        can_play_concert,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
-}
-
-/// Render a listing card for `c`, using the small listing thumbnail as the
-/// card image. `scrape_pending` is true while the concert is queued/in-flight in
-/// the background scrape worker (shows a "loading…" placeholder + keeps polling).
-/// The bulk listing leaves the track list empty (it is fetched on first hover);
-/// single-card swaps go through `render_card`, which embeds it.
-fn render_row(
-    c: &Concert,
-    has_archive_location: bool,
-    scrape_pending: bool,
-    split_queued: bool,
-) -> Result<String, askama::Error> {
-    // Listing cards don't show the delete-redundant-source button.
-    // For can_play_concert use the downloaded status as a cheap proxy (avoids
-    // a filesystem probe per card). Known limitation: once the source is deleted
-    // as redundant, download_status() becomes NotDownloaded and the listing
-    // hides "Play concert" even though reconstruction would succeed. The
-    // detail/single-card paths use ConcertMediaInventory::can_play_concert for
-    // the real check.
-    let can_play_concert = matches!(c.download_status(), DownloadStatus::Downloaded);
-    render_row_inner(
-        c,
-        has_archive_location,
-        c.thumbnail_url_from_db(),
-        scrape_pending,
-        split_queued,
-        vec![],
-        false,
-        can_play_concert,
-    )
-}
-
-/// Render the concert card shown at the top of the detail page. Same card
-/// markup as the listing, but the card image is the full-size preview rather
-/// than the thumbnail, and the embedded track list is always visible (the
-/// hover-reveal CSS is scoped to the listing): the detail page shows picture
-/// and tracks together. The detail page isn't part of the background scrape
-/// queue, so it never shows the "loading…" placeholder.
-fn render_detail_card(
-    c: &Concert,
-    has_archive_location: bool,
-    split_queued: bool,
-    stored_user_ts: Option<&[concert_types::SongTimestamp]>,
-    working_dir: &std::path::Path,
-) -> Result<String, askama::Error> {
-    let tracks =
-        crate::model::list_all_tracks_from_db(&c.set_list, &c.tracks_present, &c.tracks_liked);
-    let inventory = ConcertMediaInventory::for_concert(working_dir, c, stored_user_ts);
-    let source_redundant = inventory.source_redundant();
-    let can_play_concert = inventory.can_play_concert();
-    render_row_inner(
-        c,
-        has_archive_location,
-        c.preview_image_url_from_db(),
-        false,
-        split_queued,
-        tracks,
-        source_redundant,
-        can_play_concert,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
-fn render_row_inner(
-    c: &Concert,
-    has_archive_location: bool,
-    card_image_url: Option<String>,
-    scrape_pending: bool,
-    split_queued: bool,
-    tracks: Vec<TrackInfo>,
-    source_redundant: bool,
-    can_play_concert: bool,
-) -> Result<String, askama::Error> {
+/// Render the card markup for one Concert State.
+fn render_card_html(state: &ConcertState, variant: CardVariant) -> Result<String, askama::Error> {
+    let c = &state.concert;
+    let actions = &state.permitted_actions;
     let ds = c.download_status();
     let ss = c.split_status();
     let archive_s = c.archive_status();
-    let can_download = matches!(
-        &ds,
-        DownloadStatus::NotDownloaded | DownloadStatus::DownloadError
-    );
-    let can_delete_download = matches!(&ds, DownloadStatus::Downloaded);
     let track_count = c.track_count();
     let track_total = c.track_total();
-    let has_set_list = track_total > 0;
-    let tracks_busy = tracks_busy(c, split_queued);
-    let can_archive = has_archive_location
-        && (c.downloaded_at.is_some() || c.split_at.is_some())
-        && matches!(
-            &archive_s,
-            ArchiveStatus::NotArchived | ArchiveStatus::ArchiveError
-        );
-    let can_unarchive = matches!(&archive_s, ArchiveStatus::Archived);
     let show_download_badge = !matches!(&ds, DownloadStatus::NotDownloaded);
     let show_archive_badge = !matches!(&archive_s, ArchiveStatus::NotArchived);
     let is_in_progress = matches!(&ds, DownloadStatus::Downloading)
@@ -522,7 +352,6 @@ fn render_row_inner(
         ""
     };
     let is_available = !c.ignored && !c.wanted;
-
     RowTemplate {
         id: c.id,
         title: c.title.trim_end_matches(": Tiny Desk Concert").to_string(),
@@ -535,47 +364,73 @@ fn render_row_inner(
         is_available,
         ignored: c.ignored,
         wanted: c.wanted,
-        can_download,
-        can_delete_download,
-        has_set_list,
-        tracks_busy,
+        can_download: actions.can_download,
+        can_delete_download: actions.can_delete_download,
+        has_set_list: track_total > 0,
+        tracks_busy: actions.tracks_busy,
         track_count,
         track_total,
-        can_archive,
-        can_unarchive,
+        can_archive: actions.can_archive,
+        can_unarchive: actions.can_unarchive,
         show_download_badge,
         show_archive_badge,
         archive_status: archive_s.slug().to_string(),
         archive_status_label: archive_s.label().to_string(),
         is_in_progress,
-        card_image_url,
-        scrape_pending,
-        tracks,
-        source_redundant,
-        can_play_concert,
+        card_image_url: variant.image_url(state),
+        scrape_pending: variant.shows_scrape_placeholder() && state.active_work.scrape_pending,
+        tracks: if variant.embeds_track_list() {
+            card_tracks(state)
+        } else {
+            Vec::new()
+        },
+        source_redundant: variant.shows_redundant_source_action()
+            && actions.can_delete_redundant_source,
+        can_play_concert: actions.can_play_concert,
     }
     .render()
 }
 
-/// Whether `id` is currently queued/in-flight in the background scrape worker.
-fn scrape_pending(state: &AppState, id: i64) -> bool {
-    state.scrape_queue.is_pending(id)
+/// The card's track list, projected from canonical state.
+fn card_tracks(state: &ConcertState) -> Vec<TrackInfo> {
+    state
+        .tracks
+        .iter()
+        .map(|track| TrackInfo {
+            index: track.index,
+            title: track.title.clone(),
+            available: track.persisted_available,
+            is_video: false,
+            liked: track.liked,
+        })
+        .collect()
 }
 
-fn tracks_from_events(set_list: &[String], events: &[crate::events::EventRow]) -> Vec<TrackInfo> {
-    use std::collections::HashSet;
-    let deleted_indices: HashSet<usize> = events
-        .iter()
-        .filter(|e| e.event == "track_delete")
-        .filter_map(|e| {
-            e.json
-                .as_ref()
-                .and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok())
-                .and_then(|v| v["track_index"].as_u64())
-                .map(|i| i as usize)
-        })
-        .collect();
-    crate::model::list_tracks_from_events(set_list, &deleted_indices)
+/// Re-render a single concert card (its `<div class="card" id="concert-{id}">`)
+/// with its full track list embedded. Used by handlers that mutate a concert
+/// and want to swap just that card in place — instead of `HX-Refresh: true`,
+/// which would reload the whole page and tear down the persistent
+/// (hx-preserve'd) JS player. Mirrors `status_row`.
+fn render_card(state: &AppState, id: i64) -> Result<String, AppError> {
+    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
+    render_card_from(&concert_state)
+}
+
+/// Render the swapped-in card for a state a command already returned, so a
+/// command response needs no second observation.
+fn render_card_from(concert_state: &ConcertState) -> Result<String, AppError> {
+    render_card_html(concert_state, CardVariant::Swap)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+/// Render a listing card.
+fn render_listing_card(state: &ConcertState) -> Result<String, askama::Error> {
+    render_card_html(state, CardVariant::Listing)
+}
+
+/// Render the concert card shown at the top of the detail page.
+fn render_detail_card(state: &ConcertState) -> Result<String, askama::Error> {
+    render_card_html(state, CardVariant::Detail)
 }
 
 // ── Health / identity ────────────────────────────────────────────────────────
@@ -719,35 +574,34 @@ pub async fn list(
         .unwrap_or("")
         .to_string();
 
-    let (concerts, synced, earliest_date, has_archive_location) = {
-        let conn = state.db.lock().unwrap();
-        let concerts = db::concerts::list_concerts(&conn)?;
-        let synced = synced_months_set(&conn)?;
-        let earliest = db::sync::earliest_concert_date(&conn)?;
-        let has_al = db::settings::get_settings(&conn)?
-            .archive_location
-            .is_some();
-        (concerts, synced, earliest, has_al)
-    };
-
-    let filtered: Vec<&Concert> = concerts
-        .iter()
-        .filter(|c| matches_filter(c, &filter, has_archive_location))
-        .collect();
+    let states = state
+        .catalog
+        .browse(ConcertFilter::from_slug(&filter))
+        .map_err(concert_query_error)?;
+    let archive_configured = state
+        .catalog
+        .archive_configured()
+        .map_err(concert_query_error)?;
+    let listing_context = state
+        .catalog
+        .listing_context()
+        .map_err(concert_query_error)?;
+    let synced = listing_context.synced_months;
+    let earliest_date = listing_context.earliest_date;
 
     let current = YearMonth::current();
 
     let mut by_month: HashMap<YearMonth, Vec<String>> = HashMap::new();
     let mut no_date_rows: Vec<String> = Vec::new();
-    for c in &filtered {
-        let row = render_row(
-            c,
-            has_archive_location,
-            scrape_pending(&state, c.id),
-            split_queued(&state, c.id),
-        )
-        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-        match c.concert_date.as_deref().and_then(YearMonth::from_date_str) {
+    for concert_state in &states {
+        let row = render_listing_card(concert_state)
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        match concert_state
+            .concert
+            .concert_date
+            .as_deref()
+            .and_then(YearMonth::from_date_str)
+        {
             Some(ym) => by_month.entry(ym).or_default().push(row),
             None => no_date_rows.push(row),
         }
@@ -768,7 +622,7 @@ pub async fn list(
         rows: items,
         filters: FILTERS
             .iter()
-            .filter(|(s, _)| *s != "archived" || has_archive_location)
+            .filter(|(s, _)| *s != "archived" || archive_configured)
             .map(|(s, l)| {
                 let active = *s == filter;
                 let href = if active {
@@ -787,110 +641,105 @@ pub async fn detail(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let initial = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    // Auto-scrape on first view. The scrape itself is blocking (reqwest::blocking
-    // can't run inside the tokio runtime), so wrap the whole step in spawn_blocking.
-    let concert = if initial.metadata_scraped_at.is_none() {
-        let db = state.db.clone();
-        let initial_for_task = initial.clone();
-        let working_dir = state.jobs.working_dir.clone();
-        match tokio::task::spawn_blocking(move || {
-            let conn = db.lock().unwrap();
-            ensure_scraped(&conn, initial_for_task, |c, u| {
-                crate::scrape::scrape_url(c, u, &working_dir)
-            })
-        })
+    // Auto-scrape on first view. The interface tolerates a failed scrape, so the
+    // page renders with listing-only data when NPR cannot be reached.
+    state
+        .concerts
+        .ensure_scraped(id)
         .await
-        {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!("auto-scrape task join failed for concert {}: {}", id, e);
-                initial
-            }
-        }
-    } else {
-        initial
-    };
+        .map_err(concert_command_error)?;
 
-    let has_al = has_archive_location(&state);
-    let queued = split_queued(&state, id);
-    // Fetch user split timestamps for the source-redundant gate.
-    let stored_user_ts = {
-        let conn = state.db.lock().unwrap();
-        db::split_timestamps::get_split_timestamps(&conn, id)
-            .map(|s| s.user)
-            .unwrap_or(None)
-    };
+    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
     // The card embeds the track list (always visible on the detail page), so
     // there is no separate tracks section to populate.
-    let card_html = render_detail_card(
-        &concert,
-        has_al,
-        queued,
-        stored_user_ts.as_deref(),
-        &state.jobs.working_dir,
-    )
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-    let notes_value = concert.notes.clone().unwrap_or_default();
-    let events = {
-        let conn = state.db.lock().unwrap();
-        crate::events::list_for_concert(&conn, id)
-    };
+    let card_html = render_detail_card(&concert_state)
+        .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+    let notes_value = concert_state.concert.notes.clone().unwrap_or_default();
+    let events = state
+        .concerts
+        .event_history(id)
+        .map_err(concert_query_error)?;
 
     Ok(DetailTemplate {
         chrome: Chrome::from_state(&state),
         card_html,
         notes_value,
         events,
-        concert,
+        concert: concert_state.concert,
     })
 }
 
+fn concert_query_error(error: ConcertQueryError) -> AppError {
+    match error {
+        ConcertQueryError::NotFound { .. } => AppError::NotFound,
+        ConcertQueryError::Operational(error) => AppError::Internal(error),
+    }
+}
+
+/// Map a command outcome onto HTTP semantics: an expected rejection becomes a
+/// client error, an operational failure stays a server error.
+fn concert_command_error(error: ConcertCommandError) -> AppError {
+    match error {
+        ConcertCommandError::Rejected(rejection) => match rejection {
+            CommandRejection::NotFound { .. } => AppError::NotFound,
+            // A command naming a track or media that does not exist is a
+            // well-formed request for something absent: the same 404 the
+            // handlers returned before the interface owned the decision.
+            CommandRejection::NoSuchTrack { .. } | CommandRejection::MissingMedia { .. } => {
+                AppError::NotFound
+            }
+            // The source file is still needed; the request is well formed but
+            // conflicts with the concert's current media.
+            CommandRejection::SourceNotRedundant { .. } => AppError::Conflict(
+                "Source file is not yet fully covered by song and interlude tracks; cannot delete."
+                    .to_string(),
+            ),
+            CommandRejection::Conflict { message, .. } => AppError::Conflict(message),
+            CommandRejection::Invalid { message, .. } => AppError::BadRequest(message),
+        },
+        ConcertCommandError::Operational(error) => AppError::Internal(error),
+    }
+}
+
+/// Toggle Ignored. The route is a toggle in the UI's markup — the card posts it
+/// both to ignore a concert and, from the ✕, to clear the ignore — so the
+/// adapter turns the click into the desired Concert Status and the interface
+/// stores that status. Markup, routes, and behaviour stay as they were.
 pub async fn ignore(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::toggle_ignored(&conn, id)?;
-        db::concerts::get_concert(&conn, id)?
-    };
-    if concert.ignored {
-        if let Some(album) = concert.album.as_deref() {
-            remove_file_if_present(
-                &concert_dir(&state.jobs.working_dir, album).join("preview.jpg"),
-            );
-            remove_file_if_present(&crate::scrape::thumbnail_path(
-                &state.jobs.working_dir,
-                album,
-            ));
-        }
-    }
-    render_card(&state, id)
+    let concert_state = set_toggled_status(&state, id, ConcertStatus::Ignored)?;
+    render_card_from(&concert_state)
 }
 
-/// Delete `path`, ignoring a missing file but warning on any other error.
-fn remove_file_if_present(path: &std::path::Path) {
-    if let Err(e) = std::fs::remove_file(path) {
-        if e.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!("failed to delete {}: {}", path.display(), e);
-        }
-    }
-}
-
+/// Toggle Wanted, for the same reason as [`ignore`].
 pub async fn want(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    {
-        let conn = state.db.lock().unwrap();
-        db::concerts::toggle_wanted(&conn, id)?;
-    }
-    render_card(&state, id)
+    let concert_state = set_toggled_status(&state, id, ConcertStatus::Wanted)?;
+    render_card_from(&concert_state)
+}
+
+/// Translate a status toggle into the Concert Status the user asked for — the
+/// toggled status when it is already set, otherwise the requested one — and set
+/// it through [`Concerts`].
+fn set_toggled_status(
+    state: &AppState,
+    id: i64,
+    requested: ConcertStatus,
+) -> Result<ConcertState, AppError> {
+    let current = state.concerts.get(id).map_err(concert_query_error)?;
+    let desired = if current.concert.concert_status() == requested {
+        ConcertStatus::Available
+    } else {
+        requested
+    };
+    state
+        .concerts
+        .set_status(id, desired)
+        .map_err(concert_command_error)
 }
 
 pub async fn notes(
@@ -899,141 +748,35 @@ pub async fn notes(
     Form(form): Form<HashMap<String, String>>,
 ) -> Result<impl IntoResponse, AppError> {
     let text = form.get("notes").map(|s| s.as_str()).unwrap_or("");
-    {
-        let conn = state.db.lock().unwrap();
-        db::concerts::set_notes(&conn, id, text)?;
-    }
-    render_card(&state, id)
+    let concert_state = state
+        .concerts
+        .set_notes(id, text)
+        .map_err(concert_command_error)?;
+    render_card_from(&concert_state)
 }
 
 pub async fn scrape_concert(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (url, title) = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (c.source_url, c.title)
-    };
-
-    tracing::info!("re-scrape started for concert {} ({})", id, title);
-
-    // reqwest::blocking cannot run inside a tokio runtime; offload to a blocking thread.
-    let db = state.db.clone();
-    let working_dir = state.jobs.working_dir.clone();
-    let scrape_result = tokio::task::spawn_blocking(move || {
-        let conn = db.lock().unwrap();
-        crate::scrape::scrape_url(&conn, &url, &working_dir)
-    })
-    .await
-    .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))?;
-
-    match &scrape_result {
-        Ok(()) => tracing::info!("re-scrape completed for concert {}", id),
-        Err(e) => tracing::warn!("re-scrape failed for concert {}: {}", id, e),
-    }
-    scrape_result?;
-
-    render_card(&state, id)
-}
-
-/// Ensure metadata is scraped before downloading/preparing so we have artist,
-/// album, set_list, preview image, etc. Runs the scrape in a blocking task and
-/// waits for it; scrape failures are logged and tolerated by `ensure_scraped`.
-async fn ensure_scraped_blocking(state: &AppState, id: i64) -> Result<(), AppError> {
-    let needs_scrape = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        c.metadata_scraped_at.is_none()
-    };
-    if needs_scrape {
-        let db = state.db.clone();
-        let working_dir = state.jobs.working_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let conn = db.lock().unwrap();
-            let c = db::concerts::get_concert(&conn, id)?;
-            ensure_scraped(&conn, c, |conn, url| {
-                crate::scrape::scrape_url(conn, url, &working_dir)
-            });
-            Ok::<_, anyhow::Error>(())
-        })
-        .await;
-    }
-    Ok(())
+    let concert_state = state
+        .concerts
+        .scrape(id)
+        .await
+        .map_err(concert_command_error)?;
+    render_card_from(&concert_state)
 }
 
 pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    ensure_scraped_blocking(&state, id).await?;
-
-    // Reload after scrape — metadata may have just been populated.
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    let should_auto_split = concert.album.is_some()
-        && !concert.set_list.is_empty()
-        && matches!(
-            concert.split_status(),
-            SplitStatus::NotSplit | SplitStatus::SplitError
-        );
-
-    if should_auto_split {
-        match crate::jobs::prepare::prepare(
-            state.db.clone(),
-            state.registry.clone(),
-            state.jobs.clone(),
-            id,
-        )
+    let request = state
+        .concerts
+        .request_download(id)
         .await
-        {
-            Ok(crate::jobs::prepare::PrepareOutcome::Ready) => {
-                // All track files exist but the source is missing (manual copies).
-                // Force a download anyway so the user gets the source video.
-                let album = concert.album.as_deref().expect("checked above");
-                if find_downloaded_file(&state.jobs.working_dir, album).is_none() {
-                    start_download(
-                        state.db.clone(),
-                        state.registry.clone(),
-                        state.jobs.clone(),
-                        id,
-                    )
-                    .await?;
-                }
-                // else: source already on disk; reconcile happened in prepare —
-                // downloaded_at is now set so the Download button will disappear.
-            }
-            Ok(_) => {}
-            Err(e)
-                if e.downcast_ref::<crate::jobs::prepare::NoSetList>()
-                    .is_some() =>
-            {
-                // TOCTOU: metadata cleared between our check and prepare's re-read.
-                // Fall back to a plain download rather than a 500.
-                start_download(
-                    state.db.clone(),
-                    state.registry.clone(),
-                    state.jobs.clone(),
-                    id,
-                )
-                .await?;
-            }
-            Err(e) => return Err(AppError::Internal(e)),
-        }
-    } else {
-        start_download(
-            state.db.clone(),
-            state.registry.clone(),
-            state.jobs.clone(),
-            id,
-        )
-        .await?;
-    }
-
-    render_card(&state, id)
+        .map_err(concert_command_error)?;
+    render_card_from(&request.state)
 }
 
 /// JSON shape returned by `POST /concerts/:id/prepare` and polled via
@@ -1051,28 +794,20 @@ pub struct PrepareStatus {
     tracks_present: Vec<bool>,
 }
 
-fn prepare_status_payload(state: &AppState, id: i64) -> Result<PrepareStatus, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-    let inventory = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None);
-    let tracks_present = inventory.tracks_present_on_disk();
-    Ok(PrepareStatus {
-        download: concert.download_status().slug().to_string(),
-        split: concert.split_status().slug().to_string(),
-        split_queued: state.registry.has_dependent(
-            &JobKey {
-                concert_id: id,
-                kind: JobKind::Download,
-            },
-            &JobKey {
-                concert_id: id,
-                kind: JobKind::Split,
-            },
-        ),
-        tracks_present,
-    })
+/// Project canonical Concert State onto the status shape the player polls. Every
+/// value here is observed state; the adapter only chooses the shape.
+fn prepare_status_of(concert_state: &ConcertState) -> PrepareStatus {
+    PrepareStatus {
+        download: concert_state.concert.download_status().slug().to_string(),
+        split: concert_state.concert.split_status().slug().to_string(),
+        split_queued: concert_state.active_work.split_queued_after_download,
+        // An unobservable published split reports every track as absent, which is
+        // what this protocol has always answered and keeps its shape stable.
+        tracks_present: match &concert_state.media.published_split {
+            Observation::Known(split) => split.tracks_present_on_disk.clone(),
+            Observation::Unknown(_) => vec![false; concert_state.tracks.len()],
+        },
+    }
 }
 
 /// Idempotent "make every track playable": scrape if needed, then ensure the
@@ -1094,31 +829,15 @@ pub async fn prepare_concert(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    // 404 before scraping so an unknown id doesn't trigger a scrape attempt.
-    {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-    }
-    ensure_scraped_blocking(&state, id).await?;
-
-    if let Err(e) = crate::jobs::prepare::prepare(
-        state.db.clone(),
-        state.registry.clone(),
-        state.jobs.clone(),
-        id,
-    )
-    .await
-    {
-        // No set list is user-correctable (scrape metadata first) — 422, not 500.
-        if e.downcast_ref::<crate::jobs::prepare::NoSetList>()
-            .is_some()
-        {
-            return Ok((StatusCode::UNPROCESSABLE_ENTITY, e.to_string()).into_response());
+    match state.concerts.prepare(id).await {
+        Ok(concert_state) => Ok(Json(prepare_status_of(&concert_state)).into_response()),
+        // No set list is user-correctable (scrape metadata first) — 422 with the
+        // reason itself, not 500.
+        Err(ConcertCommandError::Rejected(CommandRejection::Invalid { message, .. })) => {
+            Ok((StatusCode::UNPROCESSABLE_ENTITY, message).into_response())
         }
-        return Err(AppError::Internal(e));
+        Err(error) => Err(concert_command_error(error)),
     }
-
-    Ok(Json(prepare_status_payload(&state, id)?).into_response())
 }
 
 #[utoipa::path(
@@ -1135,22 +854,20 @@ pub async fn prepare_status(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<PrepareStatus>, AppError> {
-    Ok(Json(prepare_status_payload(&state, id)?))
+    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
+    Ok(Json(prepare_status_of(&concert_state)))
 }
 
 pub async fn split(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    start_split(
-        state.db.clone(),
-        state.registry.clone(),
-        state.jobs.clone(),
-        id,
-        SplitMode::Analyze,
-    )
-    .await?;
-    render_card(&state, id)
+    let request = state
+        .concerts
+        .request_split(id)
+        .await
+        .map_err(concert_command_error)?;
+    render_card_from(&request.state)
 }
 
 pub async fn delete_download(
@@ -1160,59 +877,40 @@ pub async fn delete_download(
 ) -> Result<Response, AppError> {
     let force = params.get("force").map(|v| v == "true").unwrap_or(false);
 
-    let title = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        c.title
+    let confirmation = if force {
+        DeletionConfirmation::Confirmed
+    } else {
+        DeletionConfirmation::Unconfirmed
     };
+    let outcome = state
+        .concerts
+        .delete_download(id, confirmation)
+        .map_err(concert_command_error)?;
 
-    tracing::info!(
-        "delete-download started for concert {} ({}) force={}",
-        id,
-        title,
-        force
-    );
-
-    let outcome = {
-        let conn = state.db.lock().unwrap();
-        crate::lifecycle::delete_download(&conn, &state.jobs.working_dir, id, force)
-    };
-    match outcome {
-        Ok(DeleteDownloadOutcome::Deleted { removed_file }) => {
-            if let Some(path) = removed_file {
-                tracing::info!(
-                    "delete-download removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-            }
-        }
-        Ok(DeleteDownloadOutcome::MissingFileRequiresConfirmation) => {
-            tracing::info!(
-                "delete-download file not found for concert {}, returning confirm prompt",
-                id
-            );
-            let body = DeleteConfirmTemplate { id }
-                .render()
-                .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
-            return Ok(([("content-type", "text/html; charset=utf-8")], body).into_response());
-        }
-        Ok(DeleteDownloadOutcome::NotDownloaded) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                "Concert has no downloaded file to delete",
-            )
-                .into_response());
-        }
-        Err(e) => return Err(AppError::Internal(e)),
+    if matches!(outcome, DeletionOutcome::ConfirmationRequired(_)) {
+        tracing::info!(
+            concert_id = id,
+            "download file already gone; asking for confirmation before repairing the record"
+        );
+        let body = DeleteConfirmTemplate { id }
+            .render()
+            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?;
+        return Ok(([("content-type", "text/html; charset=utf-8")], body).into_response());
     }
-    tracing::info!("delete-download completed for concert {}", id);
 
     // Swap just this card in place rather than HX-Refresh (a full page reload),
     // so the persistent JS player keeps playing. The initial trash button targets
     // `this` and the confirm button targets `.delete-confirm`, so retarget both to
     // the whole card by id.
-    let body = render_card(&state, id)?;
+    card_swap_response(outcome.state())
+}
+
+/// Respond to a card-mutating handler by swapping the whole card in place.
+/// Needed for the buttons that target a narrower element (`this`, or the
+/// delete-confirm prompt), which would otherwise replace only that element.
+fn card_swap_response(concert_state: &ConcertState) -> Result<Response, AppError> {
+    let id = concert_state.concert.id;
+    let body = render_card_from(concert_state)?;
     let mut headers = HeaderMap::new();
     headers.insert(
         "content-type",
@@ -1238,88 +936,25 @@ pub async fn delete_redundant_source(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    tracing::info!(
-        "delete-redundant-source started for concert {} ({})",
-        id,
-        concert.title
-    );
-
-    let outcome = {
-        let conn = state.db.lock().unwrap();
-        crate::lifecycle::delete_redundant_source(&conn, &state.jobs.working_dir, id)
-    }?;
-    match outcome {
-        DeleteRedundantSourceOutcome::Deleted { removed_file } => {
-            if let Some(path) = removed_file {
-                tracing::info!(
-                    "delete-redundant-source removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-            }
-        }
-        DeleteRedundantSourceOutcome::NotRedundant => {
-            return Ok((
-                StatusCode::CONFLICT,
-                "Source file is not yet fully covered by song and interlude tracks; cannot delete.",
-            )
-                .into_response());
-        }
-    }
-
-    tracing::info!("delete-redundant-source completed for concert {}", id);
-
-    let body = render_card(&state, id)?;
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "content-type",
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    headers.insert(
-        "HX-Retarget",
-        HeaderValue::from_str(&format!("#concert-{id}"))
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))?,
-    );
-    headers.insert("HX-Reswap", HeaderValue::from_static("outerHTML"));
-    Ok((headers, body).into_response())
+    let outcome = state
+        .concerts
+        .delete_redundant_source(id)
+        .map_err(concert_command_error)?;
+    card_swap_response(outcome.state())
 }
 
 pub async fn delete_split(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let title = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        c.title
-    };
-
-    tracing::info!("delete-split started for concert {} ({})", id, title);
-    let result = {
-        let conn = state.db.lock().unwrap();
-        crate::lifecycle::delete_split(&conn, id)
-    };
-    match result {
-        Ok(DeleteSplitOutcome::Deleted) => {}
-        Ok(DeleteSplitOutcome::NoSplitState) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                "Concert has no split state to delete",
-            )
-                .into_response());
-        }
-        Err(e) => return Err(AppError::Internal(e)),
-    }
-    tracing::info!("delete-split completed for concert {}", id);
+    let outcome = state
+        .concerts
+        .delete_split(id)
+        .map_err(concert_command_error)?;
 
     // Swap just this card in place (its trash button targets `closest .card`)
     // rather than HX-Refresh, so the persistent JS player keeps playing.
-    let body = render_card(&state, id)?;
+    let body = render_card_from(outcome.state())?;
     Ok(([("content-type", "text/html; charset=utf-8")], body).into_response())
 }
 
@@ -1327,33 +962,37 @@ pub async fn listen(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let album = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        concert.album
-    };
-
-    let file_exists = album
-        .as_deref()
-        .and_then(|a| find_downloaded_file(&state.jobs.working_dir, a))
-        .is_some();
-
-    let render_state = if file_exists {
-        tracing::info!("listen: recording listen event for concert {}", id);
-        let conn = state.db.lock().unwrap();
-        crate::events::record_now(&conn, id, crate::events::Event::Listen, None);
-        "success"
-    } else {
-        tracing::warn!("listen: file not found for concert {}", id);
-        "error"
-    };
-
+    let render_state = media_command_state(
+        state.concerts.record_listen(id, ListenTarget::Source),
+        "listen",
+    )?;
     ListenButtonTemplate {
         id,
         state: render_state,
     }
     .render()
     .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
+}
+
+/// A listen/watch button's own pass/fail state, taken from the interface's
+/// command outcome. A rejection is the button's "error" state rather than an
+/// HTTP error: the click is well formed, the media simply is not there.
+fn media_command_state(
+    outcome: Result<ConcertState, ConcertCommandError>,
+    action: &'static str,
+) -> Result<&'static str, AppError> {
+    match outcome {
+        Ok(_) => Ok("success"),
+        // An absent concert is the page's own 404, not a button state.
+        Err(ConcertCommandError::Rejected(CommandRejection::NotFound { .. })) => {
+            Err(AppError::NotFound)
+        }
+        Err(ConcertCommandError::Rejected(rejection)) => {
+            tracing::warn!(%rejection, action, "media command rejected");
+            Ok("error")
+        }
+        Err(ConcertCommandError::Operational(error)) => Err(AppError::Internal(error)),
+    }
 }
 
 // ── Concert playback ─────────────────────────────────────────────────────────
@@ -1396,24 +1035,20 @@ pub async fn concert_playback(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<ConcertPlaybackResponse>, AppError> {
-    let (concert, stored_ts, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
-            .map(|s| s.user)
-            .unwrap_or(None);
-        let working_dir = state.jobs.working_dir.clone();
-        (concert, stored_ts, working_dir)
-    };
-
+    let concert = state.concerts.get(id).map_err(concert_query_error)?.concert;
     let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    match crate::playback::concert_playback_plan(&working_dir, &concert, stored_ts.as_deref()) {
-        Ok(PlaybackPlan::Source(source)) => Ok(Json(ConcertPlaybackResponse::Source {
+    let artist = concert.artist.clone().unwrap_or_default();
+    let sanitized_album = crate::model::sanitize_album(album);
+
+    match state
+        .concerts
+        .playback(id)
+        .map_err(concert_playback_error)?
+    {
+        PlaybackPlan::Source(source) => Ok(Json(ConcertPlaybackResponse::Source {
             source: media_info_from_source(album, source),
         })),
-        Ok(PlaybackPlan::Reconstruction(items)) => {
-            let artist = concert.artist.unwrap_or_default();
-            let sanitized_album = crate::model::sanitize_album(album);
+        PlaybackPlan::Reconstruction(items) => {
             let json_items: Vec<PlaybackItemJson> = items
                 .into_iter()
                 .map(|item| playback_item_json(&sanitized_album, &artist, item))
@@ -1422,7 +1057,6 @@ pub async fn concert_playback(
                 items: json_items,
             }))
         }
-        Err(e) => Err(playback_error_to_app_error(e)),
     }
 }
 
@@ -1430,84 +1064,39 @@ pub async fn delete_interlude(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
+    let outcome = state
+        .concerts
+        .delete_interlude(id, idx)
+        .map_err(concert_command_error)?;
+
+    // Return the refreshed concert-playback sidebar fragment from the state the
+    // deletion already returned. An unobservable split has no rows to show, which
+    // is what this fragment has always rendered for "nothing to play".
+    let items = match &outcome.state().media.published_split {
+        Observation::Known(split) => split.reconstruction_items.clone(),
+        Observation::Unknown(_) => Vec::new(),
     };
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let dir = crate::model::concert_dir(&state.jobs.working_dir, album);
-    let stem = concert_types::interlude_filename_stem(idx);
-
-    let mut removed = false;
-    for ext in crate::model::INTERLUDE_EXTENSIONS {
-        let path = dir.join(format!("{stem}.{ext}"));
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                tracing::info!(
-                    "delete_interlude: removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-                removed = true;
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(AppError::Internal(anyhow::anyhow!(
-                    "delete_interlude: failed to remove {}: {}",
-                    path.display(),
-                    e
-                )));
-            }
-        }
-    }
-
-    if !removed {
-        tracing::warn!(
-            "delete_interlude: no file found for interlude {} concert {}",
-            idx,
-            id
-        );
-        // File was already absent — desired end-state holds; skip the event so
-        // the audit trail reflects a real deletion, not a no-op.
-    } else {
-        let conn = state.db.lock().unwrap();
-        let json = serde_json::json!({"interlude_index": idx}).to_string();
-        crate::events::record_now(
-            &conn,
-            id,
-            crate::events::Event::InterludeDelete,
-            Some(&json),
-        );
-    }
-
-    tracing::info!(
-        "delete_interlude completed for concert {} interlude {} (removed={})",
-        id,
-        idx,
-        removed
-    );
-
-    // Return the refreshed concert-playback sidebar fragment.
-    concert_playback_tracks_fragment(&state, id).await
+    render_playback_tracks(id, items)
 }
 
 /// Render the `?playback=concert` sidebar fragment (used by the tracks handler
 /// and as the delete_interlude response). Returns an HTML string.
 async fn concert_playback_tracks_fragment(state: &AppState, id: i64) -> Result<String, AppError> {
-    let (concert, stored_ts) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        let stored_ts = db::split_timestamps::get_split_timestamps(&conn, id)
-            .map(|s| s.user)
-            .unwrap_or(None);
-        (concert, stored_ts)
+    let items = match state.concerts.reconstruction_items(id) {
+        Ok(items) => items,
+        // Nothing to reconstruct is not an error for this fragment: the sidebar
+        // simply has no rows, as it did before the interface owned resolution.
+        Err(ConcertPlaybackError::Lookup(PlaybackLookupError::NotPlayable)) => Vec::new(),
+        Err(error) => return Err(concert_playback_error(error)),
     };
-    let items = crate::playback::reconstruction_items(
-        &state.jobs.working_dir,
-        &concert,
-        stored_ts.as_deref(),
-    )
-    .unwrap_or_default();
+    render_playback_tracks(id, items)
+}
+
+/// Render the concert-playback sidebar rows for one concert.
+fn render_playback_tracks(
+    id: i64,
+    items: Vec<crate::model::PlaybackItem>,
+) -> Result<String, AppError> {
     ConcertPlaybackTracksTemplate { id, items }
         .render()
         .map_err(|e| AppError::Internal(anyhow::anyhow!("{}", e)))
@@ -1593,6 +1182,14 @@ fn playback_item_json(
     }
 }
 
+fn concert_playback_error(error: ConcertPlaybackError) -> AppError {
+    match error {
+        ConcertPlaybackError::NotFound { .. } => AppError::NotFound,
+        ConcertPlaybackError::Query(error) => concert_query_error(error),
+        ConcertPlaybackError::Lookup(error) => playback_error_to_app_error(error),
+    }
+}
+
 fn playback_error_to_app_error(e: PlaybackLookupError) -> AppError {
     match e {
         PlaybackLookupError::NotPlayable => AppError::NotFound,
@@ -1623,17 +1220,13 @@ pub async fn media_info(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<MediaInfo>, AppError> {
-    let (concert, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert, state.jobs.working_dir.clone())
-    };
+    let album = album_of(&state, id)?;
+    let source = state
+        .concerts
+        .source_media(id)
+        .map_err(concert_playback_error)?;
 
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let source = crate::playback::source_media(&working_dir, &concert)
-        .map_err(playback_error_to_app_error)?;
-
-    Ok(Json(media_info_from_source(album, source)))
+    Ok(Json(media_info_from_source(&album, source)))
 }
 
 #[utoipa::path(
@@ -1653,17 +1246,13 @@ pub async fn track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Json<MediaInfo>, AppError> {
-    let (concert, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert, state.jobs.working_dir.clone())
-    };
+    let album = album_of(&state, id)?;
+    let media = state
+        .concerts
+        .track_media(id, idx)
+        .map_err(concert_playback_error)?;
 
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let media = crate::playback::track_media(&working_dir, &concert, idx)
-        .map_err(playback_error_to_app_error)?;
-
-    Ok(Json(media_info_from_track(album, media)))
+    Ok(Json(media_info_from_track(&album, media)))
 }
 
 #[utoipa::path(
@@ -1683,16 +1272,12 @@ pub async fn next_track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Json<MediaInfo>, AppError> {
-    let (concert, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert, state.jobs.working_dir.clone())
-    };
-
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let media = crate::playback::next_track_media(&working_dir, &concert, idx)
-        .map_err(playback_error_to_app_error)?;
-    Ok(Json(media_info_from_track(album, media)))
+    let album = album_of(&state, id)?;
+    let media = state
+        .concerts
+        .next_track_media(id, idx)
+        .map_err(concert_playback_error)?;
+    Ok(Json(media_info_from_track(&album, media)))
 }
 
 /// Media info for the nearest playable track *before* `idx` (the Back button).
@@ -1714,44 +1299,44 @@ pub async fn prev_track_media_info(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Json<MediaInfo>, AppError> {
-    let (concert, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (concert, state.jobs.working_dir.clone())
-    };
-
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let media = crate::playback::prev_track_media(&working_dir, &concert, idx)
-        .map_err(playback_error_to_app_error)?;
-    Ok(Json(media_info_from_track(album, media)))
+    let album = album_of(&state, id)?;
+    let media = state
+        .concerts
+        .prev_track_media(id, idx)
+        .map_err(concert_playback_error)?;
+    Ok(Json(media_info_from_track(&album, media)))
 }
 
 pub async fn watch(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<StatusCode, AppError> {
-    let (album, downloaded_at, working_dir) = {
-        let conn = state.db.lock().unwrap();
-        let concert = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        (
-            concert.album,
-            concert.downloaded_at,
-            state.jobs.working_dir.clone(),
-        )
-    };
+    open_in_system_player(&state, id, ListenTarget::Source, "watch").await
+}
 
-    let path =
-        locate_full_concert_file(&working_dir, id, album.as_deref(), downloaded_at.as_deref())?;
+/// Resolve the file for `target`, record that the listener opened it, and hand
+/// it to the configured system player. Which file to open is resolved by
+/// `Concerts`; how to open it is this adapter's choice.
+async fn open_in_system_player(
+    state: &AppState,
+    id: i64,
+    target: ListenTarget,
+    action: &'static str,
+) -> Result<StatusCode, AppError> {
+    let path = state
+        .concerts
+        .media_file(id, target)
+        .map_err(concert_playback_error)?;
+    state
+        .concerts
+        .record_watch(id, target)
+        .map_err(concert_command_error)?;
 
-    tracing::info!("watch: opening {} for concert {}", path.display(), id);
-    {
-        let conn = state.db.lock().unwrap();
-        crate::events::record_now(&conn, id, crate::events::Event::Watch, None);
-    }
+    tracing::info!(concert_id = id, media = %path.display(), action, "opening media");
     match state.jobs.open_media(id, &path).await {
         OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
         OpenMediaOutcome::Failed { message } => {
-            tracing::warn!("watch: opener failed for concert {}: {}", id, message);
+            tracing::warn!(concert_id = id, action, %message, "media opener failed");
             Ok(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
@@ -1761,36 +1346,25 @@ pub async fn watch_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<StatusCode, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?;
-    let album = concert.album.as_deref().ok_or(AppError::NotFound)?;
-    let filename = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None)
-        .find_track_file(title)
-        .ok_or(AppError::NotFound)?;
-    let path = concert_dir(&state.jobs.working_dir, album).join(&filename);
-
-    tracing::info!(
-        "watch_track: opening {} for concert {} track {}",
-        path.display(),
+    open_in_system_player(
+        &state,
         id,
-        idx
-    );
-    {
-        let conn = state.db.lock().unwrap();
-        let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
-        crate::events::record_now(&conn, id, crate::events::Event::Watch, Some(&json));
-    }
-    match state.jobs.open_media(id, &path).await {
-        OpenMediaOutcome::Succeeded => Ok(StatusCode::OK),
-        OpenMediaOutcome::Failed { message } => {
-            tracing::warn!("watch_track: opener failed for concert {}: {}", id, message);
-            Ok(StatusCode::INTERNAL_SERVER_ERROR)
-        }
-    }
+        ListenTarget::Track { index: idx },
+        "watch-track",
+    )
+    .await
+}
+
+/// The album name a playback URL is built from. A concert with no album has no
+/// media to describe, which the handlers report as absent.
+fn album_of(state: &AppState, id: i64) -> Result<String, AppError> {
+    state
+        .concerts
+        .get(id)
+        .map_err(concert_query_error)?
+        .concert
+        .album
+        .ok_or(AppError::NotFound)
 }
 
 pub async fn tracks(
@@ -1812,30 +1386,13 @@ pub async fn tracks(
         return concert_playback_tracks_fragment(&state, id).await;
     }
 
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    let mut tracks = crate::model::list_all_tracks_from_db(
-        &concert.set_list,
-        &concert.tracks_present,
-        &concert.tracks_liked,
-    );
-
-    if tracks.is_empty() && concert.archived_at.is_some() && !concert.set_list.is_empty() {
-        let events = {
-            let conn = state.db.lock().unwrap();
-            crate::events::list_for_concert(&conn, id)
-        };
-        tracks = tracks_from_events(&concert.set_list, &events);
-    }
+    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
 
     TracksTemplate {
         id,
-        tracks,
+        tracks: card_tracks(&concert_state),
         show_delete: true,
-        tracks_busy: tracks_busy(&concert, split_queued(&state, id)),
+        tracks_busy: concert_state.permitted_actions.tracks_busy,
         sidebar,
     }
     .render()
@@ -1863,13 +1420,16 @@ pub async fn track_details(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<TrackDetailsResponse>, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-    let tracks = crate::playback::track_details(&state.jobs.working_dir, &concert)
-        .map_err(playback_error_to_app_error)?;
-    let tracks_busy = tracks_busy(&concert, split_queued(&state, id));
+    let tracks_busy = state
+        .concerts
+        .get(id)
+        .map_err(concert_query_error)?
+        .permitted_actions
+        .tracks_busy;
+    let tracks = state
+        .concerts
+        .track_details(id)
+        .map_err(concert_playback_error)?;
     Ok(Json(TrackDetailsResponse {
         tracks_busy,
         tracks,
@@ -1880,34 +1440,23 @@ pub async fn listen_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?
-    };
-
-    let title = concert.set_list.get(idx).ok_or(AppError::NotFound)?.clone();
-    let file_exists = ConcertMediaInventory::for_concert(&state.jobs.working_dir, &concert, None)
-        .find_track_file(&title)
-        .is_some();
-
-    let render_state = if file_exists {
-        tracing::info!(
-            "listen_track: recording listen event for concert {} track {}",
-            id,
-            idx
-        );
-        let conn = state.db.lock().unwrap();
-        let json = serde_json::json!({"track_index": idx, "track_title": &title}).to_string();
-        crate::events::record_now(&conn, id, crate::events::Event::Listen, Some(&json));
-        "success"
-    } else {
-        tracing::warn!(
-            "listen_track: file not found for concert {} track {}",
-            id,
-            idx
-        );
-        "error"
-    };
+    // The track's title is the button's label, so it is read regardless of
+    // whether the listen itself succeeds.
+    let title = state
+        .concerts
+        .get(id)
+        .map_err(concert_query_error)?
+        .concert
+        .set_list
+        .get(idx)
+        .cloned()
+        .ok_or(AppError::NotFound)?;
+    let render_state = media_command_state(
+        state
+            .concerts
+            .record_listen(id, ListenTarget::Track { index: idx }),
+        "listen-track",
+    )?;
 
     TrackListenButtonTemplate {
         id,
@@ -1923,52 +1472,46 @@ pub async fn delete_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<Response, AppError> {
-    let outcome = {
-        let conn = state.db.lock().unwrap();
-        crate::lifecycle::delete_track(&conn, &state.jobs.working_dir, id, idx)
-            .map_err(|_| AppError::NotFound)?
-    };
-    if outcome.split_cleared {
-        tracing::info!(
-            "delete_track: no tracks remain, cleared split state for concert {}",
-            id
-        );
-    }
+    let outcome = state
+        .concerts
+        .delete_track(id, idx)
+        .map_err(concert_command_error)?;
 
     // Respond with the whole card so the swap refreshes everything derived
     // from the track state: the tracks-button count, the split badge, and the
     // embedded track list (deleted tracks now render as playable-unavailable
     // buttons that trigger a re-split).
-    Ok(render_card(&state, id)?.into_response())
+    Ok(render_card_from(outcome.state())?.into_response())
 }
 
 pub async fn like_track(
     State(state): State<AppState>,
     Path((id, idx)): Path<(i64, usize)>,
 ) -> Result<impl IntoResponse, AppError> {
-    let concert = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        if idx >= c.set_list.len() {
-            return Err(AppError::NotFound);
-        }
-        if !crate::model::is_track_available(&c.tracks_present, idx) {
-            tracing::debug!(
-                concert_id = id,
-                track_idx = idx,
-                "like_track: track unavailable, ignoring"
-            );
-            return Err(AppError::NotFound);
-        }
-        db::split_timestamps::toggle_track_liked(&conn, id, idx)?;
-        db::concerts::get_concert(&conn, id)?
-    };
+    // The route is a toggle in the card markup, so the adapter turns the click
+    // into the desired like state and the interface stores that state.
+    let current = state.concerts.get(id).map_err(concert_query_error)?;
+    let liked_now = current
+        .concert
+        .tracks_liked
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
+    let concert_state = state
+        .concerts
+        .set_track_liked(id, idx, !liked_now)
+        .map_err(concert_command_error)?;
 
     // Swap only the star itself: the response is rendered into the clicked
     // button (hx-target="this"), so it works identically in every track-list
     // context. Row side effects (the liked row hiding its delete button) are
     // pure CSS via `li:has(.btn-like.liked)`.
-    let liked = concert.tracks_liked.get(idx).copied().unwrap_or(false);
+    let liked = concert_state
+        .concert
+        .tracks_liked
+        .get(idx)
+        .copied()
+        .unwrap_or(false);
     LikeButtonTemplate {
         id,
         index: idx,
@@ -2125,18 +1668,12 @@ pub async fn cancel_job(
         }
     };
 
-    let outcome = {
-        let conn = state.db.lock().unwrap();
-        crate::lifecycle::cancel_job(&conn, &state.registry, id, job_kind)?
-    };
-    tracing::info!(
-        "cancel_job: concert={} kind={} outcome={:?}",
-        id,
-        kind,
-        outcome
-    );
-    if matches!(outcome, CancelJobOutcome::NoSuchActiveJob) {
-        tracing::debug!("cancel_job: no active job found for concert {}", id);
+    match state.concerts.cancel_job(id, job_kind) {
+        Ok(_) => {}
+        // This endpoint's protocol is "always redirect back to the jobs page", and
+        // a concert that is not there has nothing to cancel.
+        Err(ConcertCommandError::Rejected(CommandRejection::NotFound { .. })) => {}
+        Err(error) => return Err(concert_command_error(error)),
     }
 
     let mut headers = HeaderMap::new();
@@ -2191,25 +1728,28 @@ pub async fn settings_save(
     Ok(axum::response::Redirect::to("/settings?saved=1").into_response())
 }
 
+/// Archive and unarchive answer 500 for a request the concert cannot satisfy
+/// (no archive location configured, not archived, an archive in flight). That is
+/// this endpoint's long-standing protocol, so the adapter keeps it while the
+/// interface decides what the answer is.
+fn archive_command_error(error: ConcertCommandError) -> AppError {
+    match error {
+        ConcertCommandError::Rejected(rejection) => {
+            AppError::Internal(anyhow::anyhow!("{rejection}"))
+        }
+        ConcertCommandError::Operational(error) => AppError::Internal(error),
+    }
+}
+
 pub async fn archive(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let archive_location = {
-        let conn = state.db.lock().unwrap();
-        db::settings::get_settings(&conn)?
-            .archive_location
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("Archive location not configured")))?
-    };
-
-    crate::jobs::archive::start_archive(
-        state.db.clone(),
-        state.registry.clone(),
-        &state.jobs.working_dir,
-        &archive_location,
-        id,
-    )
-    .await?;
+    state
+        .concerts
+        .request_archive(id)
+        .await
+        .map_err(archive_command_error)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("HX-Refresh", "true".parse().unwrap());
@@ -2220,56 +1760,11 @@ pub async fn unarchive(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    let album = {
-        let conn = state.db.lock().unwrap();
-        let c = db::concerts::get_concert(&conn, id).map_err(|_| AppError::NotFound)?;
-        if c.archived_at.is_none() {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "concert {} is not archived",
-                id
-            )));
-        }
-        if c.archive_started_at.is_some() {
-            return Err(AppError::Internal(anyhow::anyhow!(
-                "concert {} has an archive job in flight; cannot unarchive",
-                id
-            )));
-        }
-        c.album
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("concert {} has no album", id)))?
-    };
-
-    let source_dir = concert_dir(&state.jobs.working_dir, &album);
-
-    tracing::info!(
-        "unarchive started for concert {} ({}) <- symlink at {}",
-        id,
-        album,
-        source_dir.display()
-    );
-
-    let result = {
-        let source = source_dir.clone();
-        tokio::task::spawn_blocking(move || crate::jobs::archive::do_unarchive(&source))
-            .await
-            .map_err(|e| AppError::Internal(anyhow::anyhow!("task join: {}", e)))?
-    };
-
-    match result {
-        Ok(()) => {
-            let conn = state.db.lock().unwrap();
-            db::lifecycle::clear_archive_state(&conn, id)?;
-            tracing::info!("unarchive completed for concert {}", id);
-        }
-        Err(e) => {
-            let error = format!("{:#}", e);
-            tracing::warn!("unarchive failed for concert {}: {}", id, error);
-            let conn = state.db.lock().unwrap();
-            let _ = db::lifecycle::mark_archive_failed(&conn, id, &error);
-            let _ = db::failed_jobs::insert_failed_job(&conn, id, "unarchive", &error);
-            return Err(AppError::Internal(anyhow::anyhow!(error)));
-        }
-    }
+    state
+        .concerts
+        .unarchive(id)
+        .await
+        .map_err(archive_command_error)?;
 
     let mut headers = HeaderMap::new();
     headers.insert("HX-Refresh", "true".parse().unwrap());
@@ -2325,10 +1820,15 @@ pub async fn sync_month_handler(
     //    requests); each queued card renders a "loading…" placeholder and polls
     //    /concerts/:id/status until its thumbnail is ready. Enqueue happens BEFORE
     //    we respond, so the post-sync GET / sees these ids as pending.
-    let to_scrape = concerts_needing_scrape(&synced);
     let mut queued = 0usize;
-    for (id, url) in to_scrape {
-        if state.scrape_queue.enqueue(id, url) {
+    for synced_concert in &synced {
+        if matches!(
+            state
+                .concerts
+                .enqueue_scrape(synced_concert.id)
+                .map_err(concert_command_error)?,
+            ScrapeAdmission::Enqueued
+        ) {
             queued += 1;
         }
     }
@@ -2389,25 +1889,36 @@ pub async fn style_css() -> impl IntoResponse {
 
 // ── Split-timestamp API ───────────────────────────────────────────────────────
 
-fn split_timestamp_error_to_app_error(e: SplitTimestampWorkflowError) -> AppError {
-    match e {
-        SplitTimestampWorkflowError::NotFound => AppError::NotFound,
-        SplitTimestampWorkflowError::Conflict(msg)
-        | SplitTimestampWorkflowError::Unprocessable(msg) => AppError::BadRequest(msg),
-        SplitTimestampWorkflowError::Internal(e) => AppError::Internal(e),
+/// A split-timestamp read failure. Everything but an operational failure is a
+/// client-side absence or conflict.
+fn split_timestamp_error_to_app_error(error: ConcertCommandError) -> AppError {
+    match error {
+        ConcertCommandError::Rejected(rejection) => match rejection {
+            CommandRejection::NotFound { .. } => AppError::NotFound,
+            CommandRejection::Conflict { message, .. } => AppError::Conflict(message),
+            CommandRejection::Invalid { message, .. } => AppError::BadRequest(message),
+            other => AppError::BadRequest(other.to_string()),
+        },
+        ConcertCommandError::Operational(error) => AppError::Internal(error),
     }
 }
 
-fn split_timestamp_error_response(e: SplitTimestampWorkflowError) -> Result<Response, AppError> {
-    match e {
-        SplitTimestampWorkflowError::NotFound => Err(AppError::NotFound),
-        SplitTimestampWorkflowError::Conflict(msg) => {
-            Ok((StatusCode::CONFLICT, msg).into_response())
-        }
-        SplitTimestampWorkflowError::Unprocessable(msg) => {
-            Ok((StatusCode::UNPROCESSABLE_ENTITY, msg).into_response())
-        }
-        SplitTimestampWorkflowError::Internal(e) => Err(AppError::Internal(e)),
+/// A split-timestamp change that the interface rejected. These endpoints answer
+/// with a plain-text body and the protocol's own status, which is why the
+/// rejection (not an `AppError`) decides the response here.
+fn split_timestamp_command_response(error: ConcertCommandError) -> Result<Response, AppError> {
+    match error {
+        ConcertCommandError::Rejected(rejection) => match rejection {
+            CommandRejection::NotFound { .. } => Err(AppError::NotFound),
+            CommandRejection::Conflict { message, .. } => {
+                Ok((StatusCode::CONFLICT, message).into_response())
+            }
+            CommandRejection::Invalid { message, .. } => {
+                Ok((StatusCode::UNPROCESSABLE_ENTITY, message).into_response())
+            }
+            other => Ok((StatusCode::UNPROCESSABLE_ENTITY, other.to_string()).into_response()),
+        },
+        ConcertCommandError::Operational(error) => Err(AppError::Internal(error)),
     }
 }
 
@@ -2437,13 +1948,11 @@ pub async fn get_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Json<SplitTimestampsResponse>, AppError> {
-    let read = crate::split_timestamps::read_split_timestamps(
-        state.db.clone(),
-        &state.jobs.working_dir,
-        id,
-    )
-    .await
-    .map_err(split_timestamp_error_to_app_error)?;
+    let read = state
+        .concerts
+        .split_timestamps(id)
+        .await
+        .map_err(split_timestamp_error_to_app_error)?;
     Ok(Json(read.into()))
 }
 
@@ -2466,17 +1975,9 @@ pub async fn set_split_timestamps(
     Path(id): Path<i64>,
     Json(payload): Json<TimestampPayload>,
 ) -> Result<Response, AppError> {
-    match crate::split_timestamps::apply_user_timestamps(
-        state.db.clone(),
-        state.registry.clone(),
-        state.jobs.clone(),
-        id,
-        payload,
-    )
-    .await
-    {
-        Ok(outcome) => Ok(split_start_response(outcome)),
-        Err(e) => split_timestamp_error_response(e),
+    match state.concerts.set_split_timestamps(id, payload).await {
+        Ok(start) => Ok(split_start_response(start.outcome)),
+        Err(error) => split_timestamp_command_response(error),
     }
 }
 
@@ -2498,16 +1999,9 @@ pub async fn reset_split_timestamps(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    match crate::split_timestamps::reset_to_auto_timestamps(
-        state.db.clone(),
-        state.registry.clone(),
-        state.jobs.clone(),
-        id,
-    )
-    .await
-    {
-        Ok(outcome) => Ok(split_start_response(outcome)),
-        Err(e) => split_timestamp_error_response(e),
+    match state.concerts.reset_split_timestamps(id).await {
+        Ok(start) => Ok(split_start_response(start.outcome)),
+        Err(error) => split_timestamp_command_response(error),
     }
 }
 
@@ -3064,15 +2558,11 @@ pub async fn playlist_detail_page(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let (name, description, track_count, total_time, items) = {
+    let (name, description, track_count, total_time, raw_items) = {
         let conn = state.db.lock().unwrap();
         let playlist = db::playlists::get_playlist(&conn, id)?.ok_or(AppError::NotFound)?;
         let raw_items = db::playlists::list_playlist_items(&conn, id)?;
         let summary = crate::playlist::summarize_playlist(&conn, id)?;
-        let mut items = Vec::with_capacity(raw_items.len());
-        for it in raw_items {
-            items.push(build_item_row(&conn, it)?);
-        }
         (
             playlist.name,
             playlist.description.unwrap_or_default(),
@@ -3081,9 +2571,15 @@ pub async fn playlist_detail_page(
                 summary.known_duration_secs,
                 summary.unknown_count,
             ),
-            items,
+            raw_items,
         )
     };
+    // Rows are built after the lock is dropped: they observe concerts through the
+    // interface, which takes its own lock.
+    let mut items = Vec::with_capacity(raw_items.len());
+    for item in raw_items {
+        items.push(build_item_row(&state, item)?);
+    }
     Ok(PlaylistDetailTemplate {
         chrome: Chrome::from_state(&state),
         id,
@@ -3099,7 +2595,7 @@ pub async fn playlist_detail_page(
 /// concert/playlist (live reference broken by a delete) renders as a clearly
 /// labelled placeholder rather than erroring the whole page.
 fn build_item_row(
-    conn: &Connection,
+    state: &AppState,
     item: crate::model::PlaylistItem,
 ) -> Result<PlaylistItemRow, AppError> {
     use crate::model::PlaylistItemKind::*;
@@ -3107,18 +2603,27 @@ fn build_item_row(
         Track {
             concert_id,
             track_index,
-        } => match db::concerts::get_concert_opt(conn, concert_id)? {
-            Some(c) => PlaylistItemRow {
+        } => match state
+            .concerts
+            .get_opt(concert_id)
+            .map_err(concert_query_error)?
+        {
+            Some(concert_state) => PlaylistItemRow {
                 item_id: item.id,
                 kind: "track",
-                label: c
+                label: concert_state
+                    .concert
                     .set_list
                     .get(track_index)
                     .cloned()
                     .unwrap_or_else(|| format!("Track {}", track_index + 1)),
-                sublabel: c.title,
+                sublabel: concert_state.concert.title,
                 href: String::new(),
-                available: c.tracks_present.get(track_index).copied().unwrap_or(false),
+                available: concert_state
+                    .tracks
+                    .get(track_index)
+                    .map(|track| track.persisted_available)
+                    .unwrap_or(false),
             },
             None => PlaylistItemRow {
                 item_id: item.id,
@@ -3130,17 +2635,20 @@ fn build_item_row(
             },
         },
         Concert { concert_id } => {
-            let concert = db::concerts::get_concert_opt(conn, concert_id)?;
+            let concert_state = state
+                .concerts
+                .get_opt(concert_id)
+                .map_err(concert_query_error)?;
             PlaylistItemRow {
                 item_id: item.id,
                 kind: "concert",
-                label: concert
+                label: concert_state
                     .as_ref()
-                    .map(|c| c.title.clone())
+                    .map(|concert_state| concert_state.concert.title.clone())
                     .unwrap_or_else(|| "(missing concert)".to_string()),
-                sublabel: concert
+                sublabel: concert_state
                     .as_ref()
-                    .and_then(|c| c.artist.clone())
+                    .and_then(|concert_state| concert_state.concert.artist.clone())
                     .unwrap_or_default(),
                 href: format!("/concerts/{concert_id}"),
                 available: true,
@@ -3149,9 +2657,12 @@ fn build_item_row(
         Playlist { child_playlist_id } => PlaylistItemRow {
             item_id: item.id,
             kind: "playlist",
-            label: db::playlists::get_playlist(conn, child_playlist_id)?
-                .map(|p| p.name)
-                .unwrap_or_else(|| "(missing playlist)".to_string()),
+            label: {
+                let conn = state.db.lock().unwrap();
+                db::playlists::get_playlist(&conn, child_playlist_id)?
+                    .map(|p| p.name)
+                    .unwrap_or_else(|| "(missing playlist)".to_string())
+            },
             sublabel: String::new(),
             href: format!("/playlists/{child_playlist_id}"),
             available: true,
@@ -3170,9 +2681,8 @@ pub async fn playlists_js() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::{self, concerts::MetadataUpdate};
-    use crate::model::Musician;
-    use std::cell::Cell;
+    use crate::db;
+    use rusqlite::Connection;
 
     // `/health` negotiation's full matrix (absent/`*/*`/`text/*`/`application/*`
     // /406) is black-box-tested in `hurl/health.hurl`, matching this repo's
@@ -3245,97 +2755,112 @@ mod tests {
             .id
     }
 
+    /// Observe one concert through the interface, exactly as an adapter does.
+    fn concert_state(conn: Connection, workdir: &std::path::Path, id: i64) -> ConcertState {
+        use crate::concerts::Concerts;
+        use std::sync::{Arc, Mutex};
+        Concerts::without_workers(Arc::new(Mutex::new(conn)), workdir.to_path_buf())
+            .get(id)
+            .unwrap()
+    }
+
+    fn scraped_concert(
+        conn: &Connection,
+        workdir: &std::path::Path,
+        album: &str,
+        set_list: Vec<String>,
+    ) -> i64 {
+        let id = db::seeds::SeedContext::new(conn)
+            .seed_media_concert(
+                workdir,
+                crate::db::seeds::SeedMediaConcert {
+                    lifecycle: crate::db::seeds::SeedLifecycleConcert {
+                        album: Some(album.to_string()),
+                        artist: Some("Artist".to_string()),
+                        set_list: Some(set_list),
+                        ..crate::db::seeds::SeedLifecycleConcert::default()
+                    },
+                    ..crate::db::seeds::SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        assert!(id.metadata_scraped_at.is_some());
+        id.id
+    }
+
     #[test]
-    fn render_row_includes_thumbnail_when_scraped_with_album() {
+    fn listing_card_uses_thumbnail_and_detail_card_uses_preview() {
+        let workdir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
-        let url = "https://example.org/with-album";
-        let id = seed_listing(&conn, url);
-        db::concerts::update_metadata(
-            &conn,
-            id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: "Some Album".to_string(),
-                description: None,
-                set_list: vec![],
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        let id = scraped_concert(&conn, workdir.path(), "Some Album", vec![]);
+        let state = concert_state(conn, workdir.path(), id);
 
-        // Listing card uses the small thumbnail.
-        let html = render_row(&concert, false, false, false).unwrap();
-        assert!(html.contains("class=\"card-thumb\""), "html: {html}");
-        assert!(html.contains("/thumbnails/Some Album.jpg"), "html: {html}");
-
-        // Detail-page card uses the full-size preview image instead.
-        let detail_html =
-            render_detail_card(&concert, false, false, None, std::path::Path::new("/tmp")).unwrap();
+        let listing = render_listing_card(&state).unwrap();
+        assert!(listing.contains("class=\"card-thumb\""), "html: {listing}");
         assert!(
-            detail_html.contains("class=\"card-thumb\""),
-            "html: {detail_html}"
+            listing.contains("/thumbnails/Some Album.jpg"),
+            "html: {listing}"
         );
+
+        let detail = render_detail_card(&state).unwrap();
+        assert!(detail.contains("class=\"card-thumb\""), "html: {detail}");
         assert!(
-            detail_html.contains("/concert-files/Some Album/preview.jpg"),
-            "html: {detail_html}"
+            detail.contains("/concert-files/Some Album/preview.jpg"),
+            "html: {detail}"
         );
     }
 
     #[test]
-    fn render_row_omits_thumbnail_when_not_scraped() {
+    fn listing_card_omits_thumbnail_when_not_scraped() {
         let conn = db::connection::open_in_memory().unwrap();
-        let url = "https://example.org/unscraped";
-        let id = seed_listing(&conn, url);
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
-        assert!(concert.metadata_scraped_at.is_none());
+        let id = seed_listing(&conn, "https://example.org/unscraped");
+        let workdir = tempfile::tempdir().unwrap();
+        let state = concert_state(conn, workdir.path(), id);
+        assert!(state.concert.metadata_scraped_at.is_none());
 
-        let html = render_row(&concert, false, false, false).unwrap();
+        let html = render_listing_card(&state).unwrap();
         assert!(!html.contains("card-thumb"), "html: {html}");
     }
 
     /// A downloaded+split concert with 4 set-list tracks, one already deleted
     /// (3 of 4 present).
-    fn split_concert(conn: &Connection, url: &str) -> Concert {
-        let id = seed_listing(conn, url);
-        db::concerts::update_metadata(
-            conn,
-            id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: "Some Album".to_string(),
-                description: None,
-                set_list: vec![
-                    "Song A".to_string(),
-                    "Song B".to_string(),
-                    "Song C".to_string(),
-                    "Song D".to_string(),
-                ],
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        let mut concert = db::concerts::get_concert(conn, id).unwrap();
-        concert.downloaded_at = Some("2026-01-01T00:00:00Z".to_string());
-        concert.split_at = Some("2026-01-01T01:00:00Z".to_string());
-        concert.tracks_present = vec![true, true, false, true];
-        concert
+    fn split_concert(conn: &Connection, workdir: &std::path::Path) -> i64 {
+        db::seeds::SeedContext::new(conn)
+            .seed_media_concert(
+                workdir,
+                crate::db::seeds::SeedMediaConcert {
+                    lifecycle: crate::db::seeds::SeedLifecycleConcert {
+                        album: Some("Some Album".to_string()),
+                        artist: Some("Artist".to_string()),
+                        set_list: Some(vec![
+                            "Song A".to_string(),
+                            "Song B".to_string(),
+                            "Song C".to_string(),
+                            "Song D".to_string(),
+                        ]),
+                        downloaded: true,
+                        split: true,
+                        tracks_present: Some(vec![true, true, false, true]),
+                        ..crate::db::seeds::SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    track_files: Some(vec![0, 1, 3]),
+                    ..crate::db::seeds::SeedMediaConcert::default()
+                },
+            )
+            .unwrap()
+            .id
     }
 
     #[test]
-    fn render_row_with_tracks_embeds_expanded_list_with_fresh_count() {
+    fn swapped_card_embeds_expanded_list_with_fresh_count() {
+        let workdir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
-        let concert = split_concert(&conn, "https://example.org/split");
-        let tracks = crate::model::list_all_tracks_from_db(
-            &concert.set_list,
-            &concert.tracks_present,
-            &concert.tracks_liked,
-        );
+        let id = split_concert(&conn, workdir.path());
+        db::settings::update_archive_location(&conn, "/archive").unwrap();
+        let state = concert_state(conn, workdir.path(), id);
 
-        // has_archive_location = true: the delete-path card render must keep
-        // the archive context (Archive button) alongside the embedded list.
-        let html =
-            render_row_inner(&concert, true, None, false, false, tracks, false, false).unwrap();
+        let html = render_card_html(&state, CardVariant::Swap).unwrap();
         assert!(html.contains("card-tracks-box"), "html: {html}");
         assert!(html.contains("track-list"), "html: {html}");
         assert!(html.contains("(3/4)"), "html: {html}");
@@ -3351,41 +2876,40 @@ mod tests {
     }
 
     #[test]
-    fn render_row_without_tracks_renders_collapsed_card() {
+    fn listing_card_renders_collapsed_without_an_embedded_track_list() {
+        let workdir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
-        let concert = split_concert(&conn, "https://example.org/split-collapsed");
+        let id = split_concert(&conn, workdir.path());
+        let state = concert_state(conn, workdir.path(), id);
 
-        let html = render_row(&concert, false, false, false).unwrap();
+        let html = render_listing_card(&state).unwrap();
         assert!(!html.contains("track-list"), "html: {html}");
         // The tracks-button count renders regardless of expansion.
         assert!(html.contains("(3/4)"), "html: {html}");
     }
 
     #[test]
-    fn render_row_shows_tracks_row_before_split_without_action_buttons() {
+    fn card_shows_tracks_row_before_split_without_action_buttons() {
+        let workdir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
-        let id = seed_listing(&conn, "https://example.org/unsplit");
-        db::concerts::update_metadata(
+        let id = scraped_concert(
             &conn,
-            id,
-            &MetadataUpdate {
-                artist: "Artist".to_string(),
-                album: "Some Album".to_string(),
-                description: None,
-                set_list: vec!["Song A".to_string(), "Song B".to_string()],
-                musicians: vec![],
-            },
-        )
-        .unwrap();
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
+            workdir.path(),
+            "Some Album",
+            vec!["Song A".to_string(), "Song B".to_string()],
+        );
+        let state = concert_state(conn, workdir.path(), id);
 
-        let html = render_row(&concert, true, false, false).unwrap();
+        let html = render_listing_card(&state).unwrap();
         // Tracks row renders pre-split with the not-split status and 0/N count.
         assert!(html.contains("not-split (0/2)"), "html: {html}");
         assert!(html.contains("Player.playTracks"), "html: {html}");
         // The Split button, tracks-row Play button, and delete-split button
         // are gone.
-        assert!(!html.contains("/concerts/1/split"), "html: {html}");
+        assert!(
+            !html.contains(&format!("/concerts/{id}/split")),
+            "html: {html}"
+        );
         assert!(!html.contains(">Split<"), "html: {html}");
         assert!(!html.contains("/delete-split"), "html: {html}");
         assert!(
@@ -3395,13 +2919,15 @@ mod tests {
     }
 
     #[test]
-    fn render_row_disables_tracks_button_while_busy() {
+    fn card_disables_tracks_button_while_split_is_active() {
+        let workdir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
-        let mut concert = split_concert(&conn, "https://example.org/busy");
-        concert.split_at = None;
-        concert.split_started_at = Some("2026-01-01T00:00:00Z".to_string());
+        let id = split_concert(&conn, workdir.path());
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        let state = concert_state(conn, workdir.path(), id);
+        assert!(state.permitted_actions.tracks_busy);
 
-        let html = render_row(&concert, false, false, false).unwrap();
+        let html = render_listing_card(&state).unwrap();
         assert!(html.contains("disabled"), "html: {html}");
         assert!(html.contains("splitting"), "html: {html}");
     }
@@ -3506,139 +3032,6 @@ mod tests {
         .unwrap();
         assert!(unliked.contains("☆"), "{unliked}");
         assert!(!unliked.contains("liked"), "{unliked}");
-    }
-
-    #[test]
-    fn ensure_scraped_skips_when_already_scraped() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let url = "https://example.org/already";
-        let id = seed_listing(&conn, url);
-        db::concerts::update_metadata(
-            &conn,
-            id,
-            &MetadataUpdate {
-                artist: "Existing".to_string(),
-                album: "Existing Album".to_string(),
-                description: Some("desc".to_string()),
-                set_list: vec!["Song A".to_string()],
-                musicians: vec![Musician {
-                    name: "Player".to_string(),
-                    instruments: vec!["guitar".to_string()],
-                }],
-            },
-        )
-        .unwrap();
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
-        assert!(concert.metadata_scraped_at.is_some());
-
-        let called = Cell::new(false);
-        let result = ensure_scraped(&conn, concert, |_conn, _url| {
-            called.set(true);
-            Ok(())
-        });
-
-        assert!(
-            !called.get(),
-            "scrape closure must not be called when already scraped"
-        );
-        assert_eq!(result.artist.as_deref(), Some("Existing"));
-        assert_eq!(result.set_list, vec!["Song A".to_string()]);
-    }
-
-    #[test]
-    fn ensure_scraped_runs_closure_when_missing_and_merges_result() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let url = "https://example.org/fresh";
-        let id = seed_listing(&conn, url);
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
-        assert!(concert.metadata_scraped_at.is_none());
-        assert!(concert.set_list.is_empty());
-
-        let called = Cell::new(false);
-        let result = ensure_scraped(&conn, concert, |conn, source_url| {
-            called.set(true);
-            assert_eq!(source_url, url);
-            db::concerts::update_metadata(
-                conn,
-                id,
-                &MetadataUpdate {
-                    artist: "Fetched".to_string(),
-                    album: "Fetched Album".to_string(),
-                    description: None,
-                    set_list: vec!["Song 1".to_string(), "Song 2".to_string()],
-                    musicians: vec![],
-                },
-            )
-        });
-
-        assert!(
-            called.get(),
-            "scrape closure must run when metadata is missing"
-        );
-        assert_eq!(result.artist.as_deref(), Some("Fetched"));
-        assert_eq!(
-            result.set_list,
-            vec!["Song 1".to_string(), "Song 2".to_string()]
-        );
-        assert!(result.metadata_scraped_at.is_some());
-    }
-
-    #[test]
-    fn ensure_scraped_tolerates_failure_and_returns_listing_only() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let url = "https://example.org/broken";
-        let id = seed_listing(&conn, url);
-        let concert = db::concerts::get_concert(&conn, id).unwrap();
-
-        let result = ensure_scraped(&conn, concert, |_conn, _url| {
-            Err(anyhow::anyhow!("simulated network failure"))
-        });
-
-        assert_eq!(result.title, "Test Concert");
-        assert_eq!(result.teaser.as_deref(), Some("a teaser"));
-        assert!(result.artist.is_none());
-        assert!(result.set_list.is_empty());
-        assert!(
-            result.metadata_scraped_at.is_none(),
-            "metadata_scraped_at must remain NULL after a failed scrape so the next view retries"
-        );
-
-        let reread = db::concerts::get_concert(&conn, id).unwrap();
-        assert!(reread.metadata_scraped_at.is_none());
-    }
-
-    // ── matches_filter tests ──────────────────────────────────────────────────
-
-    fn archived_concert(conn: &Connection, url: &str) -> Concert {
-        let id = seed_listing(conn, url);
-        db::lifecycle::mark_archive_succeeded(conn, id).unwrap();
-        db::concerts::get_concert(conn, id).unwrap()
-    }
-
-    #[test]
-    fn matches_filter_archived_enabled_returns_true_for_archived_concert() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let c = archived_concert(&conn, "https://example.org/archived-a");
-        assert!(matches_filter(&c, "archived", true));
-    }
-
-    #[test]
-    fn matches_filter_archived_enabled_returns_false_for_non_archived_concert() {
-        let conn = db::connection::open_in_memory().unwrap();
-        let id = seed_listing(&conn, "https://example.org/not-archived");
-        let c = db::concerts::get_concert(&conn, id).unwrap();
-        assert!(!matches_filter(&c, "archived", true));
-    }
-
-    #[test]
-    fn matches_filter_archived_disabled_falls_back_to_default() {
-        // When the archive feature is gated off (has_archive_location = false),
-        // the "archived" slug must fall through to the default arm (!c.ignored),
-        // not silently hide archived concerts.
-        let conn = db::connection::open_in_memory().unwrap();
-        let c = archived_concert(&conn, "https://example.org/archived-b");
-        // Falls through to default: not ignored → true.
-        assert!(matches_filter(&c, "archived", false));
     }
 
     // ── sync_location_path ────────────────────────────────────────────────────
