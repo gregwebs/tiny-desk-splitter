@@ -151,19 +151,26 @@ RUN arch="$(uname -m)" \
     && rm -rf /var/lib/apt/lists/*
 
 # ── cargo-nextest ────────────────────────────────────────────────────────────
-# `just test-rs` runs nextest. get.nexte.st serves a prebuilt tarball per
-# platform; NEXTEST_VERSION is a path segment, so it stays a moving "latest"
-# unless pinned, exactly like the Containerfile's MNN download.
-ARG NEXTEST_VERSION=latest
-RUN arch="$(uname -m)" \
-    && case "$arch" in \
-        x86_64)  nextest_arch="x86_64" ;; \
-        aarch64) nextest_arch="arm64" ;; \
+# `just test-rs` runs nextest. Take the release tarball directly rather than the
+# get.nexte.st redirect, so the asset name (which carries the target triple) is
+# explicit and the download can be checksum-verified. Bump NEXTEST_VERSION
+# deliberately; the tag and both filenames carry it.
+ARG NEXTEST_VERSION=0.9.151
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  nextest_triple="x86_64-unknown-linux-gnu" ;; \
+        aarch64) nextest_triple="aarch64-unknown-linux-gnu" ;; \
         *) echo "Unsupported arch for nextest: $arch" >&2; exit 1 ;; \
-    esac \
-    && curl -fsSL "https://get.nexte.st/${NEXTEST_VERSION}/linux-${nextest_arch}" \
-        | tar -xz -C /usr/local/bin \
-    && cargo-nextest nextest --version
+    esac; \
+    asset="cargo-nextest-${NEXTEST_VERSION}-${nextest_triple}"; \
+    base="https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-${NEXTEST_VERSION}"; \
+    curl -fsSL -o /tmp/nextest.tar.gz "${base}/${asset}.tar.gz"; \
+    curl -fsSL -o /tmp/nextest.sha256 "${base}/${asset}.sha256"; \
+    echo "$(awk '{print $1}' /tmp/nextest.sha256)  /tmp/nextest.tar.gz" | sha256sum -c -; \
+    tar -xzf /tmp/nextest.tar.gz -C /usr/local/bin; \
+    rm -f /tmp/nextest.tar.gz /tmp/nextest.sha256; \
+    cargo-nextest nextest --version
 
 # ── Playwright / Chromium ────────────────────────────────────────────────────
 # `npx playwright test` needs a Chromium build whose revision matches
