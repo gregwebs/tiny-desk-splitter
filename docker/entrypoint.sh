@@ -58,7 +58,19 @@ seed_ocr() {
 
 seed_node_modules() {
     [ -f "$1/package-lock.json" ] || return 0
-    [ -d "$1/node_modules" ] && return 0
+    install=0
+    [ -d "$1/node_modules" ] || install=1
+    # A node_modules built on another platform (a macOS checkout in a Linux
+    # container is the usual case) has no native binding for this one, and every
+    # tool that needs esbuild/oxlint fails with a module-not-found. `npm ci`
+    # replaces node_modules wholesale, so reinstall rather than trust it.
+    if [ "$install" = 0 ] && grep -q '"esbuild"' "$1/package.json" 2>/dev/null; then
+        if ! ls -d "$1"/node_modules/@esbuild/*linux* >/dev/null 2>&1; then
+            echo "dev-entrypoint: $1/node_modules has no linux esbuild binding; reinstalling"
+            install=1
+        fi
+    fi
+    [ "$install" = 1 ] || return 0
     echo "dev-entrypoint: installing JS dependencies in $1 from the offline npm cache"
     if ! ( cd "$1" && npm ci --offline --no-audit --no-fund >/dev/null ); then
         echo "dev-entrypoint: offline npm install failed in $1" >&2
