@@ -43,7 +43,12 @@ Plus the `ffmpeg` binary itself, which the splitter and the e2e fixtures run.
 container that starts from the Rust dev image but lacks these, `Dockerfile.dev`
 adds them and verifies each `pkg-config` probe at build time. It also installs
 the CLIs the gates invoke (`just`, `hurl`, `cargo-nextest`, and a Chromium build
-matching the lockfile's `@playwright/test`), so the whole suite runs in it:
+matching the lockfile's `@playwright/test`), so the whole suite runs in it. It also caches the three things the build and test
+steps would otherwise fetch — the prebuilt MNN library, the PaddleOCR model
+files, and the npm packages — and `docker/entrypoint.sh` seeds them into a
+bind-mounted checkout on start (symlinks for the OCR assets, `npm ci --offline`
+for `node_modules`), so a container with no egress can still build and test.
+`DEV_ENTRYPOINT_SEED=0` turns that off:
 
 ```sh
 docker build -f Dockerfile.dev -t agent-vm-rust:deps .

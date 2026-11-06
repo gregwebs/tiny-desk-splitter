@@ -2,7 +2,7 @@
 #
 # `agent-vm-rust:dev` already carries the Rust toolchain (1.98.1, per
 # rust-toolchain.toml), Node/npm, gcc/g++/make, pkg-config, git, curl, tar, and
-# unzip. Two kinds of dependency are still missing, and both are added here.
+# unzip. Three things are still missing, and all of them are added here.
 #
 # ── 1. Native build libraries ────────────────────────────────────────────────
 # Without these, `cargo build`/`test`/`clippy` fail before compiling a single line
@@ -39,14 +39,32 @@
 #     --build-arg BASE_IMAGE=agent-vm-rust:dev \
 #     --build-arg HURL_VERSION=8.0.1 \
 #     --build-arg PLAYWRIGHT_VERSION=1.60.0 \
+#     --build-arg MNN_RELEASE=dev \
 #     -t agent-vm-rust:deps .
 #
-# Build-time network (same as the Containerfile's `builder` stage): ocr-rs's
-# build script downloads a prebuilt MNN library, and live-set-song-splitter's
-# downloads three PaddleOCR model files. Those downloads do not happen while
-# building THIS image — they happen on the first `cargo build` inside it — so a
-# container that runs with `--network=none` cannot build the workspace. The same
-# goes for `npm ci` (JS dependencies are per-checkout, not baked into the image).
+# The build context must be the repo root (it reads package.json,
+# package-lock.json and the frontend equivalents to fill the npm cache).
+#
+# ── 3. The assets those builds download ─────────────────────────────────────
+# Two build steps and one test step fetch things over the network at run time,
+# which is what breaks a no-egress container: ocr-rs's build script downloads a
+# prebuilt MNN library, live-set-song-splitter's downloads three PaddleOCR model
+# files, and the gates need `npm ci` for the JS dependencies. All three are
+# fetched here at image build time and cached:
+#
+#   /opt/ocr-cache/mnn/     MNN tarball under the exact name ocr-rs looks for
+#   /opt/ocr-cache/models/  the PaddleOCR model files
+#   /opt/npm-cache/         npm cache with every tarball `npm ci` needs
+#
+# They cannot sit in their final paths at image build, because the workspace is a
+# bind mount that shadows the image's /work. docker/entrypoint.sh seeds them into
+# the checkout on start — symlinks for the OCR assets (both build scripts only
+# test `Path::exists()` before downloading), `npm ci --offline` for node_modules.
+# Only gitignored paths are touched, and DEV_ENTRYPOINT_SEED=0 turns it off.
+#
+# The MNN version, model revision and file list are mirrored from the two
+# build.rs files; bump MNN_RELEASE / PADDLE_MODELS_REV here when they move. A
+# mismatch is harmless — the build scripts just download as they normally would.
 #
 # Not installed here, on purpose:
 #   cmake          — ocr-rs only invokes it for its MNN source-build fallback,
@@ -162,6 +180,61 @@ RUN apt-get update \
     && chmod -R a+rX /opt/ms-playwright \
     && rm -rf /var/lib/apt/lists/*
 
+# ── PaddleOCR assets: prebuilt MNN + model files ─────────────────────────────
+# Mirrors `MNN_PREBUILT_REPO` / `MNN_PREBUILT_VERSION` in
+# live-set-song-splitter/vendor/ocr-rs/build.rs and `MODELS_BASE_URL` /
+# `MODEL_FILES` in live-set-song-splitter/build.rs. The `en_*` override models are
+# deliberately not auto-provisioned there, so they are not fetched here either.
+ARG MNN_REPO=zibo-chen/MNN-Prebuilds
+ARG MNN_RELEASE=dev
+ARG PADDLE_MODELS_REV=b7141e7
+ENV OCR_CACHE=/opt/ocr-cache
+RUN set -eux; \
+    arch="$(uname -m)"; \
+    case "$arch" in \
+        x86_64)  mnn_suffix="linux-x86_64" ;; \
+        aarch64) mnn_suffix="linux-aarch64" ;; \
+        *) echo "Unsupported arch for the MNN prebuilt: $arch" >&2; exit 1 ;; \
+    esac; \
+    mnn_asset="mnn-${MNN_RELEASE}-${mnn_suffix}"; \
+    mkdir -p "${OCR_CACHE}/mnn" "${OCR_CACHE}/models"; \
+    curl -fsSL -o "${OCR_CACHE}/mnn/${mnn_asset}.tar.gz" \
+        "https://github.com/${MNN_REPO}/releases/download/${MNN_RELEASE}/${mnn_asset}.tar.gz"; \
+    tar -tzf "${OCR_CACHE}/mnn/${mnn_asset}.tar.gz" >/dev/null; \
+    for model in PP-OCRv5_mobile_det.mnn PP-OCRv5_mobile_rec.mnn ppocr_keys_v5.txt; do \
+        curl -fsSL -o "${OCR_CACHE}/models/${model}" \
+            "https://raw.githubusercontent.com/zibo-chen/rust-paddle-ocr/${PADDLE_MODELS_REV}/models/${model}"; \
+        test -s "${OCR_CACHE}/models/${model}"; \
+    done; \
+    chmod -R a+rX "${OCR_CACHE}"; \
+    ls -l "${OCR_CACHE}/mnn" "${OCR_CACHE}/models"
+
+# ── JS dependencies, as an offline npm cache ─────────────────────────────────
+# `npm ci` writes node_modules into the checkout, so it cannot be baked directly
+# either; instead fill npm's cache with exactly the tarballs the two lockfiles
+# resolve, including the platform-specific esbuild/oxlint binaries (the reason a
+# macOS-installed node_modules fails here). The check afterwards proves the cache
+# is self-sufficient: `npm ci --offline` refuses the network outright.
+ENV npm_config_cache=/opt/npm-cache
+COPY package.json package-lock.json /tmp/npm-seed/
+COPY concert-tracker/frontend/package.json concert-tracker/frontend/package-lock.json /tmp/npm-seed/frontend/
+RUN set -eux; \
+    cd /tmp/npm-seed/frontend; \
+    npm ci --no-audit --no-fund; \
+    rm -rf node_modules; \
+    npm ci --offline --no-audit --no-fund >/dev/null; \
+    ls -d node_modules/@oxlint/*linux* node_modules/@esbuild/*linux*; \
+    rm -rf node_modules; \
+    cd /tmp/npm-seed; \
+    npm ci --no-audit --no-fund; \
+    rm -rf node_modules; \
+    npm ci --offline --no-audit --no-fund >/dev/null; \
+    ls -d node_modules/@playwright/test node_modules/tsx node_modules/typescript; \
+    rm -rf node_modules; \
+    cd /tmp; \
+    rm -rf /tmp/npm-seed; \
+    chmod -R a+rwX "${npm_config_cache}"
+
 # ── Fail here, not 20 minutes into a cargo build ─────────────────────────────
 # Each pkg-config check is the same probe the corresponding *-sys build script
 # runs — ffmpeg-sys-next/main.rs probes exactly this list — so a missing library
@@ -185,11 +258,20 @@ RUN set -eux; \
     hurl --version; \
     node --version; \
     npx playwright --version; \
-    ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" | tee /dev/stderr | grep -q '^chromium-' 
+    ls -1 "${PLAYWRIGHT_BROWSERS_PATH}" | tee /dev/stderr | grep -q '^chromium-'; \
+    test -n "$(ls -1 "${OCR_CACHE}"/mnn/*.tar.gz)"; \
+    test -n "$(ls -1 "${OCR_CACHE}"/models/*)"; \
+    test -d "${npm_config_cache}/_cacache"
+
+# Seeds a bind-mounted checkout with the cached OCR assets and JS dependencies
+# (see docker/entrypoint.sh), then runs the command it was given.
+COPY docker/entrypoint.sh /usr/local/bin/dev-entrypoint
+RUN chmod +x /usr/local/bin/dev-entrypoint
 
 # Compilation inside the image is the job; keep the workspace out of the
 # image's layers and leave the mount point ready for a bind mount.
 WORKDIR /work
 
 # `docker run -it --rm -v "$PWD:/work" agent-vm-rust:deps bash`
+ENTRYPOINT ["/usr/local/bin/dev-entrypoint"]
 CMD ["bash"]
