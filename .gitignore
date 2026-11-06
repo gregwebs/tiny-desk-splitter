@@ -35,3 +35,4 @@ concerts.db-shm
 /playwright-report/
 
 .DS_Store
+*.swp
