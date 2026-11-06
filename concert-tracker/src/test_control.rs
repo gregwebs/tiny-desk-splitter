@@ -36,7 +36,6 @@ use jsonrpsee::server::{RpcModule, ServerBuilder, ServerHandle};
 use jsonrpsee::types::ErrorObjectOwned;
 use serde::Serialize;
 
-use crate::db;
 use crate::db::seeds::{
     FixtureIds, SeedAlbumNullConcert, SeedContext, SeedLifecycleConcert, SeedListing,
     SeedMediaConcert, SeedScrapedConcert,
@@ -560,9 +559,11 @@ fn assert_concert_events(
         }
     }
 
-    let conn = state.db.lock().unwrap();
-    db::concerts::get_concert(&conn, concert_id)
+    state
+        .concerts
+        .get(concert_id)
         .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?;
+    let conn = state.db.lock().unwrap();
     // The fallible `try_list_for_concert`, not `list_for_concert` — a query
     // failure here must surface as an error, not be misread as "no events"
     // and let an `absent` assertion silently pass without truly checking
@@ -595,19 +596,18 @@ fn assert_concert_events(
     }
 }
 
-/// Looks up `concert_id`'s `source_url` and enqueues it on the app's real
-/// scrape queue, matching what `/sync/:year/:month` does for a newly-listed
-/// concert. Drops the DB lock before calling `enqueue` — `ScrapeQueue` takes
-/// no DB lock itself, but keeping the critical section to the lookup only
-/// stays deadlock-proof by construction.
+/// Enqueues `concert_id` on the app's real scrape queue through the interface,
+/// matching what `/sync/:year/:month` does for a newly-listed concert. The
+/// existing boolean answer ("was it enqueued this time") is kept for the hurl
+/// protocol.
 fn scrape_enqueue(state: &AppState, concert_id: i64) -> anyhow::Result<bool> {
-    let source_url = {
-        let conn = state.db.lock().unwrap();
-        db::concerts::get_concert(&conn, concert_id)
-            .map_err(|e| anyhow::anyhow!("no concert with id {concert_id}: {e}"))?
-            .source_url
-    };
-    Ok(state.scrape_queue.enqueue(concert_id, source_url))
+    Ok(matches!(
+        state
+            .concerts
+            .enqueue_scrape(concert_id)
+            .map_err(|e| anyhow::anyhow!("could not enqueue a scrape for {concert_id}: {e}"))?,
+        crate::concerts::ScrapeAdmission::Enqueued
+    ))
 }
 
 /// Checks each present expectation against the Scrape Driver's observed
@@ -806,9 +806,11 @@ fn assert_concert_state(
         );
     }
 
-    let conn = state.db.lock().unwrap();
-    let concert = db::concerts::get_concert(&conn, id)
+    let state_of_concert = state
+        .concerts
+        .get(id)
         .map_err(|e| anyhow::anyhow!("no concert with id {id}: {e}"))?;
+    let concert = &state_of_concert.concert;
 
     let mut mismatches = Vec::new();
     if let Some(expected) = ignored {
@@ -940,19 +942,34 @@ pub async fn start(
 /// descendant module can reach a private ancestor item directly).
 #[cfg(test)]
 fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppState {
+    use crate::db;
     use crate::jobs::scrape_queue::ScrapeQueue;
     use crate::jobs::{JobConfig, JobRegistry};
     use std::sync::{Arc, Mutex};
 
     tiny_desk_scraper::set_proxy_mode(tiny_desk_scraper::ProxyMode::None);
+    let db = Arc::new(Mutex::new(conn));
+    let registry = Arc::new(JobRegistry::new());
+    let scrape_queue = ScrapeQueue::start(
+        Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
+        workdir.clone(),
+    );
+    let jobs = JobConfig::test(workdir);
+    let concerts = crate::concerts::Concerts::new(
+        db.clone(),
+        jobs.working_dir.clone(),
+        registry.clone(),
+        scrape_queue.clone(),
+        jobs.clone(),
+    );
+    let catalog = concerts.catalog();
     AppState {
-        db: Arc::new(Mutex::new(conn)),
-        registry: Arc::new(JobRegistry::new()),
-        scrape_queue: ScrapeQueue::start(
-            Arc::new(Mutex::new(db::connection::open_in_memory().unwrap())),
-            workdir.clone(),
-        ),
-        jobs: JobConfig::test(workdir),
+        concerts,
+        catalog,
+        db,
+        registry,
+        scrape_queue,
+        jobs,
     }
 }
 

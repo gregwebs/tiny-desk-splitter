@@ -226,14 +226,6 @@ pub fn sync_months(conn: &Connection, from: YearMonth, to: YearMonth) -> Result<
 /// `(id, url)` of just-synced concerts that still need a per-concert metadata
 /// scrape (so their preview image + listing thumbnail get generated). Pure
 /// filter over the sync result — no DB, no network.
-pub fn concerts_needing_scrape(synced: &[SyncedConcert]) -> Vec<(i64, String)> {
-    synced
-        .iter()
-        .filter(|c| c.metadata_scraped_at.is_none())
-        .map(|c| (c.id, c.source_url.clone()))
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,45 +344,6 @@ mod tests {
         set.insert(a);
         assert!(set.contains(&b));
         assert!(!set.contains(&c));
-    }
-
-    fn synced(id: i64, url: &str, scraped: bool) -> SyncedConcert {
-        SyncedConcert {
-            id,
-            source_url: url.to_string(),
-            metadata_scraped_at: scraped.then(|| "2026-05-30T00:00:00Z".to_string()),
-        }
-    }
-
-    #[test]
-    fn concerts_needing_scrape_keeps_only_unscraped() {
-        let synced = vec![
-            synced(1, "https://npr.org/c/1", false),
-            synced(2, "https://npr.org/c/2", true),
-            synced(3, "https://npr.org/c/3", false),
-        ];
-        let needing = concerts_needing_scrape(&synced);
-        assert_eq!(
-            needing,
-            vec![
-                (1, "https://npr.org/c/1".to_string()),
-                (3, "https://npr.org/c/3".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn concerts_needing_scrape_empty_when_all_scraped() {
-        let synced = vec![
-            synced(1, "https://npr.org/c/1", true),
-            synced(2, "https://npr.org/c/2", true),
-        ];
-        assert!(concerts_needing_scrape(&synced).is_empty());
-    }
-
-    #[test]
-    fn concerts_needing_scrape_empty_input() {
-        assert!(concerts_needing_scrape(&[]).is_empty());
     }
 
     // --- month scoping ------------------------------------------------------

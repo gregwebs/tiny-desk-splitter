@@ -239,7 +239,11 @@ pub struct ErrorEntry {
     pub at: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// The browsing disposition of a concert. Available, Wanted, and Ignored are
+/// mutually exclusive: this value is what callers ask for, while the two
+/// stored flags are only one encoding of it. Writing both flags from a single
+/// `ConcertStatus` is what keeps them mutually exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConcertStatus {
     Ignored,
     Wanted,
@@ -254,6 +258,16 @@ impl ConcertStatus {
             ConcertStatus::Wanted
         } else {
             ConcertStatus::Available
+        }
+    }
+
+    /// The stored `(ignored, wanted)` flags for this disposition. The inverse
+    /// of [`Self::from_flags`].
+    pub fn flags(&self) -> (bool, bool) {
+        match self {
+            ConcertStatus::Ignored => (true, false),
+            ConcertStatus::Wanted => (false, true),
+            ConcertStatus::Available => (false, false),
         }
     }
 

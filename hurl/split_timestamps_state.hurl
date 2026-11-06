@@ -170,8 +170,12 @@ HTTP 200
 [Captures]
 delete_split_not_split_id: jsonpath "$.result.id"
 
+# Deleting a split that is not there is idempotent: the desired state (no split)
+# already holds, so this succeeds instead of failing (#165).
 POST {{base_url}}/concerts/{{delete_split_not_split_id}}/delete-split
-HTTP 400
+HTTP 200
+[Asserts]
+body contains "id=\"concert-{{delete_split_not_split_id}}\""
 
 # Plain delete-split: clears split state but leaves download state untouched,
 # and the re-rendered card drops the (now-redundant) Split button — splitting

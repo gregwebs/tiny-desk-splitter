@@ -146,41 +146,34 @@ pub fn delete_track(
         .album
         .as_deref()
         .ok_or_else(|| anyhow!("concert has no album"))?;
-    let stem = crate::model::sanitize_filename(&track_title);
-    let dir = crate::model::concert_dir(working_dir, album);
-
-    let mut removed_files = Vec::new();
-    for ext in &["mp4", "m4a"] {
-        let path = dir.join(format!("{stem}.{ext}"));
-        if !path.exists() {
-            continue;
-        }
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                tracing::info!(
-                    "delete_track: removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-                removed_files.push(path);
-            }
-            Err(e) => {
-                tracing::warn!("delete_track: failed to remove {}: {}", path.display(), e);
-            }
-        }
+    // Canonical discovery, not a hand-built path: whatever extension the media
+    // is in, deleting the track removes it.
+    let removed_files = crate::concert_media::remove_track_files(working_dir, album, &track_title)
+        .with_context(|| format!("failed to delete media for track {track_title}"))?;
+    for path in &removed_files {
+        tracing::info!(
+            "delete_track: removed {} for concert {}",
+            path.display(),
+            id
+        );
     }
-
-    let json =
-        serde_json::json!({"track_index": track_index, "track_title": &track_title}).to_string();
-    events::record_now(conn, id, Event::TrackDelete, Some(&json));
 
     let mut tracks_present = concert.tracks_present.clone();
     if tracks_present.len() < concert.set_list.len() {
         tracks_present.resize(concert.set_list.len(), true);
     }
+    let already_absent = !tracks_present[track_index] && removed_files.is_empty();
     tracks_present[track_index] = false;
 
-    let split_cleared = tracks_present.iter().all(|present| !present);
+    // A retried deletion of a track that is already absent succeeds without
+    // recording a second `track_delete` event.
+    if !already_absent {
+        let json = serde_json::json!({"track_index": track_index, "track_title": &track_title})
+            .to_string();
+        events::record_now(conn, id, Event::TrackDelete, Some(&json));
+    }
+
+    let split_cleared = !already_absent && tracks_present.iter().all(|present| !present);
     if split_cleared {
         db::lifecycle::clear_split_state(conn, id)?;
     } else {
@@ -193,6 +186,56 @@ pub fn delete_track(
         removed_files,
         split_cleared,
     })
+}
+
+/// Remove one interlude's media file, recording an `interlude_delete` event only
+/// when a file was actually removed: deleting an interlude whose file is already
+/// gone is a successful no-op, so a retried request leaves the audit trail as it
+/// was.
+pub fn delete_interlude(
+    conn: &Connection,
+    working_dir: &Path,
+    id: i64,
+    interlude_index: usize,
+) -> Result<DeleteInterludeOutcome> {
+    let concert = db::concerts::get_concert(conn, id)?;
+    let album = concert
+        .album
+        .as_deref()
+        .ok_or_else(|| anyhow!("concert {id} has no album, so it has no interlude files"))?;
+    let dir = crate::model::concert_dir(working_dir, album);
+    let stem = concert_types::interlude_filename_stem(interlude_index);
+
+    let mut removed_files = Vec::new();
+    for ext in crate::model::INTERLUDE_EXTENSIONS {
+        let path = dir.join(format!("{stem}.{ext}"));
+        match std::fs::remove_file(&path) {
+            Ok(()) => {
+                tracing::info!(
+                    "remove_interlude: removed {} for concert {}",
+                    path.display(),
+                    id
+                );
+                removed_files.push(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
+            }
+        }
+    }
+
+    if !removed_files.is_empty() {
+        let json = serde_json::json!({"interlude_index": interlude_index}).to_string();
+        events::record_now(conn, id, Event::InterludeDelete, Some(&json));
+    }
+
+    Ok(DeleteInterludeOutcome { removed_files })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeleteInterludeOutcome {
+    pub removed_files: Vec<PathBuf>,
 }
 
 /// Cancel the running/queued/stale job named by `(id, job_kind)`.

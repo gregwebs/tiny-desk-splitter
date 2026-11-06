@@ -23,11 +23,44 @@ pub fn get_split_timestamps(conn: &Connection, id: i64) -> Result<StoredSplitTim
 
     let auto = auto_json
         .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
+        .map(serde_json::from_str)
+        .transpose()
+        .context("Failed to decode automatic split timestamps")?;
     let user = user_json
         .as_deref()
-        .and_then(|j| serde_json::from_str(j).ok());
+        .map(serde_json::from_str)
+        .transpose()
+        .context("Failed to decode user split timestamps")?;
     Ok(StoredSplitTimestamps { auto, user })
+}
+
+/// User split timestamps for every concert that has them, keyed by concert id.
+/// Catalog browsing builds Concert States for a whole collection, so it reads
+/// them in one query instead of one query per concert. A concert with no user
+/// timestamps is absent from the map.
+pub fn list_user_split_timestamps(
+    conn: &Connection,
+) -> Result<std::collections::HashMap<i64, Vec<concert_types::SongTimestamp>>> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, user_split_timestamps_json FROM concerts
+             WHERE user_split_timestamps_json IS NOT NULL",
+        )
+        .context("Failed to prepare user split timestamp query")?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .context("Failed to list user split timestamps")?;
+
+    let mut by_concert = std::collections::HashMap::new();
+    for row in rows {
+        let (id, json) = row.context("Failed to read user split timestamps")?;
+        let timestamps = serde_json::from_str(&json)
+            .with_context(|| format!("Failed to decode user split timestamps for concert {id}"))?;
+        by_concert.insert(id, timestamps);
+    }
+    Ok(by_concert)
 }
 
 pub fn set_auto_split_timestamps(
@@ -123,10 +156,11 @@ pub fn set_tracks_liked(conn: &Connection, id: i64, tracks: &[bool]) -> Result<(
     Ok(())
 }
 
-/// Flip the like bit for one track. Pads `tracks_liked` to `set_list.len()`
-/// with `false` so previously-unsaved indices become writeable. Caller must
-/// validate that `idx < set_list.len()`.
-pub fn toggle_track_liked(conn: &Connection, id: i64, idx: usize) -> Result<bool> {
+/// Store the desired like state for one track. Pads `tracks_liked` to
+/// `set_list.len()` with `false` so previously-unsaved indices become writeable.
+/// Caller must validate that `idx < set_list.len()`. Idempotent: storing the
+/// state already stored records no event.
+pub fn set_track_liked(conn: &Connection, id: i64, idx: usize, liked_state: bool) -> Result<bool> {
     let concert = get_concert(conn, id)?;
     if idx >= concert.set_list.len() {
         anyhow::bail!(
@@ -139,20 +173,22 @@ pub fn toggle_track_liked(conn: &Connection, id: i64, idx: usize) -> Result<bool
     if liked.len() < concert.set_list.len() {
         liked.resize(concert.set_list.len(), false);
     }
-    liked[idx] = !liked[idx];
-    let new_state = liked[idx];
+    if liked[idx] == liked_state {
+        return Ok(liked_state);
+    }
+    let _ = std::mem::replace(&mut liked[idx], liked_state);
     set_tracks_liked(conn, id, &liked)?;
 
     let title = &concert.set_list[idx];
     let json = serde_json::json!({"track_index": idx, "track_title": title}).to_string();
-    let event = if new_state {
+    let event = if liked_state {
         Event::TrackLiked
     } else {
         Event::TrackLikedDelete
     };
     events::record_now(conn, id, event, Some(&json));
 
-    Ok(new_state)
+    Ok(liked_state)
 }
 
 pub fn list_concerts_needing_tracks_backfill(conn: &Connection) -> Result<Vec<Concert>> {
@@ -233,15 +269,15 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn toggle_track_liked_roundtrip() {
+    fn set_track_liked_roundtrip() {
         let conn = open_in_memory().unwrap();
         let id = seed_with_album(&conn); // 2-song set list: "Song A", "Song B"
-        assert!(toggle_track_liked(&conn, id, 1).unwrap());
+        assert!(set_track_liked(&conn, id, 1, true).unwrap());
         assert_eq!(
             get_concert(&conn, id).unwrap().tracks_liked,
             vec![false, true]
         );
-        assert!(!toggle_track_liked(&conn, id, 1).unwrap());
+        assert!(!set_track_liked(&conn, id, 1, false).unwrap());
         assert_eq!(
             get_concert(&conn, id).unwrap().tracks_liked,
             vec![false, false]
@@ -249,7 +285,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn toggle_track_liked_from_null_column() {
+    fn set_track_liked_from_null_column() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
         update_metadata(
@@ -266,7 +302,7 @@ pub(crate) mod tests {
         .unwrap();
         // tracks_liked is NULL/empty at this point
         assert!(get_concert(&conn, id).unwrap().tracks_liked.is_empty());
-        assert!(toggle_track_liked(&conn, id, 1).unwrap());
+        assert!(set_track_liked(&conn, id, 1, true).unwrap());
         assert_eq!(
             get_concert(&conn, id).unwrap().tracks_liked,
             vec![false, true, false]
@@ -274,10 +310,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn toggle_track_liked_records_event() {
+    fn set_track_liked_records_event() {
         let conn = open_in_memory().unwrap();
         let id = seed_with_album(&conn);
-        toggle_track_liked(&conn, id, 0).unwrap();
+        set_track_liked(&conn, id, 0, true).unwrap();
         let (event, json): (String, Option<String>) = conn
             .query_row(
                 "SELECT event, json FROM events WHERE concert_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -292,11 +328,21 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn toggle_track_liked_records_unlike_event() {
+    fn set_track_liked_records_unlike_event() {
         let conn = open_in_memory().unwrap();
         let id = seed_with_album(&conn);
-        toggle_track_liked(&conn, id, 0).unwrap();
-        toggle_track_liked(&conn, id, 0).unwrap();
+        set_track_liked(&conn, id, 0, true).unwrap();
+        // A repeated like is a no-op: it must not record a second event.
+        set_track_liked(&conn, id, 0, true).unwrap();
+        let liked_events: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE concert_id = ?1 AND event = 'track_liked'",
+                params![id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(liked_events, 1);
+        set_track_liked(&conn, id, 0, false).unwrap();
         let event: String = conn
             .query_row(
                 "SELECT event FROM events WHERE concert_id = ?1 ORDER BY id DESC LIMIT 1",
@@ -308,10 +354,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn toggle_track_liked_rejects_out_of_range_idx() {
+    fn set_track_liked_rejects_out_of_range_idx() {
         let conn = open_in_memory().unwrap();
         let id = seed_with_album(&conn); // 2-song set list
-        let result = toggle_track_liked(&conn, id, 5);
+        let result = set_track_liked(&conn, id, 5, true);
         assert!(result.is_err());
         let c = get_concert(&conn, id).unwrap();
         assert!(

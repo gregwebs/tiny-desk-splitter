@@ -90,6 +90,27 @@ pub fn thumbnail_path(working_dir: &Path, album: &str) -> PathBuf {
         .join(format!("{}.jpg", sanitize_album(album)))
 }
 
+/// Remove the cached preview image and listing thumbnail for `album`. These are
+/// disposable copies of scraped images: a missing file is the normal case, and
+/// a deletion that fails anyway is not worth failing the caller over, because
+/// the next successful render or scrape replaces it.
+pub fn remove_cached_images(working_dir: &Path, album: &str) {
+    for path in [
+        preview_image_path(working_dir, album),
+        thumbnail_path(working_dir, album),
+    ] {
+        match std::fs::remove_file(&path) {
+            Ok(()) => tracing::debug!(path = %path.display(), "removed cached concert image"),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => tracing::warn!(
+                path = %path.display(),
+                %error,
+                "could not remove cached concert image"
+            ),
+        }
+    }
+}
+
 /// Ensure a listing thumbnail exists for `album`, deriving it from the preview
 /// image. The thumbnail check is independent of the preview check:
 ///

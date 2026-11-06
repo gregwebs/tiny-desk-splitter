@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use rusqlite::{params, Connection, Row};
 
 use crate::events::{self, Event};
-use crate::model::{Concert, ErrorEntry, Musician};
+use crate::model::{Concert, ConcertStatus, ErrorEntry, Musician};
 
 pub struct NewListing {
     pub source_url: String,
@@ -135,58 +135,66 @@ pub fn update_metadata(conn: &Connection, id: i64, update: &MetadataUpdate) -> R
     Ok(())
 }
 
-pub fn toggle_ignored(conn: &Connection, id: i64) -> Result<bool> {
-    conn.execute(
-        "UPDATE concerts SET
-             ignored = CASE WHEN ignored = 0 THEN 1 ELSE 0 END,
-             wanted  = CASE WHEN ignored = 0 THEN 0 ELSE wanted END
-         WHERE id = ?1",
-        params![id],
-    )
-    .context("Failed to toggle ignored")?;
-
-    let new_ignored: bool = conn
+/// Store a desired Concert Status. Both flags are written from one value, so
+/// Wanted and Ignored cannot coexist. Idempotent: storing the status already
+/// stored changes nothing and records no event, which makes a retried request
+/// safe. Returns the status now stored.
+pub fn set_concert_status(
+    conn: &Connection,
+    id: i64,
+    status: ConcertStatus,
+) -> Result<ConcertStatus> {
+    let (current_ignored, current_wanted) = conn
         .query_row(
-            "SELECT ignored FROM concerts WHERE id = ?1",
+            "SELECT ignored, wanted FROM concerts WHERE id = ?1",
             params![id],
-            |row| row.get::<_, i64>(0).map(|v| v != 0),
+            |row| Ok((row.get::<_, i64>(0)? != 0, row.get::<_, i64>(1)? != 0)),
         )
-        .context("Failed to read new ignored value")?;
+        .context("Failed to read current concert status")?;
+    let current = ConcertStatus::from_flags(current_ignored, current_wanted);
 
-    if new_ignored {
-        events::record_now(conn, id, Event::Ignored, None);
-    } else {
-        events::record_now(conn, id, Event::IgnoredDelete, None);
+    let (ignored, wanted) = status.flags();
+    // Compare the *stored* flags, not just the derived status: a row whose two
+    // flags are both set derives as Ignored, and storing Ignored must still
+    // clear the stale wanted flag rather than trusting that comparison.
+    if (current_ignored, current_wanted) == (ignored, wanted) {
+        return Ok(current);
+    }
+    conn.execute(
+        "UPDATE concerts SET ignored = ?1, wanted = ?2 WHERE id = ?3",
+        params![ignored, wanted, id],
+    )
+    .context("Failed to set concert status")?;
+
+    if current == status {
+        // Only a malformed flag pair changed; the user-visible disposition did
+        // not, so no event is recorded.
+        tracing::warn!(
+            concert_id = id,
+            ignored = current_ignored,
+            wanted = current_wanted,
+            "normalized mutually exclusive concert status flags"
+        );
+        return Ok(status);
     }
 
-    Ok(new_ignored)
-}
-
-pub fn toggle_wanted(conn: &Connection, id: i64) -> Result<bool> {
-    conn.execute(
-        "UPDATE concerts SET
-             wanted  = CASE WHEN wanted = 0 THEN 1 ELSE 0 END,
-             ignored = CASE WHEN wanted = 0 THEN 0 ELSE ignored END
-         WHERE id = ?1",
-        params![id],
-    )
-    .context("Failed to toggle wanted")?;
-
-    let new_wanted: bool = conn
-        .query_row(
-            "SELECT wanted FROM concerts WHERE id = ?1",
-            params![id],
-            |row| row.get::<_, i64>(0).map(|v| v != 0),
-        )
-        .context("Failed to read new wanted value")?;
-
-    if new_wanted {
-        events::record_now(conn, id, Event::Wanted, None);
-    } else {
-        events::record_now(conn, id, Event::WantedDelete, None);
+    // One event per transition, matching the toggle-shaped callers this
+    // replaced: entering a status records it being set, leaving one records its
+    // delete, and a direct Ignored/Wanted swap records only the one entered.
+    let event = match (current, status) {
+        (ConcertStatus::Ignored, ConcertStatus::Available) => Some(Event::IgnoredDelete),
+        (ConcertStatus::Wanted, ConcertStatus::Available) => Some(Event::WantedDelete),
+        (_, ConcertStatus::Wanted) => Some(Event::Wanted),
+        (_, ConcertStatus::Ignored) => Some(Event::Ignored),
+        // The early return above means only an unchanged Available can reach
+        // here; the other two unchanged pairs are already gone.
+        (ConcertStatus::Available, ConcertStatus::Available) => None,
+    };
+    if let Some(event) = event {
+        events::record_now(conn, id, event, None);
     }
 
-    Ok(new_wanted)
+    Ok(status)
 }
 
 pub fn set_notes(conn: &Connection, id: i64, notes: &str) -> Result<()> {
@@ -296,7 +304,7 @@ mod tests {
     fn upsert_listing_preserves_intent_on_conflict() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
-        toggle_wanted(&conn, id).unwrap();
+        set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
         upsert_listing(&conn, &listing("https://npr.org/c/1", "Updated")).unwrap();
         let c = get_concert(&conn, id).unwrap();
         assert!(c.wanted, "re-upsert must not clear wanted flag");
@@ -317,36 +325,62 @@ mod tests {
     }
 
     #[test]
-    fn toggle_ignored_flips_flag_and_clears_wanted() {
+    fn set_concert_status_writes_one_mutually_exclusive_disposition() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
 
-        // Start wanted, then ignore — wanted should be cleared
-        toggle_wanted(&conn, id).unwrap();
-        assert!(get_concert(&conn, id).unwrap().wanted);
-        toggle_ignored(&conn, id).unwrap();
-        let c = get_concert(&conn, id).unwrap();
-        assert!(c.ignored);
-        assert!(!c.wanted);
+        set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
+        let wanted = get_concert(&conn, id).unwrap();
+        assert!(wanted.wanted && !wanted.ignored);
 
-        // Toggle ignored off — ignored cleared, wanted stays off
-        toggle_ignored(&conn, id).unwrap();
-        let c = get_concert(&conn, id).unwrap();
-        assert!(!c.ignored);
-        assert!(!c.wanted);
+        set_concert_status(&conn, id, ConcertStatus::Ignored).unwrap();
+        let ignored = get_concert(&conn, id).unwrap();
+        assert!(ignored.ignored && !ignored.wanted);
+
+        set_concert_status(&conn, id, ConcertStatus::Available).unwrap();
+        let available = get_concert(&conn, id).unwrap();
+        assert!(!available.ignored && !available.wanted);
     }
 
     #[test]
-    fn toggle_wanted_flips_flag_and_clears_ignored() {
+    fn set_concert_status_repairs_a_malformed_flag_pair() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+        // Neither flag pair the product writes can produce this, but a manual
+        // edit or an older schema can: both flags set at once.
+        conn.execute(
+            "UPDATE concerts SET ignored = 1, wanted = 1 WHERE id = ?1",
+            params![id],
+        )
+        .unwrap();
+
+        set_concert_status(&conn, id, ConcertStatus::Ignored).unwrap();
+
+        let c = get_concert(&conn, id).unwrap();
+        assert!(c.ignored && !c.wanted, "stale wanted flag must be cleared");
+    }
+
+    #[test]
+    fn set_concert_status_is_idempotent() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
 
-        toggle_ignored(&conn, id).unwrap();
-        assert!(get_concert(&conn, id).unwrap().ignored);
-        toggle_wanted(&conn, id).unwrap();
+        assert_eq!(
+            set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap(),
+            ConcertStatus::Wanted
+        );
+        assert_eq!(
+            set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap(),
+            ConcertStatus::Wanted
+        );
+
+        let wanted_events = events_for(&conn, id)
+            .into_iter()
+            .filter(|(name, _)| name == "wanted")
+            .count();
+        assert_eq!(wanted_events, 1);
         let c = get_concert(&conn, id).unwrap();
-        assert!(c.wanted);
-        assert!(!c.ignored);
+        assert!(c.wanted && !c.ignored);
     }
 
     #[test]
@@ -441,34 +475,38 @@ mod tests {
     }
 
     #[test]
-    fn toggle_ignored_emits_ignored_then_ignored_delete() {
+    fn set_concert_status_emits_ignored_then_ignored_delete() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
-        toggle_ignored(&conn, id).unwrap();
-        assert_eq!(
-            events_for(&conn, id).last().unwrap(),
-            &("ignored".to_string(), None)
-        );
-        toggle_ignored(&conn, id).unwrap();
-        assert_eq!(
-            events_for(&conn, id).last().unwrap(),
-            &("ignored_delete".to_string(), None)
-        );
+        set_concert_status(&conn, id, ConcertStatus::Ignored).unwrap();
+        assert_eq!(events_for(&conn, id).last().unwrap().0, "ignored");
+        set_concert_status(&conn, id, ConcertStatus::Available).unwrap();
+        assert_eq!(events_for(&conn, id).last().unwrap().0, "ignored_delete");
     }
 
     #[test]
-    fn toggle_wanted_emits_wanted_then_wanted_delete() {
+    fn set_concert_status_emits_wanted_then_wanted_delete() {
         let conn = open_in_memory().unwrap();
         let id = seed(&conn);
-        toggle_wanted(&conn, id).unwrap();
-        assert_eq!(
-            events_for(&conn, id).last().unwrap(),
-            &("wanted".to_string(), None)
-        );
-        toggle_wanted(&conn, id).unwrap();
-        assert_eq!(
-            events_for(&conn, id).last().unwrap(),
-            &("wanted_delete".to_string(), None)
-        );
+        set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
+        assert_eq!(events_for(&conn, id).last().unwrap().0, "wanted");
+        set_concert_status(&conn, id, ConcertStatus::Available).unwrap();
+        assert_eq!(events_for(&conn, id).last().unwrap().0, "wanted_delete");
+    }
+
+    #[test]
+    fn set_concert_status_records_one_event_per_transition() {
+        let conn = open_in_memory().unwrap();
+        let id = seed(&conn);
+
+        set_concert_status(&conn, id, ConcertStatus::Wanted).unwrap();
+        set_concert_status(&conn, id, ConcertStatus::Ignored).unwrap();
+
+        let status_events: Vec<String> = events_for(&conn, id)
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.contains("wanted") || name.contains("ignored"))
+            .collect();
+        assert_eq!(status_events, vec!["wanted", "ignored"]);
     }
 }

@@ -111,6 +111,19 @@ impl ScrapeQueue {
         ScrapeQueue { tx, pending }
     }
 
+    /// A queue with no worker, for one-shot processes that never start a
+    /// background scrape (the `concert_db` CLI). Nothing is ever pending and
+    /// [`Self::enqueue`] reports "not queued", so a caller reading active work
+    /// sees only what persistence records.
+    pub fn detached() -> Self {
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx);
+        Self {
+            tx,
+            pending: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
     /// Queue `concert_id` for a background scrape. Returns `false` (a normal
     /// no-op) if it was already queued/in-flight, or if the worker is gone.
     /// Dedupe is a single critical section: check-and-insert under one lock.
