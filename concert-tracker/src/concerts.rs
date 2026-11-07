@@ -1948,55 +1948,102 @@ mod tests {
         Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.to_path_buf())
     }
 
-    #[test]
-    fn set_status_stores_the_desired_disposition_and_returns_state() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        let concert = SeedContext::new(&conn)
-            .seed_listing(db::seeds::SeedListing::default())
-            .unwrap();
-        let concerts = one_shot(conn, working_dir.path());
+    /// Every event the concert has recorded so far, in order. The matrix below
+    /// compares whole histories rather than only the status events, so an extra
+    /// event of any kind — or a missing one — is a failure.
+    fn event_names(concerts: &Concerts, concert_id: i64) -> Vec<String> {
+        concerts
+            .event_history(concert_id)
+            .unwrap()
+            .into_iter()
+            .map(|event| event.event)
+            .collect()
+    }
 
-        for status in [
-            ConcertStatus::Wanted,
-            ConcertStatus::Ignored,
-            ConcertStatus::Available,
-        ] {
-            let state = concerts.set_status(concert.id, status).unwrap();
-            assert_eq!(state.concert.concert_status(), status);
-            // Available, Wanted, and Ignored are mutually exclusive.
-            assert_eq!(state.concert.wanted, status == ConcertStatus::Wanted);
-            assert_eq!(state.concert.ignored, status == ConcertStatus::Ignored);
+    /// The one event a status transition records, derived from the event stream
+    /// the toggle-shaped callers have always produced (see
+    /// `docs/change/2026-07-25-concert-catalog-and-status.md`, "Preserved
+    /// behaviour") rather than from the storage: entering a status records it,
+    /// leaving one for Available records its delete, and a direct Wanted/Ignored
+    /// swap records only the status entered. A repeat of the same status records
+    /// nothing.
+    fn expected_status_event(from: ConcertStatus, to: ConcertStatus) -> Option<&'static str> {
+        match (from, to) {
+            // A repeat of the status the concert already has. `set_concert_status`
+            // returns early for these, so no event is recorded.
+            (ConcertStatus::Wanted, ConcertStatus::Wanted)
+            | (ConcertStatus::Ignored, ConcertStatus::Ignored)
+            | (ConcertStatus::Available, ConcertStatus::Available) => None,
+            (ConcertStatus::Wanted, ConcertStatus::Available) => Some("wanted_delete"),
+            (ConcertStatus::Ignored, ConcertStatus::Available) => Some("ignored_delete"),
+            (_, ConcertStatus::Wanted) => Some("wanted"),
+            (_, ConcertStatus::Ignored) => Some("ignored"),
         }
     }
 
+    /// Every ordered transition between Available, Wanted, and Ignored, through
+    /// the interface callers use: one mutually exclusive status, a command result
+    /// that is the concert's actual state, one event per transition, and a retry
+    /// that changes nothing.
     #[test]
-    fn repeating_a_desired_status_is_safe_and_returns_current_state() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        let concert = SeedContext::new(&conn)
-            .seed_listing(db::seeds::SeedListing::default())
-            .unwrap();
-        let concerts = one_shot(conn, working_dir.path());
+    fn every_status_transition_sets_one_exclusive_status_and_one_event() {
+        let statuses = [
+            ConcertStatus::Available,
+            ConcertStatus::Wanted,
+            ConcertStatus::Ignored,
+        ];
+        for from in statuses {
+            for to in statuses {
+                let working_dir = tempfile::tempdir().unwrap();
+                let conn = db::connection::open_in_memory().unwrap();
+                let concert = SeedContext::new(&conn)
+                    .seed_listing(db::seeds::SeedListing::default())
+                    .unwrap();
+                let concerts = one_shot(conn, working_dir.path());
 
-        concerts
-            .set_status(concert.id, ConcertStatus::Wanted)
-            .unwrap();
-        let repeated = concerts
-            .set_status(concert.id, ConcertStatus::Wanted)
-            .unwrap();
+                let starting = concerts.set_status(concert.id, from).unwrap();
+                assert_eq!(
+                    starting.concert.concert_status(),
+                    from,
+                    "setting the starting status from a fresh Available concert"
+                );
+                let mut expected = event_names(&concerts, concert.id);
 
-        assert_eq!(repeated.concert.concert_status(), ConcertStatus::Wanted);
-        let wanted_events = concerts
-            .event_history(concert.id)
-            .unwrap()
-            .into_iter()
-            .filter(|event| event.event == "wanted")
-            .count();
-        assert_eq!(
-            wanted_events, 1,
-            "a retried request records no second event"
-        );
+                let state = concerts.set_status(concert.id, to).unwrap();
+
+                // Available, Wanted, and Ignored are mutually exclusive: the
+                // status asked for is expressed by exactly one stored intent.
+                assert_eq!(state.concert.concert_status(), to, "{from:?} -> {to:?}");
+                assert_eq!(state.concert.wanted, to == ConcertStatus::Wanted);
+                assert_eq!(state.concert.ignored, to == ConcertStatus::Ignored);
+
+                // The returned state is the concert's state, not a guess about
+                // it: the next observation agrees.
+                assert_eq!(
+                    concerts.get(concert.id).unwrap().concert.concert_status(),
+                    to,
+                    "{from:?} -> {to:?}: the returned state must be the observed state"
+                );
+
+                if let Some(event) = expected_status_event(from, to) {
+                    expected.push(event.to_string());
+                }
+                assert_eq!(
+                    event_names(&concerts, concert.id),
+                    expected,
+                    "{from:?} -> {to:?} must append exactly {expected:?}"
+                );
+
+                // Repeating the desired status is safe: same state, no event.
+                let retried = concerts.set_status(concert.id, to).unwrap();
+                assert_eq!(retried.concert.concert_status(), to, "{from:?} -> {to:?}");
+                assert_eq!(
+                    event_names(&concerts, concert.id),
+                    expected,
+                    "{from:?} -> {to:?}: a retried request records no second event"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2045,8 +2092,61 @@ mod tests {
         let state = concerts.set_notes(concert.id, "saw this live").unwrap();
         assert_eq!(state.concert.notes.as_deref(), Some("saw this live"));
 
+        // Repeating the same text is safe and reports the text now stored.
+        let retried = concerts.set_notes(concert.id, "saw this live").unwrap();
+        assert_eq!(retried.concert.notes.as_deref(), Some("saw this live"));
+        assert_eq!(
+            concerts.get(concert.id).unwrap().concert.notes.as_deref(),
+            Some("saw this live"),
+            "the returned state must be the observed state"
+        );
+
         let cleared = concerts.set_notes(concert.id, "").unwrap();
         assert_eq!(cleared.concert.notes.as_deref(), Some(""));
+    }
+
+    /// Notes and Concert Status are independent desired state: writing one never
+    /// clears the other.
+    #[test]
+    fn notes_and_status_are_independent_desired_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_listing(db::seeds::SeedListing::default())
+            .unwrap();
+        let concerts = one_shot(conn, working_dir.path());
+
+        concerts
+            .set_status(concert.id, ConcertStatus::Ignored)
+            .unwrap();
+        let noted = concerts.set_notes(concert.id, "skip for now").unwrap();
+        assert_eq!(noted.concert.concert_status(), ConcertStatus::Ignored);
+        assert_eq!(noted.concert.notes.as_deref(), Some("skip for now"));
+
+        let wanted = concerts
+            .set_status(concert.id, ConcertStatus::Wanted)
+            .unwrap();
+        assert_eq!(wanted.concert.concert_status(), ConcertStatus::Wanted);
+        assert_eq!(
+            wanted.concert.notes.as_deref(),
+            Some("skip for now"),
+            "changing Concert Status must not clear the notes"
+        );
+
+        // The other direction: notes that already exist survive becoming Ignored.
+        let available = concerts
+            .set_status(concert.id, ConcertStatus::Available)
+            .unwrap();
+        assert_eq!(available.concert.concert_status(), ConcertStatus::Available);
+        concerts.set_notes(concert.id, "revisit later").unwrap();
+        let ignored = concerts
+            .set_status(concert.id, ConcertStatus::Ignored)
+            .unwrap();
+        assert_eq!(
+            ignored.concert.notes.as_deref(),
+            Some("revisit later"),
+            "becoming Ignored must not clear the notes"
+        );
     }
 
     #[test]

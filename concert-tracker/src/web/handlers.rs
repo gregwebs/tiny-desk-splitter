@@ -3034,6 +3034,53 @@ mod tests {
         assert!(!unliked.contains("liked"), "{unliked}");
     }
 
+    // ── command error mapping ────────────────────────────────────────────────
+
+    /// A rejection is an expected domain outcome and an operational error is a
+    /// fault, and the HTTP adapter must keep them apart: every rejection becomes
+    /// a client error, only a fault becomes a 500. Collapsing a rejection into a
+    /// 500 would turn "this request cannot apply to the concert" into "the server
+    /// is broken".
+    #[test]
+    fn command_rejections_are_client_errors_and_faults_are_server_errors() {
+        let rejections = [
+            CommandRejection::NotFound { concert_id: 7 },
+            CommandRejection::NoSuchTrack {
+                concert_id: 7,
+                track_index: 3,
+            },
+            CommandRejection::MissingMedia {
+                concert_id: 7,
+                target: ListenTarget::Source,
+            },
+            CommandRejection::SourceNotRedundant { concert_id: 7 },
+            CommandRejection::Conflict {
+                concert_id: 7,
+                message: "conflicts with the current state".to_string(),
+            },
+            CommandRejection::Invalid {
+                concert_id: 7,
+                message: "not a change the concert can accept".to_string(),
+            },
+        ];
+        for rejection in rejections {
+            let status = concert_command_error(ConcertCommandError::Rejected(rejection.clone()))
+                .into_response()
+                .status();
+            assert!(
+                status.is_client_error(),
+                "{rejection} is an expected rejection, so it must be a client error, got {status}"
+            );
+        }
+
+        let status = concert_command_error(ConcertCommandError::Operational(anyhow::anyhow!(
+            "the database is gone"
+        )))
+        .into_response()
+        .status();
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
     // ── sync_location_path ────────────────────────────────────────────────────
 
     #[test]
