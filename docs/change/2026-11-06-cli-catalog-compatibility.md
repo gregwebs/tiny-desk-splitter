@@ -31,14 +31,21 @@ exist — `concert-db list` had no automated test at all.
   `<repo>/target/debug/concert-web`. `hurl-test.js` also reports the resolved
   path when a successful build produced no binary, instead of a bare `ENOENT`
   from `spawn`.
-- `Dockerfile.dev` and `hurl/README.md` record that the small-volume recipe
-  (`CARGO_PROFILE_DEV_DEBUG=0` plus a scratch target dir) covers the gate
-  scripts, not only `cargo build`.
+- `scripts/cargo-target.js` is covered by `hurl/README.md`, which says the gate
+  scripts follow a `CARGO_TARGET_DIR` / `--target` build rather than assuming
+  `<repo>/target`.
 
 The tooling fix is what made this verification possible at all: the sandbox's
-mounted working directory is a 25.7 GiB volume holding 21.5 GiB of media, so the
-~4.6 GiB debuginfo build never fit, while the documented workaround silently
-failed because two scripts assumed the default target layout.
+mounted working directory also holds 21.5 GiB of media, so the ~4.6 GiB
+debuginfo build only fit after pruning stale artifacts, while the documented
+workaround silently failed because two scripts assumed the default target
+layout.
+
+Build into the mounted working directory — `<repo>/target` by default. It is a
+mounted volume, so it costs nothing in image size, and `/tmp` is not mounted:
+artifacts there land in the image, do not survive it, and are not where the gate
+scripts look. When the mounted volume runs short, prune it (`cargo clean`, or
+`rm -rf target/debug/incremental`) rather than relocating the build.
 
 ## Preserved behaviour
 
@@ -56,8 +63,9 @@ user reads.
 
 ## Verification gates
 
-Run in the mounted working directory with `CARGO_PROFILE_DEV_DEBUG=0` (a 2.4 GiB
-`target/` instead of 4.6 GiB), dependencies served from the shared kache store:
+Run in the mounted working directory, building into `<repo>/target` with the
+default dev profile — the target directory is part of the mounted volume, so it
+costs nothing in image size:
 
 - `cargo fmt --all -- --check` — clean.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0 (29 s).
@@ -73,10 +81,6 @@ Run in the mounted working directory with `CARGO_PROFILE_DEV_DEBUG=0` (a 2.4 GiB
 
 ## Follow-on
 
-- The kache store `~/.cache/kache` sits below its own free-space floor (785 MiB
-  free of 8.1 GiB, 5.2 GiB of blobs against a 5.0 GiB budget), so the daemon is
-  evicting entries that later builds have to recompile. A second store at
-  `~/Library/Caches/kache/store` holds 159 GB on a 156 GB volume.
 - `hurl/listing_status.hurl` still leaves `?filter=archived` to
   `hurl/archive_lifecycle.hurl`, which covers the filter through the archive
   lifecycle rather than through a listing fixture.

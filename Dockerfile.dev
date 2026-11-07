@@ -70,21 +70,6 @@
 #   cmake          — ocr-rs only invokes it for its MNN source-build fallback,
 #                    which linux/{x86_64,aarch64} never takes (see Containerfile)
 #   tesseract      — only for the opt-in `leptess-ocr` feature
-#
-# Tips for small or sandboxed machines:
-#   * `cargo test -p concert-tracker --features test-control` needs more than
-#     ~1.5 GiB; on a 2 GiB box the rustc invocation is OOM-killed at default
-#     parallelism. `-j1` (or CARGO_BUILD_JOBS=1) makes it fit.
-#   * Debug binaries for this workspace run to tens of GB. With a small target
-#     volume, build into a scratch target dir with
-#     CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td. Every gate that spawns
-#     a cargo-built binary honors that: the hurl suite (scripts/hurl-test.js)
-#     and the Playwright fixtures (e2e/fixtures.js) resolve the binary through
-#     scripts/cargo-target.js, the same CARGO_TARGET_DIR / CARGO_BUILD_TARGET
-#     overrides cargo itself applies.
-#   * The base image's ~/.cargo/config.toml points the rustc wrapper at `kache`.
-#     If kache's cache directory sits on a network mount, compiles crawl;
-#     `CARGO_BUILD_RUSTC_WRAPPER=""` bypasses it for a given build.
 
 ARG BASE_IMAGE=agent-vm-rust:dev
 FROM ${BASE_IMAGE}

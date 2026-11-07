@@ -90,10 +90,9 @@ compatibility slice.
 
 ## Verification gates
 
-Run in this sandbox with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td`
-(the mounted working directory is full — see the small-volume recipe in
-[Dockerfile.dev](../../Dockerfile.dev) and
-[hurl/README.md](../../hurl/README.md#running)):
+Run in the mounted working directory, building into `<repo>/target` with the
+default dev profile — no `CARGO_TARGET_DIR` redirection and no rustc-wrapper
+override:
 
 - `cargo fmt --all -- --check` — clean.
 - `cargo clippy --workspace --all-targets -- -D warnings` — exit 0.
@@ -104,6 +103,14 @@ Run in this sandbox with `CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td`
 - `npx playwright test` — 173 passed.
 - `./scripts/shellcheck.sh`, `./scripts/ts-check.sh` — exit 0 (no shell or
   TypeScript changed; run to confirm the standard lint suite still passes).
+
+These counts came from a full run whose target directory sat outside the repo.
+The recipe above is the one to use, and building into `<repo>/target` was
+re-confirmed after this branch merged: from a cleaned `target/`,
+`cargo build --bin concert-web --bin concert-db --features test-control`
+finished in 3m53s and `node scripts/hurl-test.js --glob
+hurl/detail_prepare_notes.hurl` ran 15 requests at 100% against that binary,
+with no `CARGO_TARGET_DIR` or profile override set.
 
 Mutation checks on the new assertions, each reverted afterwards:
 
