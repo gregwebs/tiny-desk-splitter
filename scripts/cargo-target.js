@@ -7,11 +7,10 @@
 //                       invokes cargo from)
 //   CARGO_BUILD_TARGET  when set, cargo nests the artifacts under the triple
 //
-// This is what makes the small-machine recipe in Dockerfile.dev — build into a
-// scratch target dir with
-// `CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/td` — work for
-// `just test-hurl` (scripts/hurl-test.js) and `npx playwright test`
-// (e2e/fixtures.js), not only for `cargo build` itself.
+// This is what keeps `just test-hurl` (scripts/hurl-test.js) and
+// `npx playwright test` (e2e/fixtures.js) working when the build went somewhere
+// other than `<repo>/target` — a cross-compiled `--target`, or a
+// `CARGO_TARGET_DIR` set by hand.
 
 const path = require("path");
 
