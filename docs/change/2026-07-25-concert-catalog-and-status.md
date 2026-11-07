@@ -87,3 +87,12 @@ The destructive "source is redundant" button stays off listing cards, as before.
 - `web/handlers.rs` card tests were rewritten against Concert State; the
   handler-level `matches_filter` tests were deleted because filter policy is
   asserted once, against the catalog.
+- `tests/cli_list.rs` runs `concert-db list` as a real process against a real
+  database file and pins the CLI's own compatibility surface: the line printed
+  per concert and its order, that its default `all` — and any filter name it
+  does not know — still lists every concert with Ignored ones included, and
+  that Wanted, Available, and Ignored keep their meanings. The web adapter's
+  half of that criterion stays with the hurl suites: `listing_status` pins the
+  Ignored, Wanted, Available, Downloaded, and Tracks (`split`) filter URLs and
+  the listing's Ignored and Wanted markup, while the filter meanings themselves
+  are asserted once, against the catalog.

@@ -127,3 +127,36 @@ HTTP 200
 [Asserts]
 body contains "id=\"concert-{{downloaded_filter_only_id}}\""
 body contains "id=\"concert-{{downloaded_filter_split_id}}\""
+
+# Wanted keeps its meaning at the filter URL. Wanted through the real public
+# endpoint (twice is not needed: the toggle starts Available, so one click
+# makes it Wanted), then the Wanted filter lists that concert and not one the
+# user has left alone.
+POST {{base_url}}/concerts/{{available_actions_id}}/want
+HTTP 200
+[Asserts]
+body contains "badge-wanted"
+
+GET {{base_url}}/?filter=wanted
+HTTP 200
+[Asserts]
+body contains "id=\"concert-{{available_actions_id}}\""
+body not contains "id=\"concert-{{filter_b_id}}\""
+
+# Available is the absence of both Wanted and Ignored: the concert that just
+# became Wanted drops out of it, an untouched one stays, and the Ignored one is
+# still absent.
+GET {{base_url}}/?filter=available
+HTTP 200
+[Asserts]
+body contains "id=\"concert-{{filter_b_id}}\""
+body not contains "id=\"concert-{{available_actions_id}}\""
+body not contains "id=\"concert-{{filter_a_id}}\""
+
+# Tracks ("split") lists only concerts that have a Published Concert Split, so
+# the downloaded-but-not-split concert must not appear.
+GET {{base_url}}/?filter=split
+HTTP 200
+[Asserts]
+body contains "id=\"concert-{{downloaded_filter_split_id}}\""
+body not contains "id=\"concert-{{downloaded_filter_only_id}}\""
