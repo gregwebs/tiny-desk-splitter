@@ -292,3 +292,111 @@ retry-interval: 50ms
 HTTP 200
 [Asserts]
 jsonpath "$.split" == "split"
+
+# ── listen and watch are explicit recording commands ────────────────────────
+# Issue #162 moved media resolution, listen recording, and watch recording
+# behind `Concerts`. Resolving media must record nothing, and each route must
+# record exactly its own event. The interface half of this is covered by
+# concert-tracker/src/concerts.rs; these cases pin the HTMX adapters that the
+# player actually posts to.
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Listen Whole Concert",
+  "downloaded": true,
+  "split": true,
+  "set_list": ["Song A"],
+  "tracks_present": [true],
+  "track_files": [0],
+  "source_file": true
+}
+HTTP 200
+[Captures]
+listen_album_id: jsonpath "$.result.id"
+
+# What the player does before it plays: resolve the plan and the track info.
+# Neither may record a listen — a failed or abandoned play is not audit history.
+GET {{base_url}}/concerts/{{listen_album_id}}/concert-playback
+HTTP 200
+
+GET {{base_url}}/concerts/{{listen_album_id}}/tracks/0/media-info
+HTTP 200
+
+POST {{test_control_url}}/test/assert/concert_events
+Content-Type: application/json
+{
+  "concert_id": {{listen_album_id}},
+  "absent": ["listen", "watch"]
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+# The buttons report their own success state and still hand the click to the
+# player, which is what actually starts playback. Each route is proved on its
+# own concert: `/test/assert/concert_events` reports which event names exist,
+# not how many, so sharing one concert could not show that the track route
+# records anything.
+POST {{base_url}}/concerts/{{listen_album_id}}/listen
+HTTP 200
+[Asserts]
+body contains "btn-listen-success"
+body contains "Player.playAlbum(this, {{listen_album_id}})"
+
+POST {{test_control_url}}/test/assert/concert_events
+Content-Type: application/json
+{
+  "concert_id": {{listen_album_id}},
+  "present": ["listen"],
+  "absent": ["watch"]
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Listen Single Track",
+  "downloaded": true,
+  "split": true,
+  "set_list": ["Song A"],
+  "tracks_present": [true],
+  "track_files": [0]
+}
+HTTP 200
+[Captures]
+listen_track_id: jsonpath "$.result.id"
+
+POST {{base_url}}/concerts/{{listen_track_id}}/tracks/0/listen
+HTTP 200
+[Asserts]
+body contains "btn-listen-success"
+body contains "Player.playTrack(this, {{listen_track_id}}, 0)"
+
+POST {{test_control_url}}/test/assert/concert_events
+Content-Type: application/json
+{
+  "concert_id": {{listen_track_id}},
+  "present": ["listen"],
+  "absent": ["watch"]
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true
+
+# The default Job Driver plan opens successfully, so /watch answers 200 without
+# launching a real player (see job_chain.hurl) and records the opened file.
+POST {{base_url}}/concerts/{{listen_album_id}}/watch
+HTTP 200
+
+POST {{test_control_url}}/test/assert/concert_events
+Content-Type: application/json
+{
+  "concert_id": {{listen_album_id}},
+  "present": ["watch", "listen"]
+}
+HTTP 200
+[Asserts]
+jsonpath "$.result.ok" == true

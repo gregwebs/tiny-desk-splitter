@@ -145,3 +145,30 @@ Content-Type: application/json
 HTTP 200
 [Asserts]
 jsonpath "$.result.ok" == true
+
+# ── concert_playback_excludes_unsupported_formats ───────────────────────────
+# The tracks exist and the track list reports them available, but no browser can
+# decode an mkv, so whole-concert reconstruction has nothing to hand the
+# browser: the plan is absent (404) rather than a list of unplayable URLs.
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Concert Playback Unplayable Format",
+  "split": true,
+  "set_list": ["Song A", "Song B"],
+  "tracks_present": [true, true],
+  "track_files": [0, 1],
+  "track_file_extension": "mkv"
+}
+HTTP 200
+[Captures]
+playback_unplayable_id: jsonpath "$.result.id"
+
+GET {{base_url}}/concerts/{{playback_unplayable_id}}/track-details
+HTTP 200
+[Asserts]
+jsonpath "$.tracks[0].available" == true
+
+GET {{base_url}}/concerts/{{playback_unplayable_id}}/concert-playback
+HTTP 404

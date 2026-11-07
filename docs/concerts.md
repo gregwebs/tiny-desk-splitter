@@ -185,6 +185,18 @@ recorded as downloaded but the file is gone
 and the last as a data-integrity failure, which is why the source-file decision
 lives in one place.
 
+A media description carries `playable` and `is_video` because the two players
+are not interchangeable. Concert Media Inventory discovers more containers than
+a browser can decode — `.mkv` is the standing example — so `source_media` and
+`track_media` describe such a file (`playable: false`) and `media_file` still
+resolves it for a system player, while `next_track_media`, `prev_track_media`,
+and the reconstruction sequence only ever offer media a browser can play. A
+source in an unsupported container therefore still plays as
+`PlaybackPlan::Source`, with `playable: false` telling the adapter to hand it to
+the system player; a concert whose only *split* media is unsupported has nothing
+to reconstruct, which is `Lookup(NotPlayable)` rather than a missing-media
+rejection.
+
 Recording is explicit:
 
 | Method | Effect |

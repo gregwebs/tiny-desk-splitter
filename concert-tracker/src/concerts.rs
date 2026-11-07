@@ -1948,6 +1948,45 @@ mod tests {
         Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.to_path_buf())
     }
 
+    /// A command's returned Concert State is the state an adapter re-renders
+    /// without a second query. Comparing the facts a render reads against a
+    /// fresh observation pins that promise without pinning how the state is
+    /// built.
+    fn assert_is_current_state(returned: &ConcertState, fresh: &ConcertState) {
+        assert_eq!(returned.concert.tracks_liked, fresh.concert.tracks_liked);
+        assert_eq!(returned.tracks, fresh.tracks);
+        assert_eq!(returned.media.source, fresh.media.source);
+        // `PublishedSplitState` holds a playback sequence rather than being
+        // comparable itself, so its facts are compared one by one.
+        match (
+            &returned.media.published_split,
+            &fresh.media.published_split,
+        ) {
+            (Observation::Known(returned_split), Observation::Known(fresh_split)) => {
+                assert_eq!(
+                    returned_split.tracks_present_on_disk, fresh_split.tracks_present_on_disk,
+                    "the published-split observation must be the fresh one"
+                );
+                assert_eq!(
+                    returned_split.reconstruction_items.len(),
+                    fresh_split.reconstruction_items.len()
+                );
+                assert_eq!(
+                    returned_split.source_redundant,
+                    fresh_split.source_redundant
+                );
+            }
+            (returned_split, fresh_split) => assert_eq!(
+                std::mem::discriminant(returned_split),
+                std::mem::discriminant(fresh_split),
+                "the published-split observation must be the fresh one"
+            ),
+        }
+        assert_eq!(returned.active_work, fresh.active_work);
+        assert_eq!(returned.archive_configured, fresh.archive_configured);
+        assert_eq!(returned.permitted_actions, fresh.permitted_actions);
+    }
+
     /// Every event the concert has recorded so far, in order. The matrix below
     /// compares whole histories rather than only the status events, so an extra
     /// event of any kind — or a missing one — is a failure.
@@ -2212,6 +2251,21 @@ mod tests {
         source_file: bool,
         track_files: Option<Vec<usize>>,
     ) -> Concert {
+        seeded_media_in_format(seeds, working_dir, set_list, source_file, track_files, None)
+    }
+
+    /// [`seeded_media`] with a chosen container. Concert Media Inventory
+    /// recognizes more extensions than a browser can play, so the format is part
+    /// of the fixture rather than a constant. `None` keeps the seed's defaults
+    /// (`.m4a` source, `.mp3` tracks).
+    fn seeded_media_in_format(
+        seeds: &SeedContext,
+        working_dir: &std::path::Path,
+        set_list: Vec<String>,
+        source_file: bool,
+        track_files: Option<Vec<usize>>,
+        format: Option<&str>,
+    ) -> Concert {
         let tracks_present = track_files.as_ref().map(|files| {
             (0..set_list.len())
                 .map(|index| files.contains(&index))
@@ -2229,7 +2283,9 @@ mod tests {
                         ..SeedLifecycleConcert::default()
                     },
                     source_file,
+                    source_file_extension: format.map(str::to_string),
                     track_files,
+                    track_file_extension: format.map(str::to_string),
                     ..SeedMediaConcert::default()
                 },
             )
@@ -2392,6 +2448,141 @@ mod tests {
         assert_eq!(available, vec![true, false, true]);
     }
 
+    /// Concert Media Inventory discovers containers a browser cannot decode
+    /// (`.mkv`), so an unplayable format is a fact about the media, not a failed
+    /// lookup: the interface describes the file and leaves "browser player or
+    /// system player" to the adapter, which is what the player bar's
+    /// `playable` flag selects.
+    #[test]
+    fn an_unplayable_source_format_is_described_and_openable() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let seeds = SeedContext::new(&conn);
+        let concert = seeded_media_in_format(
+            &seeds,
+            working_dir.path(),
+            three_songs(),
+            true,
+            None,
+            Some("mkv"),
+        );
+        let concerts = one_shot(conn, working_dir.path());
+
+        let source = concerts.source_media(concert.id).unwrap();
+        assert!(
+            source.filename.ends_with(".mkv"),
+            "filename: {}",
+            source.filename
+        );
+        assert!(!source.playable, "no browser decodes an mkv");
+
+        let PlaybackPlan::Source(plan_source) = concerts.playback(concert.id).unwrap() else {
+            panic!("a present source is whole-concert playback");
+        };
+        assert!(
+            !plan_source.playable,
+            "the plan reports the source it found, playable or not"
+        );
+
+        // The system-player route still resolves a real file to open.
+        let path = concerts
+            .media_file(concert.id, ListenTarget::Source)
+            .unwrap();
+        assert!(path.exists(), "{}", path.display());
+    }
+
+    /// A track whose container the browser cannot decode stays a track: it is
+    /// described (for the system player), listed as available, and stepped over
+    /// by navigation and reconstruction, which only ever hand the browser
+    /// something it can decode.
+    #[test]
+    fn an_unplayable_track_format_is_never_navigated_to_or_reconstructed() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let seeds = SeedContext::new(&conn);
+        let concert = seeded_media(
+            &seeds,
+            working_dir.path(),
+            three_songs(),
+            false,
+            Some(vec![0, 1, 2]),
+        );
+        // Track 1 is present and recorded as present, but only in an mkv —
+        // written by hand because the seed gives a concert one container.
+        let directory =
+            crate::model::concert_dir(working_dir.path(), concert.album.as_deref().unwrap());
+        std::fs::remove_file(directory.join("Second.mp3")).unwrap();
+        std::fs::write(directory.join("Second.mkv"), b"media").unwrap();
+        let concerts = one_shot(conn, working_dir.path());
+
+        let media = concerts.track_media(concert.id, 1).unwrap();
+        assert!(media.filename.ends_with(".mkv"), "{}", media.filename);
+        assert!(!media.playable, "no browser decodes an mkv");
+        assert!(concerts
+            .media_file(concert.id, ListenTarget::Track { index: 1 })
+            .unwrap()
+            .exists());
+        assert!(
+            concerts.track_details(concert.id).unwrap()[1].available,
+            "an unplayable format is still a present track"
+        );
+
+        assert_eq!(
+            concerts
+                .next_track_media(concert.id, 0)
+                .unwrap()
+                .track_index,
+            2,
+            "navigation steps over a track the browser cannot play"
+        );
+        assert_eq!(
+            concerts
+                .prev_track_media(concert.id, 2)
+                .unwrap()
+                .track_index,
+            0
+        );
+
+        let titles: Vec<String> = concerts
+            .reconstruction_items(concert.id)
+            .unwrap()
+            .into_iter()
+            .map(|item| item.title)
+            .collect();
+        assert_eq!(titles, vec!["First".to_string(), "Third".to_string()]);
+    }
+
+    #[test]
+    fn a_concert_with_only_unplayable_media_has_nothing_to_play() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let seeds = SeedContext::new(&conn);
+        let concert = seeded_media_in_format(
+            &seeds,
+            working_dir.path(),
+            three_songs(),
+            false,
+            Some(vec![0, 1, 2]),
+            Some("mkv"),
+        );
+        let concerts = one_shot(conn, working_dir.path());
+
+        assert!(!concerts.track_media(concert.id, 0).unwrap().playable);
+        assert!(
+            concerts
+                .reconstruction_items(concert.id)
+                .unwrap()
+                .is_empty(),
+            "reconstruction only hands the browser decodable media"
+        );
+        assert!(matches!(
+            concerts.playback(concert.id),
+            Err(ConcertPlaybackError::Lookup(
+                crate::playback::PlaybackLookupError::NotPlayable
+            ))
+        ));
+    }
+
     #[test]
     fn media_file_resolves_the_source_and_track_paths() {
         let working_dir = tempfile::tempdir().unwrap();
@@ -2463,6 +2654,7 @@ mod tests {
             .record_listen(concert.id, ListenTarget::Source)
             .unwrap();
         assert_eq!(state.concert.id, concert.id);
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
         let listens: Vec<String> = concerts
             .event_history(concert.id)
             .unwrap()
@@ -2477,9 +2669,10 @@ mod tests {
         );
 
         // A track listen carries the track's index and title, as it always has.
-        concerts
+        let track_state = concerts
             .record_listen(concert.id, ListenTarget::Track { index: 0 })
             .unwrap();
+        assert_is_current_state(&track_state, &concerts.get(concert.id).unwrap());
         let track_listen = concerts
             .event_history(concert.id)
             .unwrap()
@@ -2545,9 +2738,10 @@ mod tests {
         );
         let concerts = one_shot(conn, working_dir.path());
 
-        concerts
+        let watch_state = concerts
             .record_watch(concert.id, ListenTarget::Track { index: 2 })
             .unwrap();
+        assert_is_current_state(&watch_state, &concerts.get(concert.id).unwrap());
 
         let watch = concerts
             .event_history(concert.id)
@@ -2576,8 +2770,11 @@ mod tests {
 
         let liked = concerts.set_track_liked(concert.id, 0, true).unwrap();
         assert!(liked.tracks[0].liked);
+        assert_is_current_state(&liked, &concerts.get(concert.id).unwrap());
         let repeated = concerts.set_track_liked(concert.id, 0, true).unwrap();
         assert!(repeated.tracks[0].liked);
+        // A retry is still a state-carrying command, not only a no-op.
+        assert_is_current_state(&repeated, &concerts.get(concert.id).unwrap());
 
         let liked_events = concerts
             .event_history(concert.id)
@@ -2589,6 +2786,7 @@ mod tests {
 
         let unliked = concerts.set_track_liked(concert.id, 0, false).unwrap();
         assert!(!unliked.tracks[0].liked);
+        assert_is_current_state(&unliked, &concerts.get(concert.id).unwrap());
     }
 
     #[test]

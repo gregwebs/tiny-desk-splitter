@@ -178,3 +178,55 @@ HTTP 200
 [Asserts]
 jsonpath "$.track_index" == 1
 jsonpath "$.liked" == true
+
+# ── unplayable formats are described, not hidden ────────────────────────────
+# Concert Media Inventory recognizes containers the browser cannot decode
+# (`mkv`). The media-info routes still describe them — `playable: false` is what
+# makes the player open the file in a system player instead — rather than
+# answering 404, which would mean "there is no such media".
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Hurl Unplayable Source Album",
+  "downloaded": true,
+  "source_file": true,
+  "source_file_extension": "mkv"
+}
+HTTP 200
+[Captures]
+unplayable_source_id: jsonpath "$.result.id"
+
+GET {{base_url}}/concerts/{{unplayable_source_id}}/media-info
+HTTP 200
+[Asserts]
+jsonpath "$.playable" == false
+jsonpath "$.url" endsWith ".mkv"
+
+POST {{test_control_url}}/test/seed/media_concert
+Content-Type: application/json
+{
+  "album": "Hurl Unplayable Track Album",
+  "split": true,
+  "set_list": ["Song A", "Song B"],
+  "tracks_present": [true, true],
+  "track_files": [0, 1],
+  "track_file_extension": "mkv"
+}
+HTTP 200
+[Captures]
+unplayable_track_id: jsonpath "$.result.id"
+
+GET {{base_url}}/concerts/{{unplayable_track_id}}/tracks/0/media-info
+HTTP 200
+[Asserts]
+jsonpath "$.playable" == false
+jsonpath "$.url" endsWith ".mkv"
+
+# Navigation only offers the browser something it can decode, so an mkv track is
+# stepped over in both directions — here there is no later playable track.
+GET {{base_url}}/concerts/{{unplayable_track_id}}/tracks/0/next-media-info
+HTTP 404
+
+GET {{base_url}}/concerts/{{unplayable_track_id}}/tracks/1/prev-media-info
+HTTP 404

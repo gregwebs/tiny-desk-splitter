@@ -2701,14 +2701,57 @@ mod tests {
             .get(axum::http::header::CONTENT_TYPE)
             .map(|v| v.to_str().unwrap().to_string())
             .unwrap_or_default();
+        (status, content_type, body_text(response).await)
+    }
+
+    /// The text a response renders. Markup assertions read this, because what a
+    /// person sees in the swapped fragment is the behaviour under test.
+    async fn body_text(response: Response) -> String {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
             .await
             .unwrap();
-        (
-            status,
-            content_type,
-            String::from_utf8(bytes.to_vec()).unwrap(),
-        )
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// The smallest `AppState` a request handler needs: a real interface over an
+    /// in-memory database, a detached scrape queue (nothing enqueues a scrape
+    /// here) and an empty Job Registry.
+    fn app_state(conn: Connection, workdir: &std::path::Path) -> AppState {
+        use crate::jobs::scrape_queue::ScrapeQueue;
+        use crate::jobs::{JobConfig, JobRegistry};
+        use std::sync::{Arc, Mutex};
+
+        let db = Arc::new(Mutex::new(conn));
+        let registry = Arc::new(JobRegistry::new());
+        let scrape_queue = ScrapeQueue::detached();
+        let jobs = JobConfig::test(workdir.to_path_buf());
+        let concerts = crate::concerts::Concerts::new(
+            db.clone(),
+            workdir.to_path_buf(),
+            registry.clone(),
+            scrape_queue.clone(),
+            jobs.clone(),
+        );
+        let catalog = concerts.catalog();
+        AppState {
+            concerts,
+            catalog,
+            db,
+            registry,
+            scrape_queue,
+            jobs,
+        }
+    }
+
+    /// A concert that exists and has a set list but no media on disk.
+    fn concert_without_media(conn: &Connection) -> i64 {
+        db::seeds::SeedContext::new(conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                set_list: Some(vec!["Song A".to_string()]),
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id
     }
 
     #[tokio::test]
@@ -3079,6 +3122,131 @@ mod tests {
         .into_response()
         .status();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ── playback error mapping ───────────────────────────────────────────────
+
+    /// Playback resolution separates three situations and the HTTP adapter must
+    /// keep them apart: an absent concert and "nothing to play" are both 404s,
+    /// while a concert recorded as downloaded whose file is gone is a
+    /// data-integrity fault. Answering the last with 404 would make a broken
+    /// record look like an ordinary un-played concert.
+    #[test]
+    fn playback_errors_map_absence_to_404_and_integrity_to_500() {
+        let status =
+            |error: ConcertPlaybackError| concert_playback_error(error).into_response().status();
+
+        assert_eq!(
+            status(ConcertPlaybackError::NotFound { concert_id: 7 }),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(ConcertPlaybackError::Lookup(
+                PlaybackLookupError::NotPlayable
+            )),
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            status(ConcertPlaybackError::Lookup(
+                PlaybackLookupError::MarkedDownloadedButMissing { concert_id: 7 }
+            )),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            status(ConcertPlaybackError::Lookup(
+                PlaybackLookupError::InvalidFilename
+            )),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            status(ConcertPlaybackError::Query(ConcertQueryError::Operational(
+                anyhow::anyhow!("the database is gone")
+            ))),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
+
+    /// The listen/watch buttons carry their own pass/fail state, so a rejection
+    /// is the button's error state rather than an HTTP error: the click is well
+    /// formed and only the media is missing. An absent concert is still the
+    /// page's 404 and a fault is still a fault.
+    #[test]
+    fn media_command_rejections_are_button_states_not_http_errors() {
+        assert_eq!(
+            media_command_state(
+                Err(ConcertCommandError::Rejected(
+                    CommandRejection::MissingMedia {
+                        concert_id: 7,
+                        target: ListenTarget::Source,
+                    }
+                )),
+                "listen"
+            )
+            .ok(),
+            Some("error")
+        );
+
+        let failure_status = |outcome: Result<ConcertState, ConcertCommandError>| {
+            media_command_state(outcome, "listen")
+                .err()
+                .map(|error| error.into_response().status())
+        };
+        assert_eq!(
+            failure_status(Err(ConcertCommandError::Rejected(
+                CommandRejection::NotFound { concert_id: 7 }
+            ))),
+            Some(StatusCode::NOT_FOUND)
+        );
+        assert_eq!(
+            failure_status(Err(ConcertCommandError::Operational(anyhow::anyhow!(
+                "the database is gone"
+            )))),
+            Some(StatusCode::INTERNAL_SERVER_ERROR)
+        );
+    }
+
+    /// A listen button reports its own failure instead of failing the request,
+    /// and a play that never happened is not recorded. The hurl suite cannot
+    /// carry this case (see the Change Record), so the handler is exercised
+    /// directly: 200, the button's `error` state, no `listen` event.
+    #[tokio::test]
+    async fn listen_without_media_is_a_button_state_not_an_http_error() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = concert_without_media(&conn);
+        let state = app_state(conn, workdir.path());
+
+        let Some(listen_response) = listen(State(state.clone()), Path(id))
+            .await
+            .ok()
+            .map(askama_axum::IntoResponse::into_response)
+        else {
+            panic!("a rejected listen is the button's state, not an HTTP error");
+        };
+        assert_eq!(listen_response.status(), StatusCode::OK);
+        let listen_body = body_text(listen_response).await;
+        assert!(listen_body.contains("btn-listen-error"), "{listen_body}");
+
+        let Some(track_response) = listen_track(State(state.clone()), Path((id, 0)))
+            .await
+            .ok()
+            .map(askama_axum::IntoResponse::into_response)
+        else {
+            panic!("a rejected track listen is the button's state, not an HTTP error");
+        };
+        assert_eq!(track_response.status(), StatusCode::OK);
+        let track_body = body_text(track_response).await;
+        assert!(track_body.contains("btn-listen-error"), "{track_body}");
+
+        assert!(
+            state
+                .concerts
+                .event_history(id)
+                .unwrap()
+                .iter()
+                .all(|event| event.event != "listen"),
+            "a listen whose media is absent must not become audit history"
+        );
     }
 
     // ── sync_location_path ────────────────────────────────────────────────────
