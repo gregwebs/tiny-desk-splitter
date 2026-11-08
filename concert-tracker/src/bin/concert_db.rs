@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use concert_tracker::concerts::{ConcertFilter, Concerts, JobAdmission};
+use concert_tracker::concerts::{ConcertFilter, Concerts, JobAdmission, JobRequestOutcome};
 use concert_tracker::db;
 use concert_tracker::import::import_dir;
 use concert_tracker::jobs::scrape_queue::ScrapeQueue;
@@ -474,41 +474,51 @@ fn main() -> Result<()> {
                         let initial_errors = *initial_errors;
                         let key = JobKey { concert_id: id, kind: JobKind::Split };
 
-                        let label = match concerts.request_split(id).await.map(|r| r.admission) {
-                            Ok(JobAdmission::Admitted) => {
-                                // Poll until the async split job finishes.
-                                while registry.is_running(&key) {
-                                    tokio::time::sleep(Duration::from_millis(200)).await;
-                                }
-                                // Determine outcome via split_errors count: a failed re-split
-                                // keeps the old split_at but always appends an error entry.
-                                let post_errors = {
-                                    let conn = db.lock().unwrap();
-                                    db::concerts::get_concert(&conn, id)
-                                        .map(|c| c.split_errors.len())
-                                        .unwrap_or(initial_errors + 1)
-                                };
-                                if post_errors > initial_errors {
-                                    failed += 1;
-                                    "FAILED"
-                                } else {
-                                    succeeded += 1;
-                                    "OK"
-                                }
-                            }
-                            Ok(JobAdmission::NothingToDo) => {
-                                skipped_no_source += 1;
-                                "SKIPPED (source file missing)"
-                            }
-                            Ok(JobAdmission::AlreadyRunning) => {
-                                skipped_in_progress += 1;
-                                "SKIPPED (in progress — run `concert-db reset-in-progress` to clear)"
+                        let label = match concerts.request_split(id).await {
+                            Ok(JobRequestOutcome::Rejected(rejection)) => {
+                                eprintln!(
+                                    "  [{}] {} — rejected: {}",
+                                    id, title, rejection.reason
+                                );
+                                errored += 1;
+                                "ERROR"
                             }
                             Err(e) => {
                                 eprintln!("  [{}] {} — start error: {}", id, title, e);
                                 errored += 1;
                                 "ERROR"
                             }
+                            Ok(JobRequestOutcome::Accepted(result)) => match result.admission {
+                                JobAdmission::Admitted => {
+                                    // Poll until the async split job finishes.
+                                    while registry.is_running(&key) {
+                                        tokio::time::sleep(Duration::from_millis(200)).await;
+                                    }
+                                    // Determine outcome via split_errors count: a failed re-split
+                                    // keeps the old split_at but always appends an error entry.
+                                    let post_errors = {
+                                        let conn = db.lock().unwrap();
+                                        db::concerts::get_concert(&conn, id)
+                                            .map(|c| c.split_errors.len())
+                                            .unwrap_or(initial_errors + 1)
+                                    };
+                                    if post_errors > initial_errors {
+                                        failed += 1;
+                                        "FAILED"
+                                    } else {
+                                        succeeded += 1;
+                                        "OK"
+                                    }
+                                }
+                                JobAdmission::NothingToDo => {
+                                    skipped_no_source += 1;
+                                    "SKIPPED (source file missing)"
+                                }
+                                JobAdmission::AlreadyRunning => {
+                                    skipped_in_progress += 1;
+                                    "SKIPPED (in progress — run `concert-db reset-in-progress` to clear)"
+                                }
+                            },
                         };
                         println!("  [{}] {} ... {}", id, title, label);
                     }

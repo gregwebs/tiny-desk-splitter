@@ -249,19 +249,47 @@ name of its own.
 | `Concerts::prepare(id)` | makes every track playable: scrape when needed, then the download → split chain |
 | `Concerts::cancel_job(id, kind)` | cancels the active Job Run of that kind |
 
-`request_download` and `request_split` return a `JobRequestResult`: the admission
-decision (`Admitted`, `AlreadyRunning`, or `NothingToDo`) and the Concert State
-observed after persistent admission, so an adapter re-renders without a second
-query and a batch tool can report "skipped, source missing" without asking the
-Job Registry. Requests are idempotent: a second download
-while one is running is accepted and keeps its queued split, and `prepare` on a
-concert that already has every track starts nothing.
+`request_download`, `request_split`, and `prepare` return a `JobRequestOutcome`:
 
-Nothing to do is not an error. A split request for a concert whose source is not
-downloaded is accepted and changes nothing; `cancel_job` reports
-`JobCancellation::NothingActive` rather than failing. A request the concert cannot
-satisfy is a rejection: `prepare` on a concert with no set list is `Invalid`
-(422 — the user can fix it by scraping), and an unknown concert is `NotFound`.
+```text
+request_download / request_split / prepare
+  |
+  +--> admitted, already active, or nothing to do ----> Accepted(JobRequestResult)
+  |        the admission decision and the Concert State
+  |        observed after persistent admission
+  |
+  +--> the concert cannot do it -----------------------> Rejected(JobRejection)
+  |        the precise typed reason, and the latest
+  |        Concert State when the concert still exists
+  |
+  `--> a genuine fault --------------------------------> Err(Operational)
+```
+
+`Accepted` carries the admission decision (`Admitted`, `AlreadyRunning`, or
+`NothingToDo`) and the Concert State observed after persistent admission, so an
+adapter re-renders without a second query and a batch tool can report "skipped,
+source missing" without asking the Job Registry. `Rejected` carries the same
+`CommandRejection` vocabulary as the other commands, plus the state the concert
+was refused in — only an absent concert has no state to attach. Expected
+refusals are values and faults are errors, as for every other command.
+
+Requests are idempotent: a second download while one is running is accepted and
+keeps its queued split, a repeated `prepare` reports `AlreadyRunning` rather than
+starting a second chain, and `prepare` on a concert that already has every track
+reports `NothingToDo`. Nothing to do is not an error: a split request for a
+concert whose source is not downloaded is accepted and changes nothing, and
+`cancel_job` reports `JobCancellation::NothingActive` rather than failing.
+
+A request the concert cannot satisfy is a rejection: `prepare` on a concert with
+no set list is `Invalid` (422 — the user can fix it by scraping), and an unknown
+concert is `NotFound`. The rejection's Concert State is what lets an adapter that
+has somewhere to render it show why nothing started, while this HTML adapter
+answers with the reason alone.
+
+Failure is a terminal lifecycle outcome, not a fault: a failed or cancelled run
+leaves `download_status` or `split_status` unsuccessful and writes one Failed Job,
+and the next request admits a fresh run. A download that fails drops the split
+queued behind it, so a retried request queues a new one.
 
 `PermittedActions` and admission read the same observation, so a control the state
 offers is a command the interface accepts. Download, split, and archive are Job

@@ -12,8 +12,8 @@ use utoipa::ToSchema;
 
 use crate::concerts::{
     CommandRejection, ConcertCommandError, ConcertFilter, ConcertPlaybackError, ConcertQueryError,
-    ConcertState, DeletionConfirmation, DeletionOutcome, ListenTarget, Observation,
-    ScrapeAdmission,
+    ConcertState, DeletionConfirmation, DeletionOutcome, JobRejection, JobRequestOutcome,
+    ListenTarget, Observation, ScrapeAdmission,
 };
 use crate::db;
 use crate::jobs::JobKind;
@@ -771,12 +771,24 @@ pub async fn download(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let request = state
+    let outcome = state
         .concerts
         .request_download(id)
         .await
         .map_err(concert_command_error)?;
-    render_card_from(&request.state)
+    job_request_response(outcome)
+}
+
+/// Render a Job Request's outcome. A rejection names what the concert could not
+/// do; the interface attaches the Concert State to it for adapters richer than
+/// this HTML one, which has only a status and a message to work with.
+fn job_request_response(outcome: JobRequestOutcome) -> Result<String, AppError> {
+    match outcome {
+        JobRequestOutcome::Accepted(result) => render_card_from(&result.state),
+        JobRequestOutcome::Rejected(JobRejection { reason, .. }) => {
+            Err(concert_command_error(ConcertCommandError::Rejected(reason)))
+        }
+    }
 }
 
 /// JSON shape returned by `POST /concerts/:id/prepare` and polled via
@@ -830,11 +842,17 @@ pub async fn prepare_concert(
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     match state.concerts.prepare(id).await {
-        Ok(concert_state) => Ok(Json(prepare_status_of(&concert_state)).into_response()),
+        Ok(JobRequestOutcome::Accepted(result)) => {
+            Ok(Json(prepare_status_of(&result.state)).into_response())
+        }
         // No set list is user-correctable (scrape metadata first) — 422 with the
         // reason itself, not 500.
-        Err(ConcertCommandError::Rejected(CommandRejection::Invalid { message, .. })) => {
-            Ok((StatusCode::UNPROCESSABLE_ENTITY, message).into_response())
+        Ok(JobRequestOutcome::Rejected(JobRejection {
+            reason: CommandRejection::Invalid { message, .. },
+            ..
+        })) => Ok((StatusCode::UNPROCESSABLE_ENTITY, message).into_response()),
+        Ok(JobRequestOutcome::Rejected(JobRejection { reason, .. })) => {
+            Err(concert_command_error(ConcertCommandError::Rejected(reason)))
         }
         Err(error) => Err(concert_command_error(error)),
     }
@@ -862,12 +880,12 @@ pub async fn split(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
-    let request = state
+    let outcome = state
         .concerts
         .request_split(id)
         .await
         .map_err(concert_command_error)?;
-    render_card_from(&request.state)
+    job_request_response(outcome)
 }
 
 pub async fn delete_download(
@@ -3122,6 +3140,75 @@ mod tests {
         .into_response()
         .status();
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // ── Job Request outcomes ─────────────────────────────────────────────────
+
+    /// A rejected Job Request answers with the reason's own client-error status,
+    /// not a server error: the request was well formed, the concert cannot do
+    /// it. This is the mapping the download and split routes rely on now that a
+    /// rejection arrives as an outcome value.
+    #[test]
+    fn a_rejected_job_request_answers_with_the_reasons_client_error() {
+        let rejection = JobRequestOutcome::Rejected(JobRejection {
+            reason: CommandRejection::NotFound { concert_id: 7 },
+            state: None,
+        });
+
+        let status = match job_request_response(rejection) {
+            Ok(_) => panic!("a rejected Job Request is not a card"),
+            Err(error) => error.into_response().status(),
+        };
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Download and split for a concert that is not there stay 404s: the
+    /// interface refuses them without a state, and the adapter reports the
+    /// reason rather than failing.
+    #[tokio::test]
+    async fn job_requests_for_an_absent_concert_stay_404s() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = app_state(conn, workdir.path());
+
+        let download_status = match download(State(state.clone()), Path(i64::MAX)).await {
+            Ok(_) => panic!("an absent concert cannot render a card"),
+            Err(error) => error.into_response().status(),
+        };
+        assert_eq!(download_status, StatusCode::NOT_FOUND);
+
+        let split_status = match split(State(state), Path(i64::MAX)).await {
+            Ok(_) => panic!("an absent concert cannot render a card"),
+            Err(error) => error.into_response().status(),
+        };
+        assert_eq!(split_status, StatusCode::NOT_FOUND);
+    }
+
+    /// `POST /prepare` on a concert with no set list stays the historical 422
+    /// with the reason as the body — user-correctable, not a server error. The
+    /// rejection now carries the Concert State, which this HTML adapter has no
+    /// place for.
+    #[tokio::test]
+    async fn preparing_without_a_set_list_answers_422_not_a_server_error() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_scraped_concert(db::seeds::SeedScrapedConcert {
+                set_list: Some(vec![]),
+                ..db::seeds::SeedScrapedConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let Some(response) = prepare_concert(State(state), Path(id)).await.ok() else {
+            panic!("no set list is user-correctable, not a fault");
+        };
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_text(response).await;
+        assert!(body.contains("no set list"), "{body}");
     }
 
     // ── playback error mapping ───────────────────────────────────────────────
