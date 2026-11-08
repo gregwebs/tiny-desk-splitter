@@ -141,11 +141,24 @@ test.describe("Sync button leaves the player running", () => {
 
     const syncBtn = page.locator("button[hx-post*='/sync/']").first();
     await expect(syncBtn).toBeVisible();
+
+    // `hx-request` is only present while htmx has a request in flight, so
+    // waiting for its absence resolves before this click has issued anything and
+    // the captured path can still be null. Wait for the request first: a click
+    // that issues no sync request is exactly the regression this test guards, so
+    // it should fail at that wait rather than as a null mismatch.
+    const syncRequest = page.waitForRequest(
+      (request) => request.url().includes("/sync/"),
+      { timeout: 10_000 }
+    );
     await syncBtn.evaluate((el) => el.click());
+    await syncRequest;
 
     await page.waitForFunction(() => !document.querySelector("[hx-request]"));
 
-    // The server must echo back /?filter=liked in the HX-Location path.
-    expect(capturedLocationPath).toBe("/?filter=liked");
+    // The server must echo back /?filter=liked in the HX-Location path. Polled,
+    // because the capture happens in the route handler in Node and is not
+    // ordered against the page-side wait above.
+    await expect.poll(() => capturedLocationPath).toBe("/?filter=liked");
   });
 });
