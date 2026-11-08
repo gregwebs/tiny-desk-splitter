@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Error;
 use rusqlite::Connection;
 
-use crate::concert_media::ConcertMediaInventory;
+use crate::concert_media::{ConcertMediaInventory, MediaRemovalError};
 use crate::db;
 use crate::jobs::scrape_queue::{EnqueueOutcome, ScrapeQueue};
 use crate::jobs::{JobConfig, JobKey, JobKind, JobRegistry};
@@ -499,6 +499,22 @@ impl DeletionOutcome {
         match self {
             Self::Deleted(state) | Self::ConfirmationRequired(state) => state,
         }
+    }
+}
+
+/// Removal of Published Concert Split media can be refused because a Concert
+/// Split publication holds the canonical directory. That is a conflict with
+/// current state — retry when the publication ends — not a fault.
+fn media_removal_error(concert_id: i64, error: MediaRemovalError) -> ConcertCommandError {
+    match error {
+        MediaRemovalError::PublicationInProgress => {
+            ConcertCommandError::Rejected(CommandRejection::Conflict {
+                concert_id,
+                message: "a Concert Split publication is in progress; retry when it has finished"
+                    .to_string(),
+            })
+        }
+        MediaRemovalError::Failed(error) => ConcertCommandError::Operational(error),
     }
 }
 
@@ -1305,7 +1321,7 @@ impl Concerts {
         let outcome = {
             let conn = self.lock_db()?;
             crate::lifecycle::delete_track(&conn, &self.working_dir, concert_id, track_index)
-                .map_err(ConcertCommandError::Operational)?
+                .map_err(|error| media_removal_error(concert_id, error))?
         };
         tracing::info!(
             concert_id,
@@ -1342,7 +1358,7 @@ impl Concerts {
                 concert_id,
                 interlude_index,
             )
-            .map_err(ConcertCommandError::Operational)?
+            .map_err(|error| media_removal_error(concert_id, error))?
         };
         tracing::info!(
             concert_id,
@@ -3051,6 +3067,7 @@ mod tests {
             .unwrap();
         assert!(!first.state().concert.downloaded_at.is_some());
         assert!(!matches!(first, DeletionOutcome::ConfirmationRequired(_)));
+        assert_is_current_state(first.state(), &concerts.get(concert.id).unwrap());
 
         // The split survives a download deletion.
         assert!(first.state().concert.split_at.is_some());
@@ -3060,6 +3077,7 @@ mod tests {
             .delete_download(concert.id, DeletionConfirmation::Unconfirmed)
             .unwrap();
         assert!(!second.state().concert.downloaded_at.is_some());
+        assert_is_current_state(second.state(), &concerts.get(concert.id).unwrap());
         assert!(
             concerts
                 .event_history(concert.id)
@@ -3105,6 +3123,7 @@ mod tests {
             .delete_download(concert.id, DeletionConfirmation::Confirmed)
             .unwrap();
         assert!(matches!(confirmed, DeletionOutcome::Deleted(_)));
+        assert_is_current_state(confirmed.state(), &concerts.get(concert.id).unwrap());
         assert!(concerts
             .get(concert.id)
             .unwrap()
@@ -3151,8 +3170,10 @@ mod tests {
         let first = concerts.delete_redundant_source(covered.id).unwrap();
         assert!(matches!(first, DeletionOutcome::Deleted(_)));
         assert!(first.state().concert.downloaded_at.is_none());
+        assert_is_current_state(first.state(), &concerts.get(covered.id).unwrap());
         let second = concerts.delete_redundant_source(covered.id).unwrap();
         assert!(matches!(second, DeletionOutcome::Deleted(_)));
+        assert_is_current_state(second.state(), &concerts.get(covered.id).unwrap());
     }
 
     #[test]
@@ -3197,8 +3218,10 @@ mod tests {
 
         let first = concerts.delete_split(concert.id).unwrap();
         assert!(first.state().concert.split_at.is_none());
+        assert_is_current_state(first.state(), &concerts.get(concert.id).unwrap());
         let second = concerts.delete_split(concert.id).unwrap();
         assert!(matches!(second, DeletionOutcome::Deleted(_)));
+        assert_is_current_state(second.state(), &concerts.get(concert.id).unwrap());
     }
 
     #[test]
@@ -3221,6 +3244,7 @@ mod tests {
 
         let first = concerts.delete_track(concert.id, 0).unwrap();
         assert!(!first.state().tracks[0].persisted_available);
+        assert_is_current_state(first.state(), &concerts.get(concert.id).unwrap());
         assert!(
             crate::concert_media::find_track_file(working_dir.path(), &album, "First").is_none()
         );
@@ -3259,6 +3283,161 @@ mod tests {
                 CommandRejection::NoSuchTrack { track_index: 9, .. }
             ))
         ));
+    }
+
+    /// Every deletion refuses a concert that is not there with a typed rejection.
+    /// An invalid identity must never look like a retried deletion, which is a
+    /// success when the media is already absent.
+    #[test]
+    fn every_deletion_rejects_an_absent_concert() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concerts = one_shot(conn, working_dir.path());
+        let absent = 999;
+
+        let rejections = [
+            concerts.delete_download(absent, DeletionConfirmation::Unconfirmed),
+            concerts.delete_redundant_source(absent),
+            concerts.delete_split(absent),
+            concerts.delete_track(absent, 0),
+            concerts.delete_interlude(absent, 0),
+        ];
+
+        for (deletion, outcome) in [
+            "delete_download",
+            "delete_redundant_source",
+            "delete_split",
+            "delete_track",
+            "delete_interlude",
+        ]
+        .into_iter()
+        .zip(rejections)
+        {
+            let rejection = match outcome {
+                Err(ConcertCommandError::Rejected(rejection)) => rejection,
+                Err(error) => panic!("{deletion}: expected a typed rejection, got {error:?}"),
+                Ok(outcome) => panic!(
+                    "{deletion}: an absent concert must not look like a successful deletion: {outcome:?}"
+                ),
+            };
+            assert_eq!(
+                rejection,
+                CommandRejection::NotFound { concert_id: absent },
+                "{deletion}"
+            );
+        }
+    }
+
+    /// An interlude deletion names media a concert without an album cannot have.
+    /// That is the interface's rejection, and the adapter's historical 404, not a
+    /// silent success.
+    #[test]
+    fn deleting_an_interlude_from_a_concert_without_an_album_is_a_rejection() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_album_null_concert(crate::db::seeds::SeedAlbumNullConcert {
+                set_list: Some(vec!["Only".to_string()]),
+                tracks_present: Some(vec![true]),
+                ..crate::db::seeds::SeedAlbumNullConcert::default()
+            })
+            .unwrap();
+        let concerts = one_shot(conn, working_dir.path());
+
+        assert!(matches!(
+            concerts.delete_interlude(concert.id, 0),
+            Err(ConcertCommandError::Rejected(
+                CommandRejection::MissingMedia { concert_id, .. }
+            )) if concert_id == concert.id
+        ));
+    }
+
+    /// A Concert Split publication owns the concert directory while it runs, so
+    /// a deletion is refused instead of deleting files from under it — and the
+    /// same request succeeds once the publication has finished.
+    #[test]
+    fn deleting_a_track_during_a_publication_is_a_conflict_and_a_retry_succeeds() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let seeds = SeedContext::new(&conn);
+        let concert = seeded_media(
+            &seeds,
+            working_dir.path(),
+            three_songs(),
+            true,
+            Some(vec![0, 1, 2]),
+        );
+        let concerts = one_shot(conn, working_dir.path());
+        let album = concert.album.clone().unwrap();
+        let publisher = live_set_splitter::publication::ExclusivePublicationLock::acquire(
+            &crate::model::concert_dir(working_dir.path(), &album),
+        )
+        .unwrap();
+
+        let blocked = concerts.delete_track(concert.id, 0);
+
+        assert!(
+            matches!(
+                blocked,
+                Err(ConcertCommandError::Rejected(
+                    CommandRejection::Conflict { .. }
+                ))
+            ),
+            "unexpected outcome: {blocked:?}"
+        );
+        assert!(
+            crate::concert_media::find_track_file(working_dir.path(), &album, "First").is_some(),
+            "a refused deletion must leave the media alone"
+        );
+
+        drop(publisher);
+        let retried = concerts.delete_track(concert.id, 0).unwrap();
+        assert!(!retried.state().tracks[0].persisted_available);
+    }
+
+    /// Some canonical files gone and the rest unremovable is a fault, not a
+    /// deletion: the track stays recorded as present and no `track_delete` event
+    /// is written, so the audit trail does not claim work that did not finish.
+    #[test]
+    fn a_failed_track_removal_is_a_fault_and_records_no_deletion() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let seeds = SeedContext::new(&conn);
+        let concert = seeded_media(
+            &seeds,
+            working_dir.path(),
+            three_songs(),
+            true,
+            Some(vec![0]),
+        );
+        let concerts = one_shot(conn, working_dir.path());
+        let album = concert.album.clone().unwrap();
+        let directory = crate::model::concert_dir(working_dir.path(), &album);
+        // `mp4` is probed before `m4a`, so the first file is removed and the
+        // second cannot be: a removal that only half happened.
+        std::fs::write(directory.join("First.mp4"), b"video").unwrap();
+        std::fs::create_dir_all(directory.join("First.m4a")).unwrap();
+
+        let outcome = concerts.delete_track(concert.id, 0);
+
+        assert!(
+            matches!(outcome, Err(ConcertCommandError::Operational(_))),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert_eq!(
+            concerts
+                .event_history(concert.id)
+                .unwrap()
+                .iter()
+                .filter(|event| event.event == "track_delete")
+                .count(),
+            0,
+            "a removal that failed must not be recorded as a deletion"
+        );
+        assert!(
+            concerts.get(concert.id).unwrap().tracks[0].persisted_available,
+            "the track is still recorded as present"
+        );
     }
 
     #[test]
@@ -3316,6 +3495,7 @@ mod tests {
         // Retrying succeeds and records no second event.
         let repeated = concerts.delete_interlude(concert.id, 1).unwrap();
         assert!(matches!(repeated, DeletionOutcome::Deleted(_)));
+        assert_is_current_state(repeated.state(), &concerts.get(concert.id).unwrap());
         assert_eq!(
             concerts
                 .event_history(concert.id)

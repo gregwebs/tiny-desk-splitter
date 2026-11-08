@@ -266,20 +266,182 @@ fn restore_partial(
 }
 
 /// Shared guard held while an application consumer opens canonical split media.
-pub struct SharedPublicationLock(File);
+///
+/// It also makes an application-side *mutation* of canonical media safe: a
+/// Concert Split publication takes the same lock exclusively, so anything that
+/// changes canonical files must hold a guard while it does. Two shared holders
+/// never conflict, so readers and a deletion do not block each other.
+pub struct SharedPublicationLock {
+    file: File,
+    canonical_dir: PathBuf,
+}
 
 impl SharedPublicationLock {
     pub fn acquire(canonical_dir: &Path) -> Result<Self> {
         let file = lock_file(canonical_dir)?;
         acquire_with_timeout(|| FileExt::try_lock_shared(&file), "shared")?;
-        Ok(Self(file))
+        Ok(Self::holding(file, canonical_dir))
+    }
+
+    /// Take the guard only if no Concert Split publication currently holds the
+    /// canonical directory. `None` means a publication is in progress, so the
+    /// caller must not touch canonical media rather than wait for it.
+    pub fn try_acquire(canonical_dir: &Path) -> Result<Option<Self>> {
+        let file = lock_file(canonical_dir)?;
+        match FileExt::try_lock_shared(&file) {
+            Ok(()) => Ok(Some(Self::holding(file, canonical_dir))),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => {
+                Err(error).context("could not acquire shared Concert Split publication lock")
+            }
+        }
+    }
+
+    /// The canonical directory this guard protects. Mutating helpers take the
+    /// guard *and* derive the directory from it, so a deletion cannot hold a
+    /// guard for one concert while touching another.
+    pub fn canonical_dir(&self) -> &Path {
+        &self.canonical_dir
+    }
+
+    fn holding(file: File, canonical_dir: &Path) -> Self {
+        Self {
+            file,
+            canonical_dir: canonical_dir.to_path_buf(),
+        }
     }
 }
 
 impl Drop for SharedPublicationLock {
     fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.file);
+    }
+}
+
+/// Exclusive guard held by a Concert Split publication (or a recovery) for as
+/// long as it rewrites the canonical directory.
+pub struct ExclusivePublicationLock(File);
+
+impl ExclusivePublicationLock {
+    pub fn acquire(canonical_dir: &Path) -> Result<Self> {
+        let file = lock_file(canonical_dir)?;
+        acquire_with_timeout(|| FileExt::try_lock_exclusive(&file), "exclusive")?;
+        Ok(Self(file))
+    }
+}
+
+impl Drop for ExclusivePublicationLock {
+    fn drop(&mut self) {
         let _ = FileExt::unlock(&self.0);
     }
+}
+
+/// Drop the canonical split files an application deletion removed from the
+/// manifests that claim them.
+///
+/// A manifest names exactly the files that belong to a split — Published, or
+/// Recoverable Partial — and it is the authority a later publication backs up,
+/// merges, and restores. A deletion that leaves it naming an absent file breaks
+/// that authority: the next Concert Split refuses to back up the prior
+/// generation, so the concert could never be resplit. Taking the guard is what
+/// makes the rewrite safe — a publication cannot be in flight while it runs.
+///
+/// `removed` is what the caller just deleted; files are dropped from the
+/// manifests whether or not they are named there, and a manifest entry whose
+/// file is absent is dropped too. That second half is what makes the operation
+/// safe to retry: a deletion that removed the files but failed to rewrite the
+/// manifest leaves the same repair to the next request, instead of a manifest
+/// that stays wrong for the life of the concert.
+pub fn forget_removed_split_files(
+    guard: &SharedPublicationLock,
+    removed: &BTreeSet<PathBuf>,
+) -> Result<()> {
+    let canonical_dir = guard.canonical_dir();
+    let absent =
+        |relative: &PathBuf| removed.contains(relative) || !canonical_dir.join(relative).is_file();
+    forget_complete_split_files(canonical_dir, &absent)?;
+    forget_partial_split_files(canonical_dir, &absent)
+}
+
+fn forget_complete_split_files(
+    canonical_dir: &Path,
+    drop: &impl Fn(&PathBuf) -> bool,
+) -> Result<()> {
+    let path = canonical_dir.join(MANIFEST_NAME);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        // No Published Concert Split: nothing claims the files, so nothing needs
+        // correcting and no manifest is invented here.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()))
+        }
+    };
+    let mut manifest: PublishedManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("could not parse {}", path.display()))?;
+    let named = manifest.files.len();
+    manifest.files.retain(|relative| !drop(relative));
+    if manifest.files.len() == named {
+        return Ok(());
+    }
+    rewrite_json_atomically(&path, &manifest)
+        .context("could not rewrite the Published Concert Split manifest")
+}
+
+/// The Recoverable Partial Split manifest names the salvaged files of an
+/// unfinished split. A track whose files the application all removed no longer
+/// has partial output, so its entry goes; when no track is left, the marker goes
+/// too and the concert is simply unsplit media again.
+fn forget_partial_split_files(
+    canonical_dir: &Path,
+    drop: &impl Fn(&PathBuf) -> bool,
+) -> Result<()> {
+    let path = canonical_dir.join(PARTIAL_MANIFEST_NAME);
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => {
+            return Err(error).with_context(|| format!("could not read {}", path.display()))
+        }
+    };
+    let mut manifest: PartialManifest = serde_json::from_slice(&bytes)
+        .with_context(|| format!("could not parse {}", path.display()))?;
+    let tracks = manifest.tracks.len();
+    let files: usize = manifest.tracks.iter().map(|track| track.files.len()).sum();
+    manifest.tracks.retain_mut(|track| {
+        track.files.retain(|relative| !drop(relative));
+        !track.files.is_empty()
+    });
+    if manifest.tracks.is_empty() {
+        fs::remove_file(&path).with_context(|| format!("could not remove {}", path.display()))?;
+        return sync_directory(canonical_dir);
+    }
+    let remaining: usize = manifest.tracks.iter().map(|track| track.files.len()).sum();
+    if manifest.tracks.len() == tracks && remaining == files {
+        return Ok(());
+    }
+    rewrite_json_atomically(&path, &manifest)
+        .context("could not rewrite the Recoverable Partial Split manifest")
+}
+
+/// Write a manifest the application itself rewrites.
+///
+/// Unlike a publication's own installs, which run under the exclusive lock, two
+/// of these can be in flight for one directory — one per process deleting media —
+/// so the temporary name must not be shared: a fixed one would let two writers
+/// interleave into the same file and rename a half-written manifest into place.
+fn rewrite_json_atomically<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("path has no parent: {}", path.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    temporary.write_all(&serde_json::to_vec_pretty(value)?)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("could not install {}", path.display()))?;
+    sync_directory(parent)
 }
 
 fn lock_file(canonical_dir: &Path) -> Result<File> {
@@ -677,8 +839,7 @@ pub fn recover_publication(canonical_dir: &Path) -> Result<RecoveryStatus> {
     if !canonical_dir.exists() {
         return Ok(RecoveryStatus::NoPendingPublication);
     }
-    let lock = lock_file(canonical_dir)?;
-    acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
+    let _lock = ExclusivePublicationLock::acquire(canonical_dir)?;
     let Some(mut journal) = read_journal(canonical_dir)? else {
         return Ok(RecoveryStatus::NoPendingPublication);
     };
@@ -826,8 +987,7 @@ pub fn publish(request: &PublicationRequest) -> Result<()> {
     }
     sync_directory(&request.staging_dir)?;
     fs::create_dir_all(&request.canonical_dir)?;
-    let lock = lock_file(&request.canonical_dir)?;
-    acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
+    let _lock = ExclusivePublicationLock::acquire(&request.canonical_dir)?;
 
     let partial_prior = read_partial_manifest(&request.canonical_dir)?;
     anyhow::ensure!(
@@ -1043,8 +1203,7 @@ pub fn publish_partial(request: &PartialPublicationRequest) -> Result<Vec<Partia
     }
 
     fs::create_dir_all(&request.canonical_dir)?;
-    let lock = lock_file(&request.canonical_dir)?;
-    acquire_with_timeout(|| FileExt::try_lock_exclusive(&lock), "exclusive")?;
+    let _lock = ExclusivePublicationLock::acquire(&request.canonical_dir)?;
     let published_exists = request.canonical_dir.join(MANIFEST_NAME).exists();
     let partial_exists = request.canonical_dir.join(PARTIAL_MANIFEST_NAME).exists();
     anyhow::ensure!(
@@ -1392,6 +1551,162 @@ mod tests {
         FileExt::unlock(&publisher).unwrap();
         received.recv_timeout(Duration::from_secs(2)).unwrap();
         reader.join().unwrap();
+    }
+
+    #[test]
+    fn try_acquire_reports_a_publication_in_progress() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        fs::create_dir_all(&canonical).unwrap();
+
+        let publisher = ExclusivePublicationLock::acquire(&canonical).unwrap();
+        assert!(
+            SharedPublicationLock::try_acquire(&canonical)
+                .unwrap()
+                .is_none(),
+            "a deletion must not touch canonical media while a publication holds it"
+        );
+
+        drop(publisher);
+        assert!(SharedPublicationLock::try_acquire(&canonical)
+            .unwrap()
+            .is_some());
+    }
+
+    /// The deletion fix this pins: a file the application removed must stop
+    /// being named by the manifest, or the next publication refuses to back up a
+    /// prior generation it can no longer find.
+    #[test]
+    fn forgetting_a_removed_file_keeps_a_resplit_possible() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let first = tmp.path().join("first");
+        write(&first.join("Kept.m4a"), b"kept");
+        write(&first.join("Deleted.m4a"), b"deleted");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: first,
+            replacement_files: vec![PathBuf::from("Kept.m4a"), PathBuf::from("Deleted.m4a")],
+        })
+        .unwrap();
+
+        fs::remove_file(canonical.join("Deleted.m4a")).unwrap();
+        let guard = SharedPublicationLock::acquire(&canonical).unwrap();
+        forget_removed_split_files(&guard, &BTreeSet::from([PathBuf::from("Deleted.m4a")]))
+            .unwrap();
+        drop(guard);
+
+        let manifest = fs::read_to_string(canonical.join(MANIFEST_NAME)).unwrap();
+        assert!(manifest.contains("Kept.m4a"), "{manifest}");
+        assert!(
+            !manifest.contains("Deleted.m4a"),
+            "the manifest must stop claiming a file the application removed: {manifest}"
+        );
+
+        let second = tmp.path().join("second");
+        write(&second.join("Kept.m4a"), b"new");
+        write(&second.join("Deleted.m4a"), b"new");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: second,
+            replacement_files: vec![PathBuf::from("Kept.m4a"), PathBuf::from("Deleted.m4a")],
+        })
+        .unwrap();
+
+        assert_eq!(fs::read(canonical.join("Deleted.m4a")).unwrap(), b"new");
+        assert_eq!(
+            fs::read(canonical.join(BACKUP_DIR_NAME).join("Kept.m4a")).unwrap(),
+            b"kept"
+        );
+    }
+
+    #[test]
+    fn forgetting_files_without_a_published_split_creates_no_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        fs::create_dir_all(&canonical).unwrap();
+
+        let guard = SharedPublicationLock::acquire(&canonical).unwrap();
+        forget_removed_split_files(&guard, &BTreeSet::from([PathBuf::from("Song.m4a")])).unwrap();
+
+        assert!(!canonical.join(MANIFEST_NAME).exists());
+        assert!(!canonical.join(MANIFEST_TEMP_NAME).exists());
+    }
+
+    /// A deletion that removed the files but failed to rewrite the manifest
+    /// leaves the same repair to the next request, so a retry converges instead
+    /// of reporting success over a manifest that still claims an absent file.
+    #[test]
+    fn a_retry_repairs_a_manifest_a_failed_deletion_left_stale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join("staging");
+        write(&staging.join("Kept.m4a"), b"kept");
+        write(&staging.join("Gone.m4a"), b"gone");
+        publish(&PublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging,
+            replacement_files: vec![PathBuf::from("Kept.m4a"), PathBuf::from("Gone.m4a")],
+        })
+        .unwrap();
+        // The files are gone and the manifest was never corrected.
+        fs::remove_file(canonical.join("Gone.m4a")).unwrap();
+
+        // A retried deletion has nothing left to remove, and must still repair.
+        let guard = SharedPublicationLock::acquire(&canonical).unwrap();
+        forget_removed_split_files(&guard, &BTreeSet::new()).unwrap();
+
+        let manifest = fs::read_to_string(canonical.join(MANIFEST_NAME)).unwrap();
+        assert!(!manifest.contains("Gone.m4a"), "{manifest}");
+        assert!(manifest.contains("Kept.m4a"), "{manifest}");
+    }
+
+    /// The Recoverable Partial Split manifest names salvaged files too, and a
+    /// deletion owes it the same truth: a track whose output is gone leaves the
+    /// manifest, and the marker goes once no partial output is left.
+    #[test]
+    fn forgetting_a_removed_file_keeps_the_partial_manifest_true() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().join("concert");
+        let staging = tmp.path().join("staging");
+        write(&staging.join("First.m4a"), b"first");
+        write(&staging.join("Second.m4a"), b"second");
+        let completed = |title: &str, file: &str| PartialTrackOutput {
+            title: title.to_string(),
+            start_time: 0.0,
+            end_time: 10.0,
+            files: vec![PathBuf::from(file)],
+        };
+        publish_partial(&PartialPublicationRequest {
+            canonical_dir: canonical.clone(),
+            staging_dir: staging,
+            expected_tracks: expected(&[("First", &["First.m4a"]), ("Second", &["Second.m4a"])]),
+            completed_tracks: vec![
+                completed("First", "First.m4a"),
+                completed("Second", "Second.m4a"),
+            ],
+        })
+        .unwrap();
+
+        fs::remove_file(canonical.join("Second.m4a")).unwrap();
+        let guard = SharedPublicationLock::acquire(&canonical).unwrap();
+        forget_removed_split_files(&guard, &BTreeSet::from([PathBuf::from("Second.m4a")])).unwrap();
+        drop(guard);
+
+        let manifest = fs::read_to_string(canonical.join(PARTIAL_MANIFEST_NAME)).unwrap();
+        assert!(manifest.contains("First.m4a"), "{manifest}");
+        assert!(!manifest.contains("Second"), "{manifest}");
+        // The prior partial generation still validates, so a retry can merge it.
+        assert!(read_partial_manifest(&canonical).unwrap().is_some());
+
+        fs::remove_file(canonical.join("First.m4a")).unwrap();
+        let guard = SharedPublicationLock::acquire(&canonical).unwrap();
+        forget_removed_split_files(&guard, &BTreeSet::from([PathBuf::from("First.m4a")])).unwrap();
+
+        assert!(
+            !canonical.join(PARTIAL_MANIFEST_NAME).exists(),
+            "a marker claiming files that no longer exist must not survive"
+        );
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Context, Result};
 use rusqlite::Connection;
 
-use crate::concert_media::find_downloaded_file;
+use crate::concert_media::{find_downloaded_file, MediaRemovalError};
 use crate::db;
 use crate::events::{self, Event};
 use crate::jobs::{JobKind, JobRegistry};
@@ -135,7 +135,7 @@ pub fn delete_track(
     working_dir: &Path,
     id: i64,
     track_index: usize,
-) -> Result<DeleteTrackOutcome> {
+) -> Result<DeleteTrackOutcome, MediaRemovalError> {
     let concert = db::concerts::get_concert(conn, id)?;
     let track_title = concert
         .set_list
@@ -147,9 +147,13 @@ pub fn delete_track(
         .as_deref()
         .ok_or_else(|| anyhow!("concert has no album"))?;
     // Canonical discovery, not a hand-built path: whatever extension the media
-    // is in, deleting the track removes it.
+    // is in, deleting the track removes it. The removal holds the publication
+    // lock and keeps the published manifest true, so it reports a publication
+    // in progress rather than deleting files out from under it.
     let removed_files = crate::concert_media::remove_track_files(working_dir, album, &track_title)
-        .with_context(|| format!("failed to delete media for track {track_title}"))?;
+        .map_err(|error| {
+            error.add_context(format!("failed to delete media for track {track_title}"))
+        })?;
     for path in &removed_files {
         tracing::info!(
             "delete_track: removed {} for concert {}",
@@ -197,32 +201,25 @@ pub fn delete_interlude(
     working_dir: &Path,
     id: i64,
     interlude_index: usize,
-) -> Result<DeleteInterludeOutcome> {
+) -> Result<DeleteInterludeOutcome, MediaRemovalError> {
     let concert = db::concerts::get_concert(conn, id)?;
     let album = concert
         .album
         .as_deref()
         .ok_or_else(|| anyhow!("concert {id} has no album, so it has no interlude files"))?;
-    let dir = crate::model::concert_dir(working_dir, album);
-    let stem = concert_types::interlude_filename_stem(interlude_index);
 
-    let mut removed_files = Vec::new();
-    for ext in crate::model::INTERLUDE_EXTENSIONS {
-        let path = dir.join(format!("{stem}.{ext}"));
-        match std::fs::remove_file(&path) {
-            Ok(()) => {
-                tracing::info!(
-                    "remove_interlude: removed {} for concert {}",
-                    path.display(),
-                    id
-                );
-                removed_files.push(path);
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => {
-                return Err(error).with_context(|| format!("failed to remove {}", path.display()));
-            }
-        }
+    // Canonical discovery and mutation live in Concert Media Inventory, so this
+    // module no longer builds an interlude path or probes extensions itself.
+    let removed_files =
+        crate::concert_media::remove_interlude_files(working_dir, album, interlude_index).map_err(
+            |error| error.add_context(format!("failed to delete interlude {interlude_index}")),
+        )?;
+    for path in &removed_files {
+        tracing::info!(
+            "remove_interlude: removed {} for concert {}",
+            path.display(),
+            id
+        );
     }
 
     if !removed_files.is_empty() {

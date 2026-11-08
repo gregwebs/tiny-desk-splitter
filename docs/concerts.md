@@ -240,6 +240,54 @@ files an operation touches, so deleting a track removes its media whatever
 extension it is in, and no adapter builds a path, an extension, or a sanitized
 name of its own.
 
+### Deletion state transitions
+
+A deletion changes the recorded lifecycle only as far as the media it removed
+demanded:
+
+```mermaid
+stateDiagram-v2
+    Split --> Downloaded: delete_split
+    Split --> Downloaded: delete_track, when no recorded track is left
+    Split --> Split: delete_track, while other tracks remain
+    Split --> Split: delete_interlude
+    Split --> Split: delete_download or delete_redundant_source, split kept
+    Downloaded --> Scraped: delete_download
+```
+
+`delete_split` drops the recorded split and leaves the media alone, so the
+concert can be split again. `delete_track` clears the recorded split only once no
+recorded track is left; until then the concert stays Split and the deleted track
+is simply unavailable, which is what makes a re-split the way to restore it.
+`delete_interlude` records an `interlude_delete` event but never changes the
+lifecycle. `delete_download` and `delete_redundant_source` clear the recorded
+download and keep any split record, so a concert that was Split stays Split with
+its source gone — which is what the coverage gate requires anyway, since it only
+lets a source go once the songs cover it.
+
+### What a deletion may refuse
+
+| Outcome | Meaning |
+| --- | --- |
+| `Deleted(state)` | the desired absent state holds, including a repeated request |
+| `ConfirmationRequired(state)` | the record claims a download whose file is already gone |
+| `Rejected(SourceNotRedundant)` | song and interlude media do not cover the source |
+| `Rejected(NoSuchTrack)`, `Rejected(MissingMedia)` | the request names media that cannot exist |
+| `Rejected(Conflict)` | a Concert Split publication holds the concert directory |
+| `Operational` | a genuine removal failure, including one that removed only some files |
+
+Published Concert Split media — track and interlude files — is mutated under the
+Concert Split publication lock, because the publication journal and manifest own
+canonical split output. A publication in progress holds that lock exclusively, so
+the deletion is refused instead of removing files out from under it; the request
+succeeds once the publication ends. The same guard lets a deletion keep the
+manifests true: the files it removed stop being named by
+`.concert-split-published.json` (and by `.concert-split-partial.json` when the
+concert has a Recoverable Partial Split), which stay the authority a later
+publication backs up, merges and restores. A removal that fails part-way is an
+operational error, not a deletion: no lifecycle change and no event is recorded
+for it, though the manifest is still corrected for the files that did go.
+
 ## Job Requests
 
 | Method | Effect |
