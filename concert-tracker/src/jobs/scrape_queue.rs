@@ -53,6 +53,21 @@ fn record_scrape_failure(conn: &Connection, concert_id: i64, err: &anyhow::Error
     }
 }
 
+/// What [`ScrapeQueue::enqueue`] did. Both "already queued" and "no worker" are
+/// answers, not failures: the caller decides how to report them, and a one-shot
+/// process that never started a worker must be able to say so rather than
+/// pretending the work is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnqueueOutcome {
+    /// Queued for the worker.
+    Queued,
+    /// Already queued or in flight, so nothing was sent.
+    AlreadyQueued,
+    /// This queue has no worker (a one-shot process, or the worker is gone), so
+    /// nothing was queued and nothing is pending.
+    NoWorker,
+}
+
 /// Handle to the serial scrape worker. Cloneable; all clones share the same
 /// channel and `pending` set.
 #[derive(Clone)]
@@ -124,15 +139,17 @@ impl ScrapeQueue {
         }
     }
 
-    /// Queue `concert_id` for a background scrape. Returns `false` (a normal
-    /// no-op) if it was already queued/in-flight, or if the worker is gone.
-    /// Dedupe is a single critical section: check-and-insert under one lock.
-    pub fn enqueue(&self, concert_id: i64, source_url: String) -> bool {
-        {
-            let mut set = self.pending.lock().unwrap();
-            if !set.insert(concert_id) {
-                return false; // already queued or in-flight
-            }
+    /// Queue `concert_id` for a background scrape.
+    ///
+    /// The insert and the send are one critical section: a caller must never be
+    /// told "already queued" about an entry whose send then failed, because that
+    /// answer and the pending set it describes would disagree. The send is
+    /// unbounded and non-blocking, and the worker only takes the same lock after
+    /// its item has run, so nothing blocking happens under the lock.
+    pub fn enqueue(&self, concert_id: i64, source_url: String) -> EnqueueOutcome {
+        let mut pending = self.pending.lock().unwrap();
+        if !pending.insert(concert_id) {
+            return EnqueueOutcome::AlreadyQueued;
         }
         if self
             .tx
@@ -143,12 +160,14 @@ impl ScrapeQueue {
             .is_err()
         {
             // Worker gone: don't leave a phantom pending id that polls forever.
-            self.pending.lock().unwrap().remove(&concert_id);
+            pending.remove(&concert_id);
+            drop(pending);
             tracing::warn!(target: LOG_TARGET, "scrape queue closed; dropped concert {}", concert_id);
-            return false;
+            return EnqueueOutcome::NoWorker;
         }
+        drop(pending);
         tracing::info!(target: LOG_TARGET, "enqueued concert {} for background scrape", concert_id);
-        true
+        EnqueueOutcome::Queued
     }
 
     /// Whether `concert_id` is currently queued or being scraped. Used by the
@@ -285,10 +304,16 @@ mod tests {
         let q = ScrapeQueue::start_with(dummy_db(), PathBuf::from("/tmp"), item);
 
         // Enqueue marks pending synchronously.
-        assert!(q.enqueue(1, "https://example.org/1".into()));
+        assert_eq!(
+            q.enqueue(1, "https://example.org/1".into()),
+            EnqueueOutcome::Queued
+        );
         assert!(q.is_pending(1));
         // Dedupe: a second enqueue of the same id is a no-op and does not send.
-        assert!(!q.enqueue(1, "https://example.org/1".into()));
+        assert_eq!(
+            q.enqueue(1, "https://example.org/1".into()),
+            EnqueueOutcome::AlreadyQueued
+        );
         assert!(q.is_pending(1));
 
         // Release the in-flight item and wait for it to finish.
@@ -310,8 +335,9 @@ mod tests {
         });
 
         let q = ScrapeQueue::start_with(dummy_db(), PathBuf::from("/tmp"), item);
-        assert!(q.enqueue(1, "u".into())); // panics in the worker
-        assert!(q.enqueue(2, "u".into())); // must still be processed
+        // The first panics in the worker; the second must still be processed.
+        assert_eq!(q.enqueue(1, "u".into()), EnqueueOutcome::Queued);
+        assert_eq!(q.enqueue(2, "u".into()), EnqueueOutcome::Queued);
 
         // The second item ran despite the first panicking → worker survived.
         let got = recv_soon(&done_rx).await;
@@ -319,6 +345,20 @@ mod tests {
 
         // Pending cleared for both (panicked one included).
         wait_until(|| !q.is_pending(1) && !q.is_pending(2)).await;
+    }
+
+    /// A queue with no worker (the `concert_db` CLI's detached queue, or a
+    /// worker whose task ended) answers `NoWorker` and leaves nothing claiming to
+    /// be pending, which is what lets a caller report the two apart.
+    #[test]
+    fn enqueue_without_a_worker_reports_it_and_leaves_nothing_pending() {
+        let q = ScrapeQueue::detached();
+
+        assert_eq!(q.enqueue(7, "u".into()), EnqueueOutcome::NoWorker);
+        assert!(
+            !q.is_pending(7),
+            "an id that was never queued must not stay pending"
+        );
     }
 
     #[test]

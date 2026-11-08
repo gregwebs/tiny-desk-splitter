@@ -604,8 +604,9 @@ fn scrape_enqueue(state: &AppState, concert_id: i64) -> anyhow::Result<bool> {
     Ok(matches!(
         state
             .concerts
-            .enqueue_scrape(concert_id)
-            .map_err(|e| anyhow::anyhow!("could not enqueue a scrape for {concert_id}: {e}"))?,
+            .request_scrape(concert_id)
+            .map_err(|e| anyhow::anyhow!("could not enqueue a scrape for {concert_id}: {e}"))?
+            .admission,
         crate::concerts::ScrapeAdmission::Enqueued
     ))
 }
@@ -959,7 +960,7 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
         db.clone(),
         jobs.working_dir.clone(),
         registry.clone(),
-        scrape_queue.clone(),
+        scrape_queue,
         jobs.clone(),
     );
     let catalog = concerts.catalog();
@@ -968,7 +969,6 @@ fn test_state(conn: rusqlite::Connection, workdir: std::path::PathBuf) -> AppSta
         catalog,
         db,
         registry,
-        scrape_queue,
         jobs,
     }
 }
@@ -1748,7 +1748,15 @@ mod tests {
 
         let first = super::scrape_enqueue(&state, seeded.id).unwrap();
         assert!(first, "first enqueue call must queue the scrape");
-        assert!(state.scrape_queue.is_pending(seeded.id));
+        assert!(
+            state
+                .concerts
+                .get(seeded.id)
+                .unwrap()
+                .active_work
+                .scrape_pending,
+            "the queued scrape is observable through the interface"
+        );
 
         let second = super::scrape_enqueue(&state, seeded.id).unwrap();
         assert!(

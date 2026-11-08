@@ -38,7 +38,7 @@ fn test_state(conn: rusqlite::Connection) -> AppState {
         db.clone(),
         jobs.working_dir.clone(),
         registry.clone(),
-        scrape_queue.clone(),
+        scrape_queue,
         jobs.clone(),
     );
     let catalog = concerts.catalog();
@@ -47,7 +47,6 @@ fn test_state(conn: rusqlite::Connection) -> AppState {
         catalog,
         db,
         registry,
-        scrape_queue,
         jobs,
     }
 }
@@ -96,7 +95,7 @@ async fn detail_page_auto_scrape_failure_still_renders() {
         db_arc.clone(),
         jobs.working_dir.clone(),
         registry.clone(),
-        scrape_queue.clone(),
+        scrape_queue,
         jobs.clone(),
     );
     let catalog = concerts.catalog();
@@ -105,7 +104,6 @@ async fn detail_page_auto_scrape_failure_still_renders() {
         catalog,
         db: db_arc.clone(),
         registry,
-        scrape_queue,
         jobs,
     };
     let app = router(state);

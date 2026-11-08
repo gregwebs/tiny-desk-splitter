@@ -642,14 +642,14 @@ pub async fn detail(
     Path(id): Path<i64>,
 ) -> Result<impl IntoResponse, AppError> {
     // Auto-scrape on first view. The interface tolerates a failed scrape, so the
-    // page renders with listing-only data when NPR cannot be reached.
-    state
+    // page renders with listing-only data when NPR cannot be reached, and it
+    // reports the state to render either way.
+    let concert_state = state
         .concerts
         .ensure_scraped(id)
         .await
         .map_err(concert_command_error)?;
 
-    let concert_state = state.concerts.get(id).map_err(concert_query_error)?;
     // The card embeds the track list (always visible on the detail page), so
     // there is no separate tracks section to populate.
     let card_html = render_detail_card(&concert_state)
@@ -1837,14 +1837,16 @@ pub async fn sync_month_handler(
     //    right away. The worker scrapes one concert at a time (no parallel NPR
     //    requests); each queued card renders a "loading…" placeholder and polls
     //    /concerts/:id/status until its thumbnail is ready. Enqueue happens BEFORE
-    //    we respond, so the post-sync GET / sees these ids as pending.
+    //    we respond, so the post-sync GET / sees these ids as pending. The
+    //    interface makes the admission decision; the adapter only counts it.
     let mut queued = 0usize;
     for synced_concert in &synced {
         if matches!(
             state
                 .concerts
-                .enqueue_scrape(synced_concert.id)
-                .map_err(concert_command_error)?,
+                .request_scrape(synced_concert.id)
+                .map_err(concert_command_error)?
+                .admission,
             ScrapeAdmission::Enqueued
         ) {
             queued += 1;
@@ -2735,30 +2737,68 @@ mod tests {
     /// in-memory database, a detached scrape queue (nothing enqueues a scrape
     /// here) and an empty Job Registry.
     fn app_state(conn: Connection, workdir: &std::path::Path) -> AppState {
+        app_state_with_refresh(
+            conn,
+            workdir,
+            crate::concerts::production_metadata_refresh(),
+        )
+    }
+
+    /// The same state with the metadata refresh replaced, so a rescrape can be
+    /// driven without egress.
+    fn app_state_with_refresh(
+        conn: Connection,
+        workdir: &std::path::Path,
+        refresh: crate::concerts::MetadataRefreshFn,
+    ) -> AppState {
         use crate::jobs::scrape_queue::ScrapeQueue;
         use crate::jobs::{JobConfig, JobRegistry};
         use std::sync::{Arc, Mutex};
 
         let db = Arc::new(Mutex::new(conn));
         let registry = Arc::new(JobRegistry::new());
-        let scrape_queue = ScrapeQueue::detached();
         let jobs = JobConfig::test(workdir.to_path_buf());
         let concerts = crate::concerts::Concerts::new(
             db.clone(),
             workdir.to_path_buf(),
             registry.clone(),
-            scrape_queue.clone(),
+            ScrapeQueue::detached(),
             jobs.clone(),
-        );
+        )
+        .with_metadata_refresh(refresh);
         let catalog = concerts.catalog();
         AppState {
             concerts,
             catalog,
             db,
             registry,
-            scrape_queue,
             jobs,
         }
+    }
+
+    /// A metadata refresh that writes the metadata a fetched page would have
+    /// applied, so a rescrape renders without egress.
+    fn refresh_writing_fetched_metadata() -> crate::concerts::MetadataRefreshFn {
+        use std::sync::{Arc, Mutex};
+
+        Arc::new(
+            |db: &Arc<Mutex<Connection>>, _workdir: &std::path::Path, source_url: &str| {
+                let conn = db.lock().unwrap();
+                let concert = db::concerts::get_concert_by_url(&conn, source_url)?
+                    .ok_or_else(|| anyhow::anyhow!("no concert for {source_url}"))?;
+                db::concerts::update_metadata(
+                    &conn,
+                    concert.id,
+                    &db::concerts::MetadataUpdate {
+                        artist: "Fresh Artist".to_string(),
+                        album: "Fresh Album".to_string(),
+                        description: None,
+                        set_list: vec!["Fresh Song".to_string()],
+                        musicians: Vec::new(),
+                    },
+                )
+            },
+        )
     }
 
     /// A concert that exists and has a set list but no media on disk.
@@ -3209,6 +3249,53 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = body_text(response).await;
         assert!(body.contains("no set list"), "{body}");
+    }
+
+    // ── rescrape route ───────────────────────────────────────────────────────
+
+    /// `POST /concerts/:id/scrape` is transport translation: it asks the
+    /// interface for a rescrape and renders the state that comes back. The
+    /// interface owns the refresh itself, so this asserts only what the route
+    /// shows.
+    #[tokio::test]
+    async fn rescraping_renders_the_refreshed_card() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = seed_listing(&conn, "https://example.org/rescrape");
+        let state =
+            app_state_with_refresh(conn, workdir.path(), refresh_writing_fetched_metadata());
+
+        let response = match scrape_concert(State(state), Path(id)).await {
+            Ok(rendered) => rendered.into_response(),
+            Err(_) => panic!("a rescrape that succeeds cannot fail the request"),
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(
+            body.contains("Fresh Song"),
+            "the swapped card must embed the refreshed set list: {body}"
+        );
+        assert!(
+            body.contains("not-split (0/1)"),
+            "the refreshed set list changes the track count the card shows: {body}"
+        );
+    }
+
+    /// An absent concert is the interface's typed `NotFound`, which this adapter
+    /// answers with 404 — no scrape work happens for a concert that is not there.
+    #[tokio::test]
+    async fn rescraping_an_absent_concert_is_a_404() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = app_state(conn, workdir.path());
+
+        let status = match scrape_concert(State(state), Path(999)).await {
+            Ok(_) => panic!("an absent concert cannot be rescraped"),
+            Err(error) => error.into_response().status(),
+        };
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 
     // ── playback error mapping ───────────────────────────────────────────────

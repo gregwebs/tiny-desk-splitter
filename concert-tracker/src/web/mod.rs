@@ -18,7 +18,6 @@ use utoipa::OpenApi;
 use utoipa_axum::{router::OpenApiRouter, routes};
 use utoipa_swagger_ui::SwaggerUi;
 
-use crate::jobs::scrape_queue::ScrapeQueue;
 use crate::jobs::{JobConfig, JobRegistry};
 use openapi::ApiDoc;
 
@@ -27,9 +26,6 @@ pub struct AppState {
     pub db: Arc<Mutex<Connection>>,
     pub registry: Arc<JobRegistry>,
     pub jobs: JobConfig,
-    /// Serial background metadata-scrape worker. `Sync` enqueues unscraped
-    /// concerts here; listing cards poll until their thumbnail is ready.
-    pub scrape_queue: ScrapeQueue,
     pub concerts: crate::concerts::Concerts,
     /// Collection browsing. Separate from `concerts` because catalog
     /// capabilities (compound filters, search, pagination) are planned

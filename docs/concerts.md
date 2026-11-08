@@ -321,14 +321,51 @@ concert.
 
 | Method | Effect |
 | --- | --- |
-| `Concerts::scrape(id)` | re-fetches this concert's metadata and reports the refreshed state |
-| `Concerts::ensure_scraped(id)` | scrapes only when metadata is absent, tolerating failure |
+| `Concerts::request_scrape(id)` | queues a background metadata scrape, and reports the admission with the observed state |
+| `Concerts::scrape(id)` | re-fetches this concert's metadata now and reports the refreshed state |
+| `Concerts::ensure_scraped(id)` | scrapes only when metadata is absent, tolerating failure, and reports the observed state |
 
 A scrape is not a Job Run: it runs on the Scrape Queue's worker, which is a
 separate protocol (ADR-0006). Nothing here invents a scrape Job Run, a recovery
-pass, or a cancellation for one. `ensure_scraped` keeps the long-standing
-tolerance — a failed automatic scrape is logged and the command that wanted the
-metadata proceeds without it — while an explicit `scrape` reports the failure.
+pass, or a cancellation for one, and no adapter needs a handle on the queue —
+`AppState` carries no scrape queue, so the interface is the only way in.
+
+`request_scrape` returns a `ScrapeRequestResult` rather than a `JobRequestOutcome`:
+
+```text
+request_scrape
+  |
+  +--> needs it, nothing queued yet ---------------------> Enqueued
+  +--> needs it, already queued or in flight ------------> AlreadyQueued
+  +--> already has metadata -----------------------------> NotNeeded
+  +--> this process runs no scrape worker ---------------> NoWorker
+  |      each admission carries the Concert State
+  |      observed after it
+  |
+  +--> absent concert ----------------------------------> Err(Rejected(NotFound))
+  `--> a genuine fault ----------------------------------> Err(Operational)
+```
+
+Each admission carries the Concert State observed after it, so an adapter renders
+the "loading…" placeholder from `active_work.scrape_pending` without a second
+query. Three admissions are normal no-ops, never failures: a duplicate request, a
+concert that needs no scrape, and a process with no worker. The admission and the
+state always agree: only `Enqueued` and `AlreadyQueued` report pending work, so a
+one-shot process (the `concert_db` CLI) says `NoWorker` instead of claiming work
+it never queued. The queue reports the same distinction (`EnqueueOutcome`:
+`Queued`, `AlreadyQueued`, `NoWorker`), so the interface is not re-deriving it.
+
+`ensure_scraped` keeps the long-standing tolerance — a failed automatic scrape is
+logged and the command that wanted the metadata proceeds without it — while an
+explicit `scrape` reports the failure. Both report the state to render: after a
+successful refresh it carries the new metadata, and after a failed automatic one
+it carries the listing-only facts the concert already had, which keeps the row
+unscraped so the next view retries.
+
+The fetch itself is a process-level seam, `MetadataRefreshFn`, replaceable with
+`Concerts::with_metadata_refresh` — the same injection point the queue's item
+already has. Production fetches the source page; a test writes the metadata a
+fetched page would have, so a rescrape is observable without egress.
 
 ## Split timestamps
 

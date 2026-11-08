@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
         db.clone(),
         jobs.working_dir.clone(),
         registry.clone(),
-        scrape_queue.clone(),
+        scrape_queue,
         jobs.clone(),
     );
     let catalog = concerts.catalog();
@@ -259,7 +259,6 @@ async fn main() -> Result<()> {
         db,
         registry,
         jobs,
-        scrape_queue,
         concerts,
         catalog,
     };
