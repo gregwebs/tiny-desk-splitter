@@ -13,7 +13,7 @@ use rusqlite::Connection;
 
 use crate::concert_media::ConcertMediaInventory;
 use crate::db;
-use crate::jobs::scrape_queue::ScrapeQueue;
+use crate::jobs::scrape_queue::{EnqueueOutcome, ScrapeQueue};
 use crate::jobs::{JobConfig, JobKey, JobKind, JobRegistry};
 use crate::model::{
     ArchiveStatus, Concert, ConcertStatus, DownloadStatus, PlaybackItem, SplitStatus,
@@ -213,6 +213,22 @@ pub enum ScrapeAdmission {
     AlreadyQueued,
     /// The concert already has metadata; there is nothing to scrape.
     NotNeeded,
+    /// This process runs no scrape worker (a one-shot CLI, or a worker that is
+    /// gone), so there was nowhere to queue the work. Nothing is pending.
+    NoWorker,
+}
+
+/// The admission decision and the Concert State observed after it. The state is
+/// what makes active scrape work observable to the caller — `Enqueued` and
+/// `AlreadyQueued` report `active_work.scrape_pending` — so an adapter renders
+/// the placeholder without a second query.
+///
+/// Deliberately not a [`JobRequestOutcome`]: a scrape admits no Job Run, so there
+/// is no dependency edge, cancellation, or terminal outcome to report (ADR-0006).
+#[derive(Debug)]
+pub struct ScrapeRequestResult {
+    pub admission: ScrapeAdmission,
+    pub state: ConcertState,
 }
 
 /// What cancelling a Job Run did. Both outcomes carry the Concert State observed
@@ -502,6 +518,30 @@ pub(super) struct LoadedConcert {
     pub(super) user_split_timestamps: Option<Vec<concert_types::SongTimestamp>>,
 }
 
+/// The blocking unit that refreshes one concert's metadata from its source page:
+/// fetch, apply, and derive the cached images. It gets the connection handle
+/// rather than a guard so the refresh decides how long it holds the connection,
+/// and it runs on a blocking thread because the HTTP client cannot run inside the
+/// runtime.
+///
+/// Injectable for the same reason [`ScrapeQueue::start_with`] injects the
+/// background worker's item: a test must be able to drive a rescrape — including
+/// refreshed metadata — without egress. Production is
+/// [`production_metadata_refresh`].
+pub type MetadataRefreshFn =
+    Arc<dyn Fn(&Arc<Mutex<Connection>>, &std::path::Path, &str) -> Result<(), Error> + Send + Sync>;
+
+/// The process's real metadata refresh: fetch the source page, apply what the
+/// scraper parsed, and derive the preview image and listing thumbnail.
+pub fn production_metadata_refresh() -> MetadataRefreshFn {
+    Arc::new(|db, working_dir, source_url| {
+        let conn = db
+            .lock()
+            .map_err(|_| anyhow::anyhow!("concert database mutex is poisoned"))?;
+        crate::scrape::scrape_url(&conn, source_url, working_dir)
+    })
+}
+
 #[derive(Clone)]
 pub struct Concerts {
     db: Arc<Mutex<Connection>>,
@@ -511,6 +551,7 @@ pub struct Concerts {
     /// How to run Job Runs. `None` in a one-shot process that runs none: the
     /// methods that would admit work report that instead of pretending to do it.
     jobs: Option<JobConfig>,
+    metadata_refresh: MetadataRefreshFn,
 }
 
 impl Concerts {
@@ -527,7 +568,16 @@ impl Concerts {
             registry,
             scrape_queue,
             jobs: Some(jobs),
+            metadata_refresh: production_metadata_refresh(),
         }
+    }
+
+    /// Use a different metadata refresh. Tests replace the network fetch with a
+    /// deterministic write so a rescrape can be observed without egress; a
+    /// production process has no reason to.
+    pub fn with_metadata_refresh(mut self, refresh: MetadataRefreshFn) -> Self {
+        self.metadata_refresh = refresh;
+        self
     }
 
     /// Standalone interface for a one-shot process (the `concert_db` CLI). Such
@@ -541,6 +591,7 @@ impl Concerts {
             registry: Arc::new(JobRegistry::new()),
             scrape_queue: ScrapeQueue::detached(),
             jobs: None,
+            metadata_refresh: production_metadata_refresh(),
         }
     }
 
@@ -656,12 +707,14 @@ impl Concerts {
         concert_id: i64,
     ) -> Result<JobRequestResult, ConcertCommandError> {
         let jobs = self.job_config()?;
-        self.ensure_scraped(concert_id).await?;
-        // Re-read after the scrape: the metadata may have just been written.
-        let concert = {
-            let conn = self.lock_db()?;
-            self.load(&conn, concert_id)?.concert
-        };
+        // The state observed after the scrape is the one admission decides on:
+        // the metadata may have just been written.
+        let observed = self.ensure_scraped(concert_id).await?;
+        // Whether the chain was already in flight decides how the admission is
+        // reported; preparation itself cannot tell an established run from a new
+        // one.
+        let already_active = chain_active(&observed);
+        let concert = observed.concert;
 
         let auto_splits = concert.album.is_some()
             && !concert.set_list.is_empty()
@@ -673,10 +726,6 @@ impl Concerts {
             return self.start_download(concert_id, jobs).await;
         }
 
-        // Whether the chain was already in flight decides how the admission is
-        // reported; preparation itself cannot tell an established run from a new
-        // one.
-        let already_active = self.chain_active(concert_id)?;
         match crate::jobs::prepare::prepare(
             self.db.clone(),
             self.registry.clone(),
@@ -783,11 +832,11 @@ impl Concerts {
         concert_id: i64,
     ) -> Result<JobRequestResult, ConcertCommandError> {
         let jobs = self.job_config()?;
-        self.ensure_scraped(concert_id).await?;
+        let observed = self.ensure_scraped(concert_id).await?;
         // Whether the chain was already in flight decides how the admission is
         // reported; preparation itself cannot tell an established run from a new
-        // one.
-        let already_active = self.chain_active(concert_id)?;
+        // one. The observation made just before the request is what decides.
+        let already_active = chain_active(&observed);
         let outcome =
             crate::jobs::prepare::prepare(self.db.clone(), self.registry.clone(), jobs, concert_id)
                 .await;
@@ -810,16 +859,6 @@ impl Concerts {
             }
             Err(error) => Err(ConcertCommandError::Operational(error)),
         }
-    }
-
-    /// Whether the download → split chain is already in flight. Admission cannot
-    /// tell an established run from a new one, so the observation made before a
-    /// request is what decides how its admission is reported.
-    fn chain_active(&self, concert_id: i64) -> Result<bool, ConcertCommandError> {
-        let state = self.command_state(concert_id)?;
-        Ok(state.active_work.download.registry_active
-            || state.active_work.split.registry_active
-            || state.active_work.split_queued_after_download)
     }
 
     /// Cancel the concert's active Job Run of one kind. Cancellation goes
@@ -972,80 +1011,82 @@ impl Concerts {
     // Scrapes are their own protocol: they run on the Scrape Queue's worker, not
     // as a Job Run (see ADR-0006). These methods never invent a Job Run for one.
 
-    /// Re-fetch this concert's metadata from its source page.
+    /// Re-fetch this concert's metadata from its source page now, reporting the
+    /// refreshed state. Unlike [`Self::request_scrape`] this does the work
+    /// itself, so a failed refresh is reported rather than queued — the
+    /// behavior an explicit rescrape has always had.
     pub async fn scrape(&self, concert_id: i64) -> Result<ConcertState, ConcertCommandError> {
         let source_url = {
             let conn = self.lock_db()?;
             self.load(&conn, concert_id)?.concert.source_url
         };
         tracing::info!(concert_id, "re-scrape started");
-        self.fetch_metadata(concert_id, source_url).await?;
+        self.fetch_metadata(source_url).await?;
         tracing::info!(concert_id, "re-scrape completed");
         self.command_state(concert_id)
     }
 
     /// Queue a background scrape. The interface decides whether one is needed and
     /// whether it is already queued, so no adapter has to read the scrape queue
-    /// or the metadata timestamp to decide.
-    pub fn enqueue_scrape(&self, concert_id: i64) -> Result<ScrapeAdmission, ConcertCommandError> {
-        let concert = {
-            let conn = self.lock_db()?;
-            self.load(&conn, concert_id)?.concert
+    /// or the metadata timestamp to decide. Both decisions are values, not
+    /// failures, and the returned state shows the work the decision made
+    /// observable — a queued or in-flight scrape reports
+    /// `active_work.scrape_pending`.
+    pub fn request_scrape(
+        &self,
+        concert_id: i64,
+    ) -> Result<ScrapeRequestResult, ConcertCommandError> {
+        let concert = self.load_command_concert(concert_id)?;
+        let admission = if concert.metadata_scraped_at.is_some() {
+            ScrapeAdmission::NotNeeded
+        } else {
+            match self.scrape_queue.enqueue(concert_id, concert.source_url) {
+                EnqueueOutcome::Queued => ScrapeAdmission::Enqueued,
+                EnqueueOutcome::AlreadyQueued => ScrapeAdmission::AlreadyQueued,
+                EnqueueOutcome::NoWorker => ScrapeAdmission::NoWorker,
+            }
         };
-        if concert.metadata_scraped_at.is_some() {
-            return Ok(ScrapeAdmission::NotNeeded);
-        }
-        Ok(
-            if self.scrape_queue.enqueue(concert_id, concert.source_url) {
-                ScrapeAdmission::Enqueued
-            } else {
-                ScrapeAdmission::AlreadyQueued
-            },
-        )
+        Ok(ScrapeRequestResult {
+            admission,
+            state: self.command_state(concert_id)?,
+        })
     }
 
     /// Scrape metadata only when the concert has none, tolerating failure: the
     /// command that wanted the metadata proceeds without it, as it always has.
-    pub async fn ensure_scraped(&self, concert_id: i64) -> Result<(), ConcertCommandError> {
-        let concert = {
-            let conn = self.lock_db()?;
-            self.load(&conn, concert_id)?.concert
-        };
-        if concert.metadata_scraped_at.is_some() {
-            return Ok(());
-        }
-        tracing::info!(concert_id, "auto-scrape started");
-        match self
-            .fetch_metadata(concert_id, concert.source_url.clone())
-            .await
-        {
-            Ok(()) => tracing::info!(concert_id, "auto-scrape completed"),
-            Err(error) => tracing::warn!(concert_id, %error, "auto-scrape failed"),
-        }
-        Ok(())
-    }
-
-    /// Fetch and apply metadata for one concert. The scraper's HTTP client
-    /// cannot run inside a runtime, so the work is handed to a blocking thread.
-    async fn fetch_metadata(
+    ///
+    /// The observed state comes back either way, so a caller that needed the
+    /// metadata also gets what to render. A failed automatic scrape leaves the
+    /// listing-only state the concert already had.
+    pub async fn ensure_scraped(
         &self,
         concert_id: i64,
-        source_url: String,
-    ) -> Result<(), ConcertCommandError> {
+    ) -> Result<ConcertState, ConcertCommandError> {
+        let concert = self.load_command_concert(concert_id)?;
+        if concert.metadata_scraped_at.is_none() {
+            tracing::info!(concert_id, "auto-scrape started");
+            match self.fetch_metadata(concert.source_url).await {
+                Ok(()) => tracing::info!(concert_id, "auto-scrape completed"),
+                Err(error) => tracing::warn!(concert_id, %error, "auto-scrape failed"),
+            }
+        }
+        self.command_state(concert_id)
+    }
+
+    /// Fetch and apply one concert's metadata. The scraper's HTTP client cannot
+    /// run inside a runtime, so the work is handed to a blocking thread. The
+    /// failure is returned, not logged here: the caller that tolerates it and the
+    /// adapter that reports it are the places that log.
+    async fn fetch_metadata(&self, source_url: String) -> Result<(), ConcertCommandError> {
         let db = self.db.clone();
         let working_dir = self.working_dir.clone();
-        let outcome = tokio::task::spawn_blocking(move || {
-            let conn = db.lock().unwrap();
-            crate::scrape::scrape_url(&conn, &source_url, &working_dir)
-        })
-        .await
-        .map_err(|error| {
-            ConcertCommandError::Operational(anyhow::anyhow!("scrape task join: {error}"))
-        })?;
-        outcome.map_err(|error| {
-            tracing::warn!(concert_id, %error, "scrape failed");
-            ConcertCommandError::Operational(error)
-        })
+        let refresh = self.metadata_refresh.clone();
+        let outcome = tokio::task::spawn_blocking(move || refresh(&db, &working_dir, &source_url))
+            .await
+            .map_err(|error| {
+                ConcertCommandError::Operational(anyhow::anyhow!("scrape task join: {error}"))
+            })?;
+        outcome.map_err(ConcertCommandError::Operational)
     }
 
     // ── Split timestamps ────────────────────────────────────────────────────
@@ -1749,6 +1790,16 @@ fn archive_configured(conn: &Connection) -> Result<bool, ConcertQueryError> {
         .map_err(ConcertQueryError::Operational)
 }
 
+/// Whether the download → split chain is already in flight, as one observed
+/// Concert State reports it. Admission cannot tell an established run from a new
+/// one, so the observation made before a request is what decides how its
+/// admission is reported.
+fn chain_active(state: &ConcertState) -> bool {
+    state.active_work.download.registry_active
+        || state.active_work.split.registry_active
+        || state.active_work.split_queued_after_download
+}
+
 fn permitted_actions(
     concert: &Concert,
     media: &MediaAvailability,
@@ -2036,7 +2087,10 @@ mod tests {
                 }
             }),
         );
-        assert!(scrape_queue.enqueue(concert.id, concert.source_url.clone()));
+        assert_eq!(
+            scrape_queue.enqueue(concert.id, concert.source_url.clone()),
+            EnqueueOutcome::Queued
+        );
         let concerts = Concerts::new(
             db,
             working_dir.path().to_path_buf(),
@@ -3623,79 +3677,424 @@ mod tests {
         assert!(matches!(second, Err(ConcertCommandError::Operational(_))));
     }
 
-    #[tokio::test]
-    async fn ensure_scraped_keeps_metadata_that_is_already_there() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        let concert = SeedContext::new(&conn)
-            .seed_scraped_concert(SeedScrapedConcert::default())
-            .unwrap();
-        let concerts = with_blocking_jobs(conn, working_dir.path());
+    // ── Scrape requests ────────────────────────────────────────────────────
+    //
+    // A scrape is queued work on the Scrape Queue's own protocol, never a Job
+    // Run (ADR-0006). These tests drive the worker's injected item and the
+    // metadata refresh, so admission, duplicate work, completion, failure, and
+    // refreshed metadata are all deterministic and need no egress.
 
-        concerts.ensure_scraped(concert.id).await.unwrap();
-
-        let state = concerts.get(concert.id).unwrap();
-        assert_eq!(state.concert.artist, concert.artist);
-        assert_eq!(state.concert.set_list, concert.set_list);
-        assert!(state.concert.metadata_scraped_at.is_some());
+    /// The metadata a "fetched" page would have applied. Deliberately unlike the
+    /// listing fields, so a refresh is visible in the returned state.
+    fn fetched_metadata() -> db::concerts::MetadataUpdate {
+        db::concerts::MetadataUpdate {
+            artist: "Fresh Artist".to_string(),
+            album: "Fresh Album".to_string(),
+            description: Some("fresh description".to_string()),
+            set_list: vec!["Fresh Song".to_string()],
+            musicians: Vec::new(),
+        }
     }
 
-    #[tokio::test]
-    async fn ensure_scraped_tolerates_a_failing_fetch() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        // An unusable URL fails immediately, without touching the network.
-        let concert = SeedContext::new(&conn)
-            .seed_listing(SeedListing {
-                source_url: Some("not-a-url".to_string()),
-                ..SeedListing::default()
-            })
-            .unwrap();
-        let concerts = with_blocking_jobs(conn, working_dir.path());
+    /// A metadata refresh that writes [`fetched_metadata`] for the concert the
+    /// source URL names — the write the production refresh ends with, without
+    /// egress.
+    fn refresh_writing_fetched_metadata() -> MetadataRefreshFn {
+        Arc::new(|db, _working_dir, source_url| {
+            let conn = db.lock().unwrap();
+            let concert = db::concerts::get_concert_by_url(&conn, source_url)?
+                .ok_or_else(|| anyhow::anyhow!("no concert for {source_url}"))?;
+            db::concerts::update_metadata(&conn, concert.id, &fetched_metadata())
+        })
+    }
 
-        concerts.ensure_scraped(concert.id).await.unwrap();
+    /// A refresh that always fails, standing in for an unreachable source page.
+    fn refresh_failing() -> MetadataRefreshFn {
+        Arc::new(|_db, _working_dir, _source_url| Err(anyhow::anyhow!("source page unreachable")))
+    }
 
-        let state = concerts.get(concert.id).unwrap();
-        assert!(
-            state.concert.metadata_scraped_at.is_none(),
-            "a failed auto-scrape keeps the row unscraped so the next view retries"
+    /// A scrape worker item a test drives. It counts the items the worker picked
+    /// up, parks until the test releases it, then writes [`fetched_metadata`].
+    /// Only one item is released per test, so a second one parks forever — which
+    /// is how "this scrape ran exactly once" stays observable.
+    fn scripted_scrape_item(
+        release: std::sync::mpsc::Receiver<()>,
+    ) -> (crate::jobs::scrape_queue::ScrapeItemFn, Arc<AtomicUsize>) {
+        let picked_up = Arc::new(AtomicUsize::new(0));
+        let counted = picked_up.clone();
+        let release = Arc::new(Mutex::new(release));
+        let item = Arc::new(
+            move |db: &Arc<Mutex<Connection>>,
+                  _working_dir: &std::path::Path,
+                  request: &crate::jobs::scrape_queue::ScrapeRequest| {
+                counted.fetch_add(1, Ordering::SeqCst);
+                release
+                    .lock()
+                    .unwrap()
+                    .recv()
+                    .expect("the test releases the scrape it queued");
+                let conn = db.lock().unwrap();
+                db::concerts::update_metadata(&conn, request.concert_id, &fetched_metadata())
+                    .expect("apply the metadata the fetched page would have produced");
+            },
         );
-        assert_eq!(state.concert.title, concert.title);
+        (item, picked_up)
     }
 
-    #[test]
-    fn enqueueing_a_scrape_reports_whether_one_was_needed() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        let scraped = SeedContext::new(&conn)
-            .seed_scraped_concert(SeedScrapedConcert::default())
-            .unwrap();
-        let unscraped = SeedContext::new(&conn)
+    /// A scrape worker item that fails the way production's does from the
+    /// interface's point of view: it picks the item up and applies nothing, so
+    /// the concert stays unscraped.
+    fn failing_scrape_item() -> (crate::jobs::scrape_queue::ScrapeItemFn, Arc<AtomicUsize>) {
+        let picked_up = Arc::new(AtomicUsize::new(0));
+        let counted = picked_up.clone();
+        let item = Arc::new(
+            move |_db: &Arc<Mutex<Connection>>,
+                  _working_dir: &std::path::Path,
+                  _request: &crate::jobs::scrape_queue::ScrapeRequest| {
+                counted.fetch_add(1, Ordering::SeqCst);
+            },
+        );
+        (item, picked_up)
+    }
+
+    /// The interface over `conn` with a scrape worker whose items this test
+    /// drives.
+    fn scraping_concerts(
+        conn: rusqlite::Connection,
+        working_dir: &std::path::Path,
+        item: crate::jobs::scrape_queue::ScrapeItemFn,
+    ) -> Concerts {
+        let db = Arc::new(Mutex::new(conn));
+        Concerts::new(
+            db.clone(),
+            working_dir.to_path_buf(),
+            Arc::new(JobRegistry::new()),
+            ScrapeQueue::start_with(db.clone(), working_dir.to_path_buf(), item),
+            crate::jobs::JobConfig::test(working_dir.to_path_buf()),
+        )
+        .with_metadata_refresh(refresh_writing_fetched_metadata())
+    }
+
+    /// A listing-only concert — imported, never scraped — naming `url`.
+    fn unscraped_listing(conn: &rusqlite::Connection, url: &str) -> Concert {
+        SeedContext::new(conn)
             .seed_listing(SeedListing {
-                source_url: Some("https://example.org/never-scraped".to_string()),
+                source_url: Some(url.to_string()),
                 ..SeedListing::default()
             })
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_scrape_request_admits_work_and_reports_the_pending_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/queued");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (item, picked_up) = scripted_scrape_item(release_rx);
+        let concerts = scraping_concerts(conn, working_dir.path(), item);
+        let events_before = event_names(&concerts, concert.id);
+
+        let request = concerts.request_scrape(concert.id).unwrap();
+
+        assert_eq!(request.admission, ScrapeAdmission::Enqueued);
+        assert!(
+            request.state.active_work.scrape_pending,
+            "the returned state must show the queued work"
+        );
+        assert!(
+            request.state.concert.metadata_scraped_at.is_none(),
+            "queuing a scrape does not refresh metadata"
+        );
+        // A scrape invents no Job Run (ADR-0006): no Job Activity is active, no
+        // download→split edge is queued, and no lifecycle event is recorded.
+        assert!(!request.state.active_work.download.registry_active);
+        assert!(!request.state.active_work.split.registry_active);
+        assert!(!request.state.active_work.archive.registry_active);
+        assert!(!request.state.active_work.split_queued_after_download);
+        assert_eq!(
+            event_names(&concerts, concert.id),
+            events_before,
+            "a scrape request must record no lifecycle event"
+        );
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
+
+        release_tx.send(()).unwrap();
+        let completed = wait_for_state(&concerts, concert.id, "the queued scrape", |state| {
+            !state.active_work.scrape_pending
+        })
+        .await;
+
+        assert_eq!(
+            completed.concert.artist.as_deref(),
+            Some("Fresh Artist"),
+            "completion applies the metadata the scrape fetched"
+        );
+        assert_eq!(completed.concert.set_list, vec!["Fresh Song".to_string()]);
+        assert!(completed.concert.metadata_scraped_at.is_some());
+        assert_eq!(picked_up.load(Ordering::SeqCst), 1);
+        assert_is_current_state(&completed, &concerts.get(concert.id).unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_repeated_scrape_request_reports_the_work_already_queued() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/duplicated");
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (item, picked_up) = scripted_scrape_item(release_rx);
+        let concerts = scraping_concerts(conn, working_dir.path(), item);
+
+        let first = concerts.request_scrape(concert.id).unwrap();
+        let second = concerts.request_scrape(concert.id).unwrap();
+
+        assert_eq!(first.admission, ScrapeAdmission::Enqueued);
+        assert_eq!(
+            second.admission,
+            ScrapeAdmission::AlreadyQueued,
+            "a repeat request is a typed no-op, not a failure"
+        );
+        assert!(
+            second.state.active_work.scrape_pending,
+            "the work the first request queued is still observable"
+        );
+        assert_is_current_state(&second.state, &concerts.get(concert.id).unwrap());
+
+        release_tx.send(()).unwrap();
+        wait_for_state(&concerts, concert.id, "the queued scrape", |state| {
+            !state.active_work.scrape_pending
+        })
+        .await;
+
+        assert_eq!(
+            picked_up.load(Ordering::SeqCst),
+            1,
+            "a duplicate request must not queue a second scrape"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_failed_background_scrape_clears_the_pending_work_and_a_retry_is_admitted() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/failing");
+        let (item, picked_up) = failing_scrape_item();
+        let concerts = scraping_concerts(conn, working_dir.path(), item);
+
+        let request = concerts.request_scrape(concert.id).unwrap();
+        assert_eq!(request.admission, ScrapeAdmission::Enqueued);
+
+        let failed = wait_for_state(
+            &concerts,
+            concert.id,
+            "the queued scrape to finish without applying metadata",
+            |state| !state.active_work.scrape_pending,
+        )
+        .await;
+
+        assert!(
+            failed.concert.metadata_scraped_at.is_none(),
+            "a scrape that applied nothing leaves the concert unscraped"
+        );
+        assert_eq!(picked_up.load(Ordering::SeqCst), 1);
+
+        // Unscraped and no longer pending, so a retry is admitted rather than
+        // deduped away. Only the admission is asserted here: this item finishes
+        // instantly, so the retry's pending work can already be over by the time
+        // its state is observed. (`a_scrape_request_admits_work_and_reports_the_pending_state`
+        // pins the state a blocked item returns.)
+        let retry = concerts.request_scrape(concert.id).unwrap();
+        assert_eq!(retry.admission, ScrapeAdmission::Enqueued);
+        wait_for_state(
+            &concerts,
+            concert.id,
+            "the retried scrape to finish",
+            |state| !state.active_work.scrape_pending,
+        )
+        .await;
+        assert_eq!(
+            picked_up.load(Ordering::SeqCst),
+            2,
+            "the retry ran a second scrape"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_scrape_request_for_a_concert_with_metadata_is_not_needed() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_scraped_concert(SeedScrapedConcert::default())
             .unwrap();
-        // A detached queue accepts work but runs none of it, so the second call
-        // observes the first as already queued.
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (item, picked_up) = scripted_scrape_item(release_rx);
+        let concerts = scraping_concerts(conn, working_dir.path(), item);
+
+        let request = concerts.request_scrape(concert.id).unwrap();
+
+        assert_eq!(request.admission, ScrapeAdmission::NotNeeded);
+        assert!(
+            !request.state.active_work.scrape_pending,
+            "nothing was queued, so nothing is pending"
+        );
+        assert_eq!(request.state.concert.artist, concert.artist);
+        assert_eq!(
+            picked_up.load(Ordering::SeqCst),
+            0,
+            "a concert that already has metadata is never queued"
+        );
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
+        drop(release_tx);
+    }
+
+    #[tokio::test]
+    async fn a_scrape_request_for_an_absent_concert_is_rejected() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
         let concerts =
             Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf());
 
-        assert_eq!(
-            concerts.enqueue_scrape(scraped.id).unwrap(),
-            ScrapeAdmission::NotNeeded
-        );
-        assert_eq!(
-            concerts.enqueue_scrape(unscraped.id).unwrap(),
-            ScrapeAdmission::AlreadyQueued,
-            "a one-shot process has no scrape worker to accept the work"
-        );
         assert!(matches!(
-            concerts.enqueue_scrape(i64::MAX),
+            concerts.request_scrape(i64::MAX),
             Err(ConcertCommandError::Rejected(
                 CommandRejection::NotFound { .. }
             ))
         ));
+    }
+
+    /// A one-shot process (the `concert_db` CLI) starts no scrape worker, so
+    /// there is nowhere for a request to go: the admission says exactly that and
+    /// the state shows no work, rather than pretending to have queued anything.
+    #[tokio::test]
+    async fn a_one_shot_process_reports_that_there_is_no_worker() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/one-shot");
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf());
+
+        let request = concerts.request_scrape(concert.id).unwrap();
+
+        assert_eq!(request.admission, ScrapeAdmission::NoWorker);
+        assert!(
+            !request.state.active_work.scrape_pending,
+            "a process with no worker has nothing pending"
+        );
+        assert!(request.state.concert.metadata_scraped_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn an_explicit_rescrape_reports_the_refreshed_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_scraped_concert(SeedScrapedConcert::default())
+            .unwrap();
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf())
+                .with_metadata_refresh(refresh_writing_fetched_metadata());
+
+        let state = concerts.scrape(concert.id).await.unwrap();
+
+        assert_eq!(state.concert.artist.as_deref(), Some("Fresh Artist"));
+        assert_eq!(state.concert.set_list, vec!["Fresh Song".to_string()]);
+        assert!(state.concert.metadata_scraped_at.is_some());
+        assert!(
+            !state.active_work.scrape_pending,
+            "an explicit rescrape does the work itself; it queues nothing"
+        );
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
+    }
+
+    #[tokio::test]
+    async fn a_failed_explicit_rescrape_is_a_fault_and_keeps_the_metadata() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_scraped_concert(SeedScrapedConcert::default())
+            .unwrap();
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf())
+                .with_metadata_refresh(refresh_failing());
+
+        let error = concerts.scrape(concert.id).await.unwrap_err();
+
+        assert!(
+            matches!(error, ConcertCommandError::Operational(_)),
+            "an explicit rescrape reports its failure: {error:?}"
+        );
+        let state = concerts.get(concert.id).unwrap();
+        assert_eq!(state.concert.artist, concert.artist);
+        assert!(state.concert.metadata_scraped_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn an_automatic_scrape_reports_the_refreshed_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/automatic");
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf())
+                .with_metadata_refresh(refresh_writing_fetched_metadata());
+
+        let state = concerts.ensure_scraped(concert.id).await.unwrap();
+
+        assert_eq!(state.concert.artist.as_deref(), Some("Fresh Artist"));
+        assert!(state.concert.metadata_scraped_at.is_some());
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
+    }
+
+    /// Automatic scrape keeps the long-standing tolerance: the command that
+    /// wanted the metadata proceeds without it, and the row stays unscraped so
+    /// the next view retries.
+    #[tokio::test]
+    async fn an_automatic_scrape_tolerates_a_failing_refresh() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = unscraped_listing(&conn, "https://example.org/unreachable");
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf())
+                .with_metadata_refresh(refresh_failing());
+
+        let state = concerts.ensure_scraped(concert.id).await.unwrap();
+
+        assert!(
+            state.concert.metadata_scraped_at.is_none(),
+            "a failed automatic scrape keeps the row unscraped so the next view retries"
+        );
+        assert_eq!(state.concert.title, concert.title);
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
+    }
+
+    /// A concert that already has metadata is not fetched again: the refresh is
+    /// counted, not trusted to be skipped.
+    #[tokio::test]
+    async fn an_automatic_scrape_does_not_refresh_existing_metadata() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_scraped_concert(SeedScrapedConcert::default())
+            .unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counted = attempts.clone();
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf())
+                .with_metadata_refresh(Arc::new(move |_db, _working_dir, _source_url| {
+                    counted.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                }));
+
+        let state = concerts.ensure_scraped(concert.id).await.unwrap();
+
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            0,
+            "a concert that already has metadata must not be fetched again"
+        );
+        assert_eq!(state.concert.artist, concert.artist);
+        assert_eq!(state.concert.set_list, concert.set_list);
+        assert!(state.concert.metadata_scraped_at.is_some());
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
