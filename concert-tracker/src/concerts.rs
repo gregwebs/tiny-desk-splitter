@@ -95,6 +95,32 @@ pub struct JobRequestResult {
     pub state: ConcertState,
 }
 
+/// What asking for download, split, or prepare work did. A request that cannot
+/// be admitted is a rejection — an expected domain outcome — while a genuine
+/// fault stays an `Err`. Both ways of refusing carry the latest Concert State
+/// when the concert can be observed, so a caller that re-renders does not need a
+/// second query to explain why nothing started.
+#[derive(Debug)]
+pub enum JobRequestOutcome {
+    /// The Job Run was admitted, was already active, or had nothing to do. The
+    /// state is the Concert State observed after persistent admission.
+    Accepted(JobRequestResult),
+    /// The concert cannot be asked for that work.
+    Rejected(JobRejection),
+}
+
+/// Why a Job Request was refused, with the Concert State to render beside it.
+#[derive(Debug)]
+pub struct JobRejection {
+    /// The precise reason, in the same vocabulary as the other command
+    /// rejections, so an adapter keeps one mapping.
+    pub reason: CommandRejection,
+    /// The latest Concert State, when the concert could be observed at all: a
+    /// concert that does not exist has none, while one that exists and cannot be
+    /// prepared carries the state it was refused in.
+    pub state: Option<ConcertState>,
+}
+
 fn download_admission(outcome: crate::jobs::download::StartOutcome) -> JobAdmission {
     match outcome {
         crate::jobs::download::StartOutcome::Spawned => JobAdmission::Admitted,
@@ -108,6 +134,53 @@ fn split_admission(outcome: crate::jobs::split::StartOutcome) -> JobAdmission {
         crate::jobs::split::StartOutcome::AlreadyRunning => JobAdmission::AlreadyRunning,
         crate::jobs::split::StartOutcome::NotDownloaded => JobAdmission::NothingToDo,
     }
+}
+
+/// How preparation is reported: `Ready` means every track already exists, so
+/// there was nothing left to start, and otherwise the observation made before the
+/// request decides whether this one started the chain.
+fn prepare_admission(
+    outcome: crate::jobs::prepare::PrepareOutcome,
+    already_active: bool,
+) -> JobAdmission {
+    match outcome {
+        crate::jobs::prepare::PrepareOutcome::Ready => JobAdmission::NothingToDo,
+        _ if already_active => JobAdmission::AlreadyRunning,
+        _ => JobAdmission::Admitted,
+    }
+}
+
+/// A Job Request's accepted/rejected outcome, from its private admission step.
+fn job_request_outcome(
+    concerts: &Concerts,
+    result: Result<JobRequestResult, ConcertCommandError>,
+) -> Result<JobRequestOutcome, ConcertCommandError> {
+    match result {
+        Ok(result) => Ok(JobRequestOutcome::Accepted(result)),
+        Err(error) => job_request_rejection(concerts, error),
+    }
+}
+
+/// A refused Job Request is an outcome, not an error, so it is turned back into a
+/// value here — carrying the latest Concert State when the concert can still be
+/// observed. Only a genuine fault stays an `Err`.
+fn job_request_rejection(
+    concerts: &Concerts,
+    error: ConcertCommandError,
+) -> Result<JobRequestOutcome, ConcertCommandError> {
+    let reason = match error {
+        ConcertCommandError::Rejected(reason) => reason,
+        error @ ConcertCommandError::Operational(_) => return Err(error),
+    };
+    let state = match concerts.get(reason.concert_id()) {
+        Ok(state) => Some(state),
+        // The concert is gone, so there is no state to attach.
+        Err(ConcertQueryError::NotFound { .. }) => None,
+        Err(error @ ConcertQueryError::Operational(_)) => {
+            return Err(ConcertCommandError::from(error))
+        }
+    };
+    Ok(JobRequestOutcome::Rejected(JobRejection { reason, state }))
 }
 
 /// What asking for an archive Job Run did. Both outcomes carry the Concert State
@@ -285,6 +358,22 @@ impl std::fmt::Display for CommandRejection {
                 concert_id,
                 message,
             } => write!(formatter, "concert {concert_id}: {message}"),
+        }
+    }
+}
+
+impl CommandRejection {
+    /// The concert the rejection is about. Every rejection names one, so a
+    /// caller that wants to attach the latest Concert State does not have to
+    /// match every variant.
+    pub fn concert_id(&self) -> i64 {
+        match self {
+            Self::NotFound { concert_id }
+            | Self::NoSuchTrack { concert_id, .. }
+            | Self::MissingMedia { concert_id, .. }
+            | Self::SourceNotRedundant { concert_id }
+            | Self::Conflict { concert_id, .. }
+            | Self::Invalid { concert_id, .. } => *concert_id,
         }
     }
 }
@@ -558,6 +647,13 @@ impl Concerts {
     pub async fn request_download(
         &self,
         concert_id: i64,
+    ) -> Result<JobRequestOutcome, ConcertCommandError> {
+        job_request_outcome(self, self.admit_download(concert_id).await)
+    }
+
+    async fn admit_download(
+        &self,
+        concert_id: i64,
     ) -> Result<JobRequestResult, ConcertCommandError> {
         let jobs = self.job_config()?;
         self.ensure_scraped(concert_id).await?;
@@ -580,12 +676,7 @@ impl Concerts {
         // Whether the chain was already in flight decides how the admission is
         // reported; preparation itself cannot tell an established run from a new
         // one.
-        let already_active = {
-            let state = self.command_state(concert_id)?;
-            state.active_work.download.registry_active
-                || state.active_work.split.registry_active
-                || state.active_work.split_queued_after_download
-        };
+        let already_active = self.chain_active(concert_id)?;
         match crate::jobs::prepare::prepare(
             self.db.clone(),
             self.registry.clone(),
@@ -655,7 +746,11 @@ impl Concerts {
     pub async fn request_split(
         &self,
         concert_id: i64,
-    ) -> Result<JobRequestResult, ConcertCommandError> {
+    ) -> Result<JobRequestOutcome, ConcertCommandError> {
+        job_request_outcome(self, self.admit_split(concert_id).await)
+    }
+
+    async fn admit_split(&self, concert_id: i64) -> Result<JobRequestResult, ConcertCommandError> {
         let jobs = self.job_config()?;
         {
             let conn = self.lock_db()?;
@@ -679,27 +774,52 @@ impl Concerts {
     /// Make every track playable: scrape metadata when absent, then ensure the
     /// download → split chain is running. Idempotent, so a repeat call (or a
     /// click on a track that is still downloading) is safe.
-    pub async fn prepare(&self, concert_id: i64) -> Result<ConcertState, ConcertCommandError> {
+    pub async fn prepare(&self, concert_id: i64) -> Result<JobRequestOutcome, ConcertCommandError> {
+        job_request_outcome(self, self.admit_prepare(concert_id).await)
+    }
+
+    async fn admit_prepare(
+        &self,
+        concert_id: i64,
+    ) -> Result<JobRequestResult, ConcertCommandError> {
         let jobs = self.job_config()?;
         self.ensure_scraped(concert_id).await?;
-        if let Err(error) =
+        // Whether the chain was already in flight decides how the admission is
+        // reported; preparation itself cannot tell an established run from a new
+        // one.
+        let already_active = self.chain_active(concert_id)?;
+        let outcome =
             crate::jobs::prepare::prepare(self.db.clone(), self.registry.clone(), jobs, concert_id)
-                .await
-        {
-            if error
-                .downcast_ref::<crate::jobs::prepare::NoSetList>()
-                .is_some()
+                .await;
+        match outcome {
+            Ok(outcome) => Ok(JobRequestResult {
+                admission: prepare_admission(outcome, already_active),
+                state: self.command_state(concert_id)?,
+            }),
+            Err(error)
+                if error
+                    .downcast_ref::<crate::jobs::prepare::NoSetList>()
+                    .is_some() =>
             {
                 // The user can fix this by scraping metadata, so it is a
                 // rejection rather than a fault.
-                return Err(ConcertCommandError::Rejected(CommandRejection::Invalid {
+                Err(ConcertCommandError::Rejected(CommandRejection::Invalid {
                     concert_id,
                     message: error.to_string(),
-                }));
+                }))
             }
-            return Err(ConcertCommandError::Operational(error));
+            Err(error) => Err(ConcertCommandError::Operational(error)),
         }
-        self.command_state(concert_id)
+    }
+
+    /// Whether the download → split chain is already in flight. Admission cannot
+    /// tell an established run from a new one, so the observation made before a
+    /// request is what decides how its admission is reported.
+    fn chain_active(&self, concert_id: i64) -> Result<bool, ConcertCommandError> {
+        let state = self.command_state(concert_id)?;
+        Ok(state.active_work.download.registry_active
+            || state.active_work.split.registry_active
+            || state.active_work.split_queued_after_download)
     }
 
     /// Cancel the concert's active Job Run of one kind. Cancellation goes
@@ -1689,6 +1809,8 @@ mod tests {
     use crate::jobs::scrape_queue::ScrapeQueue;
     use crate::playback::PlaybackPlan;
     use crate::split_timestamps::TimestampPayload;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tokio::process::Command;
 
     #[tokio::test]
     async fn get_returns_complete_state_for_a_concert_with_media() {
@@ -3176,27 +3298,165 @@ mod tests {
         }
     }
 
-    /// A Job config whose download and split commands never finish on their own,
-    /// so admitted work is still observable when the assertion runs.
-    fn with_blocking_jobs(conn: rusqlite::Connection, working_dir: &std::path::Path) -> Concerts {
-        use tokio::process::Command;
-        fn blocking() -> Command {
-            let mut command = Command::new("sleep");
-            command.arg("30");
-            command
-        }
+    /// A `Concerts` that admits Job Runs into a Job config the test chose.
+    fn with_jobs(
+        conn: rusqlite::Connection,
+        working_dir: &std::path::Path,
+        config: JobConfig,
+    ) -> Concerts {
         Concerts::new(
             Arc::new(Mutex::new(conn)),
             working_dir.to_path_buf(),
             Arc::new(JobRegistry::new()),
             ScrapeQueue::detached(),
-            crate::jobs::JobConfig::from_commands(
+            config,
+        )
+    }
+
+    /// A Job config whose download and split commands never finish on their own,
+    /// so admitted work is still observable when the assertion runs.
+    fn with_blocking_jobs(conn: rusqlite::Connection, working_dir: &std::path::Path) -> Concerts {
+        fn blocking() -> Command {
+            let mut command = Command::new("sleep");
+            command.arg("30");
+            command
+        }
+        with_jobs(
+            conn,
+            working_dir,
+            JobConfig::from_commands(
                 working_dir.to_path_buf(),
                 Arc::new(|_| blocking()),
                 Arc::new(|_| blocking()),
                 Arc::new(|_| Command::new("true")),
             ),
         )
+    }
+
+    /// A Job config that runs the download → split chain's shape without a
+    /// downloader or the splitter binary: the download command writes the source
+    /// file, the split command writes every track's file and the analysis
+    /// timestamps the success commit reads. `download_failures` downloads fail
+    /// (recording a Failed Job) before one succeeds, which is how a retry after
+    /// failure is set up.
+    fn chain_config(working_dir: &std::path::Path, download_failures: usize) -> JobConfig {
+        let remaining_failures = Arc::new(AtomicUsize::new(download_failures));
+        JobConfig::from_commands(
+            working_dir.to_path_buf(),
+            Arc::new(move |job: &crate::jobs::DownloadJob| {
+                let mut command = Command::new("sh");
+                let failing = remaining_failures
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                        remaining.checked_sub(1)
+                    })
+                    .is_ok_and(|previous| previous > 0);
+                if failing {
+                    command.args(["-c", "echo boom >&2; exit 7"]);
+                    return command;
+                }
+                let source_dir = crate::model::concert_dir(&job.working_dir, &job.album);
+                command.args([
+                    "-c",
+                    &format!(
+                        "mkdir -p '{0}' && printf video > '{0}/{1}.mp4'",
+                        source_dir.display(),
+                        job.album
+                    ),
+                ]);
+                command
+            }),
+            Arc::new(|job: &crate::jobs::SplitJob| {
+                let mut script = String::new();
+                let mut timestamps = Vec::new();
+                for (index, song) in job.concert.set_list.iter().enumerate() {
+                    script.push_str(&format!(
+                        "touch '{}/{}.m4a'; ",
+                        job.output_dir.display(),
+                        crate::model::sanitize_filename(&song.title)
+                    ));
+                    timestamps.push(serde_json::json!({
+                        "title": song.title,
+                        "start_time": index as f64 * 10.0,
+                        "end_time": (index + 1) as f64 * 10.0,
+                        "duration": 10.0,
+                    }));
+                }
+                let analysis = serde_json::json!({
+                    "artist": "",
+                    "source": "",
+                    "show": "",
+                    "album": "",
+                    "set_list": [],
+                    "musicians": [],
+                    "timestamps": timestamps,
+                });
+                script.push_str(&format!(
+                    "printf '%s' '{}' > '{}/timestamps.json'",
+                    analysis,
+                    job.output_dir.display()
+                ));
+                let mut command = Command::new("sh");
+                command.args(["-c", &script]);
+                command
+            }),
+            Arc::new(|_| Command::new("true")),
+        )
+    }
+
+    /// A seeded concert whose download → split chain can run to completion.
+    fn chain_concert(conn: &rusqlite::Connection, album: &str) -> Concert {
+        SeedContext::new(conn)
+            .seed_scraped_concert(SeedScrapedConcert {
+                album: Some(album.to_string()),
+                set_list: Some(vec!["Song A".to_string(), "Song B".to_string()]),
+                ..SeedScrapedConcert::default()
+            })
+            .unwrap()
+    }
+
+    /// The accepted half of a Job Request outcome, or a panic naming the
+    /// rejection the test did not expect.
+    fn accepted(outcome: JobRequestOutcome) -> JobRequestResult {
+        match outcome {
+            JobRequestOutcome::Accepted(result) => result,
+            JobRequestOutcome::Rejected(rejection) => {
+                panic!(
+                    "expected an accepted Job Request, got {:?}",
+                    rejection.reason
+                )
+            }
+        }
+    }
+
+    /// The rejected half of a Job Request outcome, or a panic naming the
+    /// admission the test did not expect.
+    fn rejected(outcome: JobRequestOutcome) -> JobRejection {
+        match outcome {
+            JobRequestOutcome::Rejected(rejection) => rejection,
+            JobRequestOutcome::Accepted(result) => panic!(
+                "expected a rejected Job Request, got {:?}",
+                result.admission
+            ),
+        }
+    }
+
+    /// Poll the observed Concert State until `check` holds. A Job Run completes
+    /// on its own task, so a fact that only becomes true after one finishes has
+    /// to be waited for; the failure names the wait.
+    async fn wait_for_state(
+        concerts: &Concerts,
+        concert_id: i64,
+        what: &str,
+        check: impl Fn(&ConcertState) -> bool,
+    ) -> ConcertState {
+        for _ in 0..200 {
+            let state = concerts.get(concert_id).unwrap();
+            if check(&state) {
+                return state;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("timed out waiting for {what}");
     }
 
     /// Seed a concert whose archive symlink exists at `archive_dir/<album>` and
@@ -3447,16 +3707,18 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let state = concerts.request_download(concert.id).await.unwrap().state;
+        let request = accepted(concerts.request_download(concert.id).await.unwrap());
 
+        assert_eq!(request.admission, JobAdmission::Admitted);
         assert!(
-            state.active_work.download.registry_active,
+            request.state.active_work.download.registry_active,
             "the download should be running"
         );
         assert!(
-            state.active_work.split_queued_after_download,
+            request.state.active_work.split_queued_after_download,
             "the split should wait behind the download"
         );
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
@@ -3471,13 +3733,15 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let state = concerts.request_download(concert.id).await.unwrap().state;
+        let request = accepted(concerts.request_download(concert.id).await.unwrap());
 
-        assert!(state.active_work.download.registry_active);
+        assert_eq!(request.admission, JobAdmission::Admitted);
+        assert!(request.state.active_work.download.registry_active);
         assert!(
-            !state.active_work.split_queued_after_download,
+            !request.state.active_work.split_queued_after_download,
             "there is nothing to split, so no split may be queued"
         );
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
@@ -3489,8 +3753,8 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let first = concerts.request_download(concert.id).await.unwrap();
-        let second = concerts.request_download(concert.id).await.unwrap();
+        let first = accepted(concerts.request_download(concert.id).await.unwrap());
+        let second = accepted(concerts.request_download(concert.id).await.unwrap());
 
         assert_eq!(first.admission, JobAdmission::Admitted);
         assert_eq!(
@@ -3498,20 +3762,14 @@ mod tests {
             JobAdmission::AlreadyRunning,
             "the second request finds the chain already running"
         );
-    }
-
-    #[tokio::test]
-    async fn a_split_request_without_a_source_reports_nothing_to_do() {
-        let working_dir = tempfile::tempdir().unwrap();
-        let conn = db::connection::open_in_memory().unwrap();
-        let concert = SeedContext::new(&conn)
-            .seed_scraped_concert(SeedScrapedConcert::default())
-            .unwrap();
-        let concerts = with_blocking_jobs(conn, working_dir.path());
-
-        let request = concerts.request_split(concert.id).await.unwrap();
-
-        assert_eq!(request.admission, JobAdmission::NothingToDo);
+        assert_eq!(
+            event_names(&concerts, concert.id)
+                .iter()
+                .filter(|event| *event == "download_started")
+                .count(),
+            1,
+            "a repeat request must not start a second Job Run"
+        );
     }
 
     #[tokio::test]
@@ -3524,16 +3782,17 @@ mod tests {
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
         concerts.request_download(concert.id).await.unwrap();
-        let state = concerts.request_download(concert.id).await.unwrap().state;
+        let state = accepted(concerts.request_download(concert.id).await.unwrap()).state;
 
         assert!(
             state.active_work.split_queued_after_download,
             "a repeated request must not drop the queued split"
         );
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
-    async fn a_split_request_without_a_source_is_accepted_and_does_nothing() {
+    async fn a_split_request_without_a_source_is_accepted_and_reports_nothing_to_do() {
         let working_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
         let concert = SeedContext::new(&conn)
@@ -3541,14 +3800,183 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let state = concerts.request_split(concert.id).await.unwrap().state;
+        let request = accepted(concerts.request_split(concert.id).await.unwrap());
 
-        assert!(!state.active_work.split.registry_active);
-        assert!(!state.active_work.split.persisted_started);
+        assert_eq!(request.admission, JobAdmission::NothingToDo);
+        assert!(!request.state.active_work.split.registry_active);
+        assert!(!request.state.active_work.split.persisted_started);
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
-    async fn cancelling_a_running_job_is_reported_and_repeating_it_is_not_an_error() {
+    async fn a_download_request_with_nothing_left_to_run_reports_nothing_to_do() {
+        // Every track is on disk and the source is recorded, but the split was
+        // never recorded: preparation reconciles the record and starts nothing,
+        // which is what the Download control not being offered promised.
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some("Already Complete".to_string()),
+                        set_list: Some(vec!["Song A".to_string(), "Song B".to_string()]),
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    track_files: Some(vec![0, 1]),
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        let concerts = with_jobs(
+            conn,
+            working_dir.path(),
+            chain_config(working_dir.path(), 0),
+        );
+
+        let observed = concerts.get(concert.id).unwrap();
+        assert!(
+            !observed.permitted_actions.can_download,
+            "the concert is already downloaded, so the control is not offered"
+        );
+
+        let request = accepted(concerts.request_download(concert.id).await.unwrap());
+
+        assert_eq!(
+            request.admission,
+            JobAdmission::NothingToDo,
+            "a request the state did not offer must not start work"
+        );
+        assert!(!request.state.active_work.download.registry_active);
+        assert!(!request.state.active_work.download.persisted_started);
+        assert!(!request.state.active_work.split_queued_after_download);
+    }
+
+    #[tokio::test]
+    async fn the_split_queued_behind_a_download_runs_when_the_download_succeeds() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = chain_concert(&conn, "Chained Album");
+        let concerts = with_jobs(
+            conn,
+            working_dir.path(),
+            chain_config(working_dir.path(), 0),
+        );
+
+        let request = accepted(concerts.request_download(concert.id).await.unwrap());
+        assert_eq!(request.admission, JobAdmission::Admitted);
+        assert!(request.state.active_work.split_queued_after_download);
+
+        let state = wait_for_state(
+            &concerts,
+            concert.id,
+            "the split queued behind the download to run",
+            |state| state.concert.split_status() == SplitStatus::Split,
+        )
+        .await;
+
+        assert_eq!(
+            state.concert.download_status(),
+            DownloadStatus::Downloaded,
+            "the download the split depended on must have succeeded first"
+        );
+        assert_eq!(
+            state
+                .tracks
+                .iter()
+                .map(|track| track.persisted_available)
+                .collect::<Vec<_>>(),
+            vec![true, true]
+        );
+        assert!(!state.active_work.download.registry_active);
+        assert!(!state.active_work.split.registry_active);
+        assert!(
+            !state.active_work.split_queued_after_download,
+            "the finished dependency edge must not linger"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_download_is_terminal_drops_the_queued_split_and_a_retry_runs_the_chain() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = chain_concert(&conn, "Retry Album");
+        let concerts = with_jobs(
+            conn,
+            working_dir.path(),
+            chain_config(working_dir.path(), 1),
+        );
+
+        let request = accepted(concerts.request_download(concert.id).await.unwrap());
+        assert!(request.state.active_work.split_queued_after_download);
+
+        let failed = wait_for_state(&concerts, concert.id, "the download to fail", |state| {
+            state.concert.download_status() == DownloadStatus::DownloadError
+        })
+        .await;
+
+        assert!(!failed.active_work.download.registry_active);
+        assert!(
+            !failed.active_work.split_queued_after_download,
+            "a failed download drops the split queued behind it"
+        );
+        assert_eq!(
+            failed.concert.split_status(),
+            SplitStatus::NotSplit,
+            "the split must never have run"
+        );
+        let failed_jobs = concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(
+            failed_jobs
+                .iter()
+                .filter(|job| job.name == "download")
+                .count(),
+            1,
+            "the failure is recorded as Failed Job history"
+        );
+        assert!(
+            failed.permitted_actions.can_download,
+            "a failed download is terminal, so the control comes back"
+        );
+
+        let retried = accepted(concerts.request_download(concert.id).await.unwrap());
+        assert_eq!(
+            retried.admission,
+            JobAdmission::Admitted,
+            "a retried request moves the concert out of the failure"
+        );
+
+        let recovered = wait_for_state(
+            &concerts,
+            concert.id,
+            "the retried download to run its split",
+            |state| state.concert.split_status() == SplitStatus::Split,
+        )
+        .await;
+        assert_eq!(
+            recovered.concert.download_status(),
+            DownloadStatus::Downloaded
+        );
+        assert_eq!(
+            recovered
+                .tracks
+                .iter()
+                .map(|track| track.persisted_available)
+                .collect::<Vec<_>>(),
+            vec![true, true]
+        );
+        assert_eq!(
+            concerts.failed_job_history(concert.id).unwrap().len(),
+            1,
+            "the retry succeeds, so it records no second Failed Job"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_download_is_reported_and_repeating_it_is_not_an_error() {
         let working_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
         let concert = SeedContext::new(&conn)
@@ -3556,6 +3984,14 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
         concerts.request_download(concert.id).await.unwrap();
+        assert!(
+            !concerts
+                .get(concert.id)
+                .unwrap()
+                .permitted_actions
+                .can_download,
+            "a running download withdraws the control"
+        );
 
         let cancelled = concerts.cancel_job(concert.id, JobKind::Download).unwrap();
         assert!(matches!(cancelled, JobCancellation::Cancelled(_)));
@@ -3564,12 +4000,77 @@ mod tests {
             DownloadStatus::DownloadError,
             "a cancelled download is a terminal unsuccessful outcome"
         );
+        assert!(
+            cancelled.state().permitted_actions.can_download,
+            "cancellation is terminal, so the control comes back"
+        );
+        assert_is_current_state(cancelled.state(), &concerts.get(concert.id).unwrap());
+
+        let failed = concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(
+            failed.len(),
+            1,
+            "cancellation must reach exactly one terminal outcome"
+        );
+        assert_eq!(failed[0].name, "download");
+        assert_eq!(failed[0].failure_message, "cancelled by user");
 
         let again = concerts.cancel_job(concert.id, JobKind::Download).unwrap();
         assert!(
             matches!(again, JobCancellation::NothingActive(_)),
             "cancelling nothing is an outcome, not a failure"
         );
+        assert_eq!(
+            concerts.failed_job_history(concert.id).unwrap().len(),
+            1,
+            "asking again records no second terminal outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_split_returns_the_refreshed_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        let concerts = with_blocking_jobs(conn, working_dir.path());
+
+        let request = accepted(concerts.request_split(concert.id).await.unwrap());
+        assert_eq!(request.admission, JobAdmission::Admitted);
+        assert!(request.state.active_work.split.registry_active);
+        assert!(request.state.permitted_actions.tracks_busy);
+
+        let cancelled = concerts.cancel_job(concert.id, JobKind::Split).unwrap();
+        assert!(matches!(cancelled, JobCancellation::Cancelled(_)));
+        assert_eq!(
+            cancelled.state().concert.split_status(),
+            SplitStatus::SplitError,
+            "a cancelled split is a terminal unsuccessful outcome"
+        );
+        assert!(cancelled.state().concert.split_at.is_none());
+        assert!(!cancelled.state().permitted_actions.tracks_busy);
+        assert_is_current_state(cancelled.state(), &concerts.get(concert.id).unwrap());
+
+        let failed = concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "split");
+        assert_eq!(failed[0].failure_message, "cancelled by user");
+
+        assert!(matches!(
+            concerts.cancel_job(concert.id, JobKind::Split).unwrap(),
+            JobCancellation::NothingActive(_)
+        ));
     }
 
     #[tokio::test]
@@ -3581,14 +4082,16 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let state = concerts.prepare(concert.id).await.unwrap();
+        let request = accepted(concerts.prepare(concert.id).await.unwrap());
 
-        assert!(state.active_work.download.registry_active);
-        assert!(state.active_work.split_queued_after_download);
+        assert_eq!(request.admission, JobAdmission::Admitted);
+        assert!(request.state.active_work.download.registry_active);
+        assert!(request.state.active_work.split_queued_after_download);
+        assert_is_current_state(&request.state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
-    async fn preparing_without_a_set_list_is_an_invalid_rejection() {
+    async fn preparing_without_a_set_list_is_rejected_with_the_latest_state() {
         let working_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
         let concert = SeedContext::new(&conn)
@@ -3599,14 +4102,14 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let outcome = concerts.prepare(concert.id).await;
+        let rejection = rejected(concerts.prepare(concert.id).await.unwrap());
 
-        match outcome {
-            Err(ConcertCommandError::Rejected(CommandRejection::Invalid {
+        match &rejection.reason {
+            CommandRejection::Invalid {
                 concert_id,
                 message,
-            })) => {
-                assert_eq!(concert_id, concert.id);
+            } => {
+                assert_eq!(*concert_id, concert.id);
                 assert!(
                     message.contains("no set list"),
                     "the rejection should say what to fix: {message}"
@@ -3614,28 +4117,35 @@ mod tests {
             }
             other => panic!("expected an invalid rejection, got {other:?}"),
         }
+        let state = rejection
+            .state
+            .expect("a concert that exists carries the state it was refused in");
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
     }
 
     #[tokio::test]
-    async fn job_requests_are_rejected_for_an_absent_concert() {
+    async fn job_requests_are_rejected_for_an_absent_concert_without_a_state() {
         let working_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
         let missing = i64::MAX;
 
         for outcome in [
-            concerts.request_download(missing).await.map(|_| ()),
-            concerts.request_split(missing).await.map(|_| ()),
-            concerts.prepare(missing).await.map(|_| ()),
+            concerts.request_download(missing).await.unwrap(),
+            concerts.request_split(missing).await.unwrap(),
+            concerts.prepare(missing).await.unwrap(),
         ] {
+            let rejection = rejected(outcome);
             assert!(
                 matches!(
-                    outcome,
-                    Err(ConcertCommandError::Rejected(
-                        CommandRejection::NotFound { concert_id }
-                    )) if concert_id == missing
+                    rejection.reason,
+                    CommandRejection::NotFound { concert_id } if concert_id == missing
                 ),
                 "an absent concert is a rejection, not a fault"
+            );
+            assert!(
+                rejection.state.is_none(),
+                "there is no Concert State to attach to an absent concert"
             );
         }
     }
