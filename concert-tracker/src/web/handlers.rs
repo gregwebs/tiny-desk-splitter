@@ -1748,7 +1748,7 @@ pub async fn settings_save(
 /// (no archive location configured, not archived, an archive in flight). That is
 /// this endpoint's long-standing protocol, so the adapter keeps it while the
 /// interface decides what the answer is.
-fn archive_command_error(error: ConcertCommandError) -> AppError {
+fn archive_endpoint_error(error: ConcertCommandError) -> AppError {
     match error {
         ConcertCommandError::Rejected(rejection) => {
             AppError::Internal(anyhow::anyhow!("{rejection}"))
@@ -1757,19 +1757,31 @@ fn archive_command_error(error: ConcertCommandError) -> AppError {
     }
 }
 
+/// Both archive routes answer a command that went through by reloading the page:
+/// the card, the Archived chip, and the Archived filter all change together, and
+/// these endpoints have always refreshed rather than swapped a fragment.
+fn page_refresh() -> Response {
+    let mut headers = HeaderMap::new();
+    headers.insert("HX-Refresh", "true".parse().unwrap());
+    (headers, "").into_response()
+}
+
 pub async fn archive(
     State(state): State<AppState>,
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
-    state
+    let outcome = state
         .concerts
         .request_archive(id)
         .await
-        .map_err(archive_command_error)?;
+        .map_err(archive_endpoint_error)?;
 
-    let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((headers, "").into_response())
+    match outcome {
+        JobRequestOutcome::Accepted(_) => Ok(page_refresh()),
+        JobRequestOutcome::Rejected(JobRejection { reason, .. }) => Err(archive_endpoint_error(
+            ConcertCommandError::Rejected(reason),
+        )),
+    }
 }
 
 pub async fn unarchive(
@@ -1780,11 +1792,9 @@ pub async fn unarchive(
         .concerts
         .unarchive(id)
         .await
-        .map_err(archive_command_error)?;
+        .map_err(archive_endpoint_error)?;
 
-    let mut headers = HeaderMap::new();
-    headers.insert("HX-Refresh", "true".parse().unwrap());
-    Ok((headers, "").into_response())
+    Ok(page_refresh())
 }
 
 /// Build the `path` component for the post-sync `HX-Location` redirect,
@@ -3324,6 +3334,63 @@ mod tests {
         assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
         let body = body_text(response).await;
         assert!(body.contains("no set list"), "{body}");
+    }
+
+    /// `POST /concerts/:id/archive` on a concert with no configured archive
+    /// location keeps this endpoint's own 500, message and all: the interface
+    /// decides the request is refused, the adapter decides that this protocol has
+    /// always answered a refusal with a server error.
+    #[tokio::test]
+    async fn archiving_what_cannot_be_archived_is_this_endpoints_own_500() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                downloaded: true,
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        match archive(State(state), Path(id)).await {
+            Ok(_) => panic!("no archive location means the request is refused"),
+            Err(error) => {
+                let response = error.into_response();
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let body = body_text(response).await;
+                assert!(
+                    body.contains("archive location is not configured"),
+                    "{body}"
+                );
+            }
+        }
+    }
+
+    /// `POST /concerts/:id/unarchive` on a concert that is not archived keeps
+    /// this endpoint's own 500 as well.
+    #[tokio::test]
+    async fn unarchiving_what_is_not_archived_is_this_endpoints_own_500() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                downloaded: true,
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        match unarchive(State(state), Path(id)).await {
+            Ok(_) => panic!("an unarchived concert cannot be unarchived"),
+            Err(error) => {
+                let response = error.into_response();
+                assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+                let body = body_text(response).await;
+                assert!(body.contains("is not archived"), "{body}");
+            }
+        }
     }
 
     // ── rescrape route ───────────────────────────────────────────────────────

@@ -81,8 +81,9 @@ pub enum JobAdmission {
     Admitted,
     /// The same Job Run was already active, so the request changed nothing.
     AlreadyRunning,
-    /// There was nothing to run: a split whose source is not downloaded, or a
-    /// download whose source is already on disk and recorded.
+    /// There was nothing to run: a split whose source is not downloaded, a
+    /// download whose source is already on disk and recorded, or an archive of
+    /// a concert with neither a download nor a split to move.
     NothingToDo,
 }
 
@@ -95,9 +96,9 @@ pub struct JobRequestResult {
     pub state: ConcertState,
 }
 
-/// What asking for download, split, or prepare work did. A request that cannot
-/// be admitted is a rejection — an expected domain outcome — while a genuine
-/// fault stays an `Err`. Both ways of refusing carry the latest Concert State
+/// What asking for download, split, prepare, or archive work did. A request that
+/// cannot be admitted is a rejection — an expected domain outcome — while a
+/// genuine fault stays an `Err`. A rejection carries the latest Concert State
 /// when the concert can be observed, so a caller that re-renders does not need a
 /// second query to explain why nothing started.
 #[derive(Debug)]
@@ -133,6 +134,14 @@ fn split_admission(outcome: crate::jobs::split::StartOutcome) -> JobAdmission {
         crate::jobs::split::StartOutcome::Spawned => JobAdmission::Admitted,
         crate::jobs::split::StartOutcome::AlreadyRunning => JobAdmission::AlreadyRunning,
         crate::jobs::split::StartOutcome::NotDownloaded => JobAdmission::NothingToDo,
+    }
+}
+
+fn archive_admission(outcome: crate::jobs::archive::StartOutcome) -> JobAdmission {
+    match outcome {
+        crate::jobs::archive::StartOutcome::Spawned => JobAdmission::Admitted,
+        crate::jobs::archive::StartOutcome::AlreadyRunning => JobAdmission::AlreadyRunning,
+        crate::jobs::archive::StartOutcome::NothingToArchive => JobAdmission::NothingToDo,
     }
 }
 
@@ -174,26 +183,6 @@ fn job_request_rejection(
     };
     let state = concerts.latest_state(reason.concert_id())?;
     Ok(JobRequestOutcome::Rejected(JobRejection { reason, state }))
-}
-
-/// What asking for an archive Job Run did. Both outcomes carry the Concert State
-/// observed after the attempt, because "nothing to archive" is still worth
-/// rendering.
-#[derive(Debug)]
-pub enum ArchiveOutcome {
-    /// Archive work was admitted (or was already running).
-    Accepted(ConcertState),
-    /// The concert has neither a download nor a split, so there is nothing to
-    /// move into the archive location.
-    NothingToArchive(ConcertState),
-}
-
-impl ArchiveOutcome {
-    pub fn state(&self) -> &ConcertState {
-        match self {
-            Self::Accepted(state) | Self::NothingToArchive(state) => state,
-        }
-    }
 }
 
 /// What asking for a background scrape did. A scrape is queued work, not a Job
@@ -926,19 +915,30 @@ impl Concerts {
     // so it has no Job Run, no cancellation, and no recovery of its own.
 
     /// Ask for the concert's media to be moved into the configured archive
-    /// location. A concert with neither a download nor a split has nothing to
-    /// archive, which is an outcome rather than a failure.
+    /// location. Archiving is a Job Run, so it is admitted through the same Job
+    /// Request path as download and split: there is nothing to do when the media
+    /// is already in the archive or the concert has neither a download nor a
+    /// split, and a concert that cannot be archived at all — no archive location
+    /// configured — is a rejection carrying the latest state.
     pub async fn request_archive(
         &self,
         concert_id: i64,
-    ) -> Result<ArchiveOutcome, ConcertCommandError> {
-        let _jobs = self.job_config()?;
-        let archive_location = {
+    ) -> Result<JobRequestOutcome, ConcertCommandError> {
+        job_request_outcome(self, self.admit_archive(concert_id).await)
+    }
+
+    async fn admit_archive(
+        &self,
+        concert_id: i64,
+    ) -> Result<JobRequestResult, ConcertCommandError> {
+        self.job_config()?;
+        let (archive_location, already_archived) = {
             let conn = self.lock_db()?;
-            self.ensure_exists(&conn, concert_id)?;
-            db::settings::get_settings(&conn)
+            let concert = self.load(&conn, concert_id)?.concert;
+            let archive_location = db::settings::get_settings(&conn)
                 .map_err(ConcertCommandError::Operational)?
-                .archive_location
+                .archive_location;
+            (archive_location, concert.archived_at.is_some())
         };
         let Some(archive_location) = archive_location else {
             return Err(ConcertCommandError::Rejected(CommandRejection::Conflict {
@@ -946,6 +946,16 @@ impl Concerts {
                 message: "archive location is not configured".to_string(),
             }));
         };
+        // The media is already in the archive location. Answered here rather than
+        // by letting the engine refuse the second start, so `AlreadyRunning` keeps
+        // meaning "a Job Run of this kind is active", which is what the state this
+        // outcome carries shows.
+        if already_archived {
+            return Ok(JobRequestResult {
+                admission: JobAdmission::NothingToDo,
+                state: self.command_state(concert_id)?,
+            });
+        }
         let outcome = crate::jobs::archive::start_archive(
             self.db.clone(),
             self.registry.clone(),
@@ -955,19 +965,16 @@ impl Concerts {
         )
         .await
         .map_err(ConcertCommandError::Operational)?;
-        let state = self.command_state(concert_id)?;
-        Ok(match outcome {
-            crate::jobs::archive::StartOutcome::NothingToArchive => {
-                ArchiveOutcome::NothingToArchive(state)
-            }
-            _ => ArchiveOutcome::Accepted(state),
+        Ok(JobRequestResult {
+            admission: archive_admission(outcome),
+            state: self.command_state(concert_id)?,
         })
     }
 
     /// Move the concert's media back from the archive location and clear its
     /// archive lifecycle. Every eligibility check, the filesystem work, the
-    /// persistence, and the failure record live here, so an adapter only
-    /// translates. The work runs on a blocking thread because it is file IO.
+    /// persistence, and the best-effort failure record live here, so an adapter
+    /// only translates. The work runs on a blocking thread because it is file IO.
     pub async fn unarchive(&self, concert_id: i64) -> Result<ConcertState, ConcertCommandError> {
         let album = {
             let conn = self.lock_db()?;
@@ -1957,7 +1964,8 @@ mod tests {
     use super::*;
     use crate::db;
     use crate::db::seeds::{
-        SeedContext, SeedLifecycleConcert, SeedListing, SeedMediaConcert, SeedScrapedConcert,
+        SeedAlbumNullConcert, SeedContext, SeedLifecycleConcert, SeedListing, SeedMediaConcert,
+        SeedScrapedConcert,
     };
     use crate::jobs::scrape_queue::ScrapeQueue;
     use crate::playback::PlaybackPlan;
@@ -3818,21 +3826,36 @@ mod tests {
             .unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let outcome = concerts.request_archive(concert.id).await;
+        let outcome = concerts.request_archive(concert.id).await.unwrap();
 
+        let rejection = rejected(outcome);
         assert!(
             matches!(
-                outcome,
-                Err(ConcertCommandError::Rejected(
-                    CommandRejection::Conflict { concert_id, .. }
-                )) if concert_id == concert.id
+                rejection.reason,
+                CommandRejection::Conflict { concert_id, .. } if concert_id == concert.id
             ),
-            "an unconfigured archive location is a rejection: {outcome:?}"
+            "an unconfigured archive location is a rejection: {:?}",
+            rejection.reason
+        );
+        let state = rejection
+            .state
+            .expect("the concert exists, so the rejection carries its state");
+        assert_eq!(
+            state.concert.archive_status(),
+            ArchiveStatus::NotArchived,
+            "a refused request records no archive work"
+        );
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
+        assert!(
+            !event_names(&concerts, concert.id)
+                .iter()
+                .any(|event| matches!(event.as_str(), "archive_started" | "archive_error")),
+            "a refused request must not write archive history"
         );
     }
 
     #[tokio::test]
-    async fn an_archive_request_on_media_that_is_not_downloaded_has_nothing_to_archive() {
+    async fn an_archive_request_with_neither_a_download_nor_a_split_has_nothing_to_do() {
         let working_dir = tempfile::tempdir().unwrap();
         let archive_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
@@ -3842,11 +3865,279 @@ mod tests {
         db::settings::update_archive_location(&conn, archive_dir.path().to_str().unwrap()).unwrap();
         let concerts = with_blocking_jobs(conn, working_dir.path());
 
-        let outcome = concerts.request_archive(concert.id).await.unwrap();
+        let result = accepted(concerts.request_archive(concert.id).await.unwrap());
 
-        assert!(
-            matches!(outcome, ArchiveOutcome::NothingToArchive(_)),
+        assert_eq!(
+            result.admission,
+            JobAdmission::NothingToDo,
             "there is no media to move, which is not a failure"
+        );
+        assert_eq!(
+            result.state.concert.archive_status(),
+            ArchiveStatus::NotArchived
+        );
+        assert_is_current_state(&result.state, &concerts.get(concert.id).unwrap());
+        assert!(
+            concerts.failed_job_history(concert.id).unwrap().is_empty(),
+            "nothing to archive is not a Failed Job"
+        );
+    }
+
+    /// A concert with a real source directory, so archive has something to move.
+    fn archivable_concert(
+        conn: &rusqlite::Connection,
+        working_dir: &std::path::Path,
+        album: &str,
+    ) -> Concert {
+        SeedContext::new(conn)
+            .seed_media_concert(
+                working_dir,
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        album: Some(album.to_string()),
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_admitted_archive_request_moves_the_media_and_reports_the_archived_state() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let album = "Admitted Archive";
+        let concert = archivable_concert(&conn, working_dir.path(), album);
+        db::settings::update_archive_location(&conn, archive_dir.path().to_str().unwrap()).unwrap();
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let result = accepted(concerts.request_archive(concert.id).await.unwrap());
+
+        assert_eq!(result.admission, JobAdmission::Admitted);
+        assert!(
+            matches!(
+                result.state.concert.archive_status(),
+                ArchiveStatus::Archiving | ArchiveStatus::Archived
+            ),
+            "admission is persisted before the request returns: {:?}",
+            result.state.concert.archive_status()
+        );
+
+        let archived = wait_for_state(
+            &concerts,
+            concert.id,
+            "the archive run to finish",
+            |state| state.concert.archive_status() == ArchiveStatus::Archived,
+        )
+        .await;
+
+        let concert_dir = crate::model::concert_dir(working_dir.path(), album);
+        assert!(
+            std::fs::symlink_metadata(&concert_dir)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false),
+            "the concert directory becomes a symlink into the archive location"
+        );
+        assert!(
+            archive_dir
+                .path()
+                .join(crate::model::sanitize_album(album))
+                .is_dir(),
+            "the media moved into the archive location"
+        );
+        assert!(archived.permitted_actions.can_unarchive);
+        assert!(!archived.permitted_actions.can_archive);
+        assert!(!archived.active_work.archive.persisted_started);
+        assert_is_current_state(&archived, &concerts.get(concert.id).unwrap());
+        assert_eq!(
+            event_names(&concerts, concert.id)
+                .last()
+                .map(String::as_str),
+            Some("archived")
+        );
+        assert!(
+            concerts.failed_job_history(concert.id).unwrap().is_empty(),
+            "a successful archive writes no Failed Job"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failed_archive_is_terminal_records_a_failed_job_and_a_retry_runs_again() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                album: Some("Missing Source Dir".to_string()),
+                downloaded: true,
+                ..SeedLifecycleConcert::default()
+            })
+            .unwrap();
+        db::settings::update_archive_location(&conn, archive_dir.path().to_str().unwrap()).unwrap();
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let result = accepted(concerts.request_archive(concert.id).await.unwrap());
+        assert_eq!(result.admission, JobAdmission::Admitted);
+
+        let failed = wait_for_state(&concerts, concert.id, "the archive to fail", |state| {
+            state.concert.archive_status() == ArchiveStatus::ArchiveError
+        })
+        .await;
+
+        assert!(failed.concert.archived_at.is_none());
+        assert!(!failed.concert.archive_errors.is_empty());
+        assert!(
+            failed.permitted_actions.can_archive,
+            "a failed archive is terminal, so the control comes back"
+        );
+        assert!(!failed.permitted_actions.can_unarchive);
+        assert_is_current_state(&failed, &concerts.get(concert.id).unwrap());
+        assert_eq!(
+            concerts
+                .failed_job_history(concert.id)
+                .unwrap()
+                .iter()
+                .filter(|job| job.name == "archive")
+                .count(),
+            1,
+            "the failure is recorded as Failed Job history"
+        );
+
+        let retried = accepted(concerts.request_archive(concert.id).await.unwrap());
+        assert_eq!(
+            retried.admission,
+            JobAdmission::Admitted,
+            "a retry is admitted rather than refused"
+        );
+        wait_for_state(
+            &concerts,
+            concert.id,
+            "the retried archive to fail",
+            |state| state.concert.archive_errors.len() == 2,
+        )
+        .await;
+        assert_eq!(
+            concerts
+                .failed_job_history(concert.id)
+                .unwrap()
+                .iter()
+                .filter(|job| job.name == "archive")
+                .count(),
+            2,
+            "a retry is its own Job Run and its own Failed Job"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_archive_request_on_an_archived_concert_has_nothing_to_do() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = archived_concert(
+            &conn,
+            working_dir.path(),
+            archive_dir.path(),
+            "Already Archived",
+        );
+        let concerts = with_test_jobs(conn, working_dir.path());
+        let events_before = event_names(&concerts, concert.id);
+
+        let result = accepted(concerts.request_archive(concert.id).await.unwrap());
+
+        assert_eq!(
+            result.admission,
+            JobAdmission::NothingToDo,
+            "the media is already in the archive location, so no Job Run starts"
+        );
+        assert_eq!(
+            result.state.concert.archive_status(),
+            ArchiveStatus::Archived
+        );
+        assert!(
+            !result.state.active_work.archive.registry_active,
+            "nothing was started, so nothing is active — which is why this is not \
+             reported as AlreadyRunning"
+        );
+        assert_is_current_state(&result.state, &concerts.get(concert.id).unwrap());
+        assert_eq!(
+            event_names(&concerts, concert.id),
+            events_before,
+            "a no-op request records no archive history"
+        );
+        assert!(concerts.failed_job_history(concert.id).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_archive_returns_the_refreshed_state() {
+        // An archive Job Run's own work is one directory rename, which is far too
+        // fast to catch in flight. So this test holds the two facts an active run
+        // holds — the persisted `archive_started_at` that admission writes, and a
+        // live registry slot — and gives the slot a task that never finishes. It
+        // then cancels through the interface. The engine's cancellation path is
+        // shared with download and split, whose tests do run real commands, so
+        // what is pinned here is that archive's own facts reach it and its outcome
+        // reaches the caller.
+        let working_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = archivable_concert(&conn, working_dir.path(), "Cancelled Archive");
+        db::settings::update_archive_location(&conn, archive_dir.path().to_str().unwrap()).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let registry = Arc::new(JobRegistry::new());
+        let key = JobKey {
+            concert_id: concert.id,
+            kind: JobKind::Archive,
+        };
+        let (reservation, _signal) = registry.try_reserve(key).unwrap();
+        db::lifecycle::try_mark_archive_started(&db.lock().unwrap(), concert.id).unwrap();
+        reservation.activate(tokio::spawn(std::future::pending::<()>()));
+        let concerts = Concerts::new(
+            db,
+            working_dir.path().to_path_buf(),
+            registry,
+            ScrapeQueue::detached(),
+            JobConfig::test(working_dir.path().to_path_buf()),
+        );
+
+        let running = concerts.get(concert.id).unwrap();
+        assert_eq!(running.concert.archive_status(), ArchiveStatus::Archiving);
+        assert!(running.active_work.archive.registry_active);
+        assert!(
+            !running.permitted_actions.can_archive && !running.permitted_actions.can_unarchive,
+            "an archive in flight withdraws both controls"
+        );
+
+        let cancelled = concerts.cancel_job(concert.id, JobKind::Archive).unwrap();
+
+        assert!(matches!(cancelled, JobCancellation::Cancelled(_)));
+        assert_eq!(
+            cancelled.state().concert.archive_status(),
+            ArchiveStatus::ArchiveError,
+            "a cancelled archive is a terminal unsuccessful outcome"
+        );
+        assert!(
+            cancelled.state().permitted_actions.can_archive,
+            "cancellation is terminal, so the control comes back"
+        );
+        assert_is_current_state(cancelled.state(), &concerts.get(concert.id).unwrap());
+        let failed = concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].name, "archive");
+        assert_eq!(failed[0].failure_message, "cancelled by user");
+
+        let again = concerts.cancel_job(concert.id, JobKind::Archive).unwrap();
+        assert!(
+            matches!(again, JobCancellation::NothingActive(_)),
+            "cancelling nothing is an outcome, not a failure"
+        );
+        assert_eq!(
+            concerts.failed_job_history(concert.id).unwrap().len(),
+            1,
+            "asking again records no second terminal outcome"
         );
     }
 
@@ -3870,6 +4161,11 @@ mod tests {
             concert_dir.join("show.mp4").is_file(),
             "the media should be back in the concert directory"
         );
+        assert_eq!(
+            std::fs::read_to_string(concert_dir.join("show.mp4")).unwrap(),
+            "media",
+            "the bytes come back, not just an empty directory"
+        );
         assert!(
             std::fs::symlink_metadata(&concert_dir)
                 .map(|meta| !meta.file_type().is_symlink())
@@ -3877,6 +4173,17 @@ mod tests {
             "the archive symlink should be replaced by real media"
         );
         assert_eq!(state.concert.archive_status(), ArchiveStatus::NotArchived);
+        assert!(
+            state.permitted_actions.can_archive && !state.permitted_actions.can_unarchive,
+            "an unarchived concert offers archive again and no longer offers unarchive"
+        );
+        assert_is_current_state(&state, &concerts.get(concert.id).unwrap());
+        assert_eq!(
+            event_names(&concerts, concert.id)
+                .last()
+                .map(String::as_str),
+            Some("archive_delete")
+        );
     }
 
     #[tokio::test]
@@ -3902,6 +4209,71 @@ mod tests {
                 )) if concert_id == concert.id
             ),
             "expected a conflict, got {outcome:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unarchiving_an_archived_concert_with_an_archive_in_flight_is_a_conflict() {
+        // Defense in depth: `try_mark_archive_started` refuses to start an archive
+        // of an already-archived concert, so this row shape is only reachable if a
+        // future change lets an archive run overlap an archived concert. The
+        // interface must still refuse rather than yank media out from under it.
+        let working_dir = tempfile::tempdir().unwrap();
+        let archive_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = archived_concert(
+            &conn,
+            working_dir.path(),
+            archive_dir.path(),
+            "Archived And Busy",
+        );
+        conn.execute(
+            "UPDATE concerts SET archive_started_at = datetime('now') WHERE id = ?1",
+            [concert.id],
+        )
+        .unwrap();
+        let concerts = with_blocking_jobs(conn, working_dir.path());
+
+        let outcome = concerts.unarchive(concert.id).await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ConcertCommandError::Rejected(
+                    CommandRejection::Conflict { concert_id, .. }
+                )) if concert_id == concert.id
+            ),
+            "expected a conflict, got {outcome:?}"
+        );
+        let concert_dir = crate::model::concert_dir(working_dir.path(), "Archived And Busy");
+        assert!(
+            std::fs::symlink_metadata(&concert_dir)
+                .map(|meta| meta.file_type().is_symlink())
+                .unwrap_or(false),
+            "a refused unarchive leaves the archive symlink alone"
+        );
+    }
+
+    #[tokio::test]
+    async fn unarchiving_an_archived_concert_with_no_album_is_a_conflict() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_album_null_concert(SeedAlbumNullConcert::default())
+            .unwrap();
+        db::lifecycle::mark_archive_succeeded(&conn, concert.id).unwrap();
+        let concerts = with_blocking_jobs(conn, working_dir.path());
+
+        let outcome = concerts.unarchive(concert.id).await;
+
+        assert!(
+            matches!(
+                outcome,
+                Err(ConcertCommandError::Rejected(
+                    CommandRejection::Conflict { concert_id, .. }
+                )) if concert_id == concert.id
+            ),
+            "without an album there is no media directory to restore: {outcome:?}"
         );
     }
 
@@ -4799,6 +5171,7 @@ mod tests {
             concerts.request_download(missing).await.unwrap(),
             concerts.request_split(missing).await.unwrap(),
             concerts.prepare(missing).await.unwrap(),
+            concerts.request_archive(missing).await.unwrap(),
         ] {
             let rejection = rejected(outcome);
             assert!(
@@ -4828,6 +5201,7 @@ mod tests {
             concerts.request_download(concert.id).await.map(|_| ()),
             concerts.request_split(concert.id).await.map(|_| ()),
             concerts.prepare(concert.id).await.map(|_| ()),
+            concerts.request_archive(concert.id).await.map(|_| ()),
         ] {
             assert!(
                 matches!(outcome, Err(ConcertCommandError::Operational(_))),
