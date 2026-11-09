@@ -4,9 +4,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::Context;
 use concert_types::{SongTimestamp, TimestampsFile};
 use rusqlite::Connection;
-use serde::Deserialize;
 use std::fmt;
-use utoipa::ToSchema;
 
 use crate::concert_media::find_downloaded_file;
 use crate::db;
@@ -14,44 +12,28 @@ use crate::jobs::{self, JobConfig, JobRegistry, SplitMode};
 
 const MIN_SONG_DURATION_SECONDS: f64 = 1.0;
 
-/// Per-song payload from the POST /concerts/:id/split-timestamps request body.
-#[derive(Deserialize, ToSchema)]
-pub struct TimestampPayload {
-    pub songs: Vec<TimestampPayloadSong>,
-}
+/// What a caller is told when a split is already running for the concert. One
+/// string, because both the admission and the interface's own guard refuse with
+/// the same words.
+pub(crate) const SPLIT_IN_PROGRESS_MESSAGE: &str =
+    "A split job is already running for this concert";
 
-#[derive(Deserialize, ToSchema)]
-pub struct TimestampPayloadSong {
+/// One song boundary a caller asks for, before validation derives the duration
+/// or decides whether the concert can accept it. This is the input vocabulary of
+/// [`crate::concerts::Concerts::set_split_timestamps`]: an adapter translates its
+/// own request shape into these, so no wire format reaches the split workflow or
+/// the Job Run it starts.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProposedTimestamp {
     pub title: String,
     pub start_time: f64,
     pub end_time: f64,
 }
 
-/// Response body for GET /concerts/:id/split-timestamps.
-#[derive(serde::Serialize, ToSchema)]
-pub struct SplitTimestampsResponse {
-    pub set_list: Vec<String>,
-    pub auto: Option<Vec<SongTimestamp>>,
-    pub user: Option<Vec<SongTimestamp>>,
-    /// Total source-media duration in seconds, from `ffprobe`. `None` when the
-    /// source isn't downloaded or `ffprobe` is unavailable/fails. The frontend
-    /// timeline uses this for its scale and right-edge clamp.
-    pub media_duration: Option<f64>,
-}
-
-/// Success body for the split-start endpoints.
-#[derive(serde::Serialize, ToSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum SplitStartStatus {
-    Splitting,
-    AlreadyAuto,
-}
-
-#[derive(serde::Serialize, ToSchema)]
-pub struct SplitStartResponse {
-    pub status: SplitStartStatus,
-}
-
+/// The concert's stored split timestamps, as the editor reads them: the automatic
+/// analysis, the desired values the user set, and the source duration its scale
+/// needs. An adapter translates this for its own presentation; an HTTP one adds
+/// the duration in the shape its client expects.
 pub struct SplitTimestampsRead {
     pub set_list: Vec<String>,
     pub auto: Option<Vec<SongTimestamp>>,
@@ -59,31 +41,13 @@ pub struct SplitTimestampsRead {
     pub media_duration: Option<f64>,
 }
 
-impl From<SplitTimestampsRead> for SplitTimestampsResponse {
-    fn from(read: SplitTimestampsRead) -> Self {
-        SplitTimestampsResponse {
-            set_list: read.set_list,
-            auto: read.auto,
-            user: read.user,
-            media_duration: read.media_duration,
-        }
-    }
-}
-
+/// What starting the split that makes the desired timestamps real came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SplitStartOutcome {
+    /// A split Job Run was admitted and is now cutting the tracks.
     Splitting,
+    /// The concert already uses the automatic timestamps, so nothing was started.
     AlreadyAuto,
-}
-
-impl From<SplitStartOutcome> for SplitStartResponse {
-    fn from(outcome: SplitStartOutcome) -> Self {
-        let status = match outcome {
-            SplitStartOutcome::Splitting => SplitStartStatus::Splitting,
-            SplitStartOutcome::AlreadyAuto => SplitStartStatus::AlreadyAuto,
-        };
-        SplitStartResponse { status }
-    }
 }
 
 #[derive(Debug)]
@@ -234,7 +198,7 @@ pub async fn apply_user_timestamps(
     registry: Arc<JobRegistry>,
     jobs: JobConfig,
     concert_id: i64,
-    payload: TimestampPayload,
+    desired: Vec<ProposedTimestamp>,
 ) -> Result<SplitStartOutcome, SplitTimestampWorkflowError> {
     let (concert, source_path) = {
         let conn = database.lock().unwrap();
@@ -253,11 +217,11 @@ pub async fn apply_user_timestamps(
         )
     })?;
 
-    if payload.songs.len() != concert.set_list.len() {
+    if desired.len() != concert.set_list.len() {
         return Err(SplitTimestampWorkflowError::Unprocessable(format!(
             "Expected {} timestamps (one per set-list song), got {}",
             concert.set_list.len(),
-            payload.songs.len()
+            desired.len()
         )));
     }
 
@@ -269,7 +233,7 @@ pub async fn apply_user_timestamps(
         }
     };
     let validated =
-        ValidatedTimestamps::validate(&concert.set_list, Some(media_duration), &payload.songs)
+        ValidatedTimestamps::validate(&concert.set_list, Some(media_duration), &desired)
             .map_err(|e| SplitTimestampWorkflowError::Unprocessable(e.to_string()))?;
 
     reconcile_downloaded_at_if_missing(&database, concert_id, concert.downloaded_at.is_none());
@@ -314,8 +278,8 @@ pub async fn reset_to_auto_timestamps(
         return Ok(SplitStartOutcome::AlreadyAuto);
     }
 
-    let payload_songs = song_timestamps_to_payload(&auto_ts);
-    let validated = ValidatedTimestamps::validate_for_reset(&concert.set_list, &payload_songs)
+    let proposed = song_timestamps_to_proposed(&auto_ts);
+    let validated = ValidatedTimestamps::validate_for_reset(&concert.set_list, &proposed)
         .map_err(|e| SplitTimestampWorkflowError::Unprocessable(e.to_string()))?;
 
     reconcile_downloaded_at_if_missing(&database, concert_id, concert.downloaded_at.is_none());
@@ -390,7 +354,7 @@ async fn start_split_timestamp_job(
     {
         jobs::split::StartOutcome::Spawned => Ok(SplitStartOutcome::Splitting),
         jobs::split::StartOutcome::AlreadyRunning => Err(SplitTimestampWorkflowError::Conflict(
-            "A split job is already running for this concert".to_string(),
+            SPLIT_IN_PROGRESS_MESSAGE.to_string(),
         )),
         jobs::split::StartOutcome::NotDownloaded => Err(SplitTimestampWorkflowError::Conflict(
             "Concert source file not downloaded".to_string(),
@@ -404,15 +368,15 @@ async fn start_split_timestamp_job(
 pub struct ValidatedTimestamps(Vec<SongTimestamp>);
 
 impl ValidatedTimestamps {
-    /// Validate payload songs against the concert's set_list.
+    /// Validate proposed boundaries against the concert's set list.
     ///
-    /// `media_duration`: `Some` when validating user POST (bounds-checks end times against
-    /// the source file); `None` when loading stored auto timestamps for reset (those values
-    /// came from the same file, so the bounds check is skipped).
+    /// `media_duration`: `Some` when validating what a caller proposed (bounds-checks end
+    /// times against the source file); `None` when loading stored automatic timestamps for
+    /// reset (those values came from the same file, so the bounds check is skipped).
     pub fn validate(
         set_list: &[String],
         media_duration: Option<f64>,
-        songs: &[TimestampPayloadSong],
+        songs: &[ProposedTimestamp],
     ) -> Result<Self, TimestampValidationError> {
         if set_list.is_empty() {
             return Err(TimestampValidationError::EmptySetList);
@@ -491,7 +455,7 @@ impl ValidatedTimestamps {
     /// Uses `SetListChangedSinceAnalysis` instead of generic errors for mismatch.
     pub fn validate_for_reset(
         set_list: &[String],
-        songs: &[TimestampPayloadSong],
+        songs: &[ProposedTimestamp],
     ) -> Result<Self, TimestampValidationError> {
         if set_list.is_empty() {
             return Err(TimestampValidationError::EmptySetList);
@@ -532,27 +496,15 @@ impl ValidatedTimestamps {
     }
 }
 
-/// Convert stored `SongTimestamp`s back into payload form for validation.
-pub fn song_timestamps_to_payload(ts: &[SongTimestamp]) -> Vec<TimestampPayloadSong> {
+/// Convert stored `SongTimestamp`s back into proposed boundaries for validation.
+pub fn song_timestamps_to_proposed(ts: &[SongTimestamp]) -> Vec<ProposedTimestamp> {
     ts.iter()
-        .map(|t| TimestampPayloadSong {
+        .map(|t| ProposedTimestamp {
             title: t.title.clone(),
             start_time: t.start_time,
             end_time: t.end_time,
         })
         .collect()
-}
-
-// Helper for tests — cheap clone without deriving Clone on the whole type.
-#[cfg(test)]
-impl TimestampPayloadSong {
-    fn clone_for_test(&self) -> Self {
-        TimestampPayloadSong {
-            title: self.title.clone(),
-            start_time: self.start_time,
-            end_time: self.end_time,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -567,19 +519,19 @@ mod tests {
         vec!["Alpha".to_string(), "Beta".to_string(), "Gamma".to_string()]
     }
 
-    fn valid_songs() -> Vec<TimestampPayloadSong> {
+    fn valid_songs() -> Vec<ProposedTimestamp> {
         vec![
-            TimestampPayloadSong {
+            ProposedTimestamp {
                 title: "Alpha".to_string(),
                 start_time: 0.0,
                 end_time: 100.0,
             },
-            TimestampPayloadSong {
+            ProposedTimestamp {
                 title: "Beta".to_string(),
                 start_time: 105.0,
                 end_time: 200.0,
             },
-            TimestampPayloadSong {
+            ProposedTimestamp {
                 title: "Gamma".to_string(),
                 start_time: 210.0,
                 end_time: 350.0,
@@ -614,18 +566,16 @@ mod tests {
             .collect()
     }
 
-    fn payload_for(songs: &[&str]) -> TimestampPayload {
-        TimestampPayload {
-            songs: songs
-                .iter()
-                .enumerate()
-                .map(|(i, title)| TimestampPayloadSong {
-                    title: title.to_string(),
-                    start_time: (i * 60) as f64,
-                    end_time: (i * 60 + 55) as f64,
-                })
-                .collect(),
-        }
+    fn desired_for(songs: &[&str]) -> Vec<ProposedTimestamp> {
+        songs
+            .iter()
+            .enumerate()
+            .map(|(i, title)| ProposedTimestamp {
+                title: title.to_string(),
+                start_time: (i * 60) as f64,
+                end_time: (i * 60 + 55) as f64,
+            })
+            .collect()
     }
 
     #[test]
@@ -650,7 +600,7 @@ mod tests {
 
     #[test]
     fn validate_count_mismatch() {
-        let songs = vec![valid_songs()[0].clone_for_test()];
+        let songs = vec![valid_songs()[0].clone()];
         let err = ValidatedTimestamps::validate(&set_list(), None, &songs).unwrap_err();
         assert!(matches!(
             err,
@@ -739,10 +689,7 @@ mod tests {
 
     #[test]
     fn validate_for_reset_set_list_count_changed() {
-        let songs = vec![
-            valid_songs()[0].clone_for_test(),
-            valid_songs()[1].clone_for_test(),
-        ];
+        let songs = vec![valid_songs()[0].clone(), valid_songs()[1].clone()];
         let err = ValidatedTimestamps::validate_for_reset(&set_list(), &songs).unwrap_err();
         assert!(matches!(
             err,
@@ -770,41 +717,13 @@ mod tests {
     }
 
     #[test]
-    fn song_timestamps_to_payload_conversion() {
+    fn song_timestamps_to_proposed_conversion() {
         let ts = ValidatedTimestamps::validate(&set_list(), None, &valid_songs()).unwrap();
-        let payload = song_timestamps_to_payload(ts.songs());
-        assert_eq!(payload.len(), 3);
-        assert_eq!(payload[0].title, "Alpha");
-        assert_eq!(payload[0].start_time, 0.0);
-        assert_eq!(payload[0].end_time, 100.0);
-    }
-
-    #[test]
-    fn split_timestamps_response_serializes_media_duration() {
-        let resp = SplitTimestampsResponse {
-            set_list: vec!["Song A".to_string()],
-            auto: Some(vec![SongTimestamp {
-                title: "Song A".to_string(),
-                start_time: 0.0,
-                end_time: 180.0,
-                duration: 180.0,
-            }]),
-            user: None,
-            media_duration: Some(212.5),
-        };
-        let v: serde_json::Value = serde_json::to_value(&resp).unwrap();
-        assert_eq!(v["media_duration"], 212.5);
-        assert!(v["user"].is_null());
-        assert_eq!(v["auto"][0]["end_time"], 180.0);
-
-        let resp2 = SplitTimestampsResponse {
-            set_list: vec![],
-            auto: None,
-            user: None,
-            media_duration: None,
-        };
-        let v2: serde_json::Value = serde_json::to_value(&resp2).unwrap();
-        assert!(v2["media_duration"].is_null());
+        let proposed = song_timestamps_to_proposed(ts.songs());
+        assert_eq!(proposed.len(), 3);
+        assert_eq!(proposed[0].title, "Alpha");
+        assert_eq!(proposed[0].start_time, 0.0);
+        assert_eq!(proposed[0].end_time, 100.0);
     }
 
     #[tokio::test]
@@ -903,7 +822,7 @@ mod tests {
             Arc::new(JobRegistry::new()),
             JobConfig::test(workdir.path().to_path_buf()),
             id,
-            payload_for(&["A", "B"]),
+            desired_for(&["A", "B"]),
         )
         .await
         .unwrap_err();
@@ -931,7 +850,7 @@ mod tests {
             Arc::new(JobRegistry::new()),
             JobConfig::test(workdir.path().to_path_buf()),
             id,
-            payload_for(&["A"]),
+            desired_for(&["A"]),
         )
         .await
         .unwrap_err();

@@ -13,7 +13,7 @@ use utoipa::ToSchema;
 use crate::concerts::{
     CommandRejection, ConcertCommandError, ConcertFilter, ConcertPlaybackError, ConcertQueryError,
     ConcertState, DeletionConfirmation, DeletionOutcome, JobRejection, JobRequestOutcome,
-    ListenTarget, Observation, ScrapeAdmission,
+    ListenTarget, Observation, ScrapeAdmission, SplitTimestampChange,
 };
 use crate::db;
 use crate::jobs::JobKind;
@@ -22,9 +22,7 @@ use crate::model::{
     ArchiveStatus, Concert, ConcertStatus, DownloadStatus, PlaybackItemKind, SplitStatus, TrackInfo,
 };
 use crate::playback::{PlaybackLookupError, PlaybackPlan, SourceMedia, TrackMedia};
-use crate::split_timestamps::{
-    SplitStartOutcome, SplitStartResponse, SplitTimestampsResponse, TimestampPayload,
-};
+use crate::split_timestamps::{ProposedTimestamp, SplitStartOutcome, SplitTimestampsRead};
 use crate::sync::{sync_month, YearMonth};
 use crate::web::AppState;
 
@@ -1908,27 +1906,101 @@ pub async fn style_css() -> impl IntoResponse {
 }
 
 // ── Split-timestamp API ───────────────────────────────────────────────────────
+//
+// The interface owns reading and changing the desired split timestamps. The
+// shapes below are this protocol's own — a request body and three response
+// bodies — and nothing below the adapter sees them: the adapter translates the
+// body into proposed boundaries and the interface's answer into JSON.
 
-/// A split-timestamp read failure. Everything but an operational failure is a
-/// client-side absence or conflict.
-fn split_timestamp_error_to_app_error(error: ConcertCommandError) -> AppError {
-    match error {
-        ConcertCommandError::Rejected(rejection) => match rejection {
-            CommandRejection::NotFound { .. } => AppError::NotFound,
-            CommandRejection::Conflict { message, .. } => AppError::Conflict(message),
-            CommandRejection::Invalid { message, .. } => AppError::BadRequest(message),
-            other => AppError::BadRequest(other.to_string()),
-        },
-        ConcertCommandError::Operational(error) => AppError::Internal(error),
+/// One song boundary in the POST /concerts/:id/split-timestamps request body.
+#[derive(serde::Deserialize, ToSchema)]
+pub struct TimestampPayloadSong {
+    pub title: String,
+    pub start_time: f64,
+    pub end_time: f64,
+}
+
+/// The desired split timestamps a client asks for, one per set-list song.
+#[derive(serde::Deserialize, ToSchema)]
+pub struct TimestampPayload {
+    pub songs: Vec<TimestampPayloadSong>,
+}
+
+impl From<TimestampPayloadSong> for ProposedTimestamp {
+    fn from(song: TimestampPayloadSong) -> Self {
+        ProposedTimestamp {
+            title: song.title,
+            start_time: song.start_time,
+            end_time: song.end_time,
+        }
     }
 }
 
-/// A split-timestamp change that the interface rejected. These endpoints answer
-/// with a plain-text body and the protocol's own status, which is why the
-/// rejection (not an `AppError`) decides the response here.
-fn split_timestamp_command_response(error: ConcertCommandError) -> Result<Response, AppError> {
-    match error {
-        ConcertCommandError::Rejected(rejection) => match rejection {
+impl TimestampPayload {
+    /// The request body as the boundaries the interface validates.
+    fn into_desired(self) -> Vec<ProposedTimestamp> {
+        self.songs
+            .into_iter()
+            .map(ProposedTimestamp::from)
+            .collect()
+    }
+}
+
+/// Response body for GET /concerts/:id/split-timestamps.
+#[derive(serde::Serialize, ToSchema)]
+pub struct SplitTimestampsResponse {
+    pub set_list: Vec<String>,
+    pub auto: Option<Vec<concert_types::SongTimestamp>>,
+    pub user: Option<Vec<concert_types::SongTimestamp>>,
+    /// Total source-media duration in seconds, from `ffprobe`. `None` when the
+    /// source isn't downloaded or `ffprobe` is unavailable/fails. The frontend
+    /// timeline uses this for its scale and right-edge clamp.
+    pub media_duration: Option<f64>,
+}
+
+impl From<SplitTimestampsRead> for SplitTimestampsResponse {
+    fn from(read: SplitTimestampsRead) -> Self {
+        SplitTimestampsResponse {
+            set_list: read.set_list,
+            auto: read.auto,
+            user: read.user,
+            media_duration: read.media_duration,
+        }
+    }
+}
+
+/// Success body for the split-start endpoints.
+#[derive(serde::Serialize, ToSchema)]
+#[serde(rename_all = "kebab-case")]
+pub enum SplitStartStatus {
+    Splitting,
+    AlreadyAuto,
+}
+
+#[derive(serde::Serialize, ToSchema)]
+pub struct SplitStartResponse {
+    pub status: SplitStartStatus,
+}
+
+impl From<SplitStartOutcome> for SplitStartResponse {
+    fn from(outcome: SplitStartOutcome) -> Self {
+        let status = match outcome {
+            SplitStartOutcome::Splitting => SplitStartStatus::Splitting,
+            SplitStartOutcome::AlreadyAuto => SplitStartStatus::AlreadyAuto,
+        };
+        SplitStartResponse { status }
+    }
+}
+
+/// Both split-start routes answer alike: the accepted outcome with this
+/// protocol's own status, or the rejection as plain text with the status that
+/// protocol has always used for it.
+fn split_timestamp_change_response(change: SplitTimestampChange) -> Result<Response, AppError> {
+    match change {
+        SplitTimestampChange::Accepted(start) => Ok(split_start_response(start.outcome)),
+        SplitTimestampChange::Rejected(rejection) => match rejection.reason {
+            // The concert is gone, so there is no state to render beside the
+            // reason even when the rejection carried one.
             CommandRejection::NotFound { .. } => Err(AppError::NotFound),
             CommandRejection::Conflict { message, .. } => {
                 Ok((StatusCode::CONFLICT, message).into_response())
@@ -1938,7 +2010,6 @@ fn split_timestamp_command_response(error: ConcertCommandError) -> Result<Respon
             }
             other => Ok((StatusCode::UNPROCESSABLE_ENTITY, other.to_string()).into_response()),
         },
-        ConcertCommandError::Operational(error) => Err(AppError::Internal(error)),
     }
 }
 
@@ -1972,8 +2043,8 @@ pub async fn get_split_timestamps(
         .concerts
         .split_timestamps(id)
         .await
-        .map_err(split_timestamp_error_to_app_error)?;
-    Ok(Json(read.into()))
+        .map_err(concert_command_error)?;
+    Ok(Json(SplitTimestampsResponse::from(read)))
 }
 
 #[utoipa::path(
@@ -1995,9 +2066,13 @@ pub async fn set_split_timestamps(
     Path(id): Path<i64>,
     Json(payload): Json<TimestampPayload>,
 ) -> Result<Response, AppError> {
-    match state.concerts.set_split_timestamps(id, payload).await {
-        Ok(start) => Ok(split_start_response(start.outcome)),
-        Err(error) => split_timestamp_command_response(error),
+    match state
+        .concerts
+        .set_split_timestamps(id, payload.into_desired())
+        .await
+    {
+        Ok(change) => split_timestamp_change_response(change),
+        Err(error) => Err(concert_command_error(error)),
     }
 }
 
@@ -2020,8 +2095,8 @@ pub async fn reset_split_timestamps(
     Path(id): Path<i64>,
 ) -> Result<Response, AppError> {
     match state.concerts.reset_split_timestamps(id).await {
-        Ok(start) => Ok(split_start_response(start.outcome)),
-        Err(error) => split_timestamp_command_response(error),
+        Ok(change) => split_timestamp_change_response(change),
+        Err(error) => Err(concert_command_error(error)),
     }
 }
 
@@ -3421,6 +3496,202 @@ mod tests {
                 .all(|event| event.event != "listen"),
             "a listen whose media is absent must not become audit history"
         );
+    }
+
+    // ── split-timestamp routes ───────────────────────────────────────────────
+    //
+    // These assert transport translation only: the body this adapter parses, the
+    // status each interface outcome becomes, and the JSON it renders back. What
+    // the changes mean to a concert is the interface's business and is tested
+    // where the interface is.
+
+    /// The request body this protocol documents parses into the boundaries the
+    /// interface validates.
+    #[test]
+    fn a_timestamp_payload_parses_into_proposed_boundaries() {
+        let payload: TimestampPayload = serde_json::from_str(
+            r#"{"songs":[{"title":"First","start_time":0.0,"end_time":12.5}]}"#,
+        )
+        .expect("the documented request body");
+
+        assert_eq!(
+            payload.into_desired(),
+            vec![ProposedTimestamp {
+                title: "First".to_string(),
+                start_time: 0.0,
+                end_time: 12.5,
+            }]
+        );
+    }
+
+    #[tokio::test]
+    async fn the_timestamp_read_answers_the_editor_payload() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                set_list: Some(vec!["First".to_string()]),
+                auto_timestamps: Some(vec![concert_types::SongTimestamp {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 30.0,
+                    duration: 30.0,
+                }]),
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let Ok(response) = get_split_timestamps(State(state), Path(id)).await else {
+            panic!("a concert with stored timestamps can be read");
+        };
+        let response = response.into_response();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_str(&body_text(response).await).expect("a JSON body");
+        assert_eq!(body["set_list"], serde_json::json!(["First"]));
+        assert_eq!(body["auto"][0]["end_time"], 30.0);
+        assert!(body["user"].is_null());
+        // No source file, so no duration to probe — the field is present and null
+        // rather than absent, which the timeline relies on.
+        assert!(body["media_duration"].is_null());
+    }
+
+    #[tokio::test]
+    async fn every_split_timestamp_route_answers_404_for_an_absent_concert() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = app_state(conn, workdir.path());
+        let absent = i64::MAX;
+
+        let read = get_split_timestamps(State(state.clone()), Path(absent)).await;
+        assert_eq!(
+            read.map(|_| ()).unwrap_err().into_response().status(),
+            StatusCode::NOT_FOUND
+        );
+
+        for response in [
+            set_split_timestamps(
+                State(state.clone()),
+                Path(absent),
+                Json(TimestampPayload { songs: vec![] }),
+            )
+            .await,
+            reset_split_timestamps(State(state), Path(absent)).await,
+        ] {
+            assert_eq!(
+                response.map(|_| ()).unwrap_err().into_response().status(),
+                StatusCode::NOT_FOUND,
+                "an absent concert is this protocol's 404, whatever the route"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_rejection_answers_this_protocols_status_and_message() {
+        // The interface says "invalid"; this protocol has always said 422 with the
+        // reason as plain text, where the generic command mapping says 400.
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_media_concert(
+                workdir.path(),
+                db::seeds::SeedMediaConcert {
+                    lifecycle: db::seeds::SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                        downloaded: true,
+                        ..db::seeds::SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    ..db::seeds::SeedMediaConcert::default()
+                },
+            )
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let response = set_split_timestamps(
+            State(state),
+            Path(id),
+            Json(TimestampPayload {
+                songs: vec![TimestampPayloadSong {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 5.0,
+                }],
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("a rejection is this protocol's own status, not an error"));
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = body_text(response).await;
+        assert_eq!(body, "Expected 2 timestamps (one per set-list song), got 1");
+    }
+
+    #[tokio::test]
+    async fn a_timestamp_change_without_a_source_answers_409() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                set_list: Some(vec!["First".to_string()]),
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let response = set_split_timestamps(
+            State(state),
+            Path(id),
+            Json(TimestampPayload {
+                songs: vec![TimestampPayloadSong {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 5.0,
+                }],
+            }),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("a conflict is this protocol's own status, not an error"));
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(body_text(response)
+            .await
+            .contains("download the concert first"));
+    }
+
+    #[tokio::test]
+    async fn the_reset_route_answers_the_accepted_status_as_json() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_lifecycle_concert(db::seeds::SeedLifecycleConcert {
+                set_list: Some(vec!["First".to_string()]),
+                auto_timestamps: Some(vec![concert_types::SongTimestamp {
+                    title: "First".to_string(),
+                    start_time: 0.0,
+                    end_time: 30.0,
+                    duration: 30.0,
+                }]),
+                ..db::seeds::SeedLifecycleConcert::default()
+            })
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let Ok(response) = reset_split_timestamps(State(state), Path(id)).await else {
+            panic!("a reset the concert can take is an answer, not an error");
+        };
+
+        // Already automatic: this protocol answers 200 rather than 202, because
+        // nothing was started.
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert_eq!(body, r#"{"status":"already-auto"}"#);
     }
 
     // ── deletion routes ──────────────────────────────────────────────────────

@@ -1951,9 +1951,9 @@ mod tests {
     /// for tests that only need `UserTimestamps`/`ResetToAuto` to hold *some*
     /// valid value — the content doesn't matter to command/request translation.
     fn test_validated_timestamps() -> crate::split_timestamps::ValidatedTimestamps {
-        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
         let set_list = vec!["Song".to_string()];
-        let songs = vec![TimestampPayloadSong {
+        let songs = vec![ProposedTimestamp {
             title: "Song".to_string(),
             start_time: 0.0,
             end_time: 100.0,

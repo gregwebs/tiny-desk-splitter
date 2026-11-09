@@ -517,7 +517,7 @@ mod tests {
         DownloadJob, JobConfig, JobRegistry, JobRunFuture, JobRunner, JobStepOutcome,
         OpenMediaOutcome, SplitBackend,
     };
-    use crate::split_timestamps::TimestampPayloadSong;
+    use crate::split_timestamps::ProposedTimestamp;
     use std::fs;
     use std::path::PathBuf;
     use tokio::process::Command;
@@ -941,12 +941,12 @@ mod tests {
 
         let set_list = vec!["Song".to_string()];
         let (db, id) = seeded_db(album, set_list.clone());
-        let payload = vec![TimestampPayloadSong {
+        let proposed = vec![ProposedTimestamp {
             title: "Song".to_string(),
             start_time: 0.0,
             end_time: 4.0,
         }];
-        let ts = ValidatedTimestamps::validate(&set_list, Some(6.0), &payload).unwrap();
+        let ts = ValidatedTimestamps::validate(&set_list, Some(6.0), &proposed).unwrap();
 
         let registry = Arc::new(JobRegistry::new());
         let config = JobConfig::with_split_backend(
@@ -1218,7 +1218,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_timestamps_mode_stores_user_column() {
-        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
 
         let tmp = tempfile::tempdir().unwrap();
         let album = "User Album";
@@ -1231,19 +1231,19 @@ mod tests {
         let registry = Arc::new(JobRegistry::new());
         let config = config_with_timestamps_check(tmp.path().to_path_buf(), &set_list);
 
-        let payload = vec![
-            TimestampPayloadSong {
+        let proposed = vec![
+            ProposedTimestamp {
                 title: "Alpha".to_string(),
                 start_time: 0.0,
                 end_time: 95.0,
             },
-            TimestampPayloadSong {
+            ProposedTimestamp {
                 title: "Beta".to_string(),
                 start_time: 100.0,
                 end_time: 200.0,
             },
         ];
-        let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
+        let ts = ValidatedTimestamps::validate(&set_list, None, &proposed).unwrap();
 
         let outcome = start_split(
             db.clone(),
@@ -1281,7 +1281,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_timestamp_event_failure_rolls_back_user_completion_facts() {
-        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
 
         let tmp = tempfile::tempdir().unwrap();
         let album = "User Event Failure";
@@ -1294,7 +1294,7 @@ mod tests {
         let timestamps = ValidatedTimestamps::validate(
             &set_list,
             None,
-            &[TimestampPayloadSong {
+            &[ProposedTimestamp {
                 title: "Track".to_string(),
                 start_time: 0.0,
                 end_time: 10.0,
@@ -1333,7 +1333,7 @@ mod tests {
 
     #[tokio::test]
     async fn reset_event_failure_preserves_user_timestamps() {
-        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
 
         let tmp = tempfile::tempdir().unwrap();
         let album = "Reset Event Failure";
@@ -1345,7 +1345,7 @@ mod tests {
         let timestamps = ValidatedTimestamps::validate(
             &set_list,
             None,
-            &[TimestampPayloadSong {
+            &[ProposedTimestamp {
                 title: "Track".to_string(),
                 start_time: 0.0,
                 end_time: 10.0,
@@ -1387,7 +1387,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_mode_does_not_auto_recover_when_source_missing() {
-        use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+        use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
 
         let tmp = tempfile::tempdir().unwrap();
         let album = "No Source Album";
@@ -1401,12 +1401,12 @@ mod tests {
         let registry = Arc::new(JobRegistry::new());
         let config = config_for(tmp.path().to_path_buf());
 
-        let payload = vec![TimestampPayloadSong {
+        let proposed = vec![ProposedTimestamp {
             title: "Song A".to_string(),
             start_time: 0.0,
             end_time: 90.0,
         }];
-        let ts = ValidatedTimestamps::validate(&set_list, None, &payload).unwrap();
+        let ts = ValidatedTimestamps::validate(&set_list, None, &proposed).unwrap();
 
         let outcome = start_split(
             db.clone(),

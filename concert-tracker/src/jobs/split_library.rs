@@ -264,11 +264,11 @@ pub(super) async fn run(job: &SplitJob, log_file: Option<&Path>) -> JobStepOutco
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+    use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
 
     fn validated_timestamps() -> ValidatedTimestamps {
         let set_list = vec!["Song".to_string()];
-        let songs = vec![TimestampPayloadSong {
+        let songs = vec![ProposedTimestamp {
             title: "Song".to_string(),
             start_time: 0.0,
             end_time: 100.0,

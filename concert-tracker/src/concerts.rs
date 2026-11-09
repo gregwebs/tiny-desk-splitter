@@ -172,14 +172,7 @@ fn job_request_rejection(
         ConcertCommandError::Rejected(reason) => reason,
         error @ ConcertCommandError::Operational(_) => return Err(error),
     };
-    let state = match concerts.get(reason.concert_id()) {
-        Ok(state) => Some(state),
-        // The concert is gone, so there is no state to attach.
-        Err(ConcertQueryError::NotFound { .. }) => None,
-        Err(error @ ConcertQueryError::Operational(_)) => {
-            return Err(ConcertCommandError::from(error))
-        }
-    };
+    let state = concerts.latest_state(reason.concert_id())?;
     Ok(JobRequestOutcome::Rejected(JobRejection { reason, state }))
 }
 
@@ -524,6 +517,32 @@ fn media_removal_error(concert_id: i64, error: MediaRemovalError) -> ConcertComm
 pub struct SplitStart {
     pub outcome: crate::split_timestamps::SplitStartOutcome,
     pub state: ConcertState,
+}
+
+/// What asking to change the desired split timestamps did. A request the concert
+/// cannot accept is a rejection — an expected domain outcome — while a genuine
+/// fault stays an `Err`. This is the same split as [`JobRequestOutcome`], because
+/// a timestamp change is a Job Request with validation in front of it.
+#[derive(Debug)]
+pub enum SplitTimestampChange {
+    /// The change was accepted: the split that makes it real was admitted, or the
+    /// concert was already using the automatic timestamps.
+    Accepted(SplitStart),
+    /// The concert cannot take that change.
+    Rejected(SplitTimestampRejection),
+}
+
+/// Why a split-timestamp change was refused, with the Concert State to render
+/// beside it.
+#[derive(Debug)]
+pub struct SplitTimestampRejection {
+    /// The precise reason, in the same vocabulary as the other command
+    /// rejections, so an adapter keeps one mapping.
+    pub reason: CommandRejection,
+    /// The latest Concert State, when the concert could be observed at all: a
+    /// concert that does not exist has none, while one that exists and refused the
+    /// change carries the state it was refused in.
+    pub state: Option<ConcertState>,
 }
 
 /// A concert row plus the separately stored facts needed to observe it. Loaded
@@ -1123,12 +1142,35 @@ impl Concerts {
     }
 
     /// Set the desired split timestamps and start the split that makes them
-    /// real. Validation and coverage failures are rejections, so an adapter does
-    /// not have to guess which of them is a client error.
+    /// real. Validation and coverage failures are rejections carrying the latest
+    /// Concert State, so an adapter neither guesses which of them is a client
+    /// error nor re-queries to explain the refusal.
     pub async fn set_split_timestamps(
         &self,
         concert_id: i64,
-        payload: crate::split_timestamps::TimestampPayload,
+        desired: Vec<crate::split_timestamps::ProposedTimestamp>,
+    ) -> Result<SplitTimestampChange, ConcertCommandError> {
+        let result = self.apply_split_timestamps(concert_id, desired).await;
+        self.split_timestamp_change(concert_id, result)
+    }
+
+    /// Reset to the automatic split timestamps and start the split that applies
+    /// them.
+    pub async fn reset_split_timestamps(
+        &self,
+        concert_id: i64,
+    ) -> Result<SplitTimestampChange, ConcertCommandError> {
+        let result = self.replay_auto_timestamps(concert_id).await;
+        self.split_timestamp_change(concert_id, result)
+    }
+
+    /// The change itself: refuse an unobservable source, run the workflow that
+    /// validates and admits the split, then observe the concert with the split
+    /// now running.
+    async fn apply_split_timestamps(
+        &self,
+        concert_id: i64,
+        desired: Vec<crate::split_timestamps::ProposedTimestamp>,
     ) -> Result<SplitStart, ConcertCommandError> {
         self.ensure_source_observable(concert_id)?;
         let jobs = self.job_config()?;
@@ -1137,7 +1179,7 @@ impl Concerts {
             self.registry.clone(),
             jobs,
             concert_id,
-            payload,
+            desired,
         )
         .await
         .map_err(|error| split_timestamp_rejection(concert_id, error))?;
@@ -1148,16 +1190,30 @@ impl Concerts {
         })
     }
 
-    /// Reset to the automatic split timestamps and start the split that applies
-    /// them.
-    pub async fn reset_split_timestamps(
+    /// Reset does not read the source file — it drops the desired timestamps and
+    /// replays the automatic ones — so an absent or unobservable source must not
+    /// turn "already auto" or "no automated timestamps" into a conflict. The
+    /// workflow reports those itself.
+    async fn replay_auto_timestamps(
         &self,
         concert_id: i64,
     ) -> Result<SplitStart, ConcertCommandError> {
-        // Resetting does not read the source file — it drops the desired
-        // timestamps and replays the automatic ones — so an absent or
-        // unobservable source must not turn "already auto" or "no automated
-        // timestamps" into a conflict. The workflow reports those itself.
+        // A split that is still running may be about to record desired timestamps
+        // of its own: a user-timestamp split writes them when it succeeds, not
+        // when it is admitted. Answering "already automatic" on the strength of
+        // the stored column alone would report a success that the running split
+        // then undoes, so the request is refused the way admission would refuse
+        // it. A split merely queued behind a download is not enough to refuse:
+        // that one is the automatic analysis, which writes no desired timestamps.
+        let observed = self.command_state(concert_id)?;
+        if observed.active_work.split.persisted_started
+            || observed.active_work.split.registry_active
+        {
+            return Err(ConcertCommandError::Rejected(CommandRejection::Conflict {
+                concert_id,
+                message: crate::split_timestamps::SPLIT_IN_PROGRESS_MESSAGE.to_string(),
+            }));
+        }
         let jobs = self.job_config()?;
         let outcome = crate::split_timestamps::reset_to_auto_timestamps(
             self.db.clone(),
@@ -1172,6 +1228,36 @@ impl Concerts {
             outcome,
             state: self.command_state(concert_id)?,
         })
+    }
+
+    /// A refused timestamp change is an outcome, not an error, so it is turned
+    /// back into a value here — carrying the latest Concert State when the concert
+    /// can still be observed. Only a genuine fault stays an `Err`.
+    fn split_timestamp_change(
+        &self,
+        concert_id: i64,
+        result: Result<SplitStart, ConcertCommandError>,
+    ) -> Result<SplitTimestampChange, ConcertCommandError> {
+        match result {
+            Ok(start) => Ok(SplitTimestampChange::Accepted(start)),
+            Err(ConcertCommandError::Rejected(reason)) => {
+                Ok(SplitTimestampChange::Rejected(SplitTimestampRejection {
+                    reason,
+                    state: self.latest_state(concert_id)?,
+                }))
+            }
+            Err(error @ ConcertCommandError::Operational(_)) => Err(error),
+        }
+    }
+
+    /// The latest Concert State, for a rejection to carry beside its reason. A
+    /// concert that no longer exists has none.
+    fn latest_state(&self, concert_id: i64) -> Result<Option<ConcertState>, ConcertCommandError> {
+        match self.get(concert_id) {
+            Ok(state) => Ok(Some(state)),
+            Err(ConcertQueryError::NotFound { .. }) => Ok(None),
+            Err(error @ ConcertQueryError::Operational(_)) => Err(ConcertCommandError::from(error)),
+        }
     }
 
     /// Timestamp work needs the source file. Unknown media facts are not the
@@ -1875,7 +1961,7 @@ mod tests {
     };
     use crate::jobs::scrape_queue::ScrapeQueue;
     use crate::playback::PlaybackPlan;
-    use crate::split_timestamps::TimestampPayload;
+    use crate::split_timestamps::ProposedTimestamp;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::process::Command;
 
@@ -3519,17 +3605,17 @@ mod tests {
         )
     }
 
-    fn timestamps_payload(titles: &[&str], end_time: f64) -> TimestampPayload {
-        TimestampPayload {
-            songs: titles
-                .iter()
-                .map(|title| crate::split_timestamps::TimestampPayloadSong {
-                    title: title.to_string(),
-                    start_time: 0.0,
-                    end_time,
-                })
-                .collect(),
-        }
+    /// The desired boundaries a caller offers: one per title, all ending at the
+    /// same time because the validation under test is about counts and titles.
+    fn desired_timestamps(titles: &[&str], end_time: f64) -> Vec<ProposedTimestamp> {
+        titles
+            .iter()
+            .map(|title| ProposedTimestamp {
+                title: title.to_string(),
+                start_time: 0.0,
+                end_time,
+            })
+            .collect()
     }
 
     /// A `Concerts` that admits Job Runs into a Job config the test chose.
@@ -4783,6 +4869,27 @@ mod tests {
         assert!(read.user.is_none());
     }
 
+    /// The rejection a timestamp change came back with, and the state it
+    /// carried. A refused change is an outcome, so an accepted one fails here.
+    fn refusal(change: SplitTimestampChange) -> SplitTimestampRejection {
+        match change {
+            SplitTimestampChange::Rejected(rejection) => rejection,
+            SplitTimestampChange::Accepted(start) => {
+                panic!("expected a refusal, got an accepted change: {start:?}")
+            }
+        }
+    }
+
+    /// The acceptance a timestamp change came back with.
+    fn acceptance(change: SplitTimestampChange) -> SplitStart {
+        match change {
+            SplitTimestampChange::Accepted(start) => start,
+            SplitTimestampChange::Rejected(rejection) => {
+                panic!("expected an acceptance, got a refusal: {rejection:?}")
+            }
+        }
+    }
+
     #[tokio::test]
     async fn split_timestamp_commands_reject_an_absent_concert() {
         let working_dir = tempfile::tempdir().unwrap();
@@ -4790,24 +4897,36 @@ mod tests {
         let concerts = with_test_jobs(conn, working_dir.path());
         let missing = i64::MAX;
 
+        // A read has nothing to return, so an absent concert is its error.
         assert!(matches!(
             concerts.split_timestamps(missing).await,
             Err(ConcertCommandError::Rejected(
                 CommandRejection::NotFound { concert_id }
             )) if concert_id == missing
         ));
-        assert!(matches!(
-            concerts.set_split_timestamps(missing, timestamps_payload(&["A"], 10.0)).await,
-            Err(ConcertCommandError::Rejected(
-                CommandRejection::NotFound { concert_id }
-            )) if concert_id == missing
-        ));
-        assert!(matches!(
-            concerts.reset_split_timestamps(missing).await,
-            Err(ConcertCommandError::Rejected(
-                CommandRejection::NotFound { concert_id }
-            )) if concert_id == missing
-        ));
+        // A change has an answer — "no such concert" — and no state to carry,
+        // because there is no concert to observe.
+        for rejection in [
+            refusal(
+                concerts
+                    .set_split_timestamps(missing, desired_timestamps(&["A"], 10.0))
+                    .await
+                    .unwrap(),
+            ),
+            refusal(concerts.reset_split_timestamps(missing).await.unwrap()),
+        ] {
+            assert!(
+                matches!(
+                    rejection.reason,
+                    CommandRejection::NotFound { concert_id } if concert_id == missing
+                ),
+                "expected a not-found rejection, got {rejection:?}"
+            );
+            assert!(
+                rejection.state.is_none(),
+                "a concert that does not exist has no state to carry"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4828,23 +4947,65 @@ mod tests {
         std::fs::write(&concert_dir, b"not a directory").unwrap();
         let concerts = with_test_jobs(conn, working_dir.path());
 
-        let outcome = concerts
-            .set_split_timestamps(concert.id, timestamps_payload(&["First"], 10.0))
-            .await;
+        let rejection = refusal(
+            concerts
+                .set_split_timestamps(concert.id, desired_timestamps(&["First"], 10.0))
+                .await
+                .unwrap(),
+        );
 
         assert!(
             matches!(
-                outcome,
-                Err(ConcertCommandError::Rejected(
-                    CommandRejection::Conflict { concert_id, .. }
-                )) if concert_id == concert.id
+                rejection.reason,
+                CommandRejection::Conflict { concert_id, .. } if concert_id == concert.id
             ),
-            "an unobservable source must not be treated as absent: {outcome:?}"
+            "an unobservable source must not be treated as absent: {rejection:?}"
+        );
+        assert!(
+            rejection.state.is_some(),
+            "a concert that exists carries the state it was refused in"
         );
     }
 
     #[tokio::test]
-    async fn timestamp_validation_failures_are_invalid_rejections() {
+    async fn a_change_without_a_source_file_is_a_conflict_carrying_the_state() {
+        // The source is observably absent, which is a different fact from an
+        // unobservable one: the workflow gets to say "download the concert first".
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = seeded_media(
+            &SeedContext::new(&conn),
+            working_dir.path(),
+            three_songs(),
+            false,
+            None,
+        );
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let rejection = refusal(
+            concerts
+                .set_split_timestamps(concert.id, desired_timestamps(&["First"], 10.0))
+                .await
+                .unwrap(),
+        );
+
+        assert!(
+            matches!(
+                rejection.reason,
+                CommandRejection::Conflict { concert_id, .. } if concert_id == concert.id
+            ),
+            "expected a conflict, got {rejection:?}"
+        );
+        let state = rejection.state.expect("the concert exists");
+        assert_eq!(state.concert.id, concert.id);
+        assert!(
+            matches!(state.media.source, Observation::Known(_)),
+            "an absent source is still a known fact"
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_validation_failures_are_invalid_rejections_carrying_the_state() {
         let working_dir = tempfile::tempdir().unwrap();
         let conn = db::connection::open_in_memory().unwrap();
         let concert = seeded_media(
@@ -4856,19 +5017,209 @@ mod tests {
         );
         let concerts = with_test_jobs(conn, working_dir.path());
 
-        // The payload names one song but the set list has three.
-        let outcome = concerts
-            .set_split_timestamps(concert.id, timestamps_payload(&["First"], 10.0))
-            .await;
+        // The caller names one song but the set list has three.
+        let rejection = refusal(
+            concerts
+                .set_split_timestamps(concert.id, desired_timestamps(&["First"], 10.0))
+                .await
+                .unwrap(),
+        );
 
         assert!(
             matches!(
-                outcome,
-                Err(ConcertCommandError::Rejected(
-                    CommandRejection::Invalid { concert_id, .. }
-                )) if concert_id == concert.id
+                rejection.reason,
+                CommandRejection::Invalid { concert_id, .. } if concert_id == concert.id
             ),
-            "expected an invalid rejection, got {outcome:?}"
+            "expected an invalid rejection, got {rejection:?}"
+        );
+        let state = rejection.state.expect("the concert exists");
+        assert_eq!(state.concert.id, concert.id);
+        assert!(
+            !state.permitted_actions.tracks_busy,
+            "a refused change starts no work: {:?}",
+            state.permitted_actions
+        );
+    }
+
+    #[tokio::test]
+    async fn a_user_defined_change_starts_the_split_and_reports_the_state_it_ran_in() {
+        // The one case that needs a source file ffprobe accepts: the proposed end
+        // times are bounds-checked against the real duration.
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    source_file_kind: crate::db::seeds::SourceFileKind::RealAudio,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let start = acceptance(
+            concerts
+                .set_split_timestamps(
+                    concert.id,
+                    vec![
+                        ProposedTimestamp {
+                            title: "First".to_string(),
+                            start_time: 0.0,
+                            end_time: 1.0,
+                        },
+                        ProposedTimestamp {
+                            title: "Second".to_string(),
+                            start_time: 1.0,
+                            end_time: 4.0,
+                        },
+                    ],
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            start.outcome,
+            crate::split_timestamps::SplitStartOutcome::Splitting
+        );
+        assert_eq!(start.state.concert.id, concert.id);
+        assert!(
+            start.state.active_work.split.persisted_started
+                || start.state.active_work.split.registry_active,
+            "the returned state is the one with the split now running: {:?}",
+            start.state.active_work
+        );
+    }
+
+    #[tokio::test]
+    async fn a_rejected_change_can_be_retried_with_a_corrected_payload() {
+        // A rejection is about the request, not the concert: retrying a corrected
+        // one has to be seen as a fresh request, not as a repeat of the failure.
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    source_file_kind: crate::db::seeds::SourceFileKind::RealAudio,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let first = refusal(
+            concerts
+                .set_split_timestamps(concert.id, desired_timestamps(&["First"], 1.0))
+                .await
+                .unwrap(),
+        );
+        assert!(
+            matches!(first.reason, CommandRejection::Invalid { .. }),
+            "expected an invalid rejection, got {first:?}"
+        );
+
+        let retry = acceptance(
+            concerts
+                .set_split_timestamps(
+                    concert.id,
+                    vec![
+                        ProposedTimestamp {
+                            title: "First".to_string(),
+                            start_time: 0.0,
+                            end_time: 1.0,
+                        },
+                        ProposedTimestamp {
+                            title: "Second".to_string(),
+                            start_time: 1.0,
+                            end_time: 4.0,
+                        },
+                    ],
+                )
+                .await
+                .unwrap(),
+        );
+
+        assert_eq!(
+            retry.outcome,
+            crate::split_timestamps::SplitStartOutcome::Splitting
+        );
+    }
+
+    #[tokio::test]
+    async fn resetting_a_split_that_is_still_running_is_a_conflict() {
+        // A user-timestamp split records the desired values when it succeeds, not
+        // when it is admitted. Between the two, the stored column is still empty,
+        // so "already automatic" would be a success the running split then undoes.
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    source_file_kind: crate::db::seeds::SourceFileKind::RealAudio,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        let concerts = with_blocking_jobs(conn, working_dir.path());
+
+        // The split command never finishes, so it is still running below.
+        acceptance(
+            concerts
+                .set_split_timestamps(
+                    concert.id,
+                    vec![
+                        ProposedTimestamp {
+                            title: "First".to_string(),
+                            start_time: 0.0,
+                            end_time: 1.0,
+                        },
+                        ProposedTimestamp {
+                            title: "Second".to_string(),
+                            start_time: 1.0,
+                            end_time: 4.0,
+                        },
+                    ],
+                )
+                .await
+                .unwrap(),
+        );
+
+        let rejection = refusal(concerts.reset_split_timestamps(concert.id).await.unwrap());
+
+        assert!(
+            matches!(
+                &rejection.reason,
+                CommandRejection::Conflict { concert_id, message }
+                    if *concert_id == concert.id && message.contains("already running")
+            ),
+            "expected the running-split conflict, got {rejection:?}"
+        );
+        let state = rejection.state.expect("the concert exists");
+        assert!(
+            state.active_work.split.persisted_started || state.active_work.split.registry_active,
+            "the refusal carries the state with the split in flight: {:?}",
+            state.active_work
         );
     }
 
@@ -4915,9 +5266,14 @@ mod tests {
             .unwrap();
         let concerts = with_test_jobs(conn, working_dir.path());
 
-        let outcome = concerts.reset_split_timestamps(concert.id).await;
+        let change = concerts
+            .reset_split_timestamps(concert.id)
+            .await
+            .expect("reset should be admitted");
 
-        let start = outcome.expect("reset should be admitted");
+        let SplitTimestampChange::Accepted(start) = change else {
+            panic!("an admitted reset is an accepted change: {change:?}");
+        };
         assert_eq!(
             start.outcome,
             crate::split_timestamps::SplitStartOutcome::AlreadyAuto
@@ -4939,17 +5295,68 @@ mod tests {
             .unwrap();
         let concerts = with_test_jobs(conn, working_dir.path());
 
-        let outcome = concerts.reset_split_timestamps(concert.id).await;
+        let rejection = refusal(concerts.reset_split_timestamps(concert.id).await.unwrap());
 
         assert!(
             matches!(
-                outcome,
-                Err(ConcertCommandError::Rejected(
-                    CommandRejection::Invalid { concert_id, .. }
-                )) if concert_id == concert.id
+                rejection.reason,
+                CommandRejection::Invalid { concert_id, .. } if concert_id == concert.id
             ),
-            "expected an invalid rejection, got {outcome:?}"
+            "expected an invalid rejection, got {rejection:?}"
         );
+        assert_eq!(
+            rejection.state.expect("the concert exists").concert.id,
+            concert.id
+        );
+    }
+
+    #[tokio::test]
+    async fn resetting_with_analysis_that_no_longer_covers_the_set_list_is_an_invalid_rejection() {
+        // The caller has desired timestamps and wants the automatic ones back, but
+        // the stored analysis covers a set list the concert no longer has, so
+        // replaying it would cut the wrong tracks. That is a validation failure
+        // about the request — re-run analysis — not a conflict about media.
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_lifecycle_concert(SeedLifecycleConcert {
+                set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                auto_timestamps: Some(vec![concert_types::SongTimestamp {
+                    title: "Only One Before".to_string(),
+                    start_time: 0.0,
+                    end_time: 55.0,
+                    duration: 55.0,
+                }]),
+                user_timestamps: Some(vec![
+                    concert_types::SongTimestamp {
+                        title: "First".to_string(),
+                        start_time: 0.0,
+                        end_time: 20.0,
+                        duration: 20.0,
+                    },
+                    concert_types::SongTimestamp {
+                        title: "Second".to_string(),
+                        start_time: 20.0,
+                        end_time: 40.0,
+                        duration: 20.0,
+                    },
+                ]),
+                ..SeedLifecycleConcert::default()
+            })
+            .unwrap();
+        let concerts = with_test_jobs(conn, working_dir.path());
+
+        let rejection = refusal(concerts.reset_split_timestamps(concert.id).await.unwrap());
+
+        assert!(
+            matches!(
+                &rejection.reason,
+                CommandRejection::Invalid { message, .. }
+                    if message.contains("Re-run analysis")
+            ),
+            "expected the re-run-analysis rejection, got {rejection:?}"
+        );
+        assert!(rejection.state.is_some());
     }
 
     #[tokio::test]
