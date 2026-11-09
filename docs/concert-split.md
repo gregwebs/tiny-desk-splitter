@@ -200,6 +200,17 @@ previous exact set is retained under `.concert-split-backup`; a later
 successful publication replaces that one backup rather than accumulating
 generations.
 
+The application also removes canonical files itself — a user deleting one track
+or interlude (see [concerts.md](concerts.md#deletion)). Those deletions hold the
+same lock shared, so they exclude a publication without blocking readers, and
+they drop the removed files from whichever manifest names them: the Published
+manifest, and the Recoverable Partial Split marker when the concert has one
+(a track whose salvaged files are all gone leaves the marker, and the marker
+goes once no partial output is left). A manifest must keep naming only files
+that exist: publication backs up and merges exactly the set it names, so a stale
+entry would make every later split fail instead of silently producing an
+incomplete backup.
+
 If an ordinary copy, removal, or manifest-install operation fails, publication
 restores the preceding exact set from backup and returns an infrastructure
 error. Process and host crashes are recovered from the durable journal

@@ -18,8 +18,6 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use anyhow::Context;
-
 use crate::model::{
     concert_dir, is_browser_playable, is_track_available, sanitize_filename, PlaybackItem,
     PlaybackItemKind, TrackDetailItem, TrackInfo,
@@ -45,6 +43,61 @@ pub fn find_track_file(working_dir: &Path, album: &str, title: &str) -> Option<S
     None
 }
 
+/// Why an application-side removal of canonical media could not run.
+#[derive(Debug)]
+pub enum MediaRemovalError {
+    /// A Concert Split publication holds the concert directory, so removing
+    /// canonical files now would delete them out from under the publisher.
+    /// Conservative by design: the caller reports the conflict rather than
+    /// waiting for, or racing, a publication.
+    PublicationInProgress,
+    Failed(anyhow::Error),
+}
+
+impl std::fmt::Display for MediaRemovalError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PublicationInProgress => formatter.write_str(
+                "a Concert Split publication is in progress, so canonical media cannot be changed",
+            ),
+            Self::Failed(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for MediaRemovalError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::PublicationInProgress => None,
+            Self::Failed(error) => Some(error.as_ref()),
+        }
+    }
+}
+
+impl From<anyhow::Error> for MediaRemovalError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<std::io::Error> for MediaRemovalError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Failed(error.into())
+    }
+}
+
+impl MediaRemovalError {
+    /// Attach what the removal was for without turning "a publication is in
+    /// progress" into an operational failure: that outcome keeps its own
+    /// meaning, because the remedy is to retry, not to investigate a fault.
+    pub fn add_context(self, context: impl std::fmt::Display) -> Self {
+        match self {
+            Self::PublicationInProgress => Self::PublicationInProgress,
+            Self::Failed(error) => Self::Failed(error.context(context.to_string())),
+        }
+    }
+}
+
 /// Remove every file that canonical discovery would find for a track: the
 /// filename stem with any of the known media extensions. Missing files are
 /// normal (the desired state may already hold); only a real removal failure is
@@ -53,10 +106,13 @@ pub fn remove_track_files(
     working_dir: &Path,
     album: &str,
     title: &str,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let stem = sanitize_filename(title);
-    let dir = concert_dir(working_dir, album);
-    remove_media_files(&dir, &stem, TRACK_MEDIA_EXTENSIONS)
+) -> Result<Vec<PathBuf>, MediaRemovalError> {
+    remove_canonical_media(
+        working_dir,
+        album,
+        &sanitize_filename(title),
+        TRACK_MEDIA_EXTENSIONS,
+    )
 }
 
 /// Remove every file that canonical discovery would find for an interlude.
@@ -65,29 +121,89 @@ pub fn remove_interlude_files(
     working_dir: &Path,
     album: &str,
     index: usize,
-) -> anyhow::Result<Vec<PathBuf>> {
-    let stem = concert_types::interlude_filename_stem(index);
-    let dir = concert_dir(working_dir, album);
-    remove_media_files(&dir, &stem, INTERLUDE_EXTENSIONS)
+) -> Result<Vec<PathBuf>, MediaRemovalError> {
+    remove_canonical_media(
+        working_dir,
+        album,
+        &concert_types::interlude_filename_stem(index),
+        INTERLUDE_EXTENSIONS,
+    )
 }
 
-fn remove_media_files(
-    directory: &Path,
+/// The one place application code removes Published Concert Split media.
+///
+/// Removing canonical files is a mutation of state the publication journal and
+/// manifest own, so it happens under the publication lock — and it leaves both
+/// manifests naming only files that still exist, because a later publication
+/// backs up, merges, and restores exactly what they name.
+///
+/// The guard is shared rather than exclusive because readers hold it too: a
+/// stream in progress must not block a deletion. Deletions are therefore not
+/// serialized against each other by the lock, which is safe as long as every
+/// caller holds its database lock across the removal and the manifest rewrite —
+/// `Concerts` does, and it is the only way canonical media is deleted.
+fn remove_canonical_media(
+    working_dir: &Path,
+    album: &str,
     stem: &str,
     extensions: &[&str],
-) -> anyhow::Result<Vec<PathBuf>> {
-    let mut removed = Vec::new();
+) -> Result<Vec<PathBuf>, MediaRemovalError> {
+    let directory = concert_dir(working_dir, album);
+    if !directory.try_exists()? {
+        // Nothing to remove, and no reason to create a concert directory for a
+        // deletion that has nothing to delete.
+        return Ok(Vec::new());
+    }
+    let Some(guard) =
+        live_set_splitter::publication::SharedPublicationLock::try_acquire(&directory)?
+    else {
+        return Err(MediaRemovalError::PublicationInProgress);
+    };
+    let removal = remove_media_files(&directory, stem, extensions);
+    let removed_names = removal
+        .removed
+        .iter()
+        .filter_map(|path| path.file_name().map(PathBuf::from))
+        .collect();
+    // Correct the manifests even when a removal failed: a file that is gone must
+    // stop being claimed, whether or not the rest of the removal worked. The
+    // correction is a reconciliation, not just a subtraction, so a retry of a
+    // deletion whose manifest rewrite failed repairs it rather than reporting a
+    // no-op success over a manifest that still claims the file.
+    live_set_splitter::publication::forget_removed_split_files(&guard, &removed_names)?;
+    match removal.failure {
+        Some(error) => Err(MediaRemovalError::Failed(error)),
+        None => Ok(removal.removed),
+    }
+}
+
+/// What a removal attempt actually achieved. A failure is reported alongside the
+/// files it did remove, so the manifest can still be told the truth.
+struct MediaRemoval {
+    removed: Vec<PathBuf>,
+    failure: Option<anyhow::Error>,
+}
+
+fn remove_media_files(directory: &Path, stem: &str, extensions: &[&str]) -> MediaRemoval {
+    let mut removal = MediaRemoval {
+        removed: Vec::new(),
+        failure: None,
+    };
     for extension in extensions {
         let path = directory.join(format!("{stem}.{extension}"));
         match std::fs::remove_file(&path) {
-            Ok(()) => removed.push(path),
+            Ok(()) => removal.removed.push(path),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("failed to remove {}", path.display()))
+                removal.failure = Some(
+                    anyhow::Error::new(error)
+                        .context(format!("failed to remove {}", path.display())),
+                );
+                break;
             }
         }
     }
-    Ok(removed)
+    removal
 }
 
 /// Extensions probed when looking for or deleting interlude files (priority order).
@@ -839,6 +955,35 @@ mod tests {
         let cd = concert_dir(working_dir, album);
         std::fs::create_dir_all(&cd).unwrap();
         cd
+    }
+
+    /// Install a Published Concert Split the way the splitter does: files moved
+    /// from a staging sibling into the canonical directory, with a manifest
+    /// naming them. Publication validates its staging directory, so it has to be
+    /// a `.concert-split-staging-*` sibling of the canonical directory.
+    fn publish(canonical_dir: &Path, files: &[(&str, &[u8])]) {
+        std::fs::create_dir_all(canonical_dir).unwrap();
+        let parent = canonical_dir.parent().unwrap();
+        let staging = tempfile::Builder::new()
+            .prefix(".concert-split-staging-")
+            .tempdir_in(parent)
+            .unwrap();
+        for (name, bytes) in files {
+            std::fs::write(staging.path().join(name), bytes).unwrap();
+        }
+        live_set_splitter::publication::publish(
+            &live_set_splitter::publication::PublicationRequest {
+                canonical_dir: canonical_dir.to_path_buf(),
+                staging_dir: staging.path().to_path_buf(),
+                replacement_files: files.iter().map(|(name, _)| PathBuf::from(name)).collect(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn published_manifest(canonical_dir: &Path) -> String {
+        std::fs::read_to_string(canonical_dir.join(live_set_splitter::publication::MANIFEST_NAME))
+            .unwrap()
     }
 
     // ---------- find_downloaded_file ----------
@@ -1918,5 +2063,116 @@ mod tests {
         );
         assert!(inventory.reconstruction_items().is_empty());
         assert!(!inventory.source_redundant());
+    }
+
+    // ---------- remove_track_files / remove_interlude_files ----------
+
+    /// Removal is a mutation of Published Concert Split state, so it keeps the
+    /// manifest naming only files that still exist. Without that, the next
+    /// Concert Split refuses to back up the prior generation it cannot find, and
+    /// the concert could never be resplit.
+    #[test]
+    fn removing_a_track_keeps_the_published_manifest_true() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let canonical = concert_dir(dir.path(), album);
+        publish(
+            &canonical,
+            &[("Song One.m4a", b"one"), ("Song Two.m4a", b"two")],
+        );
+
+        let removed = remove_track_files(dir.path(), album, "Song Two").unwrap();
+
+        assert_eq!(removed, vec![canonical.join("Song Two.m4a")]);
+        let manifest = published_manifest(&canonical);
+        assert!(manifest.contains("Song One.m4a"), "{manifest}");
+        assert!(
+            !manifest.contains("Song Two.m4a"),
+            "the manifest must not claim a file the deletion removed: {manifest}"
+        );
+
+        // The deletion left the concert resplittable: publishing over the prior
+        // generation needs every file the manifest still names.
+        publish(
+            &canonical,
+            &[("Song One.m4a", b"one"), ("Song Two.m4a", b"two")],
+        );
+        assert_eq!(
+            std::fs::read(canonical.join("Song Two.m4a")).unwrap(),
+            b"two"
+        );
+    }
+
+    /// A publication owns the canonical directory while it runs, so a deletion
+    /// is refused rather than removing files from under it.
+    #[test]
+    fn removing_media_during_a_publication_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let canonical = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("Song One.m4a"), b"one").unwrap();
+        let publisher =
+            live_set_splitter::publication::ExclusivePublicationLock::acquire(&canonical).unwrap();
+
+        let outcome = remove_track_files(dir.path(), album, "Song One");
+
+        assert!(
+            matches!(outcome, Err(MediaRemovalError::PublicationInProgress)),
+            "unexpected outcome: {outcome:?}"
+        );
+        assert!(
+            canonical.join("Song One.m4a").exists(),
+            "a refused deletion must leave the media alone"
+        );
+
+        drop(publisher);
+        assert!(remove_track_files(dir.path(), album, "Song One").is_ok());
+    }
+
+    /// Some canonical files gone and the rest unremovable is a fault, not a
+    /// successful deletion: the caller may not record it as done.
+    #[test]
+    fn a_partial_removal_is_an_error_rather_than_a_silent_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let canonical = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("Song One.mp4"), b"one").unwrap();
+        // An extension the removal probes that is not a removable file.
+        std::fs::create_dir_all(canonical.join("Song One.m4a")).unwrap();
+
+        let outcome = remove_track_files(dir.path(), album, "Song One");
+
+        assert!(
+            matches!(outcome, Err(MediaRemovalError::Failed(_))),
+            "unexpected outcome: {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn removing_an_absent_track_is_a_successful_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        std::fs::create_dir_all(concert_dir(dir.path(), album)).unwrap();
+
+        assert_eq!(
+            remove_track_files(dir.path(), album, "Song One").unwrap(),
+            Vec::<PathBuf>::new()
+        );
+    }
+
+    #[test]
+    fn removing_an_interlude_byte_extension_matches_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let album = "Test Album";
+        let canonical = concert_dir(dir.path(), album);
+        std::fs::create_dir_all(&canonical).unwrap();
+        std::fs::write(canonical.join("interlude_00.m4a"), b"gap").unwrap();
+
+        let removed = remove_interlude_files(dir.path(), album, 0).unwrap();
+
+        assert_eq!(removed, vec![canonical.join("interlude_00.m4a")]);
+        assert!(!find_interlude_file(dir.path(), album, 0));
     }
 }

@@ -3423,6 +3423,141 @@ mod tests {
         );
     }
 
+    // ── deletion routes ──────────────────────────────────────────────────────
+
+    /// The status a deletion route refused with, for the cases where the only
+    /// thing worth asserting is the mapping. Both the `Response`- and
+    /// fragment-returning routes fit.
+    fn refusal_status<T: IntoResponse>(outcome: Result<T, AppError>) -> StatusCode {
+        match outcome {
+            Ok(_) => panic!("an absent concert cannot render anything"),
+            Err(error) => error.into_response().status(),
+        }
+    }
+
+    /// Deleting media for a concert that is not there stays a 404 on every
+    /// route: the interface refuses an invalid identity, and the adapter reports
+    /// it rather than rendering a card for a concert that does not exist.
+    #[tokio::test]
+    async fn deletion_routes_answer_404_for_an_absent_concert() {
+        use axum::extract::Query;
+
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let state = app_state(conn, workdir.path());
+        let absent = 999;
+
+        let statuses = [
+            refusal_status(
+                delete_download(
+                    State(state.clone()),
+                    Path(absent),
+                    Query(std::collections::HashMap::new()),
+                )
+                .await,
+            ),
+            refusal_status(delete_redundant_source(State(state.clone()), Path(absent)).await),
+            refusal_status(delete_split(State(state.clone()), Path(absent)).await),
+            refusal_status(delete_track(State(state.clone()), Path((absent, 0))).await),
+            refusal_status(delete_interlude(State(state), Path((absent, 0))).await),
+        ];
+
+        assert_eq!(statuses, [StatusCode::NOT_FOUND; 5]);
+    }
+
+    /// The approved retry semantics: a concert with no recorded split answers the
+    /// delete with the usual card instead of the 400 it used to be, because the
+    /// desired absent state already holds.
+    #[tokio::test]
+    async fn delete_split_on_a_concert_without_a_split_swaps_the_card() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = concert_without_media(&conn);
+        let state = app_state(conn, workdir.path());
+
+        let response = match delete_split(State(state), Path(id)).await {
+            Ok(response) => response,
+            Err(_) => panic!("deleting an absent split is a safe retry, not a failure"),
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains(&format!("id=\"concert-{id}\"")), "{body}");
+    }
+
+    /// The coverage gate is a conflict with current media, not a server error:
+    /// 409 with the explanation the button has always shown.
+    #[tokio::test]
+    async fn the_source_coverage_gate_answers_409() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_media_concert(
+                workdir.path(),
+                db::seeds::SeedMediaConcert {
+                    lifecycle: db::seeds::SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string(), "Second".to_string()]),
+                        downloaded: true,
+                        split: true,
+                        tracks_present: Some(vec![true, false]),
+                        ..db::seeds::SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    track_files: Some(vec![0]),
+                    ..db::seeds::SeedMediaConcert::default()
+                },
+            )
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let status = match delete_redundant_source(State(state), Path(id)).await {
+            Ok(_) => panic!("an uncovered source cannot be deleted"),
+            Err(error) => error.into_response().status(),
+        };
+
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    /// A track deletion answers with the whole card, so the swap refreshes the
+    /// track count, the split badge and the embedded track list together.
+    #[tokio::test]
+    async fn delete_track_answers_with_the_refreshed_card() {
+        let workdir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let id = db::seeds::SeedContext::new(&conn)
+            .seed_media_concert(
+                workdir.path(),
+                db::seeds::SeedMediaConcert {
+                    lifecycle: db::seeds::SeedLifecycleConcert {
+                        set_list: Some(vec!["First".to_string()]),
+                        downloaded: true,
+                        split: true,
+                        tracks_present: Some(vec![true]),
+                        ..db::seeds::SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    track_files: Some(vec![0]),
+                    ..db::seeds::SeedMediaConcert::default()
+                },
+            )
+            .unwrap()
+            .id;
+        let state = app_state(conn, workdir.path());
+
+        let response = match delete_track(State(state), Path((id, 0))).await {
+            Ok(response) => response,
+            Err(_) => panic!("deleting an existing track succeeds"),
+        };
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = body_text(response).await;
+        assert!(body.contains(&format!("id=\"concert-{id}\"")), "{body}");
+        // The split record is gone with its last track, so the card offers Split
+        // instead of the delete-split control it rendered before.
+        assert!(!body.contains("/delete-split"), "{body}");
+    }
+
     // ── sync_location_path ────────────────────────────────────────────────────
 
     #[test]
