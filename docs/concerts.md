@@ -420,11 +420,20 @@ fetched page would have, so a rescrape is observable without egress.
 | Method | Effect |
 | --- | --- |
 | `Concerts::split_timestamps(id)` | automatic and desired timestamps plus the source duration |
-| `Concerts::set_split_timestamps(id, payload)` | stores the desired timestamps and starts the split that applies them |
+| `Concerts::set_split_timestamps(id, desired)` | stores the desired timestamps and starts the split that applies them |
 | `Concerts::reset_split_timestamps(id)` | starts the split that restores the automatic timestamps |
 
-The change methods return a `SplitStart`: the immediate outcome (splitting, or
-already automatic) and the Concert State observed right after admission.
+The read returns a `SplitTimestampsRead`. A change returns a
+`SplitTimestampChange`: either `Accepted(SplitStart)` — the immediate outcome
+(splitting, or already automatic) and the Concert State observed right after
+admission — or `Rejected(SplitTimestampRejection)`, a typed reason with the
+latest Concert State when the concert could be observed at all. A genuine fault is
+the `Err`.
+
+`desired` is a `Vec<ProposedTimestamp>`: a title and a window per set-list song,
+before validation derives the duration. An adapter translates its own request
+shape into these, so no wire format reaches the split workflow or the Job Run it
+starts.
 
 Timestamp work needs the source file, and "we could not look" is not "it is not
 there". When the source cannot be observed — an unreadable concert directory, a
@@ -437,6 +446,46 @@ onto 422 and 409, and keep operational failures as server errors.
 A process that runs no Job Runs cannot admit split work. `Concerts::without_workers`
 (a one-shot CLI) reports that as an operational error rather than pretending the
 change was accepted.
+
+### Timestamp state transitions
+
+A change is recorded only when the split that applies it succeeds. Admission
+starts that split; until it succeeds, the stored timestamps are whatever they
+were:
+
+```mermaid
+stateDiagram-v2
+    state "automatic timestamps (desired column empty)" as Auto
+    state "desired timestamps recorded" as Desired
+    Auto --> Desired: set split succeeds
+    Desired --> Desired: set split succeeds, replaces the recorded values
+    Desired --> Auto: reset split succeeds
+    Auto --> Auto: reset_split_timestamps, nothing recorded
+```
+
+Neither change touches the recorded download. The split that runs records its own
+lifecycle facts the way any other split does, and a failed or cancelled split
+leaves the recorded timestamps as they were.
+
+Because nothing is recorded until the split succeeds, a second change while one
+is running is refused rather than queued: `Conflict`, "a split job is already
+running for this concert". That includes a reset — answering "already automatic"
+while a user-timestamp split is still in flight would report a success that the
+running split then undoes.
+
+### What a timestamp change may refuse
+
+| Outcome | Meaning |
+| --- | --- |
+| `Rejected(Invalid)` | counts, titles, ordering, durations or the source bounds the values must respect |
+| `Rejected(Conflict)` | no source file to cut, a split already running, or media facts that could not be observed |
+| `Accepted(SplitStart)` | already automatic, or the split that applies the change was admitted |
+| `Operational` | no Job Runs in this process, `ffprobe` failing, or a persistence failure |
+
+Resetting reads no source file, so an absent source is not a conflict for it.
+"No automatic timestamps" and "the analysis no longer matches the set list" are
+`Invalid` — the caller has to re-run analysis — rather than a media conflict.
+
 
 ## Concert Catalog
 

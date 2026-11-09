@@ -437,7 +437,7 @@ fn write_split_output(job: &SplitJob) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::split_timestamps::{TimestampPayloadSong, ValidatedTimestamps};
+    use crate::split_timestamps::{ProposedTimestamp, ValidatedTimestamps};
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -494,7 +494,7 @@ mod tests {
         concert_id: i64,
         output_dir: &Path,
         set_list: &[String],
-        payload: Vec<TimestampPayloadSong>,
+        payload: Vec<ProposedTimestamp>,
         media_duration: f64,
     ) -> SplitJob {
         let ts = ValidatedTimestamps::validate(set_list, None, &payload).unwrap();
@@ -832,7 +832,7 @@ mod tests {
         let driver = Arc::new(JobDriver::new());
         let runner = TestControlJobRunner::new(driver);
         let set_list = vec!["Alpha".to_string()];
-        let payload = vec![TimestampPayloadSong {
+        let payload = vec![ProposedTimestamp {
             title: "Alpha".to_string(),
             start_time: 20.0,
             end_time: 100.0,
@@ -864,7 +864,7 @@ mod tests {
         let driver = Arc::new(JobDriver::new());
         let runner = TestControlJobRunner::new(driver);
         let set_list = vec!["Alpha".to_string()];
-        let payload = vec![TimestampPayloadSong {
+        let payload = vec![ProposedTimestamp {
             title: "Alpha".to_string(),
             start_time: 0.0,
             end_time: 90.0,

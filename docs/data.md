@@ -56,9 +56,12 @@ facts into JSON, templates, and status codes. See
 `docs/change/2026-07-09-concert-media-inventory.md` for the module boundary
 and migration notes.
 Split timestamp editing workflow lives in `concert-tracker/src/split_timestamps.rs`:
-it validates timestamp payloads, reads/backfills stored automatic and user
+it validates proposed boundaries, reads/backfills stored automatic and user
 timestamps, probes source duration for the editor, and starts user/reset split
-jobs. HTTP handlers translate those outcomes into route status codes.
+jobs. `Concerts` exposes it as `split_timestamps` / `set_split_timestamps` /
+`reset_split_timestamps`; HTTP handlers translate the request body into
+`ProposedTimestamp` values and the interface's accepted or rejected outcome into
+route status codes.
 
 Key columns in the `concerts` table:
 

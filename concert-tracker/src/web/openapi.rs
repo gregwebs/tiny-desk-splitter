@@ -15,10 +15,6 @@
 
 use utoipa::OpenApi;
 
-use crate::split_timestamps::{
-    SplitStartResponse, SplitStartStatus, SplitTimestampsResponse, TimestampPayload,
-    TimestampPayloadSong,
-};
 use crate::web::handlers;
 
 #[derive(OpenApi)]
@@ -38,9 +34,9 @@ use crate::web::handlers;
         handlers::ConcertPlaybackResponse,
         handlers::TrackDetailsResponse,
         crate::model::TrackDetailItem,
-        SplitTimestampsResponse,
-        SplitStartStatus,
-        SplitStartResponse,
+        handlers::SplitTimestampsResponse,
+        handlers::SplitStartStatus,
+        handlers::SplitStartResponse,
         handlers::PlaylistJson,
         handlers::MembershipJson,
         handlers::ResolvedTrackJson,
@@ -54,8 +50,8 @@ use crate::web::handlers;
         handlers::ReorderReq,
         handlers::CreatedPlaylistJson,
         handlers::CreatedItemJson,
-        TimestampPayload,
-        TimestampPayloadSong,
+        handlers::TimestampPayload,
+        handlers::TimestampPayloadSong,
         concert_types::SongTimestamp,
     )),
     tags(
