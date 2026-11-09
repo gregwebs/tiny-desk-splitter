@@ -35,13 +35,17 @@ just test-hurl
 This checks `hurl` is on `PATH`, then runs `scripts/hurl-test.js`, which:
 
 1. Builds `concert-web` with `--features test-control`.
-2. Starts it against a scratch DB/workdir in a fresh temp directory, with
-   `--port 0 --test-control-port 0` (both ephemeral).
+2. Starts it against a scratch DB/workdir under a fresh temp **scratch root**,
+   with `--port 0 --test-control-port 0` (both ephemeral). The root also holds
+   an `archive/` directory outside the workdir — a `.hurl` file whose media has
+   to leave the workdir (archiving) gets that path as `{{archive_location}}`,
+   so no two runs can collide and an aborted run leaves nothing behind.
 3. Parses the `Listening on ...` and `Test control listening on ...` lines
    from its stdout to learn both bound ports.
 4. Runs `hurl --test --jobs 1 --glob 'hurl/*.hurl'` against them, passing
-   `{{base_url}}` and `{{test_control_url}}` as variables.
-5. Tears the server down and removes the scratch directory — including on
+   `{{base_url}}`, `{{test_control_url}}`, and `{{archive_location}}` as
+   variables.
+5. Tears the server down and removes the whole scratch root — including on
    `Ctrl-C` or a startup failure, not just a clean exit.
 
 `--jobs 1` is required, not cosmetic: every `.hurl` file in this directory
@@ -367,12 +371,14 @@ The spec's "Decisions" section covers this in depth; the short version:
    "absent": [<event names>]}`. At least one of `present`/`absent` must be
    non-empty, and every listed name must be a real event (see
    `crate::events::Event::parse`) — same "reject a vacuous call" shape as
-   `assert_concert_state`. First (and so far only) consumer: interlude
-   deletion in `hurl/concert_playback.hurl` asserts an `interlude_delete`
-   event was recorded and no `track_delete` event was — deleting an
-   interlude is not deleting a song track, and this is the only way to
-   observe that distinction, since both actions return a similar sidebar
-   fragment.
+   `assert_concert_state`. Two consumers: interlude deletion in
+   `hurl/concert_playback.hurl` asserts an `interlude_delete` event was
+   recorded and no `track_delete` event was (deleting an interlude is not
+   deleting a song track, and this is the only way to observe that
+   distinction, since both actions return a similar sidebar fragment); and
+   `hurl/archive_lifecycle.hurl` polls `present: ["archived"]` (with
+   `absent: ["archive_error"]`) as the terminal-state wait for an archive Job
+   Run, whose only other observable is the rendered page.
 4. **Job Driver control actions** (`test.job_set_plan`, `test.job_release`,
    reached via `/test/job/{name}`) — imperative, not a check: configuring
    deterministic download/split/opener behavior and releasing a blocked step.

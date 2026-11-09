@@ -69,15 +69,33 @@ function buildBinary() {
 // responsible for reaching the partially-started server via `activeServer`
 // and cleaning it up — this function only rejects, it never leaves dangling
 // listeners on the child.
+//
+// Everything one run creates lives under a single scratch root: the DB, the
+// workdir, and the archive location handed to Hurl as `{{archive_location}}`.
+// That last one has to be outside the workdir — archiving renames a concert's
+// directory out of the workdir — and it has to be unique per run. Archiving
+// renames `<workdir>/<album>` onto `<archive location>/<album>`, so a leftover
+// directory at a fixed path makes the next run fail with ENOTEMPTY (issue
+// #193); a per-run path means an aborted run can never poison a later one.
 function startServer() {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "tds-hurl-"));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "tds-hurl-"));
+  const workdir = path.join(root, "workdir");
+  const archiveLocation = path.join(root, "archive");
+  const dbPath = path.join(root, "test.db");
+  // Hand the root to `activeServer` before doing anything that can throw, so a
+  // failed setup still reaches the caller's `cleanupServer` and removes it
+  // rather than leaking a scratch directory.
+  const server = { child: null, root, stdout: "", stderr: "", exited: false };
+  activeServer = server;
+  fs.mkdirSync(workdir);
+  fs.mkdirSync(archiveLocation);
   const child = spawn(
     BIN,
     [
       "--db",
-      path.join(tmp, "test.db"),
+      dbPath,
       "--workdir",
-      tmp,
+      workdir,
       "--port",
       "0",
       "--test-control-port",
@@ -89,11 +107,14 @@ function startServer() {
     { stdio: ["ignore", "pipe", "pipe"] }
   );
 
-  const server = { child, tmp, stdout: "", stderr: "", exited: false };
-  activeServer = server;
+  server.child = child;
   child.stdout.on("data", (data) => (server.stdout += data.toString()));
   child.stderr.on("data", (data) => (server.stderr += data.toString()));
   child.on("exit", () => (server.exited = true));
+  // A child that never started (spawn error, e.g. ENOENT) emits `error` and
+  // never `exit`, so `exited` has to cover it too — `stopServer` and every
+  // cleanup path key off it.
+  child.on("error", () => (server.exited = true));
 
   return new Promise((resolve, reject) => {
     const onData = () => {
@@ -105,6 +126,7 @@ function startServer() {
           server,
           appPort: parseInt(appMatch[1], 10),
           testControlPort: parseInt(tcMatch[1], 10),
+          archiveLocation,
         });
       }
     };
@@ -114,6 +136,9 @@ function startServer() {
     };
     const onError = (error) => {
       cleanup();
+      // Set before rejecting: the `error` listener above has already run (or is
+      // about to), so cleanup must not wait for an `exit` that cannot come.
+      server.exited = true;
       reject(
         new Error(
           `server process failed to start: ${error.message}\n${serverDiagnostics(server, "").message}`
@@ -138,34 +163,42 @@ function startServer() {
 
 function serverDiagnostics(server, summary) {
   return new Error(
-    `${summary}\nworkdir: ${server.tmp}\nstdout:\n${server.stdout || "(empty)"}\nstderr:\n${server.stderr || "(empty)"}`
+    `${summary}\nscratch root: ${server.root}\nstdout:\n${server.stdout || "(empty)"}\nstderr:\n${server.stderr || "(empty)"}`
   );
 }
 
 // Signals the child and resolves only once it has actually exited (SIGTERM,
 // escalating to SIGKILL after STOP_GRACE_MS) — never deletes the scratch
-// directory out from under a still-running process.
+// directory out from under a still-running process. A server whose child was
+// never attached (setup threw between ownership of the root and the spawn) has
+// nothing to stop, and a child that never started (spawn error, e.g. ENOENT)
+// emits `error` instead of `exit`, so both events settle the wait.
 function stopServer(server) {
   return new Promise((resolve) => {
-    if (!server || server.exited) {
+    if (!server || !server.child || server.exited) {
       resolve();
       return;
     }
+    const child = server.child;
     const escalate = setTimeout(() => {
-      server.child.kill("SIGKILL");
+      child.kill("SIGKILL");
     }, STOP_GRACE_MS);
-    server.child.once("exit", () => {
+    const settle = () => {
       clearTimeout(escalate);
       resolve();
-    });
-    server.child.kill("SIGTERM");
+    };
+    child.once("exit", settle);
+    child.once("error", settle);
+    if (child.pid !== undefined) child.kill("SIGTERM");
   });
 }
 
 async function cleanupServer(server) {
   if (!server) return;
   await stopServer(server);
-  fs.rmSync(server.tmp, { recursive: true, force: true });
+  // The whole scratch root — DB, workdir, and archive location — so an aborted
+  // or Ctrl-C'd run leaves nothing behind for a later run to trip over.
+  fs.rmSync(server.root, { recursive: true, force: true });
   if (activeServer === server) activeServer = null;
 }
 
@@ -182,7 +215,7 @@ function installSignalHandlers() {
   process.on("SIGTERM", () => onSignal("SIGTERM", 143));
 }
 
-function runHurl(glob, appPort, testControlPort) {
+function runHurl(glob, { appPort, testControlPort, archiveLocation }) {
   console.log(`[hurl-test] running hurl --glob '${glob}'...`);
   const result = spawnSync(
     "hurl",
@@ -201,6 +234,11 @@ function runHurl(glob, appPort, testControlPort) {
       `base_url=http://127.0.0.1:${appPort}`,
       "--variable",
       `test_control_url=http://127.0.0.1:${testControlPort}`,
+      // Per-run archive scratch location (see startServer). A Hurl file that
+      // needs the media to leave the workdir reads this rather than inventing
+      // a fixed /tmp path.
+      "--variable",
+      `archive_location=${archiveLocation}`,
     ],
     { cwd: REPO, stdio: "inherit" }
   );
@@ -231,14 +269,14 @@ async function main() {
     return;
   }
 
-  const { server, appPort, testControlPort } = started;
+  const { server, appPort, testControlPort, archiveLocation } = started;
   console.log(
     `[hurl-test] app on http://127.0.0.1:${appPort}, test control on http://127.0.0.1:${testControlPort}`
   );
 
   let exitCode;
   try {
-    exitCode = runHurl(glob, appPort, testControlPort);
+    exitCode = runHurl(glob, { appPort, testControlPort, archiveLocation });
   } finally {
     await cleanupServer(server);
   }
