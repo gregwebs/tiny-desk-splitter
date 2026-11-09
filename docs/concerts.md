@@ -295,12 +295,14 @@ for it, though the manifest is still corrected for the files that did go.
 | `Concerts::request_download(id)` | admits the source-media download, and the split that follows it when there is something to split |
 | `Concerts::request_split(id)` | admits a split of the downloaded source |
 | `Concerts::prepare(id)` | makes every track playable: scrape when needed, then the download → split chain |
-| `Concerts::cancel_job(id, kind)` | cancels the active Job Run of that kind |
+| `Concerts::request_archive(id)` | admits the archive Job Run; see [Archive](#archive) |
+| `Concerts::cancel_job(id, kind)` | cancels the active Job Run of that kind, archive included |
 
-`request_download`, `request_split`, and `prepare` return a `JobRequestOutcome`:
+`request_download`, `request_split`, `prepare`, and `request_archive` return a
+`JobRequestOutcome`:
 
 ```text
-request_download / request_split / prepare
+request_download / request_split / prepare / request_archive
   |
   +--> admitted, already active, or nothing to do ----> Accepted(JobRequestResult)
   |        the admission decision and the Concert State
@@ -335,9 +337,9 @@ has somewhere to render it show why nothing started, while this HTML adapter
 answers with the reason alone.
 
 Failure is a terminal lifecycle outcome, not a fault: a failed or cancelled run
-leaves `download_status` or `split_status` unsuccessful and writes one Failed Job,
-and the next request admits a fresh run. A download that fails drops the split
-queued behind it, so a retried request queues a new one.
+leaves `download_status`, `split_status`, or `archive_status` unsuccessful and
+writes one Failed Job, and the next request admits a fresh run. A download that
+fails drops the split queued behind it, so a retried request queues a new one.
 
 `PermittedActions` and admission read the same observation, so a control the state
 offers is a command the interface accepts. Download, split, and archive are Job
@@ -350,20 +352,71 @@ request becomes one.
 | Method | Effect |
 | --- | --- |
 | `Concerts::request_archive(id)` | admits the Job Run that moves the media into the archive location |
-| `Concerts::unarchive(id)` | moves the media back and clears the archive lifecycle |
+| `Concerts::unarchive(id)` | moves the media back and clears the archive lifecycle, reporting the refreshed state |
 
-Archiving is a Job Run, so it has admission, cancellation, and Failed Job
-history like download and split. Nothing to archive (no download and no split) is
-an outcome, `ArchiveOutcome::NothingToArchive`, not a failure.
+Archiving is a Job Run, so it goes through the same Job Request path as download
+and split: `request_archive` returns a `JobRequestOutcome`, cancellation is
+`Concerts::cancel_job(id, JobKind::Archive)`, and Failed Job history is written
+the same way. There is nothing to do (`Accepted` with
+`JobAdmission::NothingToDo`) when the concert has neither a download nor a split
+to move, and when its media is already in the archive location. A concert that
+cannot be archived at all — no archive location configured — is `Rejected`,
+carrying the same `CommandRejection` vocabulary as the other commands and the
+latest Concert State.
 
 Unarchiving is deliberately **not** a Job Run: it repairs one symlink in place, so
-it has no admission race, no cancellation, and no recovery pass of its own. The
-interface still owns all of it — eligibility (archived, no archive in flight, has
-an album), the filesystem work on a blocking thread, the lifecycle update on
-success, and the failure record plus Failed Job entry on failure — so an adapter
-cannot invent half of the workflow. A failed unarchive leaves the record
+it has no admission race, no cancellation, and no recovery pass of its own. It is
+not a Job Request either, so a refusal is an ordinary `Rejected`
+`ConcertCommandError` rather than a `JobRequestOutcome`. The interface still owns
+all of it — eligibility (archived, no archive in flight, has an album), the
+filesystem work on a blocking thread, the lifecycle update on success, and the
+failure record plus Failed Job entry on failure — so an adapter cannot invent half
+of the workflow. Recording that failure is best effort: a write that fails must
+not mask the fault the caller has to see. A failed unarchive leaves the record
 unchanged, which makes a retry fail the same way instead of reporting a restored
 concert.
+
+### Archive state transitions
+
+```mermaid
+stateDiagram-v2
+    state "Not Archived" as S0
+    state "Archiving" as S1
+    state "Archived" as S2
+    state "Archive Error" as S3
+    S0 --> S1: request_archive
+    S3 --> S1: request_archive retries
+    S1 --> S2: archive Job Run succeeds
+    S1 --> S3: archive Job Run fails or is cancelled
+    S2 --> S0: unarchive
+    S0 --> S0: request_archive, nothing to move
+    S2 --> S2: request_archive, already archived
+```
+
+Both self-transitions record nothing: a concert with no media to move and one
+whose media is already archived report `NothingToDo`, and an archive is never
+started for either.
+
+`Archived` wins over a recorded error, so a failed archive followed by a
+successful retry reads as `Archived` with the failure still on record: the media
+is where the record says it is, and the archive control stays hidden. `unarchive`
+clears the recorded errors as well as the archive facts, so an unarchived concert
+is back to ordinary media rather than "archived, with errors"; Failed Job history
+is audit data and is never cleared.
+
+| Outcome | Meaning |
+| --- | --- |
+| `Accepted(Admitted)` | the archive Job Run is queued or running |
+| `Accepted(AlreadyRunning)` | an archive Job Run of this concert was already active, so nothing changed |
+| `Accepted(NothingToDo)` | no download and no split to move, or the media is already archived |
+| `Rejected(Conflict)` | no archive location is configured |
+| `Rejected(NotFound)` | no such concert |
+| `Operational` | this process runs no Job Runs, or a persistence failure |
+
+`unarchive` refuses with `Rejected(Conflict)` when the concert is not archived,
+has an archive in flight, or has no album to restore a directory for; the
+filesystem failure it cannot prevent is an operational error, recorded and
+retried as above.
 
 ## Scrape
 
