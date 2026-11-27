@@ -152,6 +152,53 @@ and symlink work (`do_archive`) on a blocking thread inside the engine
 future — archive-specific behavior and safety checks stay owned by archive
 execution, not by the engine.
 
+### Cancelling a stale Job Run
+
+`run::cancel` handles a Job Run whose owning process is gone on its
+`MarkedStaleFailed` branch (`lifecycle::cancel_job` →
+`jobs::run::cancel`): no registry slot and no terminal gate exist for it, so
+the caller closes the row out directly, through the same one-transaction
+terminal commit (`commit_failure_tx`: lifecycle failure columns + `*_error`
+event + Failed Job row) that a won cancellation and the run task use.
+
+```text
+stale *_started_at (owning process gone)
+              │
+    run::cancel → has_stale_in_progress
+              │
+   ONE TX: lifecycle failure cols +
+       event + Failed Job row ──▶ job id
+              │
+   write <job log dir>/<job id>.log:
+       "cancelled by user" + why no
+       execution output exists
+```
+
+A cancellation never has captured execution output to show: a *won* running
+cancellation aborts the run task, which discards the temp file it captured
+output into, and a stale cancellation has no run task at all. Both write a
+short log recording the outcome and that reason, so `/jobs/{id}/log` explains
+the cancellation instead of answering "Log file not found."
+
+A stale cancellation claims no terminal gate and no reservation: this process
+holds no run task for the row, so there is no terminal outcome to arbitrate.
+The stale check and the terminal commit run under one db lock, which is what
+keeps a repeated cancellation in one process from writing a second Failed
+Job.
+
+A slot that is merely *reserved* (admission still in progress) is not a stale
+row: `terminal_gate` exposes nothing for it, but `registry.is_running` is
+true. `run::cancel` writes nothing for it — no error columns, no event, no
+Failed Job row, no log — while preserving the pre-existing outcome for its
+queued dependents: with queued dependents behind the reserved slot it returns
+`DroppedQueued` (and drops them), otherwise it returns `NoSuchActiveJob`.
+That closes the window where a cancel could otherwise record a spurious
+failure (now a spurious Failed Job + log) for a run that is about to start.
+
+Not yet covered: `run::recover_failed` still writes no log file, so a
+restart-recovery Failed Job opens with "Log file not found." See
+[Stale job cancellation records a Failed Job](change/2026-11-27-stale-job-cancellation-failed-job.md).
+
 ### Recovery: stale accepted Job Runs
 
 A Job Run's owning process can disappear without ever reaching a terminal

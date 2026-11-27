@@ -10,6 +10,7 @@
 
 use std::any::Any;
 use std::future::Future;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -190,12 +191,19 @@ pub async fn submit<R: JobRequest>(
 /// claimed it (mid-commit or committed), cancellation writes nothing and
 /// reports [`CancelOutcome::NoSuchActiveJob`] rather than risk a second
 /// terminal outcome for the same Job Run. A Reserved-but-not-yet-accepted
-/// slot (admission still in progress) has no terminal gate exposed by the
-/// registry, so it falls through to the same "nothing to cancel yet" path.
+/// slot (admission still in progress) exposes no terminal gate and is not a
+/// cancellable Job Run yet: its queued dependents are still dropped
+/// ([`CancelOutcome::DroppedQueued`]), otherwise it returns
+/// [`CancelOutcome::NoSuchActiveJob`] and writes nothing.
+///
+/// A won cancellation and a stale-row cancellation both commit the Failed Job
+/// row in the same transaction as the lifecycle failure and event, then write
+/// the Failed Job's log under `log_dir` (see `docs/jobs.md`).
 pub fn cancel<R: JobCancellation>(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
     request: &R,
+    log_dir: Option<&Path>,
 ) -> Result<CancelOutcome> {
     let key = request.key();
 
@@ -209,7 +217,8 @@ pub fn cancel<R: JobCancellation>(
         registry.drop_dependency_edges(&key);
         let commit = commit_failure_tx(conn, request, &key, CANCELLED_BY_USER);
         registry.abort_and_release(&key);
-        commit.context("Failed to commit cancelled terminal")?;
+        let job_id = commit.context("Failed to commit cancelled terminal")?;
+        persist_cancellation_log(log_dir, job_id, request, &key, CancelLogReason::AbortedRun);
         return Ok(CancelOutcome::CancelledRunning);
     }
 
@@ -217,8 +226,15 @@ pub fn cancel<R: JobCancellation>(
     if dropped_queued {
         return Ok(CancelOutcome::DroppedQueued);
     }
+
+    if registry.is_running(&key) {
+        return Ok(CancelOutcome::NoSuchActiveJob);
+    }
+
     if request.has_stale_in_progress(conn)? {
-        request.record_failure(conn, CANCELLED_BY_USER)?;
+        let job_id = commit_failure_tx(conn, request, &key, CANCELLED_BY_USER)
+            .context("Failed to commit cancelled terminal")?;
+        persist_cancellation_log(log_dir, job_id, request, &key, CancelLogReason::StaleRow);
         return Ok(CancelOutcome::MarkedStaleFailed);
     }
     Ok(CancelOutcome::NoSuchActiveJob)
@@ -359,6 +375,89 @@ fn finish_step_failure<R: JobRequest>(
     persist_failure_log(job_id, registry, key, temp_file, log_dir);
 }
 
+/// Why a cancelled Failed Job has no execution output to show.
+#[derive(Debug, Clone, Copy)]
+enum CancelLogReason {
+    /// A won cancellation aborted the run task, which discards the output it
+    /// had captured into its temp file (`NamedTempFile` deletes on drop).
+    AbortedRun,
+    /// No run task exists in this process: the accepting process is gone, so
+    /// whatever output its run captured cannot be shown.
+    StaleRow,
+}
+
+impl CancelLogReason {
+    fn sentence(self) -> &'static str {
+        match self {
+            CancelLogReason::AbortedRun => {
+                "the cancellation aborted the run before it persisted the output it had captured"
+            }
+            CancelLogReason::StaleRow => {
+                "the process that accepted the run is gone, so the output it \
+                 captured cannot be shown"
+            }
+        }
+    }
+}
+
+/// The whole content of a Failed Job log file that has no captured output.
+struct CancellationLog {
+    job_name: &'static str,
+    concert_id: i64,
+    reason: CancelLogReason,
+}
+
+impl CancellationLog {
+    fn text(self) -> String {
+        format!(
+            "{CANCELLED_BY_USER}\n\n\
+             No execution output is available for this Job Run: {}.\n\n\
+             job: {}\nconcert: {}\n",
+            self.reason.sentence(),
+            self.job_name,
+            self.concert_id,
+        )
+    }
+}
+
+/// Write the log file for a cancellation that had nothing to persist. The
+/// Failed Job row is the durable record; the log is auxiliary, so a failure
+/// here is warned about rather than turned into a second error surface — the
+/// same contract `persist_failure_log` has for captured output.
+fn persist_cancellation_log<R: JobCancellation>(
+    log_dir: Option<&Path>,
+    job_id: i64,
+    request: &R,
+    key: &JobKey,
+    reason: CancelLogReason,
+) {
+    let Some(dir) = log_dir else { return };
+    if let Err(error) = std::fs::create_dir_all(dir) {
+        tracing::warn!(
+            "failed to create cancellation log directory {}: {}",
+            dir.display(),
+            error
+        );
+        return;
+    }
+    let log = CancellationLog {
+        job_name: request.job_name(),
+        concert_id: key.concert_id,
+        reason,
+    };
+    let path = crate::jobs::job_log_path(dir, job_id);
+    let write = tempfile::NamedTempFile::new_in(dir)
+        .and_then(|mut temp| temp.write_all(log.text().as_bytes()).map(|()| temp))
+        .and_then(|temp| temp.persist(&path).map_err(|e| e.error));
+    if let Err(error) = write {
+        tracing::warn!(
+            "failed to write cancellation log to {}: {}",
+            path.display(),
+            error
+        );
+    }
+}
+
 fn persist_failure_log(
     job_id: Result<i64>,
     registry: &Arc<JobRegistry>,
@@ -369,7 +468,7 @@ fn persist_failure_log(
     match job_id {
         Ok(job_id) => {
             if let (Some(tf), Some(dir)) = (temp_file, log_dir) {
-                let final_path = dir.join(format!("{job_id}.log"));
+                let final_path = crate::jobs::job_log_path(dir, job_id);
                 if let Err(error) = tf.persist(&final_path) {
                     tracing::warn!(
                         "failed to persist job log to {}: {}",
@@ -398,26 +497,7 @@ fn finish_as_failure<R: JobRequest>(
         let conn = db.lock().unwrap();
         commit_failure_tx(&conn, request, key, message)
     };
-    match job_id {
-        Ok(job_id) => {
-            if let (Some(tf), Some(dir)) = (temp_file, log_dir) {
-                let final_path = dir.join(format!("{job_id}.log"));
-                if let Err(e) = tf.persist(&final_path) {
-                    tracing::warn!(
-                        "failed to persist job log to {}: {}",
-                        final_path.display(),
-                        e
-                    );
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!(?key, "failed to commit failure terminal: {:#}", e);
-        }
-    }
-    // The registry must never leak a reservation, even if the failure
-    // transaction itself errored (e.g. the DB is busy or poisoned).
-    registry.release(key);
+    persist_failure_log(job_id, registry, key, temp_file, log_dir);
 }
 
 fn commit_success_tx<R: JobRequest>(conn: &Connection, request: &R, facts: R::Facts) -> Result<()> {
@@ -1012,7 +1092,7 @@ mod tests {
         };
         let outcome = {
             let conn = db.lock().unwrap();
-            cancel(&conn, &registry, &cancel_request).unwrap()
+            cancel(&conn, &registry, &cancel_request, None).unwrap()
         };
         assert_eq!(outcome, CancelOutcome::CancelledRunning);
 
@@ -1060,7 +1140,7 @@ mod tests {
         };
         let outcome = {
             let conn = db.lock().unwrap();
-            cancel(&conn, &registry, &cancel_request).unwrap()
+            cancel(&conn, &registry, &cancel_request, None).unwrap()
         };
         assert_eq!(outcome, CancelOutcome::NoSuchActiveJob);
 

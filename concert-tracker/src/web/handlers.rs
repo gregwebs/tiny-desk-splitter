@@ -227,6 +227,7 @@ struct JobLogTemplate {
 
 // ── Error type ───────────────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub enum AppError {
     NotFound,
     /// A well-formed request that fails validation (bad reference, cycle, empty
@@ -1642,7 +1643,7 @@ pub async fn job_log(
         db::failed_jobs::get_failed_job(&conn, id).map_err(|_| AppError::NotFound)?
     };
 
-    let log_path = state.jobs.log_dir().join(format!("{}.log", id));
+    let log_path = crate::jobs::job_log_path(&state.jobs.log_dir(), id);
     let content = tokio::fs::read_to_string(&log_path)
         .await
         .unwrap_or_else(|_| "Log file not found.".to_string());
@@ -3036,6 +3037,51 @@ mod tests {
             )
             .unwrap()
             .id
+    }
+
+    #[tokio::test]
+    async fn job_log_renders_the_log_a_cancellation_wrote() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = db::seeds::SeedContext::new(&conn)
+            .seed_media_concert(
+                dir.path(),
+                db::seeds::SeedMediaConcert {
+                    lifecycle: db::seeds::SeedLifecycleConcert {
+                        downloaded: true,
+                        ..Default::default()
+                    },
+                    source_file: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        // Stale: split_started_at set, no Job Run in this process.
+        db::lifecycle::try_mark_split_started(&conn, concert.id).unwrap();
+        let state = app_state(conn, dir.path());
+
+        cancel_job(
+            State(state.clone()),
+            Path((concert.id, "split".to_string())),
+        )
+        .await
+        .map_err(|e| format!("{e:?}"))
+        .expect("cancelling a stale split must succeed");
+
+        let failed = state.concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(failed.len(), 1);
+        let response = job_log(State(state.clone()), Path(failed[0].id))
+            .await
+            .map_err(|e| format!("{e:?}"))
+            .expect("job_log must render for the failed job id");
+        let body = body_text(response.into_response()).await;
+        assert!(body.contains("cancelled by user"), "{body}");
+        assert!(body.contains("No execution output"), "{body}");
+        assert!(
+            body.contains("the process that accepted the run is gone"),
+            "{body}"
+        );
+        assert!(!body.contains("Log file not found."), "{body}");
     }
 
     #[test]
