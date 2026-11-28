@@ -23,8 +23,8 @@ name: CI
 #     chromium on ubuntu26.04-x64".
 # Moving either job back to `ubuntu-latest` needs Playwright >= 1.61 (which knows
 # ubuntu26.04) and an hurl install that resolves no apt package names — the
-# nextest install below is the model. See
-# docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md.
+# checksum-verified release-tarball install of `cargo-nextest` in Dockerfile.dev
+# is the model. See docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md.
 on:
   push:
     branches: [main]
@@ -50,7 +50,7 @@ jobs:
       #   libfontconfig-dev                   - plotters' yeslogic-fontconfig-sys (pulls
       #                                         in freetype/expat -dev transitively)
       # curl/tar/unzip/git (used by the OCR build scripts to fetch MNN + models) are
-      # already present on ubuntu-latest. See live-set-song-splitter/build.rs.
+      # already present on the runner image. See live-set-song-splitter/build.rs.
       - name: Install system dependencies
         run: |
           sudo apt-get update
