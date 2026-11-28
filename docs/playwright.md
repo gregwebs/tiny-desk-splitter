@@ -5,7 +5,11 @@
 The `playwright` job in `.github/workflows/ci.yml` runs the complete suite on
 every pull request and every push to `main`. It provisions Node.js 22, the
 system `ffmpeg` executable, Chromium and its Linux libraries, and the pinned
-Rust toolchain used to build `concert-web`.
+Rust toolchain used to build `concert-web`. The job pins `ubuntu-24.04` rather
+than following `ubuntu-latest`, because `npx playwright install --with-deps`
+decides from the OS version whether it can install at all, and it hard-fails on
+an image its bundled package map does not list — see
+[`docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md`](change/2026-11-28-ci-runner-image-ubuntu-2604.md).
 
 CI uses the same fixture and per-test isolation as local runs. It does not
 enable sandbox mode, retries, sharding, or request mocking. The normal-host
