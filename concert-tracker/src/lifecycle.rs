@@ -239,28 +239,34 @@ pub struct DeleteInterludeOutcome {
 ///
 /// All three kinds route through the Job Run engine's
 /// [`crate::jobs::run::cancel`]: gate-arbitrated exactly-one-terminal-outcome,
-/// and a Failed Job row on a won cancellation (see `docs/jobs.md`).
+/// and a Failed Job row on a won cancellation (see `docs/jobs.md`). The stale
+/// branch commits the same Failed Job row and writes its cancellation log
+/// under `log_dir`; a won running cancellation also writes that log.
 pub fn cancel_job(
     conn: &Connection,
     registry: &Arc<JobRegistry>,
     id: i64,
     job_kind: JobKind,
+    log_dir: Option<&Path>,
 ) -> Result<CancelJobOutcome> {
     let outcome = match job_kind {
         JobKind::Download => crate::jobs::run::cancel(
             conn,
             registry,
             &crate::jobs::download::DownloadCancellation::new(id),
+            log_dir,
         )?,
         JobKind::Split => crate::jobs::run::cancel(
             conn,
             registry,
             &crate::jobs::split::SplitCancellation::new(id),
+            log_dir,
         )?,
         JobKind::Archive => crate::jobs::run::cancel(
             conn,
             registry,
             &crate::jobs::archive::ArchiveCancellation::new(id),
+            log_dir,
         )?,
     };
     Ok(match outcome {
@@ -573,19 +579,19 @@ mod tests {
         db::lifecycle::try_mark_split_started(&conn, stale_id).unwrap();
 
         assert_eq!(
-            cancel_job(&conn, &registry, queued_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, queued_id, JobKind::Split, None).unwrap(),
             CancelJobOutcome::DroppedQueued
         );
         assert_eq!(
-            cancel_job(&conn, &registry, running_id, JobKind::Download).unwrap(),
+            cancel_job(&conn, &registry, running_id, JobKind::Download, None).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
         assert_eq!(
-            cancel_job(&conn, &registry, stale_id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, stale_id, JobKind::Split, None).unwrap(),
             CancelJobOutcome::MarkedStaleFailed
         );
         assert_eq!(
-            cancel_job(&conn, &registry, absent_id, JobKind::Archive).unwrap(),
+            cancel_job(&conn, &registry, absent_id, JobKind::Archive, None).unwrap(),
             CancelJobOutcome::NoSuchActiveJob
         );
 
@@ -621,7 +627,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, id, JobKind::Download).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Download, None).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -657,7 +663,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, id, JobKind::Split).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Split, None).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -696,7 +702,7 @@ mod tests {
         );
 
         assert_eq!(
-            cancel_job(&conn, &registry, id, JobKind::Archive).unwrap(),
+            cancel_job(&conn, &registry, id, JobKind::Archive, None).unwrap(),
             CancelJobOutcome::CancelledRunning
         );
 
@@ -711,6 +717,269 @@ mod tests {
         assert_eq!(failed.len(), 1);
         assert_eq!(failed[0].name, "archive");
         assert_eq!(failed[0].failure_message, CANCELLED_BY_USER);
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_stale_job_creates_a_consistent_failed_job() {
+        let log_root = tempfile::tempdir().unwrap();
+        let log_dir = log_root.path().join("log").join("job");
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+
+        // The stale shape the issue describes: `*_started_at` set, no registry
+        // slot. Archive needs no download to be "started".
+        let download_id = insert_concert(&conn, "Stale Download", &["One"]);
+        db::lifecycle::try_mark_download_started(&conn, download_id).unwrap();
+        let split_id = insert_concert(&conn, "Stale Split", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, split_id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, split_id).unwrap();
+        let archive_id = insert_concert(&conn, "Stale Archive", &["One"]);
+        db::lifecycle::try_mark_archive_started(&conn, archive_id).unwrap();
+
+        for (id, kind, name, error_event) in [
+            (download_id, JobKind::Download, "download", "download_error"),
+            (split_id, JobKind::Split, "split", "split_error"),
+            (archive_id, JobKind::Archive, "archive", "archive_error"),
+        ] {
+            assert_eq!(
+                cancel_job(&conn, &registry, id, kind, Some(&log_dir)).unwrap(),
+                CancelJobOutcome::MarkedStaleFailed
+            );
+
+            // 1. lifecycle: started cleared, error appended
+            let concert = db::concerts::get_concert(&conn, id).unwrap();
+            let started = match kind {
+                JobKind::Download => concert.download_started_at,
+                JobKind::Split => concert.split_started_at,
+                JobKind::Archive => concert.archive_started_at,
+            };
+            assert!(started.is_none(), "{name} started flag must be cleared");
+            match kind {
+                JobKind::Download => assert_eq!(
+                    concert.download_errors.last().unwrap().error,
+                    CANCELLED_BY_USER
+                ),
+                JobKind::Split => assert_eq!(
+                    concert.split_errors.last().unwrap().error,
+                    CANCELLED_BY_USER
+                ),
+                JobKind::Archive => assert_eq!(
+                    concert.archive_errors.last().unwrap().error,
+                    CANCELLED_BY_USER
+                ),
+            }
+
+            // 2. event history
+            let events = crate::events::list_for_concert(&conn, id);
+            assert!(
+                events.iter().any(|e| e.event == error_event
+                    && e.json
+                        .as_deref()
+                        .is_some_and(|j| j.contains(CANCELLED_BY_USER))),
+                "stale cancellation must record {error_event} for concert {id}"
+            );
+
+            // 3./4. Jobs page (list_failed_jobs) and the concert's Failed Job
+            // history (list_for_concert) are the same rows.
+            let mine: Vec<_> = db::failed_jobs::list_failed_jobs(&conn, 100)
+                .unwrap()
+                .into_iter()
+                .filter(|j| j.concert_id == id)
+                .collect();
+            assert_eq!(mine.len(), 1, "exactly one Failed Job for concert {id}");
+            assert_eq!(mine[0].name, name);
+            assert_eq!(mine[0].failure_message, CANCELLED_BY_USER);
+            assert_eq!(
+                db::failed_jobs::list_for_concert(&conn, id).unwrap().len(),
+                1
+            );
+
+            // 5. the log file the operator asked for
+            let path = crate::jobs::job_log_path(&log_dir, mine[0].id);
+            let text = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+            assert!(text.contains(CANCELLED_BY_USER), "{text}");
+            assert!(
+                text.contains("No execution output"),
+                "the log must say why there is no output: {text}"
+            );
+            assert!(text.contains(name), "{text}");
+            assert!(text.contains(&id.to_string()), "{text}");
+
+            // Cancelling again is an outcome, not a second terminal.
+            assert_eq!(
+                cancel_job(&conn, &registry, id, kind, Some(&log_dir)).unwrap(),
+                CancelJobOutcome::NoSuchActiveJob
+            );
+            assert_eq!(
+                db::failed_jobs::list_for_concert(&conn, id).unwrap().len(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_reserved_but_not_accepted_run_writes_nothing() {
+        let log_root = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let id = insert_concert(&conn, "Reserved Not Accepted", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+
+        let key = JobKey {
+            concert_id: id,
+            kind: JobKind::Split,
+        };
+        // The admission window: a slot is reserved (handle None), then the
+        // started flag is persisted before the run task is activated.
+        let (reservation, _signal) = registry.try_reserve(key.clone()).unwrap();
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+
+        assert_eq!(
+            cancel_job(&conn, &registry, id, JobKind::Split, Some(log_root.path())).unwrap(),
+            CancelJobOutcome::NoSuchActiveJob
+        );
+
+        // Nothing was written: no error-column change, no row, no log.
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(concert.split_started_at.is_some(), "started flag untouched");
+        assert!(concert.split_errors.is_empty(), "no spurious *_error");
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(std::fs::read_dir(log_root.path()).unwrap().count(), 0);
+
+        drop(reservation); // release the reserved slot the test still holds
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_reserved_upstream_with_queued_dependents_drops_them() {
+        let log_root = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let id = insert_concert(&conn, "Reserved Upstream", &["One"]);
+        db::lifecycle::try_mark_download_started(&conn, id).unwrap();
+
+        let download_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Download,
+        };
+        let split_key = JobKey {
+            concert_id: id,
+            kind: JobKind::Split,
+        };
+        // The admission window: a slot is reserved (handle None), then the
+        // started flag is persisted before the run task is activated. A split
+        // is queued behind the reserved download, as `prepare` does.
+        let (reservation, _signal) = registry.try_reserve(download_key.clone()).unwrap();
+        registry.add_dependent(download_key.clone(), split_key.clone());
+
+        assert_eq!(
+            cancel_job(
+                &conn,
+                &registry,
+                id,
+                JobKind::Download,
+                Some(log_root.path())
+            )
+            .unwrap(),
+            CancelJobOutcome::DroppedQueued
+        );
+
+        // The queued dependent edge is gone, and nothing else was written.
+        assert!(!registry.has_dependent(&download_key, &split_key));
+        let concert = db::concerts::get_concert(&conn, id).unwrap();
+        assert!(
+            concert.download_started_at.is_some(),
+            "started flag untouched"
+        );
+        assert!(concert.download_errors.is_empty(), "no spurious *_error");
+        let events = crate::events::list_for_concert(&conn, id);
+        assert!(
+            !events.iter().any(|e| e.event == "download_error"),
+            "no spurious download_error event"
+        );
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(std::fs::read_dir(log_root.path()).unwrap().count(), 0);
+
+        drop(reservation); // release the reserved slot the test still holds
+    }
+
+    #[tokio::test]
+    async fn stale_cancellation_persistence_failure_writes_no_failed_job_or_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let id = insert_concert(&conn, "Stale Persistence Failure", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_split_error_event_stale
+             BEFORE INSERT ON events
+             WHEN NEW.event = 'split_error'
+             BEGIN SELECT RAISE(ABORT, 'reject split error event'); END;",
+        )
+        .unwrap();
+
+        let error = cancel_job(&conn, &registry, id, JobKind::Split, Some(dir.path())).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("Failed to commit cancelled terminal"));
+        assert!(
+            db::concerts::get_concert(&conn, id)
+                .unwrap()
+                .split_started_at
+                .is_some(),
+            "the transaction rolled back, so started_at must survive"
+        );
+        assert!(db::failed_jobs::list_failed_jobs(&conn, 10)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            0,
+            "no orphan <id>.log may exist for a rolled-back Failed Job"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_running_split_writes_a_cancellation_log() {
+        let log_root = tempfile::tempdir().unwrap();
+        let log_dir = log_root.path().join("log").join("job");
+        let conn = db::connection::open_in_memory().unwrap();
+        let registry = Arc::new(JobRegistry::new());
+        let id = insert_concert(&conn, "Cancel Split Log", &["One"]);
+        db::lifecycle::mark_download_succeeded(&conn, id, "mp4").unwrap();
+        db::lifecycle::try_mark_split_started(&conn, id).unwrap();
+        let (_tx, rx) = oneshot::channel::<()>();
+        reserve_running(
+            &registry,
+            JobKey {
+                concert_id: id,
+                kind: JobKind::Split,
+            },
+            tokio::spawn(async move {
+                let _ = rx.await;
+            }),
+        );
+
+        assert_eq!(
+            cancel_job(&conn, &registry, id, JobKind::Split, Some(&log_dir)).unwrap(),
+            CancelJobOutcome::CancelledRunning
+        );
+
+        let failed = db::failed_jobs::list_failed_jobs(&conn, 10).unwrap();
+        assert_eq!(failed.len(), 1);
+        let text = std::fs::read_to_string(crate::jobs::job_log_path(&log_dir, failed[0].id))
+            .unwrap_or_else(|e| panic!("{}: {e}", log_dir.display()));
+        assert!(text.contains(CANCELLED_BY_USER), "{text}");
+        assert!(
+            text.contains("aborted the run before it persisted"),
+            "{text}"
+        );
     }
 
     #[tokio::test]
@@ -740,7 +1009,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = cancel_job(&conn, &registry, id, JobKind::Split).unwrap_err();
+        let error = cancel_job(&conn, &registry, id, JobKind::Split, None).unwrap_err();
 
         assert!(error
             .to_string()

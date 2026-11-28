@@ -925,9 +925,22 @@ pub fn check_dependencies(splitter: Option<&SplitterCli>) -> Vec<String> {
     warnings
 }
 
+/// The per-process Job Run log directory: `<working_dir>/log/job` (see
+/// [`JobConfig::log_dir`]). Every cancellation writes its synthesized log here.
+pub fn job_log_dir(working_dir: &Path) -> PathBuf {
+    working_dir.join("log").join("job")
+}
+
+/// Path of one Failed Job's log file inside a job log directory (see
+/// [`JobConfig::log_dir`]). The Failed Job row's id names the file, which is
+/// how `/jobs/{id}/log` finds a run's output from the row it links.
+pub(crate) fn job_log_path(log_dir: &Path, job_id: i64) -> PathBuf {
+    log_dir.join(format!("{job_id}.log"))
+}
+
 impl JobConfig {
     pub fn log_dir(&self) -> PathBuf {
-        self.working_dir.join("log").join("job")
+        job_log_dir(&self.working_dir)
     }
 
     pub fn with_runner(working_dir: PathBuf, runner: Arc<dyn JobRunner>) -> Self {

@@ -123,8 +123,15 @@ in `tracks_present`, and clears split state only when no tracks remain present.
 Cancellation distinguishes four outcomes: a running task was aborted and marked
 failed, a queued dependent was dropped before a task was spawned, a stale
 database in-progress flag was marked failed, or no active job existed. Running
-and stale cancellations append the relevant `*_error` with `cancelled by user`;
-dropping a queued dependent records no lifecycle event because no task started.
+and stale cancellations append the relevant `*_error` with `cancelled by user`
+and insert the Failed Job row in the same transaction as that `*_error`; a
+cancelled Failed Job carries a log file recording the cancellation (recovery
+rows still may not — see the non-goal in
+[Stale job cancellation records a Failed Job](change/2026-11-27-stale-job-cancellation-failed-job.md)).
+Dropping a queued dependent records no lifecycle event because no task started,
+and a merely reserved-not-activated slot writes nothing: with queued
+dependents the outcome remains `DroppedQueued`, otherwise it is
+`NoSuchActiveJob` ("no active job existed").
 
 Restart recovery marks stale in-progress rows failed instead of only clearing
 flags: `download_started_at` becomes `download_error`, `split_started_at`

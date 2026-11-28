@@ -629,6 +629,15 @@ impl Concerts {
         })
     }
 
+    /// This process's Failed Job log directory. Every cancellation writes its
+    /// synthesized log here, whether or not this process runs Job Runs itself.
+    fn job_log_dir(&self) -> PathBuf {
+        self.jobs
+            .as_ref()
+            .map(|jobs| jobs.log_dir())
+            .unwrap_or_else(|| crate::jobs::job_log_dir(&self.working_dir))
+    }
+
     /// The collection-browsing interface built on this same observation.
     pub fn catalog(&self) -> ConcertCatalog {
         ConcertCatalog::new(self.clone())
@@ -894,9 +903,10 @@ impl Concerts {
         concert_id: i64,
         kind: JobKind,
     ) -> Result<JobCancellation, ConcertCommandError> {
+        let log_dir = self.job_log_dir();
         let outcome = {
             let conn = self.lock_db()?;
-            crate::lifecycle::cancel_job(&conn, &self.registry, concert_id, kind)
+            crate::lifecycle::cancel_job(&conn, &self.registry, concert_id, kind, Some(&log_dir))
                 .map_err(ConcertCommandError::Operational)?
         };
         let state = self.command_state(concert_id)?;
@@ -4139,6 +4149,51 @@ mod tests {
             1,
             "asking again records no second terminal outcome"
         );
+    }
+
+    /// The C1 seam: a process built with `without_workers` (`jobs: None`) must
+    /// still supply a log directory, so a stale cancellation writes its
+    /// synthesized log under `<working_dir>/log/job` — the same path a Job Run
+    /// process uses. This pins the `Concerts::job_log_dir` fallback that
+    /// `Concerts::cancel_job` passes to the engine.
+    #[tokio::test]
+    async fn without_workers_stale_cancellation_writes_log_under_working_dir() {
+        let working_dir = tempfile::tempdir().unwrap();
+        let conn = db::connection::open_in_memory().unwrap();
+        let concert = SeedContext::new(&conn)
+            .seed_media_concert(
+                working_dir.path(),
+                SeedMediaConcert {
+                    lifecycle: SeedLifecycleConcert {
+                        downloaded: true,
+                        ..SeedLifecycleConcert::default()
+                    },
+                    source_file: true,
+                    ..SeedMediaConcert::default()
+                },
+            )
+            .unwrap();
+        // Stale: split_started_at set, no Job Run in this process.
+        db::lifecycle::try_mark_split_started(&conn, concert.id).unwrap();
+
+        let concerts =
+            Concerts::without_workers(Arc::new(Mutex::new(conn)), working_dir.path().to_path_buf());
+        assert!(
+            concerts.jobs.is_none(),
+            "this test exercises the jobs: None fallback"
+        );
+
+        let cancellation = concerts.cancel_job(concert.id, JobKind::Split).unwrap();
+        assert!(matches!(cancellation, JobCancellation::Cancelled(_)));
+
+        let failed = concerts.failed_job_history(concert.id).unwrap();
+        assert_eq!(failed.len(), 1);
+        let path =
+            crate::jobs::job_log_path(&crate::jobs::job_log_dir(working_dir.path()), failed[0].id);
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        assert!(text.contains("cancelled by user"), "{text}");
+        assert!(text.contains("No execution output"), "{text}");
     }
 
     #[tokio::test]
