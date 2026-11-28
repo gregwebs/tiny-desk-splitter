@@ -454,13 +454,18 @@ The completed migration history is recorded in
 
 ## CI
 
-`.github/workflows/ci.yml`'s `rust` job runs `just test-hurl` as a **blocking**
-step, after `cargo nextest run --tests` and before the working-tree-clean
-check. It installs `hurl` from the official `.deb` release artifact (pinned
-`HURL_VERSION`, bumped deliberately) and `just` via `taiki-e/install-action`,
-then runs the same command a contributor runs locally — `scripts/hurl-test.js`
-builds `concert-web --features test-control` itself. A failing `.hurl` case
-fails the PR.
+`.github/workflows/ci.yml`'s `rust` job runs `node scripts/hurl-test.js` as a
+**blocking** step, after `cargo nextest run --tests` and before the
+working-tree-clean check. It installs `hurl` from the official `.deb` release
+artifact (pinned `HURL_VERSION`, bumped deliberately, checksum-verified against
+the release's `.sha256`) and then runs the same command a contributor runs
+locally — `scripts/hurl-test.js` builds `concert-web --features test-control`
+itself. A failing `.hurl` case fails the PR.
+
+The `rust` job pins `ubuntu-24.04` rather than following `ubuntu-latest`: hurl's
+release binaries depend on apt package names that Ubuntu 26.04 renamed, so the
+`.deb` cannot install (and the tarball cannot run) there. See
+[`docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md`](../docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md).
 
 The same job also runs a **release-safety guard** step:
 `cargo build --release --bin concert-web --features test-control` is expected

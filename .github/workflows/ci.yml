@@ -8,6 +8,23 @@ name: CI
 #   frontend   - TypeScript type-check, build-artifact drift guard, and JS/TS tests
 #   playwright - browser-driven end-to-end tests against isolated app instances
 #   shellcheck - lint all tracked shell scripts
+#
+# Runner image
+# ------------
+# `rust` and `playwright` pin `ubuntu-24.04`; `frontend` and `shellcheck` follow
+# `ubuntu-latest`. Both pinned jobs install third-party release artifacts, and
+# both of those broke when `ubuntu-latest` moved to Ubuntu 26.04 (Nov 2026):
+#   - Install Hurl: the pinned hurl 8.0.1 .deb declares `Depends: libxml2`, but
+#     26.04 ships libxml2 2.15 as `libxml2-16` (libxml2.so.16 only), so apt exits
+#     100 with "hurl : Depends: libxml2 but it is not installable". hurl 8.0.1's
+#     release tarball cannot run there either (same missing libxml2.so.2).
+#   - Install Chromium: Playwright 1.60.0's `--with-deps` package map stops at
+#     ubuntu24.04, so it exits 1 with "ERROR: Playwright does not support
+#     chromium on ubuntu26.04-x64".
+# Moving either job back to `ubuntu-latest` needs Playwright >= 1.61 (which knows
+# ubuntu26.04) and an hurl install that resolves no apt package names — the
+# nextest install below is the model. See
+# docs/change/2026-11-28-ci-runner-image-ubuntu-2604.md.
 on:
   push:
     branches: [main]
@@ -23,7 +40,7 @@ permissions:
 
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: see "Runner image" above
     steps:
       - uses: actions/checkout@v7
 
@@ -88,15 +105,29 @@ jobs:
       # Hurl (https://hurl.dev) black-box HTTP integration tests against a
       # real concert-web process — see hurl/README.md. Installed from the
       # official .deb release artifact, the method the Hurl docs recommend
-      # for Debian/Ubuntu CI. Pin HURL_VERSION and bump deliberately.
+      # for Debian/Ubuntu CI. Pin HURL_VERSION and bump deliberately; the same
+      # pin appears in Dockerfile.dev.
+      #
+      # `-f` plus `--retry` and the published checksum keep a network hiccup or
+      # an HTML error page from being handed to apt as a .deb, which reports it
+      # only as the opaque exit code 100.
       - name: Install Hurl
         run: |
           HURL_VERSION=8.0.1
-          curl --location --remote-name \
-            "https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}/hurl_${HURL_VERSION}_amd64.deb"
+          deb="hurl_${HURL_VERSION}_amd64.deb"
+          base="https://github.com/Orange-OpenSource/hurl/releases/download/${HURL_VERSION}"
+          curl -fsSL --retry 3 --retry-all-errors -o "$deb" "${base}/${deb}"
+          curl -fsSL --retry 3 --retry-all-errors -o "${deb}.sha256" "${base}/${deb}.sha256"
+          expected=$(awk '{print $1}' "${deb}.sha256")
+          actual=$(sha256sum "$deb" | awk '{print $1}')
+          if [ "$expected" != "$actual" ]; then
+            echo "::error::Hurl .deb checksum mismatch: expected $expected, got $actual"
+            exit 1
+          fi
           sudo apt-get update
-          sudo apt-get install -y "./hurl_${HURL_VERSION}_amd64.deb"
-          rm "hurl_${HURL_VERSION}_amd64.deb"
+          sudo apt-get install -y "./${deb}"
+          rm "$deb" "${deb}.sha256"
+          hurl --version
 
       # This builds concert-web --features test-control itself and runs hurl/*.hurl against it.
       # See hurl/README.md for what this does and does not cover.
@@ -180,7 +211,7 @@ jobs:
           fi
 
   playwright:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04  # pinned: see "Runner image" above
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -205,7 +236,9 @@ jobs:
               libfontconfig-dev
 
       # Install only the browser used by playwright.config.js. --with-deps
-      # provisions the Linux libraries required by Chromium on a clean runner.
+      # provisions the Linux libraries required by Chromium on a clean runner,
+      # which is why this job stays on ubuntu-24.04: --with-deps hard-fails on an
+      # OS its bundled package map does not list (see "Runner image" above).
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
